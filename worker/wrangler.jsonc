@@ -1,0 +1,34 @@
+// armada: mapped compute on Cloudflare Containers (src/worker.ts). `armada deploy --account=<id>` deploys it with
+// this account id written into a copy of this file; nothing here names an account.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "armada",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-30",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  // Both on the `durable_object` policy: no image, instance type or cap here. Each start names what it starts from
+  // (a recipe's base image, or an environment snapshot) and its instance; running instances count against the
+  // account's limits, which ArmadaFleet keeps jobs under.
+  "containers": [
+    { "class_name": "ArmadaVessel", "scheduling_policy": "durable_object" },
+    { "class_name": "ArmadaPreparer", "scheduling_policy": "durable_object" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "JOB", "class_name": "ArmadaJob" },
+      { "name": "VESSEL", "class_name": "ArmadaVessel" },
+      { "name": "ENVIRONMENTS", "class_name": "ArmadaEnvironments" },
+      { "name": "PREPARER", "class_name": "ArmadaPreparer" },
+      { "name": "TIMINGS", "class_name": "ArmadaTimings" },
+      { "name": "FLEET", "class_name": "ArmadaFleet" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] }
+  ],
+  "vars": { "FLEET_VCPUS": "1500" },
+  // Packs and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept.
+  "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "armada-artifacts" }]
+}

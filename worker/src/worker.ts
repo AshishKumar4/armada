@@ -1,0 +1,167 @@
+/**
+ * armada: fast, mappable compute on Cloudflare Containers. A job maps a command or a handler over items on a pool of
+ * containers started from an environment snapshot; the SDK (`src/sdk.ts`) is its one client, and every route takes the
+ * bearer the deploy wrote. CI is a client of it (`src/ci.ts`).
+ */
+import * as v from 'valibot';
+import { DRIVER, environmentKey, JobSpecSchema, PackBase, RecipeSchema, Sha, TimingsSchema } from '../../src/protocol';
+import { packKey, SINGLE, taskKey, type Env } from './env';
+
+export { ArmadaJob } from './job';
+
+export { ArmadaVessel } from './vessel';
+
+export { ArmadaEnvironments, ArmadaPreparer } from './environments';
+
+export { ArmadaTimings } from './timings';
+
+export { ArmadaFleet } from './fleet';
+
+const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
+
+/** The bearer, compared in constant time. */
+function authorized(request: Request, env: Env): boolean {
+  const expected = new TextEncoder().encode(`Bearer ${env.ARMADA_TOKEN}`);
+  const supplied = new TextEncoder().encode(request.headers.get('authorization') ?? '');
+
+  return env.ARMADA_TOKEN.length >= 32 && expected.length === supplied.length && crypto.subtle.timingSafeEqual(expected, supplied);
+}
+
+function jobId(): string {
+  return `${new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+const notFound = (): Response => Response.json({ error: 'not found' }, { status: 404 });
+
+/** An R2 object as the response body, or 404. */
+async function object(env: Env, key: string): Promise<Response> {
+  const found = await env.ARTIFACTS.get(key);
+
+  if (found === null) return notFound();
+  const headers = new Headers();
+
+  found.writeHttpMetadata(headers);
+
+  return new Response(found.body, { headers });
+}
+
+type Handler = (request: Request, env: Env, path: readonly string[], url: URL) => Promise<Response | undefined>;
+
+/** `/packs/<project>/<sha>/<base>`: a commit's pack, stored once (`packKey`). */
+const packs: Handler = async (request, env, [project, sha, base]) => {
+  if (!v.is(Project, project) || !v.is(Sha, sha) || !v.is(PackBase, base)) return undefined;
+  const key = packKey(project, sha, base);
+
+  if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(key)) === null ? 404 : 200 });
+
+  if (request.method !== 'PUT' || request.body === null) return undefined;
+  await env.ARTIFACTS.put(key, request.body);
+
+  return Response.json({ stored: key });
+};
+
+/** `POST /jobs` starts one; `/jobs/<id>` is its status, `/events?after=n` its outcomes, `/cancel` ends it, and
+ *  `/tasks/<index>/{output,log}` a task's stored output and log. */
+const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
+  if (id === undefined) {
+    if (request.method !== 'POST') return undefined;
+    const spec = v.parse(JobSpecSchema, await request.json());
+
+    if (spec.commit !== undefined) {
+      if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
+
+      if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
+    }
+
+    const created = jobId();
+
+    await env.JOB.getByName(created).create(created, spec);
+
+    return Response.json({ id: created });
+  }
+
+  const job = env.JOB.getByName(id);
+
+  if (tail === undefined) return Response.json(await job.status() ?? { error: 'no such job' });
+
+  if (tail === 'events') return Response.json(await job.events(Number(url.searchParams.get('after') ?? '0')));
+
+  if (tail === 'cancel' && request.method === 'POST') {
+    await job.cancel('cancelled by its client');
+
+    return Response.json({ cancelled: id });
+  }
+
+  return tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && (leaf === 'output' || leaf === 'log') ? await object(env, taskKey(id, Number(index), leaf)) : undefined;
+};
+
+/** `/verdicts/<project>/<sha>`: a graded CI run's collected verdict file. */
+const verdicts: Handler = async (request, env, [project, sha]) => {
+  if (!v.is(Project, project) || !v.is(Sha, sha)) return undefined;
+  const key = `verdicts/${project}/${sha}.json`;
+
+  if (request.method === 'GET') return await object(env, key);
+
+  if (request.method !== 'PUT') return undefined;
+  const file = v.parse(v.looseObject({ sha: v.literal(sha), part: v.literal('all'), rows: v.array(v.looseObject({ exitCode: v.number() })) }), await request.json());
+
+  await env.ARTIFACTS.put(key, JSON.stringify(file), { httpMetadata: { contentType: 'application/json' } });
+
+  return Response.json({ stored: key });
+};
+
+/** `/timings/<project>`: GET the medians a plan weighs rows by; POST a graded run's green rows and files. */
+const timings: Handler = async (request, env, [project]) => {
+  if (!v.is(Project, project)) return undefined;
+  const store = env.TIMINGS.getByName(project);
+
+  if (request.method === 'GET') return Response.json(await store.estimates());
+
+  if (request.method !== 'POST') return undefined;
+  await store.record(v.parse(TimingsSchema, await request.json()));
+
+  return Response.json({ recorded: true });
+};
+
+/** `/environments` lists them, `POST /environments/resolve` names a recipe's key and pack base, and
+ *  `DELETE /environments/<key>` forgets one whose snapshot was pruned. */
+const environments: Handler = async (request, env, [key]) => {
+  const registry = env.ENVIRONMENTS.getByName(SINGLE);
+
+  if (key === undefined) return Response.json(await registry.list());
+
+  if (key === 'resolve' && request.method === 'POST') {
+    const resolved = await environmentKey(v.parse(v.object({ recipe: RecipeSchema }), await request.json()).recipe);
+
+    return Response.json({ key: resolved, base: await registry.base(resolved) });
+  }
+
+  if (request.method !== 'DELETE') return undefined;
+  await registry.forget(key);
+
+  return Response.json({ forgotten: key });
+};
+
+const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments]]);
+
+async function route(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const [head = '', ...path] = url.pathname.split('/').filter((segment) => segment !== '');
+
+  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, vcpus: await env.FLEET.getByName('all').used() });
+
+  return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
+
+    try {
+      return await route(request, env);
+    } catch (cause) {
+      if (cause instanceof v.ValiError) return Response.json({ error: cause.message }, { status: 400 });
+      throw cause;
+    }
+  },
+} satisfies ExportedHandler<Env>;

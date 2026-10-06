@@ -1,0 +1,27 @@
+{
+  "name": "armada",
+  "version": "0.1.0",
+  "description": "Fast, mappable compute on Cloudflare Containers: map a command or a handler over many inputs on a fleet started from an environment snapshot. CI is one client.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "armada": "src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p worker",
+    "test": "bun test tests/",
+    "deploy": "bun src/cli.ts deploy"
+  },
+  "dependencies": {
+    "valibot": "1.4.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260930.2",
+    "@types/bun": "latest",
+    "typescript": "7.0.2",
+    "wrangler": "4.145.0"
+  },
+  "exports": {
+    ".": "./src/sdk.ts"
+  }
+}

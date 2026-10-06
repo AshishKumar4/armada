@@ -1,0 +1,16 @@
+{
+  "//": "The Worker runs on workerd: @cloudflare/workers-types, not Bun. It compiles src/protocol.ts too.",
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "moduleDetection": "force"
+  },
+  "include": ["src/**/*.ts", "../src/protocol.ts"]
+}
