@@ -60,9 +60,12 @@ dirty="$(git status --porcelain)"
 if [ -n "$dirty" ]; then printf 'the checkout of %s is not clean:\n%s\n' "$sha" "$dirty" >&2; exit 1; fi`;
 }
 
-/** As root, once per container: fresh tmpfs at each path (a container's own disk may report no free inodes). */
+/** As root, once per container: fresh tmpfs at each path (a container's own disk may report no free inodes), and
+ *  `/proc` whole. The runtime masks parts of it as Docker does (`/proc/sys`, `/proc/kcore`, …), and the kernel then
+ *  refuses a new proc mount in a user namespace, so `bwrap --proc` fails here where a GitHub runner's VM allows it. */
 export function mounts(tmpfs: readonly string[]): string {
-  return `set -eu\nfor dir in ${tmpfs.join(' ')}; do mkdir -p "$dir"; mount -t tmpfs -o mode=1777,size=6g tmpfs "$dir"; done`;
+  return `set -eu\nfor dir in ${tmpfs.join(' ')}; do mkdir -p "$dir"; mount -t tmpfs -o mode=1777,size=6g tmpfs "$dir"; done
+for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); do umount -l "$masked"; done`;
 }
 
 /** As root, detached so the exec returns: one task as the user in its own session, its output to the task's log,

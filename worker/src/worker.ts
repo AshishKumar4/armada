@@ -42,7 +42,8 @@ async function object(env: Env, key: string): Promise<Response> {
 
   found.writeHttpMetadata(headers);
 
-  return new Response(found.body, { headers });
+  // A log is stored gzipped with its encoding named: served as stored, never compressed a second time.
+  return new Response(found.body, { headers, encodeBody: 'manual' });
 }
 
 type Handler = (request: Request, env: Env, path: readonly string[], url: URL) => Promise<Response | undefined>;

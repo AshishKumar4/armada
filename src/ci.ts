@@ -162,7 +162,10 @@ export async function runCI(armada: Armada, target: string, label: string): Prom
     if (!config.task.verdict) return { name, entry, rows: [{ name, exitCode: outcome.exitCode, seconds: outcome.seconds, output: outcome.tail }] };
     const text = await job.output(index);
 
-    return { name, entry, rows: text === null ? null : v.parse(VerdictFileSchema, JSON.parse(text)).rows };
+    if (text === null) return { name, entry, rows: null };
+
+    // A red row that kept no output is shown with the end of its task's.
+    return { name, entry, rows: v.parse(VerdictFileSchema, JSON.parse(text)).rows.map((row) => row.exitCode !== 0 && row.output === '' ? { ...row, output: outcome.tail } : row) };
   }));
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };
