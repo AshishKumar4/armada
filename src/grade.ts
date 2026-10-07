@@ -18,7 +18,7 @@ export type Plan = v.InferOutput<typeof PlanSchema>;
 
 export type PlanEntry = Plan['include'][number];
 
-/** A row of a verdict file, named by `name` or by `run` (the command, as Kinu's ladder writes them). */
+/** A row of a verdict file, named by `name`, or by `run`, the command it ran. */
 export const VerdictRowSchema = v.looseObject({
   name: v.optional(v.string()),
   run: v.optional(v.string()),

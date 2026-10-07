@@ -1,13 +1,12 @@
 /**
  * What runs inside a container, and the one way the Worker runs it. Every container starts on the `durable_object`
  * scheduling policy, so each start names what it starts from (the recipe's base image while preparing, an environment
- * snapshot otherwise) and its instance: no image to build, push or roll out, and a container starts the way a Kinu
- * devbox wakes (Kinu DEVBOX-DECISIONS D50, D72; 0.3 to 2.3 s measured from a warm snapshot, 2026-10-06).
+ * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
 import { failureTail } from '../../src/protocol';
 
-/** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`,
- *  measured 2026-10-06), so a command drops to the user inside. */
+/** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
+ *  a command drops to the user inside. */
 export const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
 
 /** The runner's own state in a container: the pack, the job's files, the handler, the current task. */
@@ -171,8 +170,8 @@ export async function must(container: Container, doing: string, argv: readonly s
   return ran;
 }
 
-/** `body` written to `path` for the user, piped as Kinu's devbox golden pipes its tools: an exec's `stdin` given a
- *  stream fails on large bodies (`internal error`, 2026-10-06), the pipe does not. */
+/** `body` written to `path` for the user, through a pipe: an exec's `stdin` given a stream fails on large bodies
+ *  (`internal error`), the pipe does not. */
 export async function pipeIn(container: Container, body: ReadableStream | string, path: string): Promise<void> {
   const writer = await container.exec(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1" && chown ci:ci "$1"', 'pipe-in', path], { stdin: 'pipe' });
 
@@ -214,7 +213,7 @@ export async function startAndAnswer(container: Container, options: ContainerSta
 
   for (;;) {
     const [first] = await Promise.allSettled([(async () => {
-      // A restored snapshot's hostname does not resolve until it is set (Dew 6ec7406a5).
+      // A restored snapshot's hostname does not resolve until it is set.
       await must(container, 'the first exec', ['/bin/sh', '-c', 'hostname localhost; echo ready'], { ms });
       await container.setInactivityTimeout(inactivityMs);
     })()]);

@@ -1,6 +1,6 @@
 /**
  * ArmadaFleet: the vCPUs running at once across every job on the account, held under Cloudflare's 1,500-vCPU
- * ceiling (375 `standard-4`; Dew's RunnerFleet). A container over the ceiling waits for capacity rather than being
+ * ceiling (375 `standard-4`). A container over the ceiling waits for capacity rather than being
  * refused by the platform mid-job. A hold names its holder and lapses at its lease, so a holder that died returns it.
  */
 import { DurableObject } from 'cloudflare:workers';

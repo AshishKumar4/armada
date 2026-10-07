@@ -15,9 +15,9 @@ describe('a task\'s command', () => {
 
     expect({
       text: fill('echo {item} {index}', itemValues('hello', 3)),
-      object: fill('ladder --ci-row={row} --weight={weight}', itemValues(object, 0)),
+      object: fill('suite --row={row} --weight={weight}', itemValues(object, 0)),
       json: fill('{item}', itemValues(object, 0)),
-    }).toEqual({ text: 'echo hello 3', object: 'ladder --ci-row=bun test a.test.ts --weight=12.5', json: JSON.stringify(object) });
+    }).toEqual({ text: 'echo hello 3', object: 'suite --row=bun test a.test.ts --weight=12.5', json: JSON.stringify(object) });
   });
 
   test('a placeholder the task does not have is refused, never left empty', () => {
@@ -42,7 +42,7 @@ describe('a failed step', () => {
 describe('an environment', () => {
   test('is keyed by the recipe\'s own text and the driver, so a fixed script is a new environment', async () => {
     const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'apt-get install -y git', install: '', smoke: '', instance: 'standard-4' };
-    const repo = { project: 'kinu', checkout: '/home/ci/work/kinu/kinu', history: 'full' as const, manifest: [{ path: 'bun.lock', id: 'a'.repeat(40) }, { path: 'package.json', id: 'b'.repeat(40) }] };
+    const repo = { project: 'app', checkout: '/home/ci/work/app/app', history: 'full' as const, manifest: [{ path: 'bun.lock', id: 'a'.repeat(40) }, { path: 'package.json', id: 'b'.repeat(40) }] };
     const key = await environmentKey(recipe);
     const keys = {
       fixed: await environmentKey({ ...recipe, setup: 'apt-get install -y git strace' }),
@@ -69,7 +69,7 @@ describe('an environment', () => {
 
 describe('a project\'s CI config', () => {
   test('defaults what a project leaves out, and refuses a script outside the commit', () => {
-    const base = { name: 'kinu', environment: { setup: 'ci/setup.sh' }, plan: { command: ['plan'] }, task: { command: ['run', '{row}'] } };
+    const base = { name: 'app', environment: { setup: 'ci/setup.sh' }, plan: { command: ['plan'] }, task: { command: ['run', '{row}'] } };
     const config = parseConfig(JSON.stringify(base));
 
     expect({ base: config.environment.base, history: config.history, pool: config.pool, verdict: config.task.verdict, idempotent: config.task.idempotent })
@@ -78,7 +78,7 @@ describe('a project\'s CI config', () => {
   });
 
   test('a base the runtime cannot start by name is refused before anything starts, by `run` and by `map --env`', async () => {
-    const base = { name: 'nimbus', environment: {}, plan: { command: ['plan'] }, task: { command: ['run'] } };
+    const base = { name: 'app', environment: {}, plan: { command: ['plan'] }, task: { command: ['run'] } };
 
     expect(parseConfig(JSON.stringify(base)).environment.base).toBe('cloudflare/debian-trixie');
     expect(() => parseConfig(JSON.stringify({ ...base, environment: { base: 'ubuntu:26.04' } }))).toThrow('Cloudflare-managed image');
@@ -185,9 +185,9 @@ describe('uploading a pack', () => {
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
-      expect(await armada.uploadPack('dew', 'a'.repeat(40), 'root', () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
+      expect(await armada.uploadPack('app', 'a'.repeat(40), 'root', () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
       expect(seen.splice(0)).toEqual(['HEAD root?packer=2', 'PUT root?packer=2']);
-      expect(await armada.uploadPack('dew', 'b'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
+      expect(await armada.uploadPack('app', 'b'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
       expect(seen).toEqual([
         'HEAD root?packer=2', 'POST root?packer=2&uploads', 'PUT root?packer=2&upload=u1&part=1', 'PUT root?packer=2&upload=u1&part=2',
         'PUT root?packer=2&upload=u1&part=3', 'POST root?packer=2&upload=u1',
@@ -275,7 +275,7 @@ describe('a commit checkout', () => {
       git(scratch, 'init', '-q', origin);
       const fork = commit('fork', { 'apps/a.txt': 'one\n', 'b.txt': 'b\n' });
       const environment = commit('environment', { 'apps/a.txt': 'two\n' });
-      // A commit on the fork point, as a lane's overlay (`git commit-tree -p <fork>`) makes one: its `apps` is the fork's.
+      // A commit on the fork point, as `git commit-tree -p <fork>` makes one: its `apps` is the fork's.
       git(origin, 'checkout', '-q', fork);
       const head = commit('overlay', { 'c.txt': 'c\n' });
 

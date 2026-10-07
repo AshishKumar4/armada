@@ -27,7 +27,7 @@ export type Manifest = v.InferOutput<typeof ManifestSchema>;
  * A base the runtime starts by name: a Cloudflare-managed image, `cloudflare/debian-trixie`, optionally pinned. The
  * `durable_object` policy refuses any other reference unless the Worker's own configuration names it as an image:
  * Docker Hub's `ubuntu:26.04` answers "must be digest-pinned", pinned "must include a registry and repository", and a
- * digest pushed to the account's registry "Image not found" (2026-10-07). Each refusal surfaced only after a
+ * digest pushed to the account's registry "Image not found". Each refusal surfaced only after a
  * preparation's five-minute start bound, so a recipe naming one is refused here, before anything starts.
  */
 export const BaseSchema = v.pipe(

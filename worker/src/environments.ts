@@ -2,9 +2,9 @@
  * One environment per `environmentKey`: a container snapshot of the recipe's base with the runner's layer, the
  * recipe's `setup` run as root, any commit checked out, and the recipe's `install` run as the user, from which every
  * container of every job with that key starts. ArmadaEnvironments is the account's one registry of them;
- * ArmadaPreparer, one per key, builds one a phase per alarm (each exec bounded inside the platform's 15-minute alarm),
- * as Dew's SnapshotPreparer and Kinu's devbox golden do. The key hashes the recipe's own text and the driver, so a
- * fixed recipe or runner layer is a new environment, never an old snapshot trusted for weeks.
+ * ArmadaPreparer, one per key, builds one a phase per alarm (each exec bounded inside the platform's 15-minute alarm).
+ * The key hashes the recipe's own text and the driver, so a fixed recipe or runner layer is a new environment, never an
+ * old snapshot trusted for weeks.
  */
 import { DurableObject } from 'cloudflare:workers';
 import { workdirOf, type Recipe } from '../../src/protocol';

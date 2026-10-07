@@ -1,7 +1,6 @@
 /**
  * Deleting a container snapshot. The Containers API has no delete; a snapshot is a tag in a repository of the
- * account's registry, and a set tag beside it. Ported from Kinu's devbox (`packages/devbox/src/snapshot-registry.ts`,
- * DEVBOX-DECISIONS D65).
+ * account's registry, and a set tag beside it.
  */
 import { createHash } from 'node:crypto';
 import * as v from 'valibot';
