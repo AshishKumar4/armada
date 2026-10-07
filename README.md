@@ -62,9 +62,8 @@ The CLI and `.armada.json` fill these in a command's words; an unknown one is an
 
 ## From TypeScript
 
-This example takes a list of image URLs. One task makes a half-size thumbnail of each image with ImageMagick; the
-other downloads each image and reports its size and type. Both tasks run in one environment with curl and ImageMagick
-installed.
+Re-encoding a folder of videos takes a long time on one machine. This example reads each video's length and
+resolution, then re-encodes every video to 720p with ffmpeg, each on its own container, all at once.
 
 Add armada with `bun add github:AshishKumar4/armada`. `armada.config.ts` names the project and the folder its tasks
 live in:
@@ -77,30 +76,30 @@ export default defineConfig({ project: 'media', tasks: ['armada'] });
 ```
 
 ```ts
-// armada/thumbnails.ts
+// armada/video.ts
 import { recipe, sh, task } from 'armada';
 import * as v from 'valibot';
 
-export const imaging = recipe.debian().apt('curl', 'imagemagick').size('small');
+export const media = recipe.debian().apt('ffmpeg').size('small');
 
-// A command: the body returns sh, which escapes every ${} as one word. `out` is the file the task answers with.
-export const thumbnail = task({
-  id: 'thumbnail',
-  recipe: imaging,
+// Re-encode one video to 720p H.264. sh passes ${url} and ${out} as single words, so nothing needs quoting.
+export const transcode = task({
+  id: 'transcode',
+  recipe: media,
   output: 'bytes',
-  run: (url: string, { out }) => sh`curl -sL ${url} | convert - -resize 50% ${out}`,
+  run: (url: string, { out }) =>
+    sh`ffmpeg -loglevel error -i ${url} -vf scale=-2:720 -c:v libx264 -preset veryfast -c:a aac -f mp4 ${out}`,
 });
 
-// A function: the body's value is the answer, checked by its schema in the container.
-export const measure = task({
-  id: 'measure',
-  recipe: imaging,
-  input: v.object({ url: v.pipe(v.string(), v.url()) }),
-  output: v.object({ bytes: v.number(), type: v.string() }),
-  run: async ({ url }) => {
-    const response = await fetch(url);
+// Read a video's length and resolution with ffprobe. The schema checks the answer inside the container.
+export const probe = task({
+  id: 'probe',
+  recipe: media,
+  output: v.object({ seconds: v.number(), width: v.number(), height: v.number() }),
+  run: async (url: string) => {
+    const info = JSON.parse(await sh`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${url}`.text());
 
-    return { bytes: (await response.arrayBuffer()).byteLength, type: response.headers.get('content-type') ?? '' };
+    return { seconds: Number(info.format.duration), width: Number(info.streams[0].width), height: Number(info.streams[0].height) };
   },
 });
 ```
@@ -108,18 +107,22 @@ export const measure = task({
 Any script in the project can then run them:
 
 ```ts
-import { measure, thumbnail } from './armada/thumbnails';
+// encode.ts
+import { probe, transcode } from './armada/video';
 
-const sizes = await measure.map(rows);                  // { bytes: number; type: string }[], in input order
+const videos = (await Bun.file('videos.txt').text()).split('\n').filter(Boolean);
 
-for await (const result of thumbnail.stream(urls)) {    // in the order they land
-  if (result.ok) await Bun.write(`thumbs/${String(result.index)}.png`, result.value);
-  else console.error(result.item, result.kind);
+const infos = await probe.map(videos); // { seconds, width, height }[], in input order
+console.log(`${videos.length} videos, ${Math.round(infos.reduce((sum, info) => sum + info.seconds, 0))} seconds in all`);
+
+for await (const result of transcode.stream(videos)) { // each file as soon as its container finishes
+  if (result.ok) await Bun.write(`720p/${String(result.index)}.mp4`, result.value);
+  else console.error(`${result.item}: ${result.kind}`);
 }
-
-const one = await thumbnail.run(urls[0]);               // one item, on one container
-const here = await thumbnail.local(urls[0]);            // one item, on this machine, no container
 ```
+
+`bun encode.ts` with two 10-second test videos in `videos.txt` printed `2 videos, 20 seconds in all` and wrote two
+1280x720 files.
 
 - `armada push` uploads the project's tasks, and drops the ones it no longer exports. A script inside the project
   pushes on its first run, and `armada dev` pushes on every save.
