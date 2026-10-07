@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Result } from '../src/index';
-import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
+import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, remembered, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
 
@@ -258,6 +258,15 @@ describe('a task\'s retries', () => {
     await flaky.stream([1], { armada }).settled();
 
     expect([...jobs.values()].at(-1)?.spec.retries).toEqual({ attempts: 3, backoffSeconds: 0, exitCodes: [], errors: ['Flake'] });
+  });
+});
+
+describe('a task\'s cache', () => {
+  test('travels with its job, and a result says whether it ran', async () => {
+    const { armada, jobs } = await fleet();
+    const [result] = await remembered.stream([4], { armada }).settled();
+
+    expect({ cache: [...jobs.values()].at(-1)?.spec.cache, value: result?.ok === true ? result.value : null, cached: result?.meta.cached }).toEqual({ cache: { days: 7 }, value: 8, cached: false });
   });
 });
 

@@ -156,6 +156,7 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
       spec.run = { ...spec.run, bundle };
     }
 
+    if (spec.cache !== undefined && spec.run.kind !== 'task') return Response.json({ error: 'a cache is for a pushed task: its bundle is part of the key' }, { status: 400 });
     const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
     const unset = spec.secrets.find((name) => !(name in held));
 

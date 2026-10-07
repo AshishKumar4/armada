@@ -38,6 +38,15 @@ export const bundleKey = (digest: string): string => `code/${digest}.mjs`;
 /** The R2 keys of a task's output and log. */
 export const taskKey = (job: string, index: number, leaf: 'output' | 'log'): string => `jobs/${job}/tasks/${String(index)}/${leaf === 'log' ? 'log.gz' : 'output'}`;
 
+/** Bytes as text, or undefined when they are not UTF-8. */
+export function textOf(bytes: ArrayBuffer): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The one instance of a deployment-wide object. */
 export const SINGLE = 'all';
 

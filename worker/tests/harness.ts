@@ -43,6 +43,8 @@ export interface Stored {
   readonly ctx: DurableObjectState;
   /** Every key-value entry and every SQL row the object holds, as text. */
   readonly dump: () => string;
+  /** The work the object handed `waitUntil`. */
+  readonly pending: readonly Promise<unknown>[];
 }
 
 /** An in-memory Durable Object state, with `container` as its container. */
@@ -80,8 +82,11 @@ export function state(container?: Container): Stored {
     return JSON.stringify([[...entries], tables]);
   };
 
+  // What an object hands `waitUntil`, for a test to wait on.
+  const pending: Promise<unknown>[] = [];
+
   // The few storage methods the objects call, not the whole DurableObjectState: a test double at the platform's seam.
-  return { ctx: { storage, container } as unknown as DurableObjectState, dump };
+  return { ctx: { storage, container, waitUntil: (promise: Promise<unknown>) => { pending.push(promise); } } as unknown as DurableObjectState, dump, pending };
 }
 
 /** A namespace whose `getByName` answers from `named`. */
@@ -100,7 +105,14 @@ export function bucket(objects = new Map<string, string>()) {
     /** When each object was put, which a test may move back. */
     kept,
     head: async (key: string) => objects.has(key) ? object(key) : null,
-    get: async (key: string) => objects.has(key) ? { ...object(key), body: new Blob([objects.get(key) ?? '']).stream(), text: async () => objects.get(key) ?? '' } : null,
+    get: async (key: string) => {
+      const text = objects.get(key);
+
+      if (text === undefined) return null;
+      const bytes = new TextEncoder().encode(text);
+
+      return { ...object(key), size: bytes.byteLength, httpMetadata: {}, body: new Blob([bytes]).stream(), text: async () => text, arrayBuffer: async () => bytes.buffer };
+    },
     put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string> } = {}) => {
       objects.set(key, typeof body === 'string' ? body : await new Response(body).text());
       kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {} });
