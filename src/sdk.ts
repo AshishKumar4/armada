@@ -50,13 +50,19 @@ export interface Summary {
   readonly tasksPerSecond: number;
 }
 
-/** The runner this machine deployed (`armada deploy`), or `ARMADA_URL` and `ARMADA_TOKEN`. */
+/** Where `armada deploy --name=<name>` writes a deployment's connection: `connection.json` for the default `armada`. */
+export function connectionFile(name: string): string {
+  return join(CONFIG_DIR, name === 'armada' ? 'connection.json' : `${name}.json`);
+}
+
+/** The runner this machine deployed (`armada deploy`), the one `ARMADA_CONNECTION` names, or `ARMADA_URL` and
+ *  `ARMADA_TOKEN`. */
 export function connect(): Armada {
   const url = process.env['ARMADA_URL'];
   const token = process.env['ARMADA_TOKEN'];
 
   if (url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
-  const file = join(CONFIG_DIR, 'connection.json');
+  const file = process.env['ARMADA_CONNECTION'] ?? connectionFile('armada');
 
   if (!existsSync(file)) throw new Error('no runner: deploy one with `armada deploy --account=<id>`, or set ARMADA_URL and ARMADA_TOKEN');
 

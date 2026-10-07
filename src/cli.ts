@@ -6,7 +6,11 @@
  *   armada run <commit|worktree> [--label=<text>] [-- <plan words>]
  *                                                     a project's CI from its `.armada.json`; exits 0, 1 red, 2 not graded
  *   armada status <job-id>
- *   armada deploy --account=<id>                      with this machine's wrangler login
+ *   armada deploy --account=<id> [--name=armada] [--vcpus=N]
+ *                                                     with this machine's wrangler login; a name of its own is a separate
+ *                                                     deployment: its Worker, its `<name>-artifacts` bucket, its fleet of
+ *                                                     at most N vCPUs (FLEET_VCPUS) and `~/.config/armada/<name>.json`
+ *   --connection=<file>                               any command: the deployment that file names (ARMADA_CONNECTION)
  *   armada prune [--keep=3]                           needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
  *
  * `map` items are a JSON array, or one item per line; `--times=N` maps over 1..N. `--commit` runs in the commit's checkout,
@@ -20,7 +24,7 @@ import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { cancelOnInterrupt, onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
-import { CONFIG_DIR, connect, ConnectionSchema } from './sdk';
+import { CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
 import { BaseSchema, INSTANCES } from './protocol';
 
 const ROOT = join(import.meta.dir, '..');
@@ -106,8 +110,8 @@ function wrangler(args: readonly string[], account: string, stdin?: string): str
 }
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
-function deploy(account: string): number {
-  const bucket = 'armada-artifacts';
+function deploy(account: string, name: string, vcpus: string | undefined): number {
+  const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
   const rules = wrangler(['r2', 'bucket', 'lifecycle', 'list', bucket], account);
@@ -120,13 +124,15 @@ function deploy(account: string): number {
 
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
 
-  writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "armada",\n  "account_id": "${account}",`)
-    .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', ''));
+  writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "${name}",\n  "account_id": "${account}",`)
+    .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
+    .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
+    .replace(/"FLEET_VCPUS": "\d+"/u, (whole) => vcpus === undefined ? whole : `"FLEET_VCPUS": "${vcpus}"`));
   const deployed = wrangler(['deploy', '-c', config], account);
-  const url = /https:\/\/armada\.[a-z0-9-]+\.workers\.dev/u.exec(deployed)?.[0];
+  const url = new RegExp(`https://${name}\\.[a-z0-9-]+\\.workers\\.dev`, 'u').exec(deployed)?.[0];
 
   if (url === undefined) throw new Error(`the deploy printed no workers.dev URL:\n${deployed.slice(-2000)}`);
-  const file = join(CONFIG_DIR, 'connection.json');
+  const file = connectionFile(name);
   const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
   wrangler(['secret', 'put', 'ARMADA_TOKEN', '-c', config], account, token);
@@ -161,6 +167,9 @@ async function prune(keep: number): Promise<number> {
 }
 
 async function main(): Promise<number> {
+  const connection = option('connection');
+
+  if (connection !== undefined) process.env['ARMADA_CONNECTION'] = resolve(connection);
   const dash = process.argv.indexOf('--');
   const words = (dash < 0 ? process.argv : process.argv.slice(0, dash)).slice(2).filter((argument) => !argument.startsWith('--'));
   const [command, target] = words;
@@ -175,10 +184,19 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  if (command === 'deploy' && option('account') !== undefined) return deploy(option('account') ?? '');
+  if (command === 'deploy' && option('account') !== undefined) {
+    const name = option('name') ?? 'armada';
+    const vcpus = option('vcpus');
+
+    if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
+
+    if (vcpus !== undefined && !/^[1-9]\d*$/u.test(vcpus)) throw new Error(`--vcpus=${vcpus}: a whole number of vCPUs`);
+
+    return deploy(option('account') ?? '', name, vcpus);
+  }
 
   if (command === 'prune') return await prune(Number(option('keep') ?? '3'));
-  throw new Error('usage: armada map … | armada run <commit|worktree> | armada status <job-id> | armada deploy --account=<id> | armada prune [--keep=3]');
+  throw new Error('usage: armada map … | armada run <commit|worktree> | armada status <job-id> | armada deploy --account=<id> [--name=armada] [--vcpus=N] | armada prune [--keep=3]');
 }
 
 try {

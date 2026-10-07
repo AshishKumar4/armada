@@ -151,6 +151,11 @@ armada proves itself the same way: its own `.armada.json` runs `bun test` and th
 stay), deploys the Worker, sets its bearer token and writes `~/.config/armada/connection.json`. There is no image to
 build. `ARMADA_URL` and `ARMADA_TOKEN` override the connection file.
 
+`--name=<name>` deploys a separate armada on the same account: its own Worker, `<name>-artifacts` bucket and fleet,
+and `~/.config/armada/<name>.json`, which `--connection=<file>` (or `ARMADA_CONNECTION`) points any command at.
+`--vcpus=N` caps a deployment's fleet (`FLEET_VCPUS`, 1,500 by default); deployments on one account share
+Cloudflare's 1,500, so their caps should add up to it.
+
 ## Things I learned about the containers
 
 These decided how the runner layer works:
