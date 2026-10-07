@@ -91,7 +91,9 @@ under `node`; its return value is the task's output.
    install, snapshot, then a test start from the snapshot. Every container after that starts from the snapshot.
 3. **Queue.** Tasks are queued longest first, by an object item's numeric `weight`.
 4. **Fleet.** Up to `pool` containers each pull task after task until the queue is empty. Every command runs as the
-   unprivileged user under tini, on fresh tmpfs mounts (`/tmp` and `/dev/shm` by default). The whole account's fleet
+   unprivileged user under tini, on fresh tmpfs mounts (`/tmp` and `/dev/shm` by default), in a cgroup of its own that
+   the user may nest groups and limits in (`ARMADA_CGROUP`). Whatever a task leaves running ends before the next task
+   starts, and a killed task ends with everything it started. The whole account's fleet
    stays under `FLEET_VCPUS`, which is Cloudflare's ceiling of 1,500 vCPUs.
 5. **Retries.** A task the infrastructure dropped runs once more: a container that never answered, a lost exec, or a
    container that went quiet mid-task. A task that exited never runs again. A task past its `timeout` is killed and

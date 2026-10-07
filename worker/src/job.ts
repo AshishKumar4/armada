@@ -20,7 +20,7 @@ import {
 } from '../../src/protocol';
 import { said, SINGLE, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { STATE, TASK } from './container';
+import { STATE, TASK, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
 
 type Phase = JobStatus['phase'];
@@ -186,7 +186,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
   private claimOf(spec: Kept, own: Record<string, string>, index: number, item: string, attempt: number, duplicate: boolean): Claim {
     const parsed: unknown = JSON.parse(item);
-    const env = { ...commandEnv(spec.recipe, own), ARMADA_ITEM: item, ARMADA_INDEX: String(index), ARMADA_OUT: `${TASK}/out` };
+    const env = { ...commandEnv(spec.recipe, own), ARMADA_ITEM: item, ARMADA_INDEX: String(index), ARMADA_OUT: `${TASK}/out`, ARMADA_CGROUP: TASK_GROUP };
     const values = { ...itemValues(parsed, index), out: `${TASK}/out`, files: `${STATE}/files`, workdir: workdirOf(spec.recipe), commit: spec.commit?.sha ?? '' };
     const argv = 'command' in spec.run ? spec.run.command.map((word) => fill(word, values)) : ['node', `${STATE}/handler.mjs`];
 

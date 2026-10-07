@@ -15,6 +15,27 @@ export const STATE = '/armada';
 
 export const TASK = `${STATE}/task`;
 
+const PARENT_GROUP = '/sys/fs/cgroup/armada';
+
+/** The cgroup a task runs in, delegated to the user, so a task can give what it starts groups and limits of its own
+ *  (a test runner's per-file memory). The task itself is in its `runner` child: a group whose children have
+ *  controllers holds no process. Everything in it ends with the task, daemons it detached with `setsid` included. */
+export const TASK_GROUP = `${PARENT_GROUP}/task`;
+
+/** Controllers a task's groups get: CPU and memory to read and to cap, pids to bound. */
+const CONTROLLERS = '+cpu +memory +pids';
+
+/** As root: ends everything in the task's group, the user's nested groups included, and removes them. */
+const END_GROUP = String.raw`if [ -d ${TASK_GROUP} ]; then
+  echo 1 > ${TASK_GROUP}/cgroup.kill
+  n=0
+  while grep -q '^populated 1' ${TASK_GROUP}/cgroup.events; do
+    n=$((n + 1)); [ "$n" -lt 100 ] || { echo "${TASK_GROUP} would not empty" >&2; exit 1; }
+    sleep 0.05
+  done
+  find ${TASK_GROUP} -depth -type d -exec rmdir {} +
+fi`;
+
 /** git as a GitHub runner has it: Debian trixie's 2.47 prints no `path=` records for `rev-list --objects -z`. Built
  *  from kernel.org's release, pinned by digest. */
 const GIT = { version: '2.53.0', sha256: '5818bd7d80b061bbbdfec8a433d609dc8818a05991f731ffc4a561e2ca18c653' };
@@ -61,23 +82,30 @@ dirty="$(git status --porcelain)"
 if [ -n "$dirty" ]; then printf 'the checkout of %s is not clean:\n%s\n' "$sha" "$dirty" >&2; exit 1; fi`;
 }
 
-/** As root, once per container: fresh tmpfs at each path (a container's own disk may report no free inodes), and
- *  `/proc` whole. The runtime masks parts of it as Docker does (`/proc/sys`, `/proc/kcore`, …), and the kernel then
+/** As root, once per container: fresh tmpfs at each path (a container's own disk may report no free inodes), the
+ *  group that holds each task's (`TASK_GROUP`), and `/proc` whole. The runtime masks parts of it as Docker does (`/proc/sys`, `/proc/kcore`, …), and the kernel then
  *  refuses a new proc mount in a user namespace, so `bwrap --proc` fails here where a GitHub runner's VM allows it. */
 export function mounts(tmpfs: readonly string[]): string {
   return `set -eu\nfor dir in ${tmpfs.join(' ')}; do mkdir -p "$dir"; mount -t tmpfs -o mode=1777,size=6g tmpfs "$dir"; done
+mkdir -p ${PARENT_GROUP}
+echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); do umount -l "$masked"; done`;
 }
 
-/** As root, detached so the exec returns: one task as the user in its own session, its output to the task's log,
- *  its exit code to the task's `exit`. */
+/** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
+ *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
+ *  task's `exit`. */
 export function launchTask(workdir: string): string {
   return String.raw`set -eu
+${END_GROUP}
+mkdir -p ${TASK_GROUP}/runner
+echo '${CONTROLLERS}' > ${TASK_GROUP}/cgroup.subtree_control
+for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${TASK_GROUP}/$owned"; done
 rm -rf ${TASK}
 mkdir -p ${TASK}
 chown ci:ci ${TASK}
 cd ${workdir}
-setsid ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
+setsid sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c '"$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
 /** Waits up to `$1` seconds for the task, then prints its exit code, or nothing while it runs. */
@@ -85,12 +113,12 @@ export const WAIT = String.raw`end=$(( $(date +%s) + $1 ))
 while [ ! -f ${TASK}/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.05; done
 cat ${TASK}/exit 2>/dev/null || true`;
 
-/** Ends the task's whole session: its process group, and whatever it started. */
-export const KILL = String.raw`pid="$(cat ${TASK}/pid 2>/dev/null || true)"
-[ -n "$pid" ] || exit 0
-kill -TERM -- "-$pid" 2>/dev/null || true
+/** Ends the task and everything it started: a TERM to each of its processes, then, 2 s later, its whole group. */
+export const KILL = String.raw`set -eu
+[ -d ${TASK_GROUP} ] || exit 0
+for pid in $(find ${TASK_GROUP} -name cgroup.procs -exec cat {} +); do kill -TERM "$pid" 2>/dev/null || true; done
 sleep 2
-kill -KILL -- "-$pid" 2>/dev/null || true`;
+${END_GROUP}`;
 
 /** A handler: a function's source, called with the item, its value written to `{out}`. */
 export function handlerModule(source: string): string {
