@@ -141,6 +141,17 @@ export type Push = v.InferOutput<typeof PushSchema>;
 /** A task's output up to this size rides in its event; a larger one is read from R2. */
 export const INLINE_BYTES = 32 * 1024;
 
+/** When a task that failed by itself runs again: up to `attempts` runs in all, on one of these exit codes, or on one of
+ *  these errors a pushed task's body threw, by name. Each retry waits `backoffSeconds`, doubled each time. */
+export const RetriesSchema = v.object({
+  attempts: v.pipe(v.number(), v.integer(), v.minValue(2), v.maxValue(10)),
+  backoffSeconds: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(3600)), 1),
+  exitCodes: v.optional(v.array(v.pipe(v.number(), v.integer())), []),
+  errors: v.optional(v.array(v.pipe(v.string(), v.minLength(1))), []),
+});
+
+export type Retries = v.InferInput<typeof RetriesSchema>;
+
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,
   /** For a repository recipe: the commit each container checks out, packed against `base`. */
@@ -161,6 +172,7 @@ export const JobSpecSchema = v.object({
   speculative: v.optional(v.boolean(), false),
   /** A task's own bound, in seconds. */
   timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
+  retries: v.optional(RetriesSchema),
   label: v.optional(v.pipe(v.string(), v.maxLength(200)), ''),
 });
 
@@ -186,6 +198,8 @@ export const OutcomeSchema = v.object({
   /** A pushed task's answer, as its runner says: `value` is an envelope with the body's value or error, `command` the
    *  file the body's command wrote. */
   answer: v.optional(v.picklist(['value', 'command'])),
+  /** The name of the error a pushed task's body threw. */
+  error: v.optional(v.string()),
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),

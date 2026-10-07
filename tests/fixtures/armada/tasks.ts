@@ -54,3 +54,14 @@ export const fromFile = task({
   },
   run: (n: number) => n + 1,
 });
+
+/** Fails until its third attempt, and is retried for it. */
+export const flaky = task({
+  id: 'flaky',
+  retries: { attempts: 3, backoffSeconds: 0, errors: ['Flake'] },
+  run: (n: number, { attempt }) => {
+    if (attempt < 3) throw Object.assign(new Error(`attempt ${String(attempt)}`), { name: 'Flake' });
+
+    return n;
+  },
+});

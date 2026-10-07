@@ -21,14 +21,16 @@ async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   return { job: created, begun };
 }
 
-const exited = (index: number, vessel: string): Outcome => ({ index, kind: 'exited', exitCode: 0, seconds: 1, vessel, attempt: 1, tail: '', output: false });
+const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
+  index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: false, ...error === undefined ? {} : { error },
+});
 
-/** `vessel` claims, runs and lands its next task. */
-async function finish(open: ArmadaJob, vessel: string): Promise<void> {
+/** `vessel` claims, runs and lands its next task, which exits `exitCode`, having thrown `error`. */
+async function finish(open: ArmadaJob, vessel: string, exitCode = 0, error?: string): Promise<void> {
   const claim = await open.claim(vessel);
 
-  if (claim === null || !(await open.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
-  await open.complete(vessel, exited(claim.index, vessel), 1000);
+  if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
+  await open.complete(vessel, exited(claim.index, vessel, exitCode, error), 1000);
 }
 
 describe('an open job', () => {
@@ -65,7 +67,7 @@ describe('a task\'s claim', () => {
     const bundle = 'b'.repeat(64);
     const { job: taskJob } = await job({ recipe: {}, items: [{ item: { n: 1 } }], run: { kind: 'task', id: 'square', bundle } });
     const { job: cmdJob } = await job({ recipe: {}, items: [{ item: 'x', argv: ['echo', 'x'] }], run: { kind: 'command' } });
-    const [taskClaim, cmdClaim] = [await taskJob.claim('v1'), await cmdJob.claim('v1')];
+    const [taskClaim, cmdClaim] = [await taskJob.claim('v1'), await cmdJob.claim('v1')].map((claim) => claim === null || 'waitMs' in claim ? undefined : claim);
 
     expect([taskClaim?.argv, taskClaim?.env['ARMADA_TASK'], taskClaim?.env['ARMADA_ITEM'], taskClaim?.env['ARMADA_ATTEMPT'], cmdClaim?.argv, cmdClaim?.env['ARMADA_TASK'], cmdClaim?.env['ARMADA_ITEM']])
       .toEqual([['node', '/armada/bundle.mjs'], 'square', '{"n":1}', '1', ['echo', 'x'], undefined, '"x"']);
@@ -77,7 +79,7 @@ describe('a task\'s outcome', () => {
     const { job: cancelled } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
     const claim = await cancelled.claim('v1');
 
-    await cancelled.accept('v1', claim?.index ?? -1);
+    await cancelled.accept('v1', claim === null || 'waitMs' in claim ? -1 : claim.index);
     await cancelled.cancel('cancelled by its client', 'cancelled');
     await cancelled.complete('v1', exited(0, 'v1'), 1000);
     const { events } = await cancelled.events(0);
@@ -94,7 +96,7 @@ describe('a task whose container stopped under it', () => {
     for (const vessel of ['v1', 'r1', 'r2']) {
       const claim = await lossy.claim(vessel);
 
-      lost.push(claim?.index ?? null);
+      lost.push(claim === null || 'waitMs' in claim ? null : claim.index);
       await lossy.vesselFailed(vessel, 'the wait failed to run: exec() cannot be called on a container that is not running.');
     }
     const { events } = await lossy.events(0);
@@ -146,5 +148,27 @@ describe('a job none of whose containers starts', () => {
       tails: ['no vessel was left to run it', 'no vessel was left to run it'],
       vessels: 10,
     });
+  });
+});
+
+describe('a task that failed by itself', () => {
+  test('runs again on an exit code or a thrown error its job names, after a doubling backoff, up to its attempts', async () => {
+    const task = { item: 'a', argv: ['true'] };
+    const retries = { attempts: 3, backoffSeconds: 0, exitCodes: [75], errors: ['FetchError'] };
+    const { job: retried } = await job({ recipe: {}, items: [task, task, task], run: { kind: 'command' }, retries });
+
+    // Item 0 fails three named ways and is out of attempts; item 1 fails unnamed; item 2 throws a named error, then passes.
+    for (const [exitCode, error] of [[75], [1, 'FetchError'], [75], [2], [1, 'FetchError'], [0]] as const) await finish(retried, 'v1', exitCode, error);
+    const { events } = await retried.events(0);
+
+    expect(events.map((event) => [event.outcome.index, event.outcome.exitCode])).toEqual([[0, 75], [1, 2], [2, 0]]);
+  });
+
+  test('that waits out its backoff tells a vessel how long to wait, a minute at most', async () => {
+    const { job: waiting } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, retries: { attempts: 2, backoffSeconds: 300, exitCodes: [1] } });
+
+    await finish(waiting, 'v1', 1);
+
+    expect(await waiting.claim('v1')).toEqual({ waitMs: 60_000 });
   });
 });

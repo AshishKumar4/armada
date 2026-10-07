@@ -35,7 +35,9 @@ describe('a job\'s env', () => {
   test('reaches every claim while the job runs', async () => {
     const { job } = await running();
 
-    expect((await job.claim('v1'))?.env['TOKEN']).toBe(SECRET);
+    const claim = await job.claim('v1');
+
+    expect(claim === null || 'waitMs' in claim ? null : claim.env['TOKEN']).toBe(SECRET);
   });
 
   const ends: Record<string, (setup: Running) => Promise<void>> = {
@@ -43,7 +45,7 @@ describe('a job\'s env', () => {
       for (const vessel of ['v1', 'v2']) {
         const claim = await job.claim(vessel);
 
-        if (claim === null || !(await job.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
+        if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
         await job.complete(vessel, exited(claim.index, vessel), 1000);
       }
     },
@@ -94,7 +96,8 @@ describe('a job\'s env', () => {
     // The layout an earlier Worker left: the env inside the spec.
     await stored.ctx.storage.put({ spec: { ...kept, env }, phase: 'running', environment: generation, startedAt: 0 });
     stored.ctx.storage.sql.exec(`INSERT INTO vessels (name, state, beat) VALUES ('v1', 'working', ?)`, Date.now());
-    const claimed = (await job.claim('v1'))?.env['TOKEN'];
+    const claim = await job.claim('v1');
+    const claimed = claim === null || 'waitMs' in claim ? undefined : claim.env['TOKEN'];
 
     await job.cancel('cancelled by its client', 'cancelled');
     const running = stored.dump().includes(SECRET);

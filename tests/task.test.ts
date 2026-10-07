@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Result } from '../src/index';
-import { echo, encode, fromFile, greet, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
+import { echo, encode, flaky, fromFile, greet, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
 
@@ -44,12 +44,12 @@ function localFleet(lose: readonly number[] = []) {
       const tail = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
       const kept = job.spec.output || spec.kind === 'task' ? readFileSync(out, { flag: 'a+' }) : null;
       const text = kept === null || kept.byteLength > INLINE_BYTES ? undefined : new TextDecoder('utf-8', { fatal: false }).decode(kept);
-      const said = spec.kind === 'task' ? readFileSync(marker, { flag: 'a+' }).toString() : '';
+      const [said, error] = spec.kind === 'task' ? readFileSync(marker, { flag: 'a+' }).toString().split('\n') : [];
 
       if (kept !== null) outputs.set(`${id}/${String(index)}`, new Uint8Array(kept));
       job.events.push({
         index, kind: 'exited', exitCode, seconds: 0.1, vessel: 'v1', attempt: 1, tail, output: kept !== null, ...text === undefined || text.includes('\uFFFD') ? {} : { value: text },
-        ...said === 'value' || said === 'command' ? { answer: said } : {},
+        ...said === 'value' || said === 'command' ? { answer: said } : {}, ...error === undefined ? {} : { error },
       });
     })());
   };
@@ -248,6 +248,16 @@ describe('a recipe given as a function', () => {
 
     expect({ value: await fromFile.run(1, { armada }), setup: [...jobs.values()].at(-1)?.spec.recipe.setup })
       .toEqual({ value: 2, setup: readFileSync(join(FIXTURES, 'greeting.ts'), 'utf8') });
+  });
+});
+
+describe('a task\'s retries', () => {
+  test('travel with its job, for the Worker to decide by', async () => {
+    const { armada, jobs } = await fleet();
+
+    await flaky.stream([1], { armada }).settled();
+
+    expect([...jobs.values()].at(-1)?.spec.retries).toEqual({ attempts: 3, backoffSeconds: 0, exitCodes: [], errors: ['Flake'] });
   });
 });
 

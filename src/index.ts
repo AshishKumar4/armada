@@ -7,5 +7,5 @@ export { sh, Shell, ShellError } from './sh';
 export type { OutFile, Word } from './sh';
 export { connect } from './sdk';
 export type { Armada, Summary } from './sdk';
-export type { Size } from './protocol';
+export type { Retries, Size } from './protocol';
 export type { StandardSchemaV1 } from './standard-schema';

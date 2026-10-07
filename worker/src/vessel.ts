@@ -203,6 +203,13 @@ export class ArmadaVessel extends DurableObject<Env> {
         const claim = await job.claim(spec.name);
 
         if (claim === null) return await this.retire(spec);
+
+        // The tasks left wait out a retry's backoff: the container waits with them.
+        if ('waitMs' in claim) {
+          await this.ctx.storage.setAlarm(Date.now() + claim.waitMs);
+
+          return false;
+        }
         await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
         const { env, ...kept } = claim;
 
@@ -265,8 +272,11 @@ export class ArmadaVessel extends DurableObject<Env> {
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
     const said = spec.bundle === null ? '' : (await run(container, ['cat', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
-    const answer = said === 'value' || said === 'command' ? said : undefined;
-    const outcome: Outcome = { index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...usage };
+    const [kind = '', error] = said.split('\n');
+    const answer = kind === 'value' || kind === 'command' ? kind : undefined;
+    const outcome: Outcome = {
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...error === undefined ? {} : { error }, ...usage,
+    };
 
     await job.complete(spec.name, outcome, seconds * 1000);
   }

@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { jsonOf, MAX_TASKS, RecipeSchema, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { jsonOf, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { remoteError, RUN, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -209,6 +209,8 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
   readonly timeout?: number;
   /** Lets an idle container run a straggler again, the first answer kept. Only for tasks safe to repeat. */
   readonly speculative?: boolean;
+  /** Runs a task again when it fails one of the named ways: an exit code, or an error its body threw, by name. */
+  readonly retries?: Retries;
   readonly run: (input: I, context: Context) => R | Promise<R>;
 }
 
@@ -231,6 +233,7 @@ export function task(config: TaskConfig<Json, unknown, Output | undefined, unkno
 interface TaskOptions {
   readonly timeout?: number;
   readonly speculative?: boolean;
+  readonly retries?: Retries;
 }
 
 /** How a job is created and its outcomes read, for one kind of task. */
@@ -280,7 +283,7 @@ abstract class Base<I, O> {
     const { commit, ...recipe } = this.recipe;
     const spec = {
       recipe, commit, run, output, pool: options.pool, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
-      timeout: this.options.timeout, speculative: this.options.speculative,
+      timeout: this.options.timeout, speculative: this.options.speculative, retries: this.options.retries,
     };
 
     if (Array.isArray(items)) {

@@ -63,7 +63,8 @@ export class ArmadaJob extends DurableObject<Env> {
   async create(id: string, spec: JobSpec): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS tasks (idx INTEGER PRIMARY KEY, item TEXT NOT NULL, weight REAL NOT NULL, state TEXT NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0, infra INTEGER NOT NULL DEFAULT 0, vessel TEXT, started INTEGER, dup TEXT)`);
+      attempts INTEGER NOT NULL DEFAULT 0, infra INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0, not_before INTEGER NOT NULL DEFAULT 0,
+      vessel TEXT, started INTEGER, dup TEXT)`);
     this.sql.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT NOT NULL)');
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vessels (name TEXT PRIMARY KEY, state TEXT NOT NULL, tasks INTEGER NOT NULL DEFAULT 0,
       boot_ms INTEGER, busy_ms INTEGER NOT NULL DEFAULT 0, error TEXT, beat INTEGER NOT NULL)`);
@@ -203,8 +204,9 @@ export class ArmadaJob extends DurableObject<Env> {
     this.beat(name, 'waiting');
   }
 
-  /** The next task for `name`, or null when there is none left for it: the vessel then stops. */
-  async claim(name: string): Promise<Claim | null> {
+  /** The next task for `name`; how long to wait, when the only tasks left wait out a retry's backoff; or null when there
+   *  is none left for it: the vessel then stops. */
+  async claim(name: string): Promise<Claim | { readonly waitMs: number } | null> {
     const spec = await this.spec();
 
     if (spec === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return null;
@@ -212,12 +214,16 @@ export class ArmadaJob extends DurableObject<Env> {
     const now = Date.now();
     const next = this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET state = 'running', vessel = ?, started = ?, attempts = attempts + 1
-       WHERE idx = (SELECT idx FROM tasks WHERE state = 'queued' ORDER BY weight DESC, idx LIMIT 1) RETURNING idx, item, attempts`, name, now,
+       WHERE idx = (SELECT idx FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1) RETURNING idx, item, attempts`, name, now, now,
     ).toArray()[0];
 
     const env = (await this.ctx.storage.get<Record<string, string>>('env')) ?? {};
 
     if (next !== undefined) return this.claimOf(spec, env, next.idx, next.item, next.attempts, false);
+    const [later] = this.sql.exec<{ at: number | null }>(`SELECT MIN(not_before) AS at FROM tasks WHERE state = 'queued'`).toArray();
+
+    // At most a minute at a time, so a waiting vessel still beats.
+    if (later?.at !== null && later?.at !== undefined) return { waitMs: Math.min(60_000, Math.max(1000, later.at - now)) };
 
     if (!spec.speculative) {
       this.beat(name, 'done');
@@ -257,12 +263,22 @@ export class ArmadaJob extends DurableObject<Env> {
     return true;
   }
 
-  /** The kept answer, once its output and log are in R2: appended to the stream. */
+  /** The kept answer, once its output and log are in R2: appended to the stream, or, for a failure the job's retries
+   *  name, the task queued again after its backoff. */
   async complete(name: string, outcome: Outcome, busyMs: number): Promise<void> {
-    // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
-    const landed = this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ? AND state = 'landing' RETURNING idx`, outcome.kind, outcome.index).toArray().length > 0;
+    const retries = (await this.spec())?.retries;
+    const task = this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'landing'`, outcome.index).toArray()[0];
+    const named = outcome.exitCode !== 0 && (retries?.exitCodes.includes(outcome.exitCode) === true || (outcome.error !== undefined && retries?.errors.includes(outcome.error) === true));
 
-    if (landed) this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
+    if (task !== undefined && retries !== undefined && named && task.retries + 1 < retries.attempts) {
+      const backoff = retries.backoffSeconds * 1000 * 2 ** task.retries;
+
+      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, dup = NULL, retries = retries + 1, not_before = ? WHERE idx = ?`, Date.now() + backoff, outcome.index);
+    } else if (task !== undefined) {
+      // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
+      this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ?`, outcome.kind, outcome.index);
+      this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
+    }
     this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
     await this.settle();
   }

@@ -74,7 +74,8 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
     writeFileSync(marker, 'command');
     process.exit((await execute(answer.script, { signal: controller.signal, inherit: true })).exitCode);
   }
-  writeFileSync(marker, 'value');
+  // The error's name follows, for the job to decide a retry by.
+  writeFileSync(marker, answer.ok ? 'value' : `value\n${answer.error.name}`);
   writeFileSync(out, JSON.stringify(answer));
   process.exit(answer.ok ? 0 : 1);
 }

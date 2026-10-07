@@ -140,6 +140,9 @@ for await (const result of transcode.stream(videos)) { // each file as soon as i
 - An output can be up to 4.995 GiB, R2's limit for one upload. `job.outputStream(i)` streams a large one.
 - `map(items, { pool, label, env, files, tmpfs })` sets a job's options. A task takes `timeout`, and `speculative` to
   let an idle container rerun a straggler.
+- `retries` runs a failed item again, only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
+  exitCodes: [75], errors: ['FetchError'] }`, an item that exits 75 or throws a `FetchError` runs up to three times,
+  waiting 5 s, then 10 s. Any other failure is final.
 
 ## CI with `armada run`
 
