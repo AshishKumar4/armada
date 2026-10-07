@@ -297,6 +297,28 @@ describe('a commit checkout', () => {
 });
 
 describe('the CLI\'s arguments', () => {
+  test('with no command, or with --help, are answered with the usage; a wrong option says what to give instead', async () => {
+    const cli = async (...words: string[]) => {
+      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { stdout: 'pipe', stderr: 'pipe' });
+
+      return { exit: await ran.exited, said: await new Response(ran.stdout).text() + await new Response(ran.stderr).text() };
+    };
+
+    expect([await cli(), await cli('map', '--help')].map(({ exit, said }) => [exit, said.includes('\nUsage:\n')])).toEqual([[0, true], [0, true]]);
+    expect([
+      await cli('map', '--times', '3', '--', 'true'), await cli('map', '--time=3', '--', 'true'), await cli('map', '-pool=1', '--times=3', '--', 'true'),
+      await cli('map', '--times=0', '--', 'true'), await cli('deploy', 'garbage'), await cli('toString'), await cli('--pool=1'),
+    ]).toEqual([
+      { exit: 2, said: 'armada: --times takes a value, as in --times=<value>\n' },
+      { exit: 2, said: 'armada: map has no option --time=3; see armada --help\n' },
+      { exit: 2, said: 'armada: map has no option -pool=1; see armada --help\n' },
+      { exit: 2, said: 'armada: --times takes a positive whole number, not 0\n' },
+      { exit: 2, said: 'armada: deploy does not take garbage; see armada --help\n' },
+      { exit: 2, said: 'armada: no command toString; see armada --help\n' },
+      { exit: 2, said: 'armada: no command given; see armada --help\n' },
+    ]);
+  });
+
   test('are its own before --, and every word after -- is the command\'s', async () => {
     const jobs: unknown[] = [];
     const server = Bun.serve({

@@ -1,23 +1,5 @@
 #!/usr/bin/env bun
-/**
- * armada: fast, mappable compute on Cloudflare Containers.
- *
- *   armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command with {item}>
- *   armada run <commit|worktree> [--label=<text>] [-- <plan words>]
- *                                                     a project's CI from its `.armada.json`; exits 0, 1 red, 2 not graded
- *   armada status <job-id>
- *   armada deploy --account=<id> [--name=armada] [--vcpus=N]
- *                                                     with this machine's wrangler login; a name of its own is a separate
- *                                                     deployment: its Worker, its `<name>-artifacts` bucket, its fleet of
- *                                                     at most N vCPUs (FLEET_VCPUS) and `~/.config/armada/<name>.json`
- *   --connection=<file>                               any command: the deployment that file names (ARMADA_CONNECTION)
- *   armada prune [--keep=3]                           needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
- *
- * `map` items are a JSON array, or one item per line; `--times=N` maps over 1..N. `--commit` runs in the commit's checkout,
- * in the environment its `.armada.json` names, as `armada run` does. A recipe file is `{"base", "setup", "install", "smoke",
- * "instance"}`, its scripts given as paths relative to it. Each outcome is printed as it lands (`--json` for JSON
- * lines), then a summary; `map` exits 0 when every task exited 0, 1 when one did not, 2 when one could not run.
- */
+/** The armada CLI; `armada --help` prints its usage. */
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,6 +11,51 @@ import { BaseSchema, INSTANCES } from './protocol';
 
 const ROOT = join(import.meta.dir, '..');
 
+const USAGE = `armada runs a command over many inputs at once, on Cloudflare Containers.
+
+Usage:
+  armada deploy --account=<id> [--name=<name>] [--vcpus=N]
+                                       deploy armada with your wrangler login
+  armada map [options] -- <command>    run the command once per item
+  armada run <commit|worktree> [--label=<text>] [-- <plan args>]
+                                       run a project's CI from the commit's .armada.json
+  armada status <job-id>               print a job's status as JSON
+  armada prune [--keep=3]              delete the snapshots of all but the newest environments
+
+map options:
+  --times=N            the items are 1 to N
+  --items=<file|->     a JSON array, or one item per line
+  --env=<recipe.json>  {"base", "setup", "install", "smoke", "instance"}, scripts relative to it
+  --commit=<rev>       run in the commit's checkout, in the environment its .armada.json names
+  --pool=N             the most containers at once (default 50)
+  --timeout=S          a task's limit, in seconds (default 3600)
+  --output             keep each task's {out} file
+  --idempotent         let an idle container run a straggler again
+  --json               print each outcome as a JSON line
+  --label=<text>       name the job
+
+deploy options:
+  --account=<id>       the Cloudflare account to deploy to
+  --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
+                       and connection file, ~/.config/armada/<name>.json (default armada)
+  --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
+
+Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
+The command's {item}, {index}, {out} and {files} are filled per item.
+map exits 1 when a task exits nonzero, and 2 when one could not run.
+run exits 1 when a row is red, and 2 when the run can't be graded.
+prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
+
+/** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
+ *  command also takes `--connection=`. */
+const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
+  ['deploy', { options: ['account=', 'name=', 'vcpus='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'pool=', 'timeout=', 'output', 'idempotent', 'json', 'label='], words: 0 }],
+  ['run', { options: ['label='], words: 1 }],
+  ['status', { options: [], words: 1 }],
+  ['prune', { options: ['keep='], words: 0 }],
+]);
+
 const dash = process.argv.indexOf('--');
 
 /** The arguments before `--`, which are armada's, and the words after it, which are the command's. */
@@ -39,6 +66,18 @@ const rest = dash < 0 ? [] : process.argv.slice(dash + 1);
 const option = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
 
 const flag = (name: string): boolean => args.includes(`--${name}`);
+
+/** `--name=N` as a whole number no less than `least`, or undefined when it is not given. */
+function whole(name: string, least = 1): number | undefined {
+  const text = option(name);
+
+  if (text === undefined) return undefined;
+  const value = Number(text);
+
+  if (!Number.isInteger(value) || value < least) throw new Error(`--${name} takes a ${least > 0 ? 'positive ' : ''}whole number, not ${text}`);
+
+  return value;
+}
 
 const RecipeFileSchema = v.object({
   base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), instance: v.optional(v.picklist(INSTANCES)),
@@ -67,19 +106,19 @@ function itemsFrom(source: string): unknown[] {
 }
 
 async function map(): Promise<number> {
-  const command = rest;
   const items = option('items');
-  const times = option('times');
+  const times = whole('times');
 
-  if (command.length === 0 || (items === undefined && times === undefined)) throw new Error('usage: armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] -- <command with {item}>');
+  if (rest.length === 0 || (items === undefined) === (times === undefined)) {
+    throw new Error('map needs one of --times=N and --items=<file|->, and a command after --, as in: armada map --times=3 -- echo {item}');
+  }
   const armada = connect();
   const began = Date.now();
   const target = option('commit');
   const where = target === undefined ? { recipe: recipeFrom(option('env')) } : await onCommit(armada, target);
   const job = await armada.map({
-    ...where, items: items === undefined ? Array.from({ length: Number(times) }, (_, index) => index + 1) : itemsFrom(items),
-    run: { command }, output: flag('output'), idempotent: flag('idempotent'),
-    pool: Number(option('pool') ?? '50'), timeout: Number(option('timeout') ?? '3600'), label: option('label') ?? '',
+    ...where, items: times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1),
+    run: { command: rest }, output: flag('output'), idempotent: flag('idempotent'), pool: whole('pool'), timeout: whole('timeout'), label: option('label') ?? '',
   });
   let worst = 0;
 
@@ -116,7 +155,7 @@ function wrangler(args: readonly string[], account: string, stdin?: string): str
 }
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
-function deploy(account: string, name: string, vcpus: string | undefined): number {
+function deploy(account: string, name: string, vcpus: number | undefined): number {
   const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -133,7 +172,7 @@ function deploy(account: string, name: string, vcpus: string | undefined): numbe
   writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "${name}",\n  "account_id": "${account}",`)
     .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
     .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
-    .replace(/"FLEET_VCPUS": "\d+"/u, (whole) => vcpus === undefined ? whole : `"FLEET_VCPUS": "${vcpus}"`));
+    .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`));
   const deployed = wrangler(['deploy', '-c', config], account);
   const url = new RegExp(`https://${name}\\.[a-z0-9-]+\\.workers\\.dev`, 'u').exec(deployed)?.[0];
 
@@ -172,35 +211,70 @@ async function prune(keep: number): Promise<number> {
   return 0;
 }
 
+/** Refuses an option the command does not take, a value given to a flag or missing from an option, and a word too many. */
+function checkArguments(command: string, words: readonly string[]): void {
+  const { options, words: wanted } = COMMANDS.get(command) ?? { options: [], words: 0 };
+
+  for (const argument of args.filter((each) => each.startsWith('-'))) {
+    const name = argument.startsWith('--') ? argument.slice(2).split('=')[0] ?? '' : '';
+    const valued = name === 'connection' || options.includes(`${name}=`);
+
+    if (!valued && !options.includes(name)) throw new Error(`${command} has no option ${argument}; see armada --help`);
+
+    if (valued !== argument.includes('=')) throw new Error(valued ? `--${name} takes a value, as in --${name}=<value>` : `--${name} takes no value`);
+  }
+
+  if (words.length > wanted) throw new Error(`${command} does not take ${words.slice(wanted).join(' ')}; see armada --help`);
+}
+
 async function main(): Promise<number> {
-  const connection = option('connection');
+  const [command, ...words] = args.filter((argument) => !argument.startsWith('-'));
 
-  if (connection !== undefined) process.env['ARMADA_CONNECTION'] = resolve(connection);
-  const [command, target] = args.filter((argument) => !argument.startsWith('--'));
-
-  if (command === 'map') return await map();
-
-  if (command === 'run' && target !== undefined) return await runCI(connect(), target, option('label') ?? '', rest);
-
-  if (command === 'status' && target !== undefined) {
-    console.log(JSON.stringify(await connect().job(target).status(), null, 2));
+  if (args.length === 0 || command === 'help' || flag('help') || args.includes('-h')) {
+    console.log(USAGE);
 
     return 0;
   }
 
-  if (command === 'deploy' && option('account') !== undefined) {
-    const name = option('name') ?? 'armada';
-    const vcpus = option('vcpus');
+  if (command === undefined || !COMMANDS.has(command)) throw new Error(`${command === undefined ? 'no command given' : `no command ${command}`}; see armada --help`);
+  checkArguments(command, words);
+  const [target] = words;
+  const connection = option('connection');
 
-    if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
+  if (connection !== undefined) process.env['ARMADA_CONNECTION'] = resolve(connection);
 
-    if (vcpus !== undefined && !/^[1-9]\d*$/u.test(vcpus)) throw new Error(`--vcpus=${vcpus}: a whole number of vCPUs`);
+  switch (command) {
+    case 'map':
+      return await map();
 
-    return deploy(option('account') ?? '', name, vcpus);
+    case 'run':
+      if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
+
+      return await runCI(connect(), target, option('label') ?? '', rest);
+
+    case 'status':
+      if (target === undefined) throw new Error('status needs a job id, which map and run print');
+      console.log(JSON.stringify(await connect().job(target).status(), null, 2));
+
+      return 0;
+
+    case 'deploy': {
+      const account = option('account');
+      const name = option('name') ?? 'armada';
+
+      if (account === undefined) throw new Error('deploy needs --account=<id>');
+
+      if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
+
+      return deploy(account, name, whole('vcpus'));
+    }
+
+    case 'prune':
+      return await prune(whole('keep', 0) ?? 3);
+
+    default:
+      throw new Error(`no command ${command}`);
   }
-
-  if (command === 'prune') return await prune(Number(option('keep') ?? '3'));
-  throw new Error('usage: armada map … | armada run <commit|worktree> | armada status <job-id> | armada deploy --account=<id> [--name=armada] [--vcpus=N] | armada prune [--keep=3]');
 }
 
 try {
