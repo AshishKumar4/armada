@@ -245,6 +245,54 @@ describe('packing a commit', () => {
   });
 });
 
+describe('a commit checkout', () => {
+  test('takes a commit whose parent is an ancestor of the environment\'s, sharing a tree with it the checkout never held', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
+    const origin = join(scratch, 'origin');
+    const checkout = join(scratch, 'checkout');
+    const git = (cwd: string, ...args: string[]): string => {
+      const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' });
+
+      if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString()}`);
+
+      return ran.stdout.toString().trim();
+    };
+    const commit = (message: string, files: Record<string, string>) => {
+      for (const [path, text] of Object.entries(files)) {
+        mkdirSync(join(origin, path, '..'), { recursive: true });
+        writeFileSync(join(origin, path), text);
+      }
+      git(origin, 'add', '.');
+      git(origin, 'commit', '-qm', message);
+
+      return git(origin, 'rev-parse', 'HEAD');
+    };
+
+    try {
+      git(scratch, 'init', '-q', origin);
+      const fork = commit('fork', { 'apps/a.txt': 'one\n', 'b.txt': 'b\n' });
+      const environment = commit('environment', { 'apps/a.txt': 'two\n' });
+      // A commit on the fork point, as a lane's overlay (`git commit-tree -p <fork>`) makes one: its `apps` is the fork's.
+      git(origin, 'checkout', '-q', fork);
+      const head = commit('overlay', { 'c.txt': 'c\n' });
+
+      git(scratch, 'init', '-q', checkout);
+      // The environment's own commit run again packs nothing, and the overlay's pack carries what the checkout lacks.
+      for (const [sha, base] of [[environment, 'root'], [environment, environment], [head, environment]] as const) {
+        const pack = new Uint8Array(await packOf(origin, sha, base, 'commit').arrayBuffer());
+
+        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
+        appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
+        git(checkout, 'checkout', '-q', '-f', '-B', 'armada', sha);
+      }
+
+      expect({ head: git(checkout, 'rev-parse', 'HEAD'), a: git(checkout, 'show', 'HEAD:apps/a.txt'), status: git(checkout, 'status', '--porcelain') }).toEqual({ head, a: 'one', status: '' });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('the CLI following a job', () => {
   test('interrupted, it cancels the job and exits 2, even when the job finishes green while the cancel is answered', async () => {
     const seen: string[] = [];

@@ -77,12 +77,17 @@ export function packBase(repo: string, environment: string): string {
   return environment !== 'root' && Bun.spawnSync(['git', 'cat-file', '-e', `${environment}^{commit}`], { cwd: repo }).exitCode === 0 ? environment : 'root';
 }
 
-/** The commit from the root (with its history, or alone), or what it adds to the environment's commit. */
+/** The commit from the root (with its history, or alone), or what it adds to the environment's commit. A `commit`
+ *  checkout holds the environment commit's tree and nothing of its history, so the pack is every object of the
+ *  commit's tree that tree lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the
+ *  base, which the checkout never received. */
 export function packOf(repo: string, sha: string, base: string, history: Config['history']): Blob {
-  const walk = history === 'commit' ? ['--no-walk'] : [];
-  const objects = git(repo, ['rev-list', '--objects', ...walk, sha, ...base === 'root' ? [] : ['--not', base]]);
+  const listed = (...args: string[]) => git(repo, ['rev-list', '--objects', ...args]).toString().split('\n').filter((line) => line !== '');
+  const id = (line: string) => line.split(' ')[0] ?? '';
+  const held = new Set(history === 'commit' && base !== 'root' ? listed('--no-walk', base).map(id) : []);
+  const objects = history === 'commit' ? listed('--no-walk', sha).filter((line) => !held.has(id(line))) : listed(sha, ...base === 'root' ? [] : ['--not', base]);
 
-  return new Blob([new Uint8Array(git(repo, ['-c', 'pack.threads=4', 'pack-objects', '--stdout', '-q'], objects))]);
+  return new Blob([new Uint8Array(git(repo, ['-c', 'pack.threads=4', 'pack-objects', '--stdout', '-q'], new TextEncoder().encode(objects.map((line) => `${line}\n`).join(''))))]);
 }
 
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
