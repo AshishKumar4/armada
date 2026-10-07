@@ -166,7 +166,33 @@ function printReds(reds: readonly VerdictRow[]): void {
   }
 }
 
-/** The job fields that run a command on a commit, in the environment its `.armada.json` names. */
+/** The verdict `armada run` stored for a commit: 0 when every row is green, 1 when a row is red, and 2 when the commit
+ *  has none. `json` prints the verdict file itself, `{sha, part, rows}`, or `null` for none, so a caller tells none
+ *  from an error, which exits 2 too. */
+export async function verdictCI(armada: Armada, target: string, json: boolean): Promise<number> {
+  const { sha, repo } = resolveCommit(target);
+  const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
+  const answer = await armada.call(`/verdicts/${config.name}/${sha}`);
+
+  if (answer.status === 404) {
+    if (json) console.log('null');
+    console.error(`${config.name} ${sha} has no verdict; armada run ${sha.slice(0, 12)} grades one`);
+
+    return 2;
+  }
+  const text = await answer.text();
+  const { rows } = v.parse(VerdictFileSchema, JSON.parse(text));
+  const reds = rows.filter((row) => row.exitCode !== 0);
+
+  if (json) console.log(text);
+  else {
+    printReds(reds);
+    console.log(`${reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(rows.length - reds.length)} of ${String(rows.length)} rows green, ${config.name} ${sha}`);
+  }
+
+  return reds.length === 0 ? 0 : 1;
+}
+
 /** What runs a command on a commit: its recipe, and the env and tmpfs its `.armada.json` names. */
 interface OnCommit {
   readonly recipe: Recipe;

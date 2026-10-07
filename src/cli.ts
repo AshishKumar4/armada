@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
-import { argvOf, cancelOnInterrupt, onCommit, runCI } from './ci';
+import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
 import { BaseSchema, describeUsage, SizeSchema, usageOf } from './protocol';
@@ -20,6 +20,8 @@ Usage:
   armada map [options] -- <command>    run the command once per item
   armada run <commit|worktree> [--label=<text>] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json
+  armada verdict <commit|worktree> [--json]
+                                       print the verdict armada run stored for the commit
   armada status <job-id>               print a job's status as JSON
   armada prune [--keep=3]              delete the snapshots of all but the newest environments
 
@@ -46,6 +48,7 @@ Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another de
 The command's {item}, {index}, {out} and {files} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
+verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.
 prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
 
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
@@ -54,6 +57,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['deploy', { options: ['account=', 'name=', 'vcpus='], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'json', 'label='], words: 0 }],
   ['run', { options: ['label='], words: 1 }],
+  ['verdict', { options: ['json'], words: 1 }],
   ['status', { options: [], words: 1 }],
   ['prune', { options: ['keep='], words: 0 }],
 ]);
@@ -329,6 +333,11 @@ async function main(): Promise<number> {
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
       return await runCI(connect(), target, option('label') ?? '', rest);
+
+    case 'verdict':
+      if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');
+
+      return await verdictCI(connect(), target, flag('json'));
 
     case 'status':
       if (target === undefined) throw new Error('status needs a job id, which map and run print');

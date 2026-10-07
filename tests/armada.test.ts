@@ -457,6 +457,59 @@ describe('the CLI following a job', () => {
   });
 });
 
+describe('armada verdict', () => {
+  test('prints the verdict armada run stored for the commit, and exits 0 green, 1 red and 2 with none', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-verdict-'));
+    const repo = join(scratch, 'repo');
+    const git = (...words: string[]) => Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo, stdout: 'pipe' });
+    const stored = new Map<string, unknown>();
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const found = stored.get(new URL(request.url).pathname);
+
+        return found === undefined ? Response.json({ error: 'not found' }, { status: 404 }) : Response.json(found);
+      },
+    });
+    const verdict = async (...words: string[]) => {
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'verdict', 'HEAD', ...words], {
+        cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+
+      return { exit: await cli.exited, said: (await new Response(cli.stdout).text() + await new Response(cli.stderr).text()).trim() };
+    };
+
+    try {
+      mkdirSync(repo);
+      git('init', '-q');
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task'] } }));
+      git('add', '.');
+      git('commit', '-qm', 'one');
+      const sha = git('rev-parse', 'HEAD').stdout.toString().trim();
+      const none = await verdict();
+      const noneJson = await verdict('--json');
+      const rows = [{ run: 'unit', exitCode: 0, seconds: 1, output: '' }, { run: 'e2e', exitCode: 1, seconds: 2, output: 'a real failure' }];
+
+      stored.set(`/verdicts/proj/${sha}`, { sha, part: 'all', rows });
+      const red = await verdict();
+      const json = await verdict('--json');
+
+      stored.set(`/verdicts/proj/${sha}`, { sha, part: 'all', rows: rows.slice(0, 1) });
+
+      expect({ none, noneJson: noneJson.said.split('\n')[0], red: [red.exit, red.said.includes('RED  e2e') && red.said.endsWith(`FAIL: 1 of 2 rows green, proj ${sha}`)], json: [json.exit, JSON.parse(json.said)], green: await verdict() }).toEqual({
+        none: { exit: 2, said: `proj ${sha} has no verdict; armada run ${sha.slice(0, 12)} grades one` },
+        noneJson: 'null',
+        red: [1, true],
+        json: [1, { sha, part: 'all', rows }],
+        green: { exit: 0, said: `PASS: 1 of 1 rows green, proj ${sha}` },
+      });
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
