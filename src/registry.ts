@@ -19,9 +19,7 @@ const ACCEPT = 'application/vnd.oci.image.manifest.v1+json, application/vnd.dock
 
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
 
-export type Deletion = 'deleted' | 'absent';
-
-export async function deleteSnapshot(input: { readonly account: string; readonly token: string; readonly id: string }): Promise<Deletion> {
+export async function deleteSnapshot(input: { readonly account: string; readonly token: string; readonly id: string }): Promise<'deleted' | 'absent'> {
   const minted = await fetch(`https://api.cloudflare.com/client/v4/accounts/${input.account}/containers/registries/registry.cloudflare.com/credentials`, {
     method: 'POST', headers: { authorization: `Bearer ${input.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ expiration_minutes: 5, permissions: ['pull', 'push'] }),

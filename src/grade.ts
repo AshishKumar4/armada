@@ -14,12 +14,10 @@ export const PlanSchema = v.object({
   include: v.pipe(v.array(v.looseObject({ rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()) })), v.minLength(1)),
 });
 
-export type Plan = v.InferOutput<typeof PlanSchema>;
-
-export type PlanEntry = Plan['include'][number];
+export type PlanEntry = v.InferOutput<typeof PlanSchema>['include'][number];
 
 /** A row of a verdict file, named by `name`, or by `run`, the command it ran. */
-export const VerdictRowSchema = v.looseObject({
+const VerdictRowSchema = v.looseObject({
   name: v.optional(v.string()),
   run: v.optional(v.string()),
   exitCode: v.number(),

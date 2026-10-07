@@ -37,7 +37,7 @@ interface Commit {
 }
 
 /** The commit a target names; a worktree must be committed, since the commit is what is proved. */
-export function resolveCommit(target: string): Commit {
+function resolveCommit(target: string): Commit {
   if (existsSync(target) && statSync(target).isDirectory()) {
     const dirty = git(target, ['status', '--porcelain']).toString().trim();
 

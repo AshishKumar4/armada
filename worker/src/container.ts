@@ -7,7 +7,7 @@ import { failureTail } from '../../src/protocol';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
  *  a command drops to the user inside. */
-export const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
+const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
 
 /** The runner's own state in a container: the pack, the job's files, the handler, the current task. */
 export const STATE = '/armada';
@@ -185,7 +185,7 @@ export async function pipeIn(container: Container, body: ReadableStream | string
 }
 
 /** A container started anew: one an earlier attempt left running, which `running` may not report yet, goes first. */
-export async function startFresh(container: Container, options: ContainerStartupOptions): Promise<void> {
+async function startFresh(container: Container, options: ContainerStartupOptions): Promise<void> {
   if (container.running) await container.destroy();
 
   try {

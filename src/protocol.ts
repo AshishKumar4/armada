@@ -19,7 +19,7 @@ export const VCPUS: Readonly<Record<(typeof INSTANCES)[number], number>> = { lit
 const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
 
 /** The commit's paths that key a repository environment, by git object id. */
-export const ManifestSchema = v.array(v.object({ path: v.string(), id: Sha }));
+const ManifestSchema = v.array(v.object({ path: v.string(), id: Sha }));
 
 export type Manifest = v.InferOutput<typeof ManifestSchema>;
 
@@ -74,7 +74,7 @@ export const Packer = v.optional(v.pipe(v.number(), v.integer(), v.minValue(2)))
 
 /** A command, its words filled per item (`{item}`, an object item's scalar keys, `{out}`, `{files}`, `{index}`), or a
  *  JavaScript function's source, called with the item under `node`; its return value is the task's output. */
-export const RunSchema = v.union([
+const RunSchema = v.union([
   v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)) }),
   v.object({ handler: v.pipe(v.string(), v.minLength(1)) }),
 ]);
@@ -212,7 +212,7 @@ export function failureTail(stdout: string, stderr: string, limit = 3000): strin
 }
 
 /** The samples an estimate keeps per row or file. */
-export const SAMPLES = 5;
+const SAMPLES = 5;
 
 /** Each key's last `SAMPLES` measurements, the newest last. */
 export function recordSamples(history: Readonly<Record<string, readonly number[]>>, sample: Readonly<Record<string, number>>): Record<string, number[]> {

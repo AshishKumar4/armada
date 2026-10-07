@@ -31,7 +31,7 @@ export const taskKey = (job: string, index: number, leaf: 'output' | 'log'): str
 export const SINGLE = 'all';
 
 /** An error and every cause under it, on one line. */
-export function chain(error: Error): string {
+function chain(error: Error): string {
   if (error.cause instanceof Error) return `${error.message}: ${chain(error.cause)}`;
 
   return error.cause === undefined ? error.message : `${error.message}: ${JSON.stringify(error.cause)}`;

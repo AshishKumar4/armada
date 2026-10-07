@@ -22,13 +22,9 @@ export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 /** The largest pack, in bytes, sent in one request; a Worker takes 100 MB, and R2 wants every part but the last alike. */
 export const PACK_PART = 64 * 1024 * 1024;
 
-export interface Connection {
-  readonly url: string;
-  readonly token: string;
-  readonly account: string;
-}
-
 export const ConnectionSchema = v.object({ url: v.string(), token: v.string(), account: v.string() });
+
+export type Connection = v.InferOutput<typeof ConnectionSchema>;
 
 /** What `map` takes: a job spec, with a recipe's defaults filled and a handler given as a function if wanted. */
 export type MapSpec = Omit<v.InferInput<typeof JobSpecSchema>, 'run' | 'recipe'> & {
