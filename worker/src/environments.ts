@@ -2,13 +2,15 @@
  * One environment per `environmentKey`: a container snapshot of the recipe's base with the runner's layer, the
  * recipe's `setup` run as root, any commit checked out, and the recipe's `install` run as the user, from which every
  * container of every job with that key starts. ArmadaEnvironments is the account's one registry of them;
- * ArmadaPreparer, one per key, builds one a phase per alarm (each exec bounded inside the platform's 15-minute alarm).
+ * ArmadaPreparer, one per key, builds one a phase at a time. A phase's command runs detached, once per container, and
+ * alarms wait on it a slice at a time, as a vessel waits on a task: an alarm the platform delivers again takes the
+ * phase up rather than running it twice, and an exec the platform loses is a wait to make again.
  * The key hashes the recipe's own text and the driver, so a fixed recipe or runner layer is a new environment, never an
  * old snapshot trusted for weeks.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { workdirOf, type Recipe } from '../../src/protocol';
-import { ENTRYPOINT, must, pipeIn, receive, runnerLayer, startAndAnswer, STATE } from './container';
+import { failureTail, workdirOf, type Recipe } from '../../src/protocol';
+import { AS_USER, ENTRYPOINT, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
 /** An environment snapshot: what every container with its key starts from. */
@@ -116,6 +118,8 @@ interface Preparation {
   /** The packer of the commit's pack: absent for an earlier client's. */
   readonly packer?: number;
   readonly phase: Phase;
+  /** When the phase's command was given its inputs; absent until then. */
+  readonly started?: number;
   readonly seconds: Record<string, number>;
   readonly snapshot: Generation['snapshot'] | null;
 }
@@ -124,8 +128,29 @@ interface Preparation {
  *  sbin, which the user's commands do without. */
 const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-/** An exec's bound inside one alarm, which the platform ends at 15 minutes. */
+/** A phase's bound. */
 const STEP_MS = 12 * 60_000;
+
+const EXEC_MS = 90_000;
+
+/** One alarm's share of a phase; the next alarm takes it up at once. */
+const SLICE_MS = 50_000;
+
+/** One blocking wait on a running phase. */
+const WAIT_SECONDS = 20;
+
+/** Execs in a row the platform lost before the container counts as lost, as a vessel counts them. */
+const LOST_EXECS = 3;
+
+/** A phase's command: what the container is given first, once, and what then runs, as root or as the user. */
+interface Command {
+  readonly doing: string;
+  readonly inputs: () => Promise<unknown>;
+  readonly argv: readonly string[];
+  readonly asUser: boolean;
+  /** Its environment; the container's own where absent. */
+  readonly env?: Record<string, string>;
+}
 
 export class ArmadaPreparer extends DurableObject<Env> {
   async begin(key: string, since: number, recipe: Recipe, sha: string | null, packer?: number): Promise<void> {
@@ -140,10 +165,12 @@ export class ArmadaPreparer extends DurableObject<Env> {
     const began = Date.now();
 
     try {
-      const snapshot = await this.step(preparation);
-      const seconds = { ...preparation.seconds, [preparation.phase]: (Date.now() - began) / 1000 };
+      const step = await this.step(preparation);
+
+      if (step === 'running') return await this.ctx.storage.setAlarm(Date.now());
+      const seconds = { ...preparation.seconds, [preparation.phase]: (Date.now() - (preparation.started ?? began)) / 1000 };
       const next = NEXT[preparation.phase];
-      const advanced = { ...preparation, seconds, snapshot: snapshot ?? preparation.snapshot };
+      const advanced = { ...preparation, seconds, started: undefined, snapshot: step.snapshot ?? preparation.snapshot };
 
       if (next === null) return await this.done(advanced);
       await this.ctx.storage.put('preparation', { ...advanced, phase: next } satisfies Preparation);
@@ -157,68 +184,123 @@ export class ArmadaPreparer extends DurableObject<Env> {
     }
   }
 
-  /** One phase; the snapshot once there is one. */
-  private async step(preparation: Preparation): Promise<Generation['snapshot'] | undefined> {
+  /** One phase, or a slice of one whose command still runs; the snapshot once there is one. */
+  private async step(preparation: Preparation): Promise<'running' | { readonly snapshot?: Generation['snapshot'] }> {
     const { recipe } = preparation;
     const container = this.container();
     const workdir = workdirOf(recipe);
-    const asUser = { asUser: true, env: commandEnv(recipe, {}), cwd: workdir, ms: STEP_MS };
+    const env = commandEnv(recipe, {});
 
     switch (preparation.phase) {
-      case 'base': {
-        await startAndAnswer(container, { image: recipe.base, instance: recipe.instance, enableInternet: true, entrypoint: ['sleep', 'infinity'] }, 300_000, LEASE_MS);
-        await must(container, 'the runner layer', ['/bin/sh', '-c', runnerLayer(workdir)], { ms: STEP_MS });
+      case 'base':
+        return await this.command(preparation, {
+          doing: 'the runner layer', asUser: false, argv: ['/bin/sh', '-c', runnerLayer(workdir)],
+          inputs: async () => { await startAndAnswer(container, { image: recipe.base, instance: recipe.instance, enableInternet: true, entrypoint: ['sleep', 'infinity'] }, 300_000, LEASE_MS); },
+        });
 
-        return undefined;
-      }
-
-      case 'setup': {
-        if (recipe.setup === '') return undefined;
-        await pipeIn(container, recipe.setup, `${STATE}/setup.sh`);
-        await must(container, 'the recipe\'s setup', ['/bin/sh', `${STATE}/setup.sh`], { env: { ...commandEnv(recipe, {}), PATH: ROOT_PATH }, cwd: workdir, ms: STEP_MS });
-
-        return undefined;
-      }
+      case 'setup':
+        return recipe.setup === '' ? {} : await this.command(preparation, {
+          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH }, argv: ['/bin/sh', `${STATE}/setup.sh`],
+          inputs: async () => { await pipeIn(container, recipe.setup, `${STATE}/setup.sh`); },
+        });
 
       case 'receive': {
-        if (recipe.repo === undefined || preparation.sha === null) return undefined;
-        const pack = await this.env.ARTIFACTS.get(packKey(recipe.repo.project, preparation.sha, 'root', preparation.packer));
+        const { repo } = recipe;
+        const { sha } = preparation;
 
-        if (pack === null) throw new Error(`the pack of ${preparation.sha} is not in R2`);
-        await pipeIn(container, pack.body, `${STATE}/pack`);
-        await must(container, 'the checkout', ['/bin/sh', '-c', receive(workdir, recipe.repo.history), 'receive', preparation.sha], asUser);
+        return repo === undefined || sha === null ? {} : await this.command(preparation, {
+          doing: 'the checkout', asUser: true, env, argv: ['/bin/sh', '-c', receive(workdir, repo.history), 'receive', sha],
+          inputs: async () => {
+            const pack = await this.env.ARTIFACTS.get(packKey(repo.project, sha, 'root', preparation.packer));
 
-        return undefined;
+            if (pack === null) throw new Error(`the pack of ${sha} is not in R2`);
+            await pipeIn(container, pack.body, `${STATE}/pack`);
+          },
+        });
       }
 
-      case 'install': {
-        if (recipe.install === '') return undefined;
-        await pipeIn(container, recipe.install, `${STATE}/install.sh`);
-        await must(container, 'the recipe\'s install', ['/bin/sh', `${STATE}/install.sh`], asUser);
-
-        return undefined;
-      }
+      case 'install':
+        return recipe.install === '' ? {} : await this.command(preparation, {
+          doing: 'the recipe\'s install', asUser: true, env, argv: ['/bin/sh', `${STATE}/install.sh`],
+          inputs: async () => { await pipeIn(container, recipe.install, `${STATE}/install.sh`); },
+        });
 
       case 'snapshot': {
+        // The phases' logs stay out of the environment.
+        await must(container, 'clearing the phases', ['rm', '-rf', `${STATE}/phases`], { ms: EXEC_MS });
         const snapshot = await container.snapshotContainer({ name: `armada-${preparation.key.slice(0, 20)}` });
 
         await container.destroy();
 
-        return { id: snapshot.id, size: snapshot.size };
+        return { snapshot: { id: snapshot.id, size: snapshot.size } };
       }
 
       case 'verify': {
-        if (preparation.snapshot === null) throw new Error('verifying a preparation that has no snapshot');
+        const { snapshot } = preparation;
+
+        if (snapshot === null) throw new Error('verifying a preparation that has no snapshot');
         // A snapshot that does not start, or starts without what it was given, is no environment.
-        await startAndAnswer(container, { containerSnapshot: { id: preparation.snapshot.id }, instance: recipe.instance, enableInternet: true, entrypoint: ENTRYPOINT }, 300_000, LEASE_MS);
-        await must(container, 'the restored environment', ['/bin/sh', '-c', recipe.repo === undefined ? 'true' : 'git rev-parse HEAD'], asUser);
+        const checks = [recipe.repo === undefined ? 'true' : 'git rev-parse HEAD', ...recipe.smoke === '' ? [] : [recipe.smoke]].join(' && ');
+        const verified = await this.command(preparation, {
+          doing: recipe.smoke === '' ? 'the restored environment' : 'the restored environment and the recipe\'s smoke', asUser: true, env, argv: ['/bin/sh', '-c', checks],
+          inputs: async () => { await startAndAnswer(container, { containerSnapshot: { id: snapshot.id }, instance: recipe.instance, enableInternet: true, entrypoint: ENTRYPOINT }, 300_000, LEASE_MS); },
+        });
 
-        if (recipe.smoke !== '') await must(container, 'the recipe\'s smoke', ['/bin/sh', '-c', recipe.smoke], asUser);
-        await container.destroy();
+        if (verified !== 'running') await container.destroy();
 
-        return undefined;
+        return verified;
       }
     }
+  }
+
+  /** A phase's command, run once in its container whatever alarms see it: the first gives the container its inputs and
+   *  launches the command detached, and each waits on it for a slice. A launch or a wait whose exec the platform lost is
+   *  made again; three lost in a row, and the container is lost. */
+  private async command(preparation: Preparation, { doing, inputs, argv, asUser, env }: Command): Promise<'running' | Record<string, never>> {
+    const container = this.container();
+    const dir = phaseDir(preparation.phase);
+    let { started } = preparation;
+
+    if (started === undefined) {
+      await inputs();
+      started = Date.now();
+      await this.ctx.storage.put('preparation', { ...preparation, started } satisfies Preparation);
+    }
+
+    const cwd = workdirOf(preparation.recipe);
+    let lost = 0;
+    // An exec's output, or null where the platform lost it and it is to be made again.
+    const attempt = async (what: string, exec: readonly string[], options: Exec): Promise<string | null> => {
+      const [answered] = await Promise.allSettled([run(container, exec, options)]);
+
+      if (answered.status === 'rejected') {
+        lost += 1;
+
+        if (lost < LOST_EXECS) return null;
+        throw new Error(`${what} failed to run`, { cause: answered.reason });
+      }
+
+      if (answered.value.exitCode !== 0) throw new Error(`${what} exited ${String(answered.value.exitCode)}: ${failureTail(answered.value.stdout, answered.value.stderr)}`);
+
+      return answered.value.stdout.trim();
+    };
+    const until = Date.now() + SLICE_MS;
+
+    while (Date.now() < until) {
+      if ((await attempt(`launching ${doing}`, ['/bin/sh', '-c', LAUNCH_PHASE, 'launch', preparation.phase, ...asUser ? AS_USER : [], ...argv], { env, cwd, ms: EXEC_MS })) === null) continue;
+      const exit = await attempt('the wait', ['/bin/sh', '-c', waitOn(dir), 'wait', String(WAIT_SECONDS)], { ms: (WAIT_SECONDS + 30) * 1000 });
+
+      if (exit === null) continue;
+      lost = 0;
+
+      if (exit === '0') return {};
+
+      if (exit !== '') throw new Error(`${doing} exited ${exit}: ${(await run(container, ['tail', '-c', '3000', `${dir}/log`], { ms: EXEC_MS })).stdout}`);
+
+      if (Date.now() - started > STEP_MS) throw new Error(`${doing} ran longer than ${String(STEP_MS / 60_000)} min`);
+    }
+
+    return 'running';
   }
 
   private async done(preparation: Preparation): Promise<void> {

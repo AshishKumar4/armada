@@ -7,12 +7,15 @@ import { failureTail } from '../../src/protocol';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
  *  a command drops to the user inside. */
-const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
+export const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
 
 /** The runner's own state in a container: the pack, the job's files, the handler, the current task. */
 export const STATE = '/armada';
 
 export const TASK = `${STATE}/task`;
+
+/** Where a preparation's phase runs: its log and its exit code. */
+export const phaseDir = (phase: string): string => `${STATE}/phases/${phase}`;
 
 const PARENT_GROUP = '/sys/fs/cgroup/armada';
 
@@ -109,10 +112,24 @@ cd ${workdir}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
-/** Waits up to `$1` seconds for the task, then prints its exit code, or nothing while it runs. */
-export const WAIT = String.raw`end=$(( $(date +%s) + $1 ))
-while [ ! -f ${TASK}/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.05; done
-cat ${TASK}/exit 2>/dev/null || true`;
+/** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
+ *  nothing while it runs. */
+export function waitOn(dir: string): string {
+  return String.raw`end=$(( $(date +%s) + $1 ))
+while [ ! -f ${dir}/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.05; done
+cat ${dir}/exit 2>/dev/null || true`;
+}
+
+export const WAIT = waitOn(TASK);
+
+/** As root, detached so the exec returns: phase `$1` of a preparation, its command the rest, once per container
+ *  however often it is asked (the directory claims it), its output to the phase's log and its exit code to its `exit`. */
+export const LAUNCH_PHASE = String.raw`set -eu
+dir="${STATE}/phases/$1"
+shift
+mkdir -p ${STATE}/phases
+mkdir "$dir" 2>/dev/null || exit 0
+setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
 /** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
 export const KILL = String.raw`set -eu
@@ -171,9 +188,10 @@ export async function must(container: Container, doing: string, argv: readonly s
 }
 
 /** `body` written to `path` for the user, through a pipe: an exec's `stdin` given a stream fails on large bodies
- *  (`internal error`), the pipe does not. */
+ *  (`internal error`), the pipe does not. `path` is replaced whole once written, so a script already reading it reads
+ *  it as it was. */
 export async function pipeIn(container: Container, body: ReadableStream | string, path: string): Promise<void> {
-  const writer = await container.exec(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1" && chown ci:ci "$1"', 'pipe-in', path], { stdin: 'pipe' });
+  const writer = await container.exec(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && part="$(mktemp "$1.XXXXXX")" && cat > "$part" && chmod 644 "$part" && chown ci:ci "$part" && mv -f "$part" "$1"', 'pipe-in', path], { stdin: 'pipe' });
 
   if (writer.stdin === null) throw new Error(`writing ${path}: the exec took no stdin`);
   const source = typeof body === 'string' ? new Blob([body]).stream() : body;
