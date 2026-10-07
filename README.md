@@ -195,6 +195,7 @@ proof without running it again.
 | `pool` | `40` | The most containers the tasks run on. The plan's `weight`s or past timings can make it fewer. |
 | `target` | `300` | Seconds per task the plan aims for, passed as `{target}`. |
 | `plan.command` | | Prints `{"include": [...]}`. Gets `{target}`, and `{timings}`, a file of past timings. |
+| `plan.local` | `false` | Runs the plan here, on this checkout, where it is the commit and clean (a CI runner's checkout), rather than in a container whose start can take a minute. |
 | `task.command` | | Runs one matrix entry. The entry's keys fill its placeholders. |
 | `task.name` | `name` | The entry key that names a task. |
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |

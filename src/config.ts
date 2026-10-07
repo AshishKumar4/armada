@@ -37,7 +37,9 @@ const ConfigSchema = v.object({
   target: v.optional(v.pipe(v.number(), v.integer(), v.minValue(10)), 300),
   /** The most containers a run's task job runs at once. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 40),
-  plan: v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)) }),
+  /** `local` runs the plan in this checkout where it is the commit itself and clean, as a CI runner's is, rather than
+   *  in a container whose start can take a minute; elsewhere the plan runs in a container as ever. */
+  plan: v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)), local: v.optional(v.boolean(), false) }),
   task: v.object({
     command: v.pipe(v.array(v.string()), v.minLength(1)),
     /** The matrix key that names a task; `name`, else the first string-valued key, by default. */

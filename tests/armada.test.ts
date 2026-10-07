@@ -524,7 +524,7 @@ describe('armada verdict', () => {
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0) {
+  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0, planConfig: unknown = { command: ['plan'] }) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const git = (...words: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo }).exitCode).toBe(0);
@@ -546,7 +546,7 @@ describe('armada run', () => {
         if (pathname === '/jobs') {
           commands.push(v.parse(v.object({ items: v.array(v.object({ argv: v.array(v.string()) })) }), await request.json()).items[0]?.argv ?? []);
 
-          return Response.json({ id: commands.length === 1 ? 'plan' : 'tasks' });
+          return Response.json({ id: commands.at(-1)?.includes('task') === true ? 'tasks' : 'plan' });
         }
         if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: pathname.startsWith('/jobs/tasks/') ? { ...outcome, exitCode: taskExit } : outcome }], done: true });
         if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify(plan));
@@ -560,7 +560,7 @@ describe('armada run', () => {
     try {
       mkdirSync(repo);
       git('init', '-q');
-      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task', '{out}'] } }));
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: planConfig, task: { command: ['task', '{out}'] } }));
       git('add', '.');
       git('commit', '-qm', 'one');
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
@@ -579,6 +579,16 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), verdicts: ran.seen.filter((each) => each.startsWith('PUT /verdicts')), timings: ran.seen.includes('POST /timings/proj') })
       .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], verdicts: [], timings: true });
+  });
+
+  test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job', async () => {
+    const printed = JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] });
+    // The plan checks what it was given: the timings file the runner answered, and the default target.
+    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
+    const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, 0, { command, local: true });
+
+    expect({ exit: ran.exit, jobs: ran.commands.length, task: ran.commands[0]?.slice(-2), here: ran.stdout.includes('plan run here') })
+      .toEqual({ exit: 0, jobs: 1, task: ['task', '/armada/task/out'], here: true });
   });
 
   test('a task that exits 0 with a red row among its rows is named RED as it lands, with the row', async () => {

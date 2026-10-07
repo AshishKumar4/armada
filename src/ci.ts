@@ -6,8 +6,8 @@
  * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the green rows' timings
  * stored on the runner. Exits 0 when every planned row ran once and passed, 1 when one was red, 2 when not graded.
  */
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
@@ -48,6 +48,28 @@ function resolveCommit(target: string): Commit {
   }
 
   return { sha: git(process.cwd(), ['rev-parse', '--verify', `${target}^{commit}`]).toString().trim(), repo: process.cwd() };
+}
+
+/** The plan's stdout, run in `repo` where its checkout is `sha` and clean, with `{target}` and `{timings}` filled here;
+ *  undefined where it is not that commit, and the plan runs in a container. A container's start, cold on a new machine,
+ *  was 61 of the 70 seconds Dew's plan took. */
+export function localPlan(repo: string, sha: string, command: readonly string[], target: number, timings: Timings,
+  env: Readonly<Record<string, string>>): string | undefined {
+  if (git(repo, ['rev-parse', 'HEAD']).toString().trim() !== sha || git(repo, ['status', '--porcelain']).toString().trim() !== '') return undefined;
+  const scratch = mkdtempSync(join(tmpdir(), 'armada-plan-'));
+
+  try {
+    writeFileSync(join(scratch, TIMINGS_FILE), JSON.stringify(timings));
+    const argv = command.map((word) => word.replaceAll('{target}', String(target)).replaceAll('{timings}', join(scratch, TIMINGS_FILE)));
+    const filled = Object.fromEntries(Object.entries(env).map(([name, value]) => [name, value.replaceAll('{workdir}', repo)]));
+    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...process.env, ...filled }, stdout: 'pipe', stderr: 'pipe' });
+
+    if (ran.exitCode !== 0) throw new Error(`the plan exited ${String(ran.exitCode)}: ${ran.stderr.toString().slice(-2000)}`);
+
+    return ran.stdout.toString();
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /** The commit's paths that key its environment: the `key` globs and the two recipe scripts. */
@@ -212,7 +234,7 @@ async function commitOf(armada: Armada, target: string) {
   const base = packBase(repo, environment.base);
   const spec: OnCommit = { recipe: { ...recipe, commit: { sha, base, packer: PACKER } }, env: config.env, tmpfs: config.tmpfs };
 
-  return { sha, config, timings, environment, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
+  return { sha, repo, config, timings, environment, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
 }
 
 /** A commit's job fields, its pack uploaded. */
@@ -257,7 +279,7 @@ export function poolFor(estimates: readonly number[], most: number): number {
  *  printed and reported but never stored as the commit's. */
 export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = []): Promise<number> {
   const began = Date.now();
-  const { sha, config, timings, environment, spec, upload } = await commitOf(armada, target);
+  const { sha, repo, config, timings, environment, spec, upload } = await commitOf(armada, target);
 
   console.log(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 
@@ -269,21 +291,34 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada };
-  // The plan's stdout is its output; its stderr stays in its log.
-  const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
-  const planJob = planTask.stream([{}], { ...options, pool: 1 });
-  const planId = await planJob.id;
+  const here = config.plan.local ? localPlan(repo, sha, [...config.plan.command, ...planArgs], config.target, timings, config.env) : undefined;
+  let planId = 'local';
+  let printed: string;
+  // The plan's own usage, which a container's plan reports and a local one does not.
+  const planRun: { readonly meta: Parameters<typeof usageOf>[0][number] }[] = [];
 
-  console.log(`plan job ${planId}`);
-  const [planned] = await follow(planJob, began, () => 'plan');
+  if (here === undefined) {
+    // The plan's stdout is its output; its stderr stays in its log.
+    const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
+    const planJob = planTask.stream([{}], { ...options, pool: 1 });
 
-  if (planned?.kind !== 'ok') {
-    console.log(`\nNOT GRADED: the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`);
+    planId = await planJob.id;
+    console.log(`plan job ${planId}`);
+    const [planned] = await follow(planJob, began, () => 'plan');
 
-    return 2;
+    if (planned?.kind !== 'ok') {
+      console.log(`\nNOT GRADED: the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`);
+
+      return 2;
+    }
+    printed = planned.value;
+    planRun.push(planned);
+  } else {
+    console.log(`plan run here, on this checkout of ${sha.slice(0, 12)}`);
+    printed = here;
   }
 
-  const plan = v.parse(PlanSchema, JSON.parse(planned.value));
+  const plan = v.parse(PlanSchema, JSON.parse(printed));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const most = Math.min(config.pool, plan.include.length);
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
@@ -348,7 +383,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   else console.log(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
-  const usage = usageOf([planned, ...results].map((result) => result.meta));
+  const usage = usageOf([...planRun, ...results].map((result) => result.meta));
 
   await armada.post(`/timings/${config.name}`, {
     rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
