@@ -1,5 +1,6 @@
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaFleet } from './fleet';
+import type { ArmadaTasks } from './tasks';
 import type { ArmadaJob } from './job';
 import type { ArmadaTimings } from './timings';
 import type { ArmadaVessel } from './vessel';
@@ -11,6 +12,7 @@ export interface Env {
   readonly PREPARER: DurableObjectNamespace<ArmadaPreparer>;
   readonly TIMINGS: DurableObjectNamespace<ArmadaTimings>;
   readonly FLEET: DurableObjectNamespace<ArmadaFleet>;
+  readonly TASKS: DurableObjectNamespace<ArmadaTasks>;
   /** Packs, task outputs and logs, verdicts. */
   readonly ARTIFACTS: R2Bucket;
   /** The bearer the SDK presents (`~/.config/armada/connection.json`). */
@@ -26,11 +28,10 @@ export interface Env {
 export const packKey = (project: string, sha: string, base: string, packer: number | undefined): string =>
   `packs/${project}/${sha}.${base}${packer === undefined ? '' : `.p${String(packer)}`}.pack`;
 
-/** The R2 key of a pushed bundle, by the digest of its bytes. */
-export const bundleKey = (digest: string): string => `bundles/${digest}.mjs`;
+/** The R2 key of a pushed bundle, by the digest of its bytes. It is kept while a task id points to it, and for a week
+ *  after, for the jobs still running it (`sweepBundles`). */
+export const bundleKey = (digest: string): string => `code/${digest}.mjs`;
 
-/** The R2 key of a task id's current bundle digest, kept with its project. Never expires, unlike the bundle itself. */
-export const taskIdKey = (id: string): string => `tasks/${id}`;
 
 /** The R2 keys of a task's output and log. */
 export const taskKey = (job: string, index: number, leaf: 'output' | 'log'): string => `jobs/${job}/tasks/${String(index)}/${leaf === 'log' ? 'log.gz' : 'output'}`;

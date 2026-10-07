@@ -4,7 +4,7 @@
  */
 import * as v from 'valibot';
 import { DRIVER, environmentKey, type Health, JobSpecSchema, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
-import { bundleKey, packKey, SINGLE, taskIdKey, taskKey, type Env } from './env';
+import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
 
@@ -15,6 +15,8 @@ export { ArmadaEnvironments, ArmadaPreparer } from './environments';
 export { ArmadaTimings } from './timings';
 
 export { ArmadaFleet } from './fleet';
+
+export { ArmadaTasks } from './tasks';
 
 /** The bearer, compared in constant time. */
 function authorized(request: Request, env: Env): boolean {
@@ -76,22 +78,40 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
   return Response.json({ stored: key });
 };
 
-/** `POST /tasks` records a push: each id now runs from its bundle. An id another project pushed is refused. */
+/** `POST /tasks` records a push: each id now runs from its bundle, and the project's ids it no longer exports go. */
 const tasks: Handler = async (request, env) => {
   if (request.method !== 'POST') return undefined;
   const push = v.parse(PushSchema, await request.json());
 
   if ((await env.ARTIFACTS.head(bundleKey(push.bundle))) === null) return Response.json({ error: `upload the bundle ${push.bundle} first` }, { status: 409 });
+  const refused = await env.TASKS.getByName(SINGLE).publish(push);
 
-  for (const id of push.ids) {
-    const owner = (await env.ARTIFACTS.head(taskIdKey(id)))?.customMetadata?.['project'];
-
-    if (owner !== undefined && owner !== push.project) return Response.json({ error: `the task id ${id} belongs to the project ${owner}` }, { status: 409 });
-  }
-  await Promise.all(push.ids.map(async (id) => await env.ARTIFACTS.put(taskIdKey(id), push.bundle, { customMetadata: { project: push.project } })));
+  if (refused !== null) return Response.json({ error: refused }, { status: 409 });
+  await sweepBundles(env);
 
   return Response.json({ pushed: push.ids.length });
 };
+
+/** How long a bundle no task id points to is kept: past any job that could still be starting containers from it. */
+const BUNDLE_GRACE_MS = 7 * 24 * 3600 * 1000;
+
+/** Deletes the bundles no task id points to that are older than BUNDLE_GRACE_MS. */
+async function sweepBundles(env: Env): Promise<void> {
+  const current = new Set(await env.TASKS.getByName(SINGLE).current());
+
+  for (let cursor: string | undefined; ;) {
+    const page = await env.ARTIFACTS.list({ prefix: 'code/', cursor });
+
+    for (const bundle of page.objects) {
+      const digest = bundle.key.slice('code/'.length, -'.mjs'.length);
+
+      if (!current.has(digest) && Date.now() - bundle.uploaded.getTime() > BUNDLE_GRACE_MS) await env.ARTIFACTS.delete(bundle.key);
+    }
+
+    if (!page.truncated) return;
+    cursor = page.cursor;
+  }
+}
 
 /** `/bundles/<digest>`: a pushed project's bundle, stored once under the digest of its bytes. */
 const bundles: Handler = async (request, env, [digest]) => {
@@ -126,7 +146,7 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
 
     if (spec.run.kind === 'task') {
       // The bundle the client just pushed, else the one the task's id was last pushed with.
-      const bundle = spec.run.bundle ?? (await env.ARTIFACTS.get(taskIdKey(spec.run.id)).then(async (stored) => await stored?.text()));
+      const bundle = spec.run.bundle ?? await env.TASKS.getByName(SINGLE).bundleOf(spec.run.id);
 
       if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed; run armada push in its project` }, { status: 409 });
 

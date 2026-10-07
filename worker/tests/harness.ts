@@ -54,7 +54,7 @@ export function state(container?: Container): Stored {
     put: async (key: string | Record<string, unknown>, value?: unknown) => {
       for (const [name, each] of typeof key === 'string' ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
     },
-    delete: async (key: string) => entries.delete(key),
+    delete: async (keys: string | readonly string[]) => typeof keys === 'string' ? entries.delete(keys) : keys.filter((key) => entries.delete(key)).length,
     list: async ({ prefix = '' }: { prefix?: string } = {}) => new Map([...entries].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key, structuredClone(value)])),
     setAlarm: async () => undefined,
     deleteAlarm: async () => undefined,
@@ -91,13 +91,24 @@ export function namespace<T>(named: (name: string) => T): DurableObjectNamespace
 
 /** An R2 bucket in memory: what a test reads back of what was put, by key. */
 export function bucket(objects = new Map<string, string>()) {
+  const kept = new Map<string, { readonly uploaded: Date; readonly customMetadata: Record<string, string> }>();
+  const object = (key: string) => ({ key, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {} });
+
   return {
     objects,
-    head: async (key: string) => objects.has(key) ? { key } : null,
-    get: async (key: string) => objects.has(key) ? { body: new Blob([objects.get(key) ?? '']).stream() } : null,
-    put: async (key: string, body: ReadableStream | string | ArrayBuffer | null) => {
+    /** When each object was put, which a test may move back. */
+    kept,
+    head: async (key: string) => objects.has(key) ? object(key) : null,
+    get: async (key: string) => objects.has(key) ? { ...object(key), body: new Blob([objects.get(key) ?? '']).stream(), text: async () => objects.get(key) ?? '' } : null,
+    put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string> } = {}) => {
       objects.set(key, typeof body === 'string' ? body : await new Response(body).text());
+      kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {} });
     },
+    delete: async (key: string) => {
+      objects.delete(key);
+      kept.delete(key);
+    },
+    list: async ({ prefix = '' }: { readonly prefix?: string } = {}) => ({ objects: [...objects.keys()].filter((key) => key.startsWith(prefix)).sort().map(object), truncated: false }),
   };
 }
 

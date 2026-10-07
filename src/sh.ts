@@ -16,9 +16,20 @@ declare const OUT: unique symbol;
 /** What a template may interpolate: a word, a number, a list of words, the out file, or another command. */
 export type Word = string | number | OutFile | Shell | readonly (string | number)[];
 
+/** What marks a command, so a body's plain value is never taken for one. A registered symbol, so a bundle holding a
+ *  second copy of this module still knows it; JSON cannot carry it. */
+const SHELL: unique symbol = Symbol.for('armada.shell');
+
+/** Whether `value` is a command a body returned, made by this module or another copy of it. */
+export function isShell(value: unknown): value is Shell {
+  return typeof value === 'object' && value !== null && SHELL in value;
+}
+
 /** A command that has not run. It is not a thenable, so returning one from an async body makes it the task's command
  *  instead of awaiting it. */
 export class Shell {
+  readonly [SHELL] = true;
+
   constructor(readonly script: string) {}
 
   /** Runs it under `/bin/sh` and resolves to its output, or rejects with a ShellError when it exits nonzero. */
@@ -48,7 +59,7 @@ export function quote(word: string): string {
 }
 
 function interpolated(value: Word): string {
-  if (value instanceof Shell) return value.script;
+  if (isShell(value)) return value.script;
 
   if (typeof value === 'object' && 'path' in value) return quote(value.path);
 
@@ -57,8 +68,30 @@ function interpolated(value: Word): string {
   return quote(String(value));
 }
 
+/** Whether the shell is inside quotes at the end of `script`: an interpolation quoted again there would be read inside
+ *  those quotes, where `$(...)` still runs within double quotes. */
+function quoted(script: string): boolean {
+  let quote: '' | "'" | '"' = '';
+
+  for (let at = 0; at < script.length; at += 1) {
+    const char = script[at];
+
+    if (quote !== "'" && char === '\\') at += 1;
+    else if (quote === '' && (char === "'" || char === '"')) quote = char;
+    else if (char === quote) quote = '';
+  }
+
+  return quote !== '';
+}
+
 function template(strings: TemplateStringsArray, values: readonly Word[], escape: (value: Word) => string): Shell {
-  return new Shell(strings.reduce((script, part, at) => script + part + (at < values.length ? escape(values[at] as Word) : ''), ''));
+  return new Shell(strings.reduce((script, part, at) => {
+    if (at >= values.length) return script + part;
+
+    if (escape === interpolated && quoted(script + part)) throw new Error('sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`');
+
+    return script + part + escape(values[at] as Word);
+  }, ''));
 }
 
 interface Sh {

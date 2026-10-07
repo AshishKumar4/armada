@@ -22,14 +22,17 @@
       { "name": "ENVIRONMENTS", "class_name": "ArmadaEnvironments" },
       { "name": "PREPARER", "class_name": "ArmadaPreparer" },
       { "name": "TIMINGS", "class_name": "ArmadaTimings" },
-      { "name": "FLEET", "class_name": "ArmadaFleet" }
+      { "name": "FLEET", "class_name": "ArmadaFleet" },
+      { "name": "TASKS", "class_name": "ArmadaTasks" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] }
+    { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] },
+    { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] }
   ],
   "vars": { "FLEET_VCPUS": "1500" },
   "version_metadata": { "binding": "VERSION" },
-  // Packs, bundles and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept.
+  // Packs and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept, and a
+  // pushed bundle while a task points to it.
   "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "armada-artifacts" }]
 }

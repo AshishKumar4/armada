@@ -84,3 +84,12 @@ function describe(result: Result<number, { a: number; b?: string }>): string {
     case 'lost': return result.reason;
   }
 }
+
+// @ts-expect-error a command's output schema is checked too: `any` says nothing of what travels
+export const anyCommand = task({ id: 'any-command', output: v.any(), run: () => sh`echo 1` });
+
+// @ts-expect-error an output schema of anything says nothing of what travels
+export const unknownValue = task({ id: 'unknown-value', output: v.unknown(), run: () => 1 });
+
+// @ts-expect-error a command's JSON cannot be a Date
+export const datedCommand = task({ id: 'dated-command', output: v.date(), run: () => sh`true` });

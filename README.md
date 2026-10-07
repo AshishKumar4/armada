@@ -121,10 +121,10 @@ const one = await thumbnail.run(urls[0]);               // one item, on one cont
 const here = await thumbnail.local(urls[0]);            // one item, on this machine, no container
 ```
 
-- `armada push` bundles every task the project's folders export and sends it; a task runs by its `id`, which must be
-  unique in the deployment. A script run inside the project pushes it once by itself, so `bun run sweep.ts` needs no
-  separate step. An app deployed elsewhere runs `armada push` in its own release. `armada dev` pushes again on each
-  save.
+- `armada push` bundles every task the project's folders export and sends it. A task runs by its `id`, which one
+  project owns in a deployment; a push drops the ids its project no longer exports. A script run inside the project
+  pushes it once by itself, so `bun run sweep.ts` needs no separate step. An app deployed elsewhere runs `armada push`
+  in its own release. `armada dev` pushes again on each save.
 - `.map` returns the values in input order, or throws a `MapError` holding every result. `.stream` returns the job,
   whose results arrive as they land, with `ordered()`, `settled()`, `cancel()` and `outputStream(i)`.
 - A result has `ok`. When it is false, `kind` says why: `error` (the body threw, its value failed its schema, or its

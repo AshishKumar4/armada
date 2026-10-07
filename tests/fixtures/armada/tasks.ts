@@ -39,3 +39,6 @@ export const touch = task({ id: 'touch', run: (n: number) => sh`true ${n}` });
 
 /** A body that runs a command and answers with a value built from it. */
 export const shout = task({ id: 'shout', run: async (word: string) => (await sh`printf %s ${word}`.text()).toUpperCase() });
+
+/** A plain value shaped like a command, which must come back as the value it is. */
+export const lookalike = task({ id: 'lookalike', run: (path: string) => ({ script: `touch ${path}`, text: 'not a command' }) });

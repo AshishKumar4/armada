@@ -43,7 +43,8 @@ export async function findProject(from: string): Promise<{ readonly root: string
   }
 }
 
-/** Every task the project's folders export, each by the file it is in, refusing an id two of them share. */
+/** Every task the project's folders export, each by the file it is in, refusing an id two of them share. A file is read
+ *  as this process imported it, so a push after an edit runs in a new process, as `armada dev` does. */
 async function tasksOf(root: string, folders: readonly string[]): Promise<{ readonly files: string[]; readonly ids: string[] }> {
   const files: string[] = [];
   const owners = new Map<string, string>();
@@ -111,15 +112,17 @@ export async function push(armada: Armada, from: string): Promise<Push | null> {
   return record;
 }
 
-/** Each deployment's push from this process: one per process, so a script's maps share it. */
-const pushes = new WeakMap<Armada, Promise<string | null>>();
+/** Each push from this process, by the deployment's URL and the directory whose project it pushed: one per process,
+ *  so a script's maps share it whichever client each made. */
+const pushes = new Map<string, Promise<string | null>>();
 
 /** The bundle this process pushed for the project it runs in, or null outside a project, where the deployment's current
  *  push of each id is run. */
 export async function pushed(armada: Armada): Promise<string | null> {
-  const known = pushes.get(armada) ?? push(armada, process.cwd()).then((record) => record?.bundle ?? null);
+  const key = `${armada.connection.url} ${process.cwd()}`;
+  const known = pushes.get(key) ?? push(armada, process.cwd()).then((record) => record?.bundle ?? null);
 
-  pushes.set(armada, known);
+  pushes.set(key, known);
 
   return await known;
 }

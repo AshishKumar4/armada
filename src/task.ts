@@ -14,7 +14,7 @@ import { jsonOf, MAX_TASKS, RecipeSchema, type JobStatus, type Outcome, type Rec
 import { pushed } from './push';
 import { remoteError, RUN, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
-import { execute, outFile, quote, Shell, ShellError } from './sh';
+import { execute, isShell, outFile, quote, ShellError, type Shell } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
 
 export type { Context, Json, RemoteError };
@@ -185,13 +185,18 @@ export type Answer<R, Out> = [R] extends [Shell]
 type Checked<I, R, Out> = 0 extends 1 & I ? { readonly 'a task takes plain JSON, and this item type is any': I }
   : 0 extends 1 & R ? { readonly 'a task answers plain JSON or bytes, and this body returns any': R }
   : [I] extends [Plain<I>]
-  ? [R] extends [Shell] ? string
+  ? [R] extends [Shell] ? OutputChecked<Out>
   : Out extends 'text' | 'bytes' ? { readonly 'output text or bytes is for a body that returns sh': Out }
-  : Out extends StandardSchemaV1 ? [R] extends [InputOf<Out>] ? [OutputOf<Out>] extends [Value<OutputOf<Out>>] ? string
-    : { readonly 'a task answers plain JSON or bytes, and this output schema gives neither': OutputOf<Out> }
-    : { readonly 'the body returns what its output schema does not take': R }
+  : Out extends StandardSchemaV1 ? [R] extends [InputOf<Out>] ? OutputChecked<Out> : { readonly 'the body returns what its output schema does not take': R }
   : [R] extends [Value<R>] ? string : { readonly 'a task answers plain JSON or bytes, and this body returns neither': R }
   : { readonly 'a task takes plain JSON, and this item type is not': I };
+
+/** A string when an output schema gives plain JSON or bytes, nothing as loose as `any` or `unknown`. */
+type OutputChecked<Out> = Out extends StandardSchemaV1
+  ? 0 extends 1 & OutputOf<Out> ? { readonly 'a task answers plain JSON or bytes, and this output schema gives any': OutputOf<Out> }
+  : [OutputOf<Out>] extends [Value<OutputOf<Out>>] ? string
+  : { readonly 'a task answers plain JSON or bytes, and this output schema gives neither': OutputOf<Out> }
+  : string;
 
 export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
   /** Unique in the deployment: `armada push` refuses a second task with it. */
@@ -393,11 +398,6 @@ const EnvelopeSchema = v.union([
   v.object({ ok: v.literal(true), bytes: v.string() }),
   v.object({ ok: v.literal(false), error: v.object({ name: v.string(), message: v.string(), stack: v.string() }) }),
 ]);
-
-/** Whether `value` is a command a body returned: one from another copy of this module is one too. */
-function isShell(value: unknown): value is Shell {
-  return value instanceof Shell || (typeof value === 'object' && value !== null && 'script' in value && typeof value.script === 'string' && 'text' in value);
-}
 
 /** A task's config, past the overloads' checks. */
 type Config = TaskConfig<Json, unknown, Output | undefined> & { readonly input?: StandardSchemaV1 };

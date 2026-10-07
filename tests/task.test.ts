@@ -1,12 +1,12 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
-import { MapError, push, recipe, task, type Result } from '../src/index';
-import { echo, encode, greet, lie, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
+import { MapError, push, recipe, sh, task, type Result } from '../src/index';
+import { echo, encode, greet, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
 
@@ -242,6 +242,23 @@ describe('a command task', () => {
   });
 });
 
+describe('a body\'s value shaped like a command', () => {
+  test('comes back as the value it is, in a container and locally, and runs nothing', async () => {
+    const { armada } = await fleet();
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-lookalike-'));
+    const remote = join(scratch, 'remote');
+    const local = join(scratch, 'local');
+
+    try {
+      expect({ remote: await lookalike.run(remote, { armada }), local: await lookalike.local(local), ran: [existsSync(remote), existsSync(local)] }).toEqual({
+        remote: { script: `touch ${remote}`, text: 'not a command' }, local: { script: `touch ${local}`, text: 'not a command' }, ran: [false, false],
+      });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('a task run locally', () => {
   test('gives the same values and errors on this machine, with no deployment', async () => {
     const thrown = await refuse.local(3).catch((error: unknown) => String(error));
@@ -330,6 +347,30 @@ describe('a recipe built a step at a time', () => {
       },
       other: 'cloudflare/other',
       plain: 'x',
+    });
+  });
+});
+
+describe('sh', () => {
+  test('quotes each interpolation as one word, a list as one word each, and refuses one inside the template\'s own quotes', async () => {
+    const hostile = `$(echo pwned) "q" 'r' \\ ; |`;
+
+    expect({
+      word: await sh`printf '[%s]' ${hostile}`.text(),
+      list: await sh`printf '[%s]' ${['a b', 'c']}`.text(),
+      number: sh`sleep ${1.5}`.script,
+      doubled: (() => { try { return sh`echo "${hostile}"`.script; } catch (cause) { return String(cause); } })(),
+      single: (() => { try { return sh`echo '${hostile}'`.script; } catch (cause) { return String(cause); } })(),
+      escaped: sh`echo \\" ${'x'}`.script,
+      raw: sh.raw`echo ${'$HOME'}`.script,
+    }).toEqual({
+      word: `[${hostile}]`,
+      list: '[a b][c]',
+      number: 'sleep 1.5',
+      doubled: 'Error: sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`',
+      single: 'Error: sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`',
+      escaped: 'echo \\" x',
+      raw: 'echo $HOME',
     });
   });
 });

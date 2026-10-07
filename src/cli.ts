@@ -257,7 +257,7 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
   }
 }
 
-/** Drains the deployed version first; then the bucket (packs, bundles and job artifacts expire after 7 days), the
+/** Drains the deployed version first; then the bucket (packs and job artifacts expire after 7 days), the
  *  Worker, its bearer, and the connection file. The version deployed admits jobs at once, and a deploy that fails or
  *  is interrupted lets the drained one admit them again. */
 async function deploy(name: string, vcpus: number | undefined): Promise<number> {
@@ -294,7 +294,7 @@ function install(account: string, name: string, vcpus: number | undefined, file:
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
   const rules = wrangler(['r2', 'bucket', 'lifecycle', 'list', bucket], account);
 
-  for (const prefix of ['packs/', 'jobs/', 'bundles/']) {
+  for (const prefix of ['packs/', 'jobs/']) {
     const rule = `expire-${prefix.slice(0, -1)}`;
 
     if (!rules.includes(rule)) wrangler(['r2', 'bucket', 'lifecycle', 'add', bucket, rule, prefix, '--expire-days', '7', '--force'], account);
