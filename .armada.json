@@ -1,0 +1,12 @@
+{
+  "name": "armada",
+  "environment": {
+    "setup": "ci/setup.sh",
+    "install": "ci/install.sh",
+    "key": ["bun.lock", "package.json"],
+    "smoke": "bun --version"
+  },
+  "pool": 2,
+  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}]}"] },
+  "task": { "command": ["bun", "run", "{name}"], "verdict": false, "timeout": 600 }
+}

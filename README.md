@@ -136,6 +136,8 @@ no credentials.
 | `task.idempotent` | Whether a straggling task may run again. Default `false`. |
 | `task.timeout` | A task's limit, in seconds. Default 3600. |
 
+armada proves itself the same way: its own `.armada.json` runs `bun test` and the typecheck, each as one row.
+
 ## Deploying
 
 `armada deploy --account=<id>` creates the `armada-artifacts` bucket (packs and artifacts expire after 7 days; verdicts
