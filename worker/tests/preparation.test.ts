@@ -6,7 +6,7 @@ import type { Recipe } from '../../src/protocol';
 import { ArmadaPreparer, type Generation } from '../src/environments';
 import { container, namespace, state, world, type Answer } from './harness';
 
-const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'locale-gen\n', install: '', smoke: 'bun --version', instance: 'standard-4' };
+const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'locale-gen\n', install: '', smoke: 'bun --version', size: 'medium' };
 
 interface Prepared {
   readonly generations: Generation[];

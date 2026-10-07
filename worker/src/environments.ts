@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import { failureTail, workdirOf, type Recipe } from '../../src/protocol';
-import { AS_USER, ENTRYPOINT, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
+import { AS_USER, ENTRYPOINT, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
 /** An environment snapshot: what every container with its key starts from. */
@@ -197,7 +197,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       case 'base':
         return await this.command(preparation, {
           doing: 'the runner layer', asUser: false, argv: ['/bin/sh', '-c', runnerLayer(workdir)],
-          inputs: async () => { await startAndAnswer(container, { image: recipe.base, instance: recipe.instance, enableInternet: true, entrypoint: ['sleep', 'infinity'] }, 300_000, LEASE_MS); },
+          inputs: async () => { await startAndAnswer(container, { image: recipe.base, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ['sleep', 'infinity'] }, 300_000, LEASE_MS); },
         });
 
       case 'setup':
@@ -245,7 +245,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
         const checks = [recipe.repo === undefined ? 'true' : 'git rev-parse HEAD', ...recipe.smoke === '' ? [] : [recipe.smoke]].join(' && ');
         const verified = await this.command(preparation, {
           doing: recipe.smoke === '' ? 'the restored environment' : 'the restored environment and the recipe\'s smoke', asUser: true, env, cwd: workdir, argv: ['/bin/sh', '-c', checks],
-          inputs: async () => { await startAndAnswer(container, { containerSnapshot: { id: snapshot.id }, instance: recipe.instance, enableInternet: true, entrypoint: ENTRYPOINT }, 300_000, LEASE_MS); },
+          inputs: async () => { await startAndAnswer(container, { containerSnapshot: { id: snapshot.id }, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ENTRYPOINT }, 300_000, LEASE_MS); },
         });
 
         if (verified !== 'running') await container.destroy();

@@ -15,7 +15,7 @@
  *                code is its one row.
  */
 import * as v from 'valibot';
-import { BaseSchema, DEFAULT_BASE, INSTANCES, Project } from './protocol';
+import { BaseSchema, DEFAULT_BASE, Project, SizeSchema } from './protocol';
 
 const Path = v.pipe(v.string(), v.minLength(1), v.check((path) => !path.startsWith('/') && !path.split('/').includes('..'), 'a path inside the commit'));
 
@@ -33,7 +33,7 @@ const ConfigSchema = v.object({
   history: v.optional(v.picklist(['full', 'commit']), 'full'),
   env: v.optional(v.record(v.string(), v.string()), {}),
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
-  instance: v.optional(v.picklist(INSTANCES), 'standard-4'),
+  size: v.optional(SizeSchema, 'medium'),
   target: v.optional(v.pipe(v.number(), v.integer(), v.minValue(10)), 300),
   /** The most containers a run's task job runs at once. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 40),

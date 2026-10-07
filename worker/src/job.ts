@@ -15,12 +15,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  environmentKey, fill, itemValues, OutcomeSchema, VCPUS, weightOf, workdirOf,
+  environmentKey, fill, itemValues, OutcomeSchema, SIZES, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Outcome, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { STATE, TASK, TASK_GROUP } from './container';
+import { instanceOf, STATE, TASK, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
 
 type Phase = JobStatus['phase'];
@@ -128,7 +128,7 @@ export class ArmadaJob extends DurableObject<Env> {
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const vessel: VesselSpec = {
-      jobId: id, name, snapshot: generation.snapshot.id, instance: spec.recipe.instance, vcpus: VCPUS[spec.recipe.instance],
+      jobId: id, name, snapshot: generation.snapshot.id, instance: instanceOf(spec.recipe.size), vcpus: SIZES[spec.recipe.size].vcpus,
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
       tmpfs: spec.tmpfs, files: spec.files, handler: 'handler' in spec.run ? spec.run.handler : null, output: spec.output, timeout: spec.timeout,
     };

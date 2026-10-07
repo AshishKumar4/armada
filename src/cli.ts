@@ -7,7 +7,7 @@ import * as v from 'valibot';
 import { cancelOnInterrupt, onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, INSTANCES } from './protocol';
+import { BaseSchema, SizeSchema } from './protocol';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -25,8 +25,9 @@ Usage:
 map options:
   --times=N            the items are 1 to N
   --items=<file|->     a JSON array, or one item per line
-  --env=<recipe.json>  {"base", "setup", "install", "smoke", "instance"}, scripts relative to it
+  --env=<recipe.json>  {"base", "setup", "install", "smoke", "size"}, scripts relative to it
   --commit=<rev>       run in the commit's checkout, in the environment its .armada.json names
+  --size=<size>        each container's size: micro, mini, small or medium (default medium)
   --pool=N             the most containers at once (default 50)
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
@@ -50,7 +51,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus='], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'pool=', 'timeout=', 'output', 'idempotent', 'json', 'label='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'idempotent', 'json', 'label='], words: 0 }],
   ['run', { options: ['label='], words: 1 }],
   ['status', { options: [], words: 1 }],
   ['prune', { options: ['keep='], words: 0 }],
@@ -80,7 +81,7 @@ function whole(name: string, least = 1): number | undefined {
 }
 
 const RecipeFileSchema = v.object({
-  base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), instance: v.optional(v.picklist(INSTANCES)),
+  base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), size: v.optional(SizeSchema),
 });
 
 /** A recipe file, its scripts read as text relative to it. */
@@ -115,7 +116,10 @@ async function map(): Promise<number> {
   const armada = connect();
   const began = Date.now();
   const target = option('commit');
+  const size = option('size');
   const where = target === undefined ? { recipe: recipeFrom(option('env')) } : await onCommit(armada, target);
+
+  if (size !== undefined) where.recipe = { ...where.recipe, size: v.parse(SizeSchema, size) };
   const job = await armada.map({
     ...where, items: times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1),
     run: { command: rest }, output: flag('output'), idempotent: flag('idempotent'), pool: whole('pool'), timeout: whole('timeout'), label: option('label') ?? '',

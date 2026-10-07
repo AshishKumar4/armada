@@ -41,7 +41,7 @@ describe('a failed step', () => {
 
 describe('an environment', () => {
   test('is keyed by the recipe\'s own text and the driver, so a fixed script is a new environment', async () => {
-    const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'apt-get install -y git', install: '', smoke: '', instance: 'standard-4' };
+    const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'apt-get install -y git', install: '', smoke: '', size: 'medium' };
     const repo = { project: 'app', checkout: '/home/ci/work/app/app', history: 'full' as const, manifest: [{ path: 'bun.lock', id: 'a'.repeat(40) }, { path: 'package.json', id: 'b'.repeat(40) }] };
     const key = await environmentKey(recipe);
     const keys = {

@@ -103,7 +103,7 @@ The commit is uploaded from your machine, so private repos and unpushed commits 
 | `history` | `full` | `commit` checks out the tree without its history. |
 | `env` | `{}` | Environment variables for the plan and tasks. `{workdir}` is the checkout. |
 | `tmpfs` | `["/tmp", "/dev/shm"]` | Paths that get a fresh tmpfs in each container. |
-| `instance` | `standard-4` | The container size. |
+| `size` | `medium` | The container size, from the table below. |
 | `pool` | `40` | The most containers the tasks run on at once. |
 | `target` | `300` | Seconds per task the plan aims for, passed as `{target}`. |
 | `plan.command` | | Prints `{"include": [...]}`. Gets `{target}`, and `{timings}`, a file of past timings. |
@@ -115,11 +115,20 @@ The commit is uploaded from your machine, so private repos and unpushed commits 
 
 A matrix entry may list the `rows` its task must report.
 
+| Size | vCPU | Memory | Cloudflare instance type |
+|---|---|---|---|
+| `micro` | 1/2 | 4 GiB | `standard-1` |
+| `mini` | 1 | 6 GiB | `standard-2` |
+| `small` | 2 | 8 GiB | `standard-3` |
+| `medium` | 4 | 12 GiB | `standard-4` |
+
+Cloudflare has no larger container.
+
 ## Commands
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--pool=N] [--timeout=S] [--output] [--idempotent] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--idempotent] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [-- <plan args>]
 armada status <job-id>
 armada prune [--keep=3]

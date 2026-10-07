@@ -3,7 +3,7 @@
  * scheduling policy, so each start names what it starts from (the recipe's base image while preparing, an environment
  * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
-import { failureTail } from '../../src/protocol';
+import { failureTail, SIZES, type Size } from '../../src/protocol';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
  *  a command drops to the user inside. */
@@ -149,6 +149,9 @@ const value = await handler(JSON.parse(process.env.ARMADA_ITEM));
 writeFileSync(process.env.ARMADA_OUT, JSON.stringify(value === undefined ? null : value));
 `;
 }
+
+/** A size's instance type, as a start takes it. */
+export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;
 
 /** A snapshot's container runs under tini, which reaps orphans as PID 1. */
 export const ENTRYPOINT = ['tini', '--', 'sleep', 'infinity'];

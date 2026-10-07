@@ -67,7 +67,7 @@ function recipeOf(repo: string, sha: string, config: Config): Recipe {
 
   return {
     base: config.environment.base, setup: text(config.environment.setup), install: text(config.environment.install), smoke: config.environment.smoke,
-    instance: config.instance, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, config) },
+    size: config.size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, config) },
   };
 }
 

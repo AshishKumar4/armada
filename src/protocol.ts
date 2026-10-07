@@ -11,10 +11,18 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
  *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it. */
 export const DRIVER = 1;
 
-export const INSTANCES = ['lite', 'standard-1', 'standard-2', 'standard-3', 'standard-4'] as const;
+/** The container sizes, smallest first, each a Cloudflare instance type. Cloudflare's largest is 4 vCPU and 12 GiB. A
+ *  container's start refuses its `basic` type, and `lite`, at 1/16 vCPU, is too small to prepare an environment on. */
+export const SIZES = {
+  micro: { instance: 'standard-1', vcpus: 0.5, memoryGiB: 4 },
+  mini: { instance: 'standard-2', vcpus: 1, memoryGiB: 6 },
+  small: { instance: 'standard-3', vcpus: 2, memoryGiB: 8 },
+  medium: { instance: 'standard-4', vcpus: 4, memoryGiB: 12 },
+} as const;
 
-/** vCPUs per instance, for the account's concurrent-vCPU ceiling. */
-export const VCPUS: Readonly<Record<(typeof INSTANCES)[number], number>> = { lite: 0.0625, 'standard-1': 0.5, 'standard-2': 1, 'standard-3': 2, 'standard-4': 4 };
+export type Size = keyof typeof SIZES;
+
+export const SizeSchema = v.picklist(Object.keys(SIZES) as Size[], 'a size is micro, mini, small or medium');
 
 /** A project's slug, which scopes its environments, packs, timings and verdicts. */
 export const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
@@ -49,7 +57,7 @@ export const RecipeSchema = v.object({
   install: v.optional(v.string(), ''),
   /** Run as the user after the snapshot is restored once; it must exit 0. */
   smoke: v.optional(v.string(), ''),
-  instance: v.optional(v.picklist(INSTANCES), 'standard-4'),
+  size: v.optional(SizeSchema, 'medium'),
   /** A repository environment: the commit is checked out where `checkout` says, and these files key it. */
   repo: v.optional(v.object({
     project: Project,
@@ -155,13 +163,14 @@ export const TimingsSchema = v.object({ rows: v.record(v.string(), v.number()), 
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;
 
-/** One environment per driver and recipe: base, scripts, instance and, for a repository, its key files. */
+/** One environment per driver and recipe: base, scripts, size and, for a repository, its key files. */
 export async function environmentKey(recipe: Recipe): Promise<string> {
   const repo = recipe.repo === undefined ? null : {
     ...recipe.repo,
     manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map((entry) => `${entry.path} ${entry.id}`),
   };
-  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, recipe.smoke, recipe.instance, repo];
+  // The size keys by its instance type, as the instance type did before sizes were named.
+  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, recipe.smoke, SIZES[recipe.size].instance, repo];
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(inputs)));
 
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
