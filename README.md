@@ -111,7 +111,7 @@ The commit is uploaded from your machine, so private repos and unpushed commits 
 | `task.command` | | Runs one matrix entry. The entry's keys fill its placeholders. |
 | `task.name` | `name` | The entry key that names a task. |
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
-| `task.idempotent` | `false` | Lets an idle container run a straggler again. |
+| `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 
 A matrix entry may list the `rows` its task must report.
@@ -131,7 +131,7 @@ once.
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--idempotent] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [-- <plan args>]
 armada status <job-id>
 armada prune [--keep=3]

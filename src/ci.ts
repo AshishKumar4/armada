@@ -259,7 +259,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
   const job = await armada.map({
     ...common, items: plan.include, run: { command: config.task.command.map(placed) }, output: config.task.verdict,
-    pool, idempotent: config.task.idempotent, timeout: config.task.timeout,
+    pool, speculative: config.task.speculative, timeout: config.task.timeout,
   });
 
   console.log(`task job ${job.id}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);

@@ -4,7 +4,7 @@
  * pays its boot once and then pulls task after task, so short and long tasks balance themselves. Each task's outcome
  * is appended to the job's event stream as it lands. A task a vessel lost to the infrastructure is queued again once;
  * a task that exited, red or green, never is. When the queue is empty, an idle vessel may run a straggler again only
- * if the job says its tasks are idempotent; the first answer is kept.
+ * if the job says its tasks are speculative; the first answer is kept.
  *
  * Concurrency: storage keeps the input gate shut, an RPC or R2 call opens it, so a method decides from storage and
  * writes before it calls out.
@@ -174,7 +174,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (next !== undefined) return this.claimOf(spec, env, next.idx, next.item, next.attempts, false);
 
-    if (!spec.idempotent) return null;
+    if (!spec.speculative) return null;
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ?

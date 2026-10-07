@@ -103,7 +103,7 @@ export const JobSpecSchema = v.object({
   /** The most containers this job runs at once; the account's ceiling and the item count bound it too. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 50),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
-  idempotent: v.optional(v.boolean(), false),
+  speculative: v.optional(v.boolean(), false),
   /** A task's own bound, in seconds. */
   timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
   label: v.optional(v.pipe(v.string(), v.maxLength(200)), ''),

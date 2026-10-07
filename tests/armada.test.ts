@@ -72,8 +72,8 @@ describe('a project\'s CI config', () => {
     const base = { name: 'app', environment: { setup: 'ci/setup.sh' }, plan: { command: ['plan'] }, task: { command: ['run', '{row}'] } };
     const config = parseConfig(JSON.stringify(base));
 
-    expect({ base: config.environment.base, history: config.history, pool: config.pool, verdict: config.task.verdict, idempotent: config.task.idempotent })
-      .toEqual({ base: 'cloudflare/debian-trixie', history: 'full', pool: 40, verdict: true, idempotent: false });
+    expect({ base: config.environment.base, history: config.history, pool: config.pool, verdict: config.task.verdict, speculative: config.task.speculative })
+      .toEqual({ base: 'cloudflare/debian-trixie', history: 'full', pool: 40, verdict: true, speculative: false });
     expect(() => parseConfig(JSON.stringify({ ...base, environment: { setup: '../outside.sh' } }))).toThrow('a path inside the commit');
   });
 

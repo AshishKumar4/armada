@@ -31,7 +31,7 @@ map options:
   --pool=N             the most containers at once (default 50)
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
-  --idempotent         let an idle container run a straggler again
+  --speculative        let an idle container run a straggler again
   --json               print each outcome as a JSON line
   --label=<text>       name the job
 
@@ -51,7 +51,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus='], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'idempotent', 'json', 'label='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'json', 'label='], words: 0 }],
   ['run', { options: ['label='], words: 1 }],
   ['status', { options: [], words: 1 }],
   ['prune', { options: ['keep='], words: 0 }],
@@ -122,7 +122,7 @@ async function map(): Promise<number> {
   if (size !== undefined) where.recipe = { ...where.recipe, size: v.parse(SizeSchema, size) };
   const job = await armada.map({
     ...where, items: times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1),
-    run: { command: rest }, output: flag('output'), idempotent: flag('idempotent'), pool: whole('pool'), timeout: whole('timeout'), label: option('label') ?? '',
+    run: { command: rest }, output: flag('output'), speculative: flag('speculative'), pool: whole('pool'), timeout: whole('timeout'), label: option('label') ?? '',
   });
   let worst = 0;
   const outcomes: Outcome[] = [];

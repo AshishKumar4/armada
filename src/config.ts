@@ -45,7 +45,7 @@ const ConfigSchema = v.object({
     name: v.optional(v.string()),
     verdict: v.optional(v.boolean(), true),
     /** Whether a straggling task may be run again by an idle container, first answer kept. */
-    idempotent: v.optional(v.boolean(), false),
+    speculative: v.optional(v.boolean(), false),
     timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
   }),
 });
