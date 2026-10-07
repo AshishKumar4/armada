@@ -118,6 +118,10 @@ interface Preparation {
   readonly snapshot: Generation['snapshot'] | null;
 }
 
+/** root's PATH, which the recipe's setup runs under: the tools it reaches for (locale-gen, update-alternatives) are in
+ *  sbin, which the user's commands do without. */
+const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+
 /** An exec's bound inside one alarm, which the platform ends at 15 minutes. */
 const STEP_MS = 12 * 60_000;
 
@@ -169,7 +173,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       case 'setup': {
         if (recipe.setup === '') return undefined;
         await pipeIn(container, recipe.setup, `${STATE}/setup.sh`);
-        await must(container, 'the recipe\'s setup', ['/bin/sh', `${STATE}/setup.sh`], { env: commandEnv(recipe, {}), cwd: workdir, ms: STEP_MS });
+        await must(container, 'the recipe\'s setup', ['/bin/sh', `${STATE}/setup.sh`], { env: { ...commandEnv(recipe, {}), PATH: ROOT_PATH }, cwd: workdir, ms: STEP_MS });
 
         return undefined;
       }
