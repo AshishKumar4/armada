@@ -48,6 +48,12 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
       .toEqual({ exit: '0', log: '0::/armada/task/runner', left: [false, false], nested: false });
   });
 
+  test('a task starts with SIGINT and SIGQUIT at their defaults, so a ^C it sends ends what it reaches', () => {
+    const interrupted = task('sh', '-c', 'grep SigIgn /proc/self/status; kill -INT $$; echo survived');
+
+    expect({ exit: interrupted.exit, log: interrupted.log.trim() }).toEqual({ exit: '130', log: 'SigIgn:\t0000000000000000' });
+  });
+
   test('a killed task ends with all it started', () => {
     expect(sh(launchTask(workdir), 'sh', '-c', 'setsid sleep 603 >/dev/null 2>&1 < /dev/null & sleep 604').exitCode).toBe(0);
     expect(sh(WAIT, '1').stdout.toString().trim()).toBe('');
