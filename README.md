@@ -88,6 +88,8 @@ for await (const result of thumbnail.map(urls)) {    // in the order they land
   log, and its peak memory and CPU.
 - `job.ordered()` yields results in input order, `job.settled()` returns them all, and `job.values()` returns the
   values or throws a `MapError` holding every result. `task.run(item)` runs one item.
+- An output may be any size up to 4.995 GiB, R2's limit for one upload. `job.outputStream(i)` downloads one too large
+  to hold in memory.
 - Items may be an array, or an iterable or async iterable that streams into the job as it yields.
 - Schemas are any [Standard Schema](https://standardschema.dev): valibot, zod or arktype. An item is checked before
   it is sent, and a value in the container before it counts as `ok`.
@@ -175,6 +177,10 @@ armada prune [--keep=3]
 ```
 
 `armada --help` describes every option. `map` exits 1 if a task exits nonzero and 2 if a task could not run.
+
+`armada deploy` over a running armada first stops it taking new jobs and waits for its open ones to finish, so a
+deploy never cuts a job short. Until it is done, a new job is refused with a message to run again. A client and a
+Worker of different versions refuse each other's requests and say which one to update.
 
 `armada deploy --name=<name>` deploys a second armada on the same account and prints the file that
 `--connection=<file>` takes to point any command at it. `--vcpus=N` caps a deployment's fleet. All deployments on an
