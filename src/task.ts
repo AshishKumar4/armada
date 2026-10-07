@@ -418,12 +418,12 @@ class CmdTask<I, O> extends Base<I, O> {
     if (output === undefined) return { kind: 'ok' as const, value: null as O };
 
     if (output === 'bytes') return { kind: 'ok' as const, value: (await read() ?? new Uint8Array()) as O };
-    const text = outcome.value ?? new TextDecoder().decode(await read() ?? new Uint8Array());
 
-    if (output === 'text') return { kind: 'ok' as const, value: text as O };
-
+    // An output too large for a string, or not the JSON its schema wants, is this item's error, not the job's.
     try {
-      return { kind: 'ok' as const, value: await check(output, JSON.parse(text), 'the output') as O };
+      const text = outcome.value ?? new TextDecoder().decode(await read() ?? new Uint8Array());
+
+      return { kind: 'ok' as const, value: (output === 'text' ? text : await check(output, JSON.parse(text), 'the output')) as O };
     } catch (cause) {
       return { kind: 'error' as const, error: remoteError(cause) };
     }
