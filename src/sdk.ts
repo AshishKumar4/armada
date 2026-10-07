@@ -58,9 +58,10 @@ export function connect(): Armada {
   const token = process.env['ARMADA_TOKEN'];
 
   if (url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
-  const file = process.env['ARMADA_CONNECTION'] ?? connectionFile('armada');
+  const named = process.env['ARMADA_CONNECTION'];
+  const file = named ?? connectionFile('armada');
 
-  if (!existsSync(file)) throw new Error('no runner: deploy one with `armada deploy --account=<id>`, or set ARMADA_URL and ARMADA_TOKEN');
+  if (!existsSync(file)) throw new Error(named === undefined ? 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN' : `no connection file at ${file}`);
 
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
 }

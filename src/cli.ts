@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** The armada CLI; `armada --help` prints its usage. */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
@@ -14,7 +14,7 @@ const ROOT = join(import.meta.dir, '..');
 const USAGE = `armada runs a command over many inputs at once, on Cloudflare Containers.
 
 Usage:
-  armada deploy --account=<id> [--name=<name>] [--vcpus=N]
+  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
                                        deploy armada with your wrangler login
   armada map [options] -- <command>    run the command once per item
   armada run <commit|worktree> [--label=<text>] [-- <plan args>]
@@ -35,7 +35,7 @@ map options:
   --label=<text>       name the job
 
 deploy options:
-  --account=<id>       the Cloudflare account to deploy to
+  --account=<id>       the account, when the wrangler login has more than one
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
@@ -143,8 +143,10 @@ async function map(): Promise<number> {
   return worst;
 }
 
+const WRANGLER = join(ROOT, 'node_modules', '.bin', 'wrangler');
+
 function wrangler(args: readonly string[], account: string, stdin?: string): string {
-  const ran = Bun.spawnSync([join(ROOT, 'node_modules', '.bin', 'wrangler'), ...args], {
+  const ran = Bun.spawnSync([WRANGLER, ...args], {
     cwd: ROOT, env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: account }, stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe',
   });
   const output = ran.stdout.toString() + ran.stderr.toString();
@@ -154,37 +156,65 @@ function wrangler(args: readonly string[], account: string, stdin?: string): str
   return output;
 }
 
+const WhoamiSchema = v.object({ accounts: v.array(v.object({ id: v.string(), name: v.string() })) });
+
+/** `--account`, else the wrangler login's one account. */
+function accountOf(): string {
+  const named = option('account');
+
+  if (named !== undefined) return named;
+  const whoami = Bun.spawnSync([WRANGLER, 'whoami', '--json'], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
+  const output = whoami.stdout.toString();
+
+  if (output.includes('"loggedIn":false')) throw new Error('log in to Cloudflare first, with `bunx wrangler login`, or set CLOUDFLARE_API_TOKEN');
+
+  if (whoami.exitCode !== 0) throw new Error(`wrangler whoami exited ${String(whoami.exitCode)}:\n${(output + whoami.stderr.toString()).slice(-2000)}`);
+  const { accounts } = v.parse(WhoamiSchema, JSON.parse(output));
+  const [only] = accounts;
+
+  if (only !== undefined && accounts.length === 1) return only.id;
+
+  throw new Error(accounts.length === 0 ? 'wrangler lists no account for this login; name one with --account=<id>'
+    : `this login has ${String(accounts.length)} accounts; name one with --account=<id>:${accounts.map((each) => `\n  ${each.id}  ${each.name}`).join('')}`);
+}
+
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
-function deploy(account: string, name: string, vcpus: number | undefined): number {
+function deploy(name: string, vcpus: number | undefined): number {
+  const account = accountOf();
   const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
   const rules = wrangler(['r2', 'bucket', 'lifecycle', 'list', bucket], account);
 
   for (const prefix of ['packs/', 'jobs/']) {
-    const name = `expire-${prefix.slice(0, -1)}`;
+    const rule = `expire-${prefix.slice(0, -1)}`;
 
-    if (!rules.includes(name)) wrangler(['r2', 'bucket', 'lifecycle', 'add', bucket, name, prefix, '--expire-days', '7', '--force'], account);
+    if (!rules.includes(rule)) wrangler(['r2', 'bucket', 'lifecycle', 'add', bucket, rule, prefix, '--expire-days', '7', '--force'], account);
   }
 
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
+  const file = connectionFile(name);
 
   writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "${name}",\n  "account_id": "${account}",`)
     .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
     .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
     .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`));
-  const deployed = wrangler(['deploy', '-c', config], account);
-  const url = new RegExp(`https://${name}\\.[a-z0-9-]+\\.workers\\.dev`, 'u').exec(deployed)?.[0];
 
-  if (url === undefined) throw new Error(`the deploy printed no workers.dev URL:\n${deployed.slice(-2000)}`);
-  const file = connectionFile(name);
-  const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  try {
+    const deployed = wrangler(['deploy', '-c', config], account);
+    const url = new RegExp(`https://${name}\\.[a-z0-9-]+\\.workers\\.dev`, 'u').exec(deployed)?.[0];
 
-  wrangler(['secret', 'put', 'ARMADA_TOKEN', '-c', config], account, token);
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n');
-  chmodSync(file, 0o600);
-  console.log(`armada: ${url}`);
+    if (url === undefined) throw new Error(`the deploy printed no workers.dev URL:\n${deployed.slice(-2000)}`);
+    const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+
+    wrangler(['secret', 'put', 'ARMADA_TOKEN', '-c', config], account, token);
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n');
+    chmodSync(file, 0o600);
+    console.log(`${name} is deployed at ${url}\ntry it: armada map${name === 'armada' ? '' : ` --connection=${file}`} --times=3 --json -- echo hello {item}`);
+  } finally {
+    rmSync(config, { force: true });
+  }
 
   return 0;
 }
@@ -259,14 +289,11 @@ async function main(): Promise<number> {
       return 0;
 
     case 'deploy': {
-      const account = option('account');
       const name = option('name') ?? 'armada';
-
-      if (account === undefined) throw new Error('deploy needs --account=<id>');
 
       if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return deploy(account, name, whole('vcpus'));
+      return deploy(name, whole('vcpus'));
     }
 
     case 'prune':

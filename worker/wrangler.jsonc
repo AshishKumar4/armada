@@ -1,5 +1,5 @@
-// armada: mapped compute on Cloudflare Containers (src/worker.ts). `armada deploy --account=<id>` deploys it with
-// this account id written into a copy of this file; nothing here names an account.
+// armada's Worker (src/worker.ts). `armada deploy` deploys it with the account id written into a copy of this file;
+// nothing here names an account.
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "armada",
