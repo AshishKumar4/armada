@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { PACKER, TimingsSchema, type JobSpec, type Manifest, type Outcome, type Recipe, type Timings } from './protocol';
+import { describeUsage, fitSize, PACKER, TimingsSchema, usageOf, type JobSpec, type Manifest, type Outcome, type Recipe, type Size, type Timings } from './protocol';
 import type { Armada, Job } from './sdk';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -62,12 +62,12 @@ function manifestOf(repo: string, sha: string, config: Config): Manifest {
 }
 
 /** The recipe the commit names, its scripts read from the commit as text. */
-function recipeOf(repo: string, sha: string, config: Config): Recipe {
+function recipeOf(repo: string, sha: string, config: Config, size: Size): Recipe {
   const text = (path: string | undefined) => path === undefined ? '' : git(repo, ['show', `${sha}:${path}`]).toString();
 
   return {
     base: config.environment.base, setup: text(config.environment.setup), install: text(config.environment.install), smoke: config.environment.smoke,
-    size: config.size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, config) },
+    size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, config) },
   };
 }
 
@@ -175,12 +175,14 @@ type OnCommit = Pick<JobSpec, 'recipe' | 'commit' | 'env' | 'tmpfs'>;
 async function commitOf(armada: Armada, target: string) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
-  const recipe = recipeOf(repo, sha, config);
+  const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
+  const size = config.size !== 'auto' ? config.size : timings.usage === null || timings.usage === undefined ? 'medium' : fitSize(timings.usage);
+  const recipe = recipeOf(repo, sha, config, size);
   const environment = await armada.resolve(recipe);
   const base = packBase(repo, environment.base);
   const spec: OnCommit = { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs };
 
-  return { sha, config, environment, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
+  return { sha, config, timings, environment, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
 }
 
 /** A commit's job fields, its pack uploaded. */
@@ -225,13 +227,16 @@ export function poolFor(estimates: readonly number[], most: number): number {
  *  printed and reported but never stored as the commit's. */
 export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = []): Promise<number> {
   const began = Date.now();
-  const { sha, config, environment, spec, upload } = await commitOf(armada, target);
+  const { sha, config, timings, environment, spec, upload } = await commitOf(armada, target);
 
   console.log(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
+
+  if (config.size === 'auto') {
+    console.log(`size ${spec.recipe.size}${timings.usage === null || timings.usage === undefined ? ', until a run has measured its tasks' : `: the last runs' tasks used at most ${describeUsage(timings.usage)}`}`);
+  }
   const uploaded = await upload();
 
   if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
-  const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const common = { ...spec, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
   // The plan's stdout is its output; its stderr stays in its log.
@@ -308,12 +313,18 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   else console.log(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
-  await armada.post(`/timings/${config.name}`, { rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})) });
+  const usage = usageOf([...planned, ...outcomes]);
+
+  await armada.post(`/timings/${config.name}`, {
+    rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
+  });
   printReds(graded.reds);
   const boots = summary.bootMs;
 
   console.log(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(graded.rows.length - graded.reds.length)} of ${String(graded.rows.length)} rows green, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
   console.log(`${String(summary.vessels)} containers; first answers ${seconds(boots[0] ?? 0)} to ${seconds(boots.at(-1) ?? 0)} (median ${seconds(boots[Math.floor(boots.length / 2)] ?? 0)})`);
+
+  if (usage !== null) console.log(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
   console.log(`report: ${report}`);
 
   return graded.reds.length === 0 ? 0 : 1;

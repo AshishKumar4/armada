@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, failureTail, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
+import { environmentKey, failureTail, fill, fitSize, itemValues, medians, recordSamples, usageOf, weightOf, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 
 describe('a task\'s command', () => {
@@ -160,6 +160,25 @@ describe('grading a CI run', () => {
       'one was reported by both a and b',
       'c wrote no verdict',
     ]);
+  });
+});
+
+describe('a size', () => {
+  const GiB = 2 ** 30;
+
+  test('fits the most a task used with a quarter to spare, and goes up when a task filled its vCPUs', () => {
+    expect([
+      fitSize({ memory: 0.5 * GiB, cores: 0.3 }), fitSize({ memory: 0.5 * GiB, cores: 0.6 }), fitSize({ memory: 5 * GiB, cores: 0.3 }),
+      fitSize({ memory: 2 * GiB, cores: 1.9 }), fitSize({ memory: 10 * GiB, cores: 1 }),
+    ]).toEqual(['micro', 'mini', 'small', 'medium', 'medium']);
+  });
+
+  test('reads what tasks used from the outcomes that measured it', () => {
+    const outcome = (seconds: number, peakMemory?: number, cpuSeconds?: number): Outcome => ({
+      index: 0, kind: 'exited', exitCode: 0, seconds, vessel: 'v1', attempt: 1, tail: '', output: false, ...peakMemory === undefined ? {} : { peakMemory, cpuSeconds },
+    });
+
+    expect([usageOf([outcome(10, GiB, 5), outcome(4, 2 * GiB, 1), outcome(3)]), usageOf([outcome(3)])]).toEqual([{ memory: 2 * GiB, cores: 0.5 }, null]);
   });
 });
 

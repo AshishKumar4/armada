@@ -103,7 +103,7 @@ The commit is uploaded from your machine, so private repos and unpushed commits 
 | `history` | `full` | `commit` checks out the tree without its history. |
 | `env` | `{}` | Environment variables for the plan and tasks. `{workdir}` is the checkout. |
 | `tmpfs` | `["/tmp", "/dev/shm"]` | Paths that get a fresh tmpfs in each container. |
-| `size` | `medium` | The container size, from the table below. |
+| `size` | `medium` | The container size, from the table below, or `auto`. |
 | `pool` | `40` | The most containers the tasks run on. The plan's `weight`s or past timings can make it fewer. |
 | `target` | `300` | Seconds per task the plan aims for, passed as `{target}`. |
 | `plan.command` | | Prints `{"include": [...]}`. Gets `{target}`, and `{timings}`, a file of past timings. |
@@ -122,7 +122,9 @@ A matrix entry may list the `rows` its task must report.
 | `small` | 2 | 8 GiB | `standard-3` |
 | `medium` | 4 | 12 GiB | `standard-4` |
 
-Cloudflare has no larger container.
+Cloudflare has no larger container. With `"size": "auto"`, each run takes the smallest size that the last five runs'
+tasks fill to three quarters at most, in peak memory and in average busy cores. A new size prepares its own environment
+once.
 
 ## Commands
 

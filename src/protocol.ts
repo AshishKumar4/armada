@@ -161,8 +161,13 @@ export const JobStatusSchema = v.object({
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
 
-/** The timings a project's graded run reports back, and the medians a plan reads: `{rows, files}`. */
-export const TimingsSchema = v.object({ rows: v.record(v.string(), v.number()), files: v.record(v.string(), v.number()) });
+const UsageSchema = v.object({ memory: v.number(), cores: v.number() });
+
+/** The timings a project's graded run reports back, and the medians a plan reads: `{rows, files}`. `usage` is the
+ *  most one task used in the run reported, or in the last runs read. */
+export const TimingsSchema = v.object({
+  rows: v.record(v.string(), v.number()), files: v.record(v.string(), v.number()), usage: v.optional(v.nullable(UsageSchema)),
+});
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;
 
@@ -225,10 +230,7 @@ export function failureTail(stdout: string, stderr: string, limit = 3000): strin
 }
 
 /** What a job's tasks used at most: the highest peak memory, in bytes, and the most cores one task kept busy on average. */
-export interface Usage {
-  readonly memory: number;
-  readonly cores: number;
-}
+export type Usage = v.InferOutput<typeof UsageSchema>;
 
 /** The most any of these outcomes used, or null when none was measured. */
 export function usageOf(outcomes: readonly Outcome[]): Usage | null {
@@ -240,6 +242,12 @@ export function usageOf(outcomes: readonly Outcome[]): Usage | null {
     memory: Math.max(...measured.map((outcome) => outcome.peakMemory ?? 0)),
     cores: Math.max(...measured.map((outcome) => (outcome.cpuSeconds ?? 0) / outcome.seconds)),
   };
+}
+
+/** The smallest size whose memory and vCPUs this usage fills to three quarters at most. Measured on a smaller size, a
+ *  task held to its vCPUs fills them, so the next run goes a size up. */
+export function fitSize(usage: Usage): Size {
+  return (Object.keys(SIZES) as Size[]).find((size) => usage.memory <= SIZES[size].memoryGiB * 2 ** 30 * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? 'medium';
 }
 
 export const describeUsage = (usage: Usage): string => `${(usage.memory / 2 ** 30).toFixed(2)} GiB and ${usage.cores.toFixed(2)} cores`;

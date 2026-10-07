@@ -33,7 +33,8 @@ const ConfigSchema = v.object({
   history: v.optional(v.picklist(['full', 'commit']), 'full'),
   env: v.optional(v.record(v.string(), v.string()), {}),
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
-  size: v.optional(SizeSchema, 'medium'),
+  /** A size, or `auto`: the smallest the last runs' tasks fit, `medium` until there are any. */
+  size: v.optional(v.union([SizeSchema, v.literal('auto')]), 'medium'),
   target: v.optional(v.pipe(v.number(), v.integer(), v.minValue(10)), 300),
   /** The most containers a run's task job runs at once. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 40),
