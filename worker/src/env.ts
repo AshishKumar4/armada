@@ -15,7 +15,7 @@ export interface Env {
   readonly ARTIFACTS: R2Bucket;
   /** The bearer the SDK presents (`~/.config/armada/connection.json`). */
   readonly ARMADA_TOKEN: string;
-  /** Concurrent vCPUs across every job on the account: Cloudflare's ceiling is 1,500. */
+  /** Concurrent vCPUs across every job of this deployment. */
   readonly FLEET_VCPUS: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
@@ -32,7 +32,7 @@ export const bundleKey = (digest: string): string => `bundles/${digest}.mjs`;
 /** The R2 keys of a task's output and log. */
 export const taskKey = (job: string, index: number, leaf: 'output' | 'log'): string => `jobs/${job}/tasks/${String(index)}/${leaf === 'log' ? 'log.gz' : 'output'}`;
 
-/** The one instance of an account-wide object. */
+/** The one instance of a deployment-wide object. */
 export const SINGLE = 'all';
 
 /** An error and every cause under it, on one line. */

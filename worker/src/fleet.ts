@@ -1,7 +1,7 @@
 /**
- * ArmadaFleet: the vCPUs running at once across every job on the account, held under Cloudflare's 1,500-vCPU
- * ceiling (375 `standard-4`). A container over the ceiling waits for capacity rather than being
- * refused by the platform mid-job. A hold names its holder and lapses at its lease, so a holder that died returns it.
+ * ArmadaFleet: the vCPUs running at once across every job of this deployment, held under its own FLEET_VCPUS. A
+ * container over the cap waits for capacity rather than being refused by the platform mid-job. A hold names its
+ * holder and lapses at its lease, so a holder that died returns it.
  *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so

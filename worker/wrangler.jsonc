@@ -10,7 +10,7 @@
   "observability": { "enabled": true },
   // Both on the `durable_object` policy: no image, instance type or cap here. Each start names what it starts from
   // (a recipe's base image, or an environment snapshot) and its instance; running instances count against the
-  // account's limits, which ArmadaFleet keeps jobs under.
+  // account's limits, and ArmadaFleet keeps this deployment's jobs under its FLEET_VCPUS.
   "containers": [
     { "class_name": "ArmadaVessel", "scheduling_policy": "durable_object" },
     { "class_name": "ArmadaPreparer", "scheduling_policy": "durable_object" }

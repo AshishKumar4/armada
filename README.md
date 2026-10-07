@@ -2,6 +2,9 @@
 
 Run a command or a TypeScript function over many inputs at once, on Cloudflare Containers.
 
+The CLI and `armada run` run any command, so a task can be written in any language its environment installs. Only the
+SDK's typed functions are TypeScript.
+
 For example, you can use it for CI. It takes about 7 seconds to spawn 100 containers and run a 3-second command on
 each, all in parallel.
 
@@ -23,6 +26,26 @@ the Workers Paid plan.
 
 Each task runs as the user `ci`, in a cgroup of its own (`$ARMADA_CGROUP`), with fresh tmpfs on `/tmp` and `/dev/shm`.
 Anything a task leaves running is stopped before the next task starts.
+
+## Architecture
+
+<p align="center"><img src=".github/arch.svg" alt="Clients call the Worker's bearer API. The Worker keeps its state in Durable Objects: ArmadaJob, ArmadaVessel, ArmadaEnvironments, ArmadaPreparer, ArmadaTimings and ArmadaFleet. Vessels start containers from a snapshot, the preparer from the base image, and packs, bundles, outputs, logs and verdicts live in R2." width="100%"></p>
+
+Every client speaks one bearer API to armada's Worker, which keeps its state in Durable Objects. ArmadaJob holds a
+job's queue and its outcome events. One ArmadaVessel per container pulls task after task on alarms, and holds its
+vCPUs in ArmadaFleet before its container starts. ArmadaFleet belongs to one deployment, so `--vcpus` caps only that
+deployment. Packs, bundles, outputs, logs and verdicts live in R2.
+
+### The preparer
+
+Every container of a job has to be the same, and has to start with its tools already installed. So an environment is
+prepared once, and every container after that starts from its snapshot. One ArmadaPreparer per environment key starts
+a container from the base image, adds armada's runner layer, runs the recipe's `setup` as root, checks out the commit
+for a repository, runs `install` as the user, and snapshots the container. That takes a few minutes. A container then
+starts from the snapshot in 0.2 to 2 seconds. The key hashes the runner layer's version, the base image, the two
+scripts' text, the size and, for a repository, the content of the files `environment.key` lists. Changing any of them
+prepares a new environment, and an unchanged recipe reuses its snapshot. If a snapshot does not start, the job's
+containers fail, and the job names the environment once.
 
 ## Examples
 
@@ -181,5 +204,4 @@ deploy never cuts a job short. Until it is done, a new job is refused with a mes
 Worker of different versions refuse each other's requests and say which one to update.
 
 `armada deploy --name=<name>` deploys a second armada on the same account and prints the file that
-`--connection=<file>` takes to point any command at it. `--vcpus=N` caps a deployment's fleet. All deployments on an
-account share Cloudflare's 1,500 vCPUs.
+`--connection=<file>` takes to point any command at it. `--vcpus=N` caps only that deployment's fleet.
