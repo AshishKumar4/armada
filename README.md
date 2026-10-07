@@ -36,7 +36,10 @@ const job = await armada.map({
   output: true,
 });
 
-for await (const outcome of job.outcomes()) console.log(outcome.index, outcome.exitCode);
+for await (const outcome of job.outcomes()) {
+  const png = await job.outputBytes(outcome.index);
+  // write it, upload it, whatever you need
+}
 ```
 
 Run a JavaScript function over your items instead of a command:

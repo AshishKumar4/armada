@@ -153,11 +153,18 @@ export class Job {
     }
   }
 
-  /** A task's stored output (`{out}`, or a handler's JSON value), or null. */
+  /** A task's stored output (`{out}`, or a handler's JSON value) as text, or null. */
   async output(index: number): Promise<string | null> {
     const response = await this.armada.call(`/jobs/${this.id}/tasks/${String(index)}/output`);
 
     return response.status === 404 ? null : await response.text();
+  }
+
+  /** A task's stored output as its exact bytes (an image, an archive), or null. */
+  async outputBytes(index: number): Promise<Uint8Array | null> {
+    const response = await this.armada.call(`/jobs/${this.id}/tasks/${String(index)}/output`);
+
+    return response.status === 404 ? null : new Uint8Array(await response.arrayBuffer());
   }
 
   async log(index: number): Promise<string | null> {

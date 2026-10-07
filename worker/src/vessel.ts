@@ -203,7 +203,8 @@ export class ArmadaVessel extends DurableObject<Env> {
     let output = false;
 
     if (spec.output || spec.handler !== null) {
-      const out = await run(container, ['cat', `${TASK}/out`], { ms: EXEC_MS });
+      // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
+      const out = await (await container.exec(['cat', `${TASK}/out`], { signal: AbortSignal.timeout(EXEC_MS) })).output();
 
       if (out.exitCode === 0) {
         await this.env.ARTIFACTS.put(taskKey(spec.jobId, index, 'output'), out.stdout);
