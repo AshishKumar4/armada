@@ -211,3 +211,50 @@ describe('packing a commit', () => {
     }
   });
 });
+
+describe('the CLI following a job', () => {
+  test('interrupted, it cancels the job and exits 2, even when the job finishes green while the cancel is answered', async () => {
+    const seen: string[] = [];
+    let polled: () => void = () => undefined;
+    const polling = new Promise<void>((resolve) => { polled = resolve; });
+    let cancelled = false;
+    const green = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false };
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        seen.push(`${request.method} ${pathname}`);
+        if (pathname === '/jobs') return Response.json({ id: 'j1' });
+        if (pathname === '/jobs/j1/events') {
+          polled();
+
+          return Response.json(cancelled ? { events: [{ seq: 1, outcome: green }], done: true } : { events: [], done: false });
+        }
+        if (pathname === '/jobs/j1/cancel') {
+          cancelled = true;
+          await Bun.sleep(2_500);
+
+          return Response.json({ cancelled: 'j1' });
+        }
+
+        return Response.json({
+          id: 'j1', label: '', phase: 'done', key: 'k', createdAt: 0, startedAt: 0, finishedAt: 1, vessels: [], problems: [], environment: null,
+          tasks: { total: 1, queued: 0, running: 0, exited: 1, red: 0, failed: 0 },
+        });
+      },
+    });
+
+    try {
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=1', '--', 'true'], {
+        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+
+      await polling;
+      cli.kill('SIGINT');
+      expect({ exit: await cli.exited, cancelled: seen.includes('POST /jobs/j1/cancel') }).toEqual({ exit: 2, cancelled: true });
+    } finally {
+      await server.stop(true);
+    }
+  });
+});

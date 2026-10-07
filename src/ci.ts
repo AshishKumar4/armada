@@ -89,6 +89,30 @@ const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
 
 const clock = (ms: number): string => `${String(Math.floor(ms / 60_000))}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 
+/** `body`, while it follows `job`: interrupting the CLI (Ctrl-C, or a CI job cancelled) cancels the job, rather than
+ *  leaving its containers to run for an answer nobody reads, and exits 2. */
+export async function cancelOnInterrupt<T>(job: Job, body: () => Promise<T>): Promise<T> {
+  // Once interrupted, the cancel's end is the CLI's: a job that finishes meanwhile does not answer for it.
+  let cancelling: Promise<never> | null = null;
+  const interrupted = (signal: NodeJS.Signals): void => {
+    console.error(`armada: ${signal}: cancelling job ${job.id}`);
+    cancelling ??= job.cancel().then(() => process.exit(2), (cause: unknown) => {
+      console.error(`armada: cancelling job ${job.id} failed: ${String(cause)}`);
+      process.exit(2);
+    });
+  };
+
+  process.once('SIGINT', interrupted).once('SIGTERM', interrupted);
+
+  try {
+    const result = await body();
+
+    return cancelling === null ? result : await cancelling;
+  } finally {
+    process.off('SIGINT', interrupted).off('SIGTERM', interrupted);
+  }
+}
+
 /** Follows a job to its end, saying each phase once and each outcome as it lands. */
 async function follow(job: Job, began: number, name: (outcome: Outcome) => string): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
@@ -102,17 +126,19 @@ async function follow(job: Job, began: number, name: (outcome: Outcome) => strin
   }, 3_000);
 
   try {
-    for await (const outcome of job.outcomes()) {
-      outcomes.push(outcome);
-      const verdict = outcome.kind === 'failed' ? `FAILED: ${outcome.tail.slice(-300)}` : outcome.exitCode === 0 ? 'green' : `RED (exit ${String(outcome.exitCode)})`;
+    return await cancelOnInterrupt(job, async () => {
+      for await (const outcome of job.outcomes()) {
+        outcomes.push(outcome);
+        const verdict = outcome.kind === 'failed' ? `FAILED: ${outcome.tail.slice(-300)}` : outcome.exitCode === 0 ? 'green' : `RED (exit ${String(outcome.exitCode)})`;
 
-      console.log(`${clock(Date.now() - began).padStart(6)}  ${name(outcome).padEnd(14)} ${verdict} in ${clock(outcome.seconds * 1000)} on ${outcome.vessel}`);
-    }
+        console.log(`${clock(Date.now() - began).padStart(6)}  ${name(outcome).padEnd(14)} ${verdict} in ${clock(outcome.seconds * 1000)} on ${outcome.vessel}`);
+      }
+
+      return outcomes;
+    });
   } finally {
     clearInterval(watcher);
   }
-
-  return outcomes;
 }
 
 function printReds(reds: readonly VerdictRow[]): void {

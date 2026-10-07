@@ -54,7 +54,8 @@ Prove a commit with your project's CI, from the `.armada.json` in that commit:
 armada run HEAD
 ```
 
-It exits 0 when every row is green, 1 when a row is red, and 2 when the run can't be graded.
+It exits 0 when every row is green, 1 when a row is red, and 2 when the run can't be graded. Interrupting `run` or `map`
+(Ctrl-C, or a cancelled CI job) cancels the job, so its containers stop.
 
 ## Commands
 

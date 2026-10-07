@@ -17,7 +17,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
-import { onCommit, runCI } from './ci';
+import { cancelOnInterrupt, onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, ConnectionSchema } from './sdk';
 import { INSTANCES } from './protocol';
@@ -74,13 +74,15 @@ async function map(): Promise<number> {
 
   console.error(`job ${job.id}`);
 
-  for await (const outcome of job.outcomes()) {
-    if (flag('json')) console.log(JSON.stringify(outcome));
-    else console.log(`${String(outcome.index).padStart(6)}  ${outcome.kind === 'failed' ? 'FAILED' : `exit ${String(outcome.exitCode)}`}  ${outcome.seconds.toFixed(2)} s  ${outcome.vessel}`);
+  await cancelOnInterrupt(job, async () => {
+    for await (const outcome of job.outcomes()) {
+      if (flag('json')) console.log(JSON.stringify(outcome));
+      else console.log(`${String(outcome.index).padStart(6)}  ${outcome.kind === 'failed' ? 'FAILED' : `exit ${String(outcome.exitCode)}`}  ${outcome.seconds.toFixed(2)} s  ${outcome.vessel}`);
 
-    if (outcome.kind === 'failed') worst = 2;
-    else if (outcome.exitCode !== 0 && worst === 0) worst = 1;
-  }
+      if (outcome.kind === 'failed') worst = 2;
+      else if (outcome.exitCode !== 0 && worst === 0) worst = 1;
+    }
+  });
 
   const summary = await job.summary();
 
