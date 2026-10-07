@@ -128,7 +128,7 @@ async function map(): Promise<number> {
   const began = Date.now();
   const target = option('commit');
   const size = option('size');
-  const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))), env: {}, tmpfs: undefined } : await onCommit(armada, target);
+  const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target);
   const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
   const argv = argvOf(rest, base);
   const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout') };

@@ -14,7 +14,7 @@ import { jsonOf, MAX_TASKS, RecipeSchema, type JobStatus, type Outcome, type Rec
 import { pushed } from './push';
 import { remoteError, RUN, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
-import { execute, outFile, Shell, ShellError } from './sh';
+import { execute, outFile, quote, Shell, ShellError } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
 
 export type { Context, Json, RemoteError };
@@ -47,9 +47,54 @@ export interface RecipeOptions {
   readonly size?: Size;
 }
 
-export function recipe(options: RecipeOptions = {}): Recipe {
-  return v.parse(RecipeSchema, options);
+/** A recipe built a step at a time. Each step returns a new recipe, so two tasks can share one as a base. Steps append
+ *  to the recipe's scripts, so its environment key hashes exactly what runs. */
+export class RecipeBuilder {
+  /** The recipe as a job takes it. */
+  readonly spec: Recipe;
+
+  constructor(options: RecipeOptions) {
+    this.spec = v.parse(RecipeSchema, options);
+  }
+
+  /** Debian packages, installed in setup as root. */
+  apt(...packages: readonly string[]): RecipeBuilder {
+    return this.then('setup', `apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${packages.map(quote).join(' ')}`);
+  }
+
+  /** More of setup, run as root once per environment. */
+  setup(script: string): RecipeBuilder {
+    return this.then('setup', script);
+  }
+
+  /** More of install, run as the user in the checkout once per environment. */
+  install(script: string): RecipeBuilder {
+    return this.then('install', script);
+  }
+
+  size(size: Size): RecipeBuilder {
+    return new RecipeBuilder({ ...this.spec, size });
+  }
+
+  private then(script: 'setup' | 'install', step: string): RecipeBuilder {
+    const before = this.spec[script];
+
+    return new RecipeBuilder({ ...this.spec, [script]: before === '' ? step : `${before}\n${step}` });
+  }
 }
+
+interface RecipeOf {
+  (options?: RecipeOptions): RecipeBuilder;
+  /** `cloudflare/debian-trixie`, the base a recipe has by default. */
+  debian(): RecipeBuilder;
+  /** Another base image, one the runtime starts by name. */
+  from(base: string): RecipeBuilder;
+}
+
+export const recipe: RecipeOf = Object.assign((options: RecipeOptions = {}) => new RecipeBuilder(options), {
+  debian: () => new RecipeBuilder({}),
+  from: (base: string) => new RecipeBuilder({ base }),
+});
 
 export interface MapOptions {
   /** The most containers at once. Default 50. */
@@ -152,7 +197,7 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
   /** Unique in the deployment: `armada push` refuses a second task with it. */
   readonly id: Id;
   /** Default `recipe()`: `cloudflare/debian-trixie` on medium. */
-  readonly recipe?: Recipe;
+  readonly recipe?: Recipe | RecipeBuilder;
   readonly output?: Out;
   /** A task's limit, in seconds. Default 3600. */
   readonly timeout?: number;
@@ -361,7 +406,7 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
   readonly id: string;
 
   constructor(private readonly config: Config) {
-    super(config.recipe ?? recipe(), config);
+    super(config.recipe instanceof RecipeBuilder ? config.recipe.spec : config.recipe ?? recipe().spec, config);
     this.id = config.id;
   }
 

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
-import { MapError, push, task, type Result } from '../src/index';
+import { MapError, push, recipe, task, type Result } from '../src/index';
 import { echo, encode, greet, lie, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
@@ -314,5 +314,22 @@ describe('a job\'s items', () => {
     }
 
     expect(seen).toEqual([[0, 'a'], [1, 'b']]);
+  });
+});
+
+describe('a recipe built a step at a time', () => {
+  test('appends each step to its script, quotes packages, and leaves the recipe it came from as it was', () => {
+    const base = recipe.debian().apt('curl', "it's");
+    const ml = base.setup('echo root').install('uv sync --frozen').size('small');
+
+    expect({ base: base.spec, ml: ml.spec, other: recipe.from('cloudflare/other').spec.base, plain: recipe({ install: 'x' }).spec.install }).toEqual({
+      base: { base: 'cloudflare/debian-trixie', setup: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl 'it'\\''s'", install: '', size: 'medium' },
+      ml: {
+        base: 'cloudflare/debian-trixie', setup: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl 'it'\\''s'\necho root",
+        install: 'uv sync --frozen', size: 'small',
+      },
+      other: 'cloudflare/other',
+      plain: 'x',
+    });
   });
 });

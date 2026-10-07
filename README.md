@@ -83,7 +83,7 @@ export default defineConfig({ project: 'media', tasks: ['armada'] });
 import { recipe, sh, task } from 'armada';
 import * as v from 'valibot';
 
-export const imaging = recipe({ setup: 'apt-get install -y curl imagemagick', size: 'small' });
+export const imaging = recipe.debian().apt('curl', 'imagemagick').size('small');
 
 // A command: the body returns sh, which escapes every ${} as one word. `out` is the file the task answers with.
 export const thumbnail = task({
@@ -130,6 +130,9 @@ const here = await thumbnail.local(urls[0]);            // one item, on this mac
 - A result has `ok`. When it is false, `kind` says why: `error` (the body threw, its value failed its schema, or its
   command exited nonzero), `timeout`, `cancelled` or `lost`. Each result carries its `meta`: seconds, container, exit
   code, the tail of its log, and its peak memory and CPU.
+- A recipe is built a step at a time: `recipe.debian()` or `recipe.from(image)`, then `.apt(...packages)` and
+  `.setup(script)` as root, `.install(script)` as the user, and `.size(size)`. Each step returns a new recipe, and the
+  environment's key hashes the scripts the steps make. `recipe({ setup, install, size })` takes them whole.
 - A body can also run commands and answer with a value: `` (await sh`git rev-parse HEAD`.text()).trim() ``.
   `` sh.raw`...` `` interpolates without escaping, for a script that is itself shell.
 - Schemas are any [Standard Schema](https://standardschema.dev): valibot, zod or arktype. An item is checked before
