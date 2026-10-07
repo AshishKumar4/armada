@@ -255,9 +255,9 @@ describe('a failed request', () => {
       const failed = async (path: string, method = 'POST') => await armada.call(path, { method }).then((answer) => `answered ${String(answer.status)}`, (cause: unknown) => String(cause));
 
       expect([await failed('/jobs'), await failed('/environments/resolve'), await failed('/health', 'GET'), await failed('/jobs/j1', 'GET')]).toEqual([
-        'Error: POST /jobs: 409 upload the pack first',
-        'Error: POST /environments/resolve: 503 from the Worker (it may still be deploying): Service Unavailable',
-        'Error: GET /health: 404 from the Worker (it may still be deploying): There is nothing here yet',
+        'RequestError: POST /jobs: 409 upload the pack first',
+        'RequestError: POST /environments/resolve: 503 from the Worker (it may still be deploying): Service Unavailable',
+        'RequestError: GET /health: 404 from the Worker (it may still be deploying): There is nothing here yet',
         'answered 404',
       ]);
     } finally {

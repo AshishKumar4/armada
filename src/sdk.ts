@@ -71,19 +71,34 @@ async function failureOf(response: Response): Promise<string> {
   }
 }
 
+/** The first version of the wire whose Worker drains. */
+const FIRST_DRAIN = 2;
+
+/** A request the Worker answered with an error: its status, and what it said. */
+export class RequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'RequestError';
+  }
+}
+
 export class Armada {
   constructor(readonly connection: Connection) {}
 
   /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, or a dropped connection, is
    *  asked again, up to READ_ATTEMPTS times a second apart more each time: the Worker answers it again unchanged, and a
    *  `run` that polls for half an hour should not end on one. */
-  async call(path: string, init: RequestInit = {}): Promise<Response> {
+  /** The wire's version this client speaks to the deployment: its own, or an older one a drain found the deployed
+   *  Worker speaks, for the drain, the health and the admit, which are the same in every version. */
+  private spoken = PROTOCOL;
+
+  async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const attempts = method === 'GET' || method === 'HEAD' ? READ_ATTEMPTS : 1;
 
     headers.set('authorization', `Bearer ${this.connection.token}`);
-    headers.set(PROTOCOL_HEADER, String(PROTOCOL));
+    headers.set(PROTOCOL_HEADER, String(protocol));
 
     for (let attempt = 1; ; attempt += 1) {
       const sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }).catch((error: unknown) => error);
@@ -97,7 +112,7 @@ export class Armada {
       // The Worker's own 404 says a thing is absent; an HTML one is a page from a Worker not yet answering.
       const absent = sent.status === 404 && sent.headers.get('content-type')?.startsWith('text/html') !== true;
 
-      if (!sent.ok && !absent) throw new Error(`${method} ${path}: ${await failureOf(sent)}`);
+      if (!sent.ok && !absent) throw new RequestError(sent.status, `${method} ${path}: ${await failureOf(sent)}`);
 
       return sent;
     }
@@ -109,19 +124,31 @@ export class Armada {
   }
 
   async health(): Promise<Health> {
-    return v.parse(HealthSchema, await (await this.call('/health')).json());
+    return v.parse(HealthSchema, await (await this.call('/health', {}, this.spoken)).json());
   }
 
   /** Admits no new job until the version deployed now is replaced, or `admit` is called; answers how many jobs are
    *  still open, or null for a Worker too old to drain. */
   async drain(): Promise<number | null> {
-    const answer = await this.call('/drain', { method: 'POST' });
+    // A Worker that answers the drain only in its own version is asked in each older one, down to the first that had it.
+    for (let protocol = PROTOCOL; protocol >= FIRST_DRAIN; protocol -= 1) {
+      const answer = await this.call('/drain', { method: 'POST' }, protocol).catch((cause: unknown) => {
+        if (cause instanceof RequestError && cause.status === 426) return null;
+        throw cause;
+      });
 
-    return answer.status === 404 ? null : v.parse(v.object({ jobs: v.number() }), await answer.json()).jobs;
+      if (answer !== null) {
+        this.spoken = protocol;
+
+        return answer.status === 404 ? null : v.parse(v.object({ jobs: v.number() }), await answer.json()).jobs;
+      }
+    }
+
+    return null;
   }
 
   async admit(): Promise<void> {
-    await this.call('/drain', { method: 'DELETE' });
+    await this.call('/drain', { method: 'DELETE' }, this.spoken);
   }
 
   /** A recipe's environment key, and what a commit for it should be packed against. */

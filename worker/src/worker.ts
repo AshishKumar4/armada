@@ -273,10 +273,12 @@ async function route(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
-    // A request with no version is from a client older than the version was.
+    // A request with no version is from a client older than the version was. The drain and the health are the same in
+    // every version, so a deploy drains the version it replaces whatever version it speaks.
     const spoken = Number(request.headers.get(PROTOCOL_HEADER) ?? '1');
+    const head = new URL(request.url).pathname.split('/')[1];
 
-    if (spoken !== PROTOCOL) {
+    if (spoken !== PROTOCOL && head !== 'drain' && head !== 'health') {
       return Response.json({
         error: spoken > PROTOCOL ? 'the deployed Worker is older than this armada client: run `armada deploy` to update it'
           : 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin',
