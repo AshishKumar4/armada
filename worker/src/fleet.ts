@@ -18,6 +18,15 @@ interface Hold {
   readonly until: number;
 }
 
+/** How long a drain holds unless it is asked again: longer than a deploy's install, the Worker upload and its
+ *  secrets, takes between two asks. */
+export const DRAIN_MS = 10 * 60_000;
+
+interface Drained {
+  readonly version: string;
+  readonly until: number;
+}
+
 export class ArmadaFleet extends DurableObject<Env> {
   /** Whether `holder` holds `vcpus` now; it keeps them until `release` or its lease. */
   async acquire(holder: string, vcpus: number, now = Date.now()): Promise<boolean> {
@@ -58,9 +67,11 @@ export class ArmadaFleet extends DurableObject<Env> {
     return (await this.ctx.storage.list({ prefix: 'job:' })).size;
   }
 
-  /** Admits no new job while `version` runs; answers how many jobs are still open. */
+  /** Admits no new job while `version` runs, for `DRAIN_MS` from now: a deploy asks again while it waits, so a deploy
+   *  that dies, even by a kill no handler sees, leaves the version admitting jobs again. Answers how many jobs are still
+   *  open. */
   async drain(version: string): Promise<number> {
-    await this.ctx.storage.put('drained', version);
+    await this.ctx.storage.put('drained', { version, until: Date.now() + DRAIN_MS } satisfies Drained);
 
     return await this.jobs();
   }
@@ -71,6 +82,11 @@ export class ArmadaFleet extends DurableObject<Env> {
   }
 
   async admits(version: string): Promise<boolean> {
-    return (await this.ctx.storage.get<string>('drained')) !== version;
+    const drained = await this.ctx.storage.get<Drained | string>('drained');
+
+    // A drain an earlier Worker stored names its version alone, and lasted until the deploy admitted again.
+    if (typeof drained === 'string') return drained !== version;
+
+    return drained === undefined || drained.version !== version || drained.until <= Date.now();
   }
 }

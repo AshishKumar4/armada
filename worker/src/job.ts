@@ -189,7 +189,7 @@ export class ArmadaJob extends DurableObject<Env> {
    */
   private async answerFromCache(spec: Kept, indexes: readonly number[]): Promise<void> {
     if (spec.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || indexes.length === 0) return;
-    const { bundle } = spec.run;
+    const { bundle, id: task } = spec.run;
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const environment = (await this.ctx.storage.get<string>('key')) ?? '';
 
@@ -198,7 +198,7 @@ export class ArmadaJob extends DurableObject<Env> {
         const [row] = this.sql.exec<{ item: string }>('SELECT item FROM tasks WHERE idx = ?', index).toArray();
 
         if (row === undefined) return;
-        const cached = await this.env.ARTIFACTS.get(await cacheKey(bundle, environment, v.parse(TaskSchema, JSON.parse(row.item)).item));
+        const cached = await this.env.ARTIFACTS.get(await cacheKey(bundle, task, environment, v.parse(TaskSchema, JSON.parse(row.item)).item));
 
         if (cached === null || Number(cached.customMetadata?.['expires'] ?? 0) < Date.now()) return;
         const small = cached.size <= INLINE_BYTES ? await cached.arrayBuffer() : null;
@@ -361,7 +361,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const output = await this.env.ARTIFACTS.get(taskKey(id, outcome.index, 'output'));
 
     if (row === undefined || output === null) return;
-    const key = await cacheKey(spec.run.bundle, (await this.ctx.storage.get<string>('key')) ?? '', v.parse(TaskSchema, JSON.parse(row.item)).item);
+    const key = await cacheKey(spec.run.bundle, spec.run.id, (await this.ctx.storage.get<string>('key')) ?? '', v.parse(TaskSchema, JSON.parse(row.item)).item);
     const expires = String(Date.now() + spec.cache.days * DAY_MS);
 
     await copyInto(this.env.ARTIFACTS, key, output, output.size <= INLINE_BYTES ? await output.arrayBuffer() : null, { expires, answer: outcome.answer ?? '' });

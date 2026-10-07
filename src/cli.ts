@@ -254,10 +254,11 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
   }
   drained();
 
-  while (jobs > 0) {
+  // Each ask renews the drain, which lapses by itself if this process dies.
+  while (jobs !== null && jobs > 0) {
     console.log(`waiting for ${String(jobs)} open job${jobs === 1 ? '' : 's'} to finish; new jobs are refused until the deploy is done`);
     await Bun.sleep(DRAIN_POLL_MS);
-    ({ jobs } = await armada.health());
+    jobs = await armada.drain();
   }
 }
 
@@ -277,7 +278,7 @@ async function deploy(name: string, vcpus: number | undefined): Promise<number> 
     void admit().finally(() => process.exit(2));
   };
 
-  process.once('SIGINT', interrupted).once('SIGTERM', interrupted);
+  process.once('SIGINT', interrupted).once('SIGTERM', interrupted).once('SIGHUP', interrupted);
 
   try {
     if (deployed !== null) await drain(deployed, () => { drained = true; });
@@ -285,7 +286,7 @@ async function deploy(name: string, vcpus: number | undefined): Promise<number> 
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
   } finally {
-    process.off('SIGINT', interrupted).off('SIGTERM', interrupted);
+    process.off('SIGINT', interrupted).off('SIGTERM', interrupted).off('SIGHUP', interrupted);
     await admit();
   }
 

@@ -10,9 +10,9 @@ const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot'
 
 const bundle = 'b'.repeat(64);
 
-/** A job of a cached pushed task over `items`, on a ready environment, beside the other jobs of `artifacts`; its
- *  vessels only record that they began. */
-async function cachedJob(id: string, items: readonly unknown[], artifacts: ReturnType<typeof bucket>) {
+/** A job of the cached pushed task `task` over `items`, on a ready environment, beside the other jobs of `artifacts`;
+ *  its vessels only record that they began. */
+async function cachedJob(id: string, items: readonly unknown[], artifacts: ReturnType<typeof bucket>, task = 'square') {
   const begun: string[] = [];
   const stored = state();
   const job = new ArmadaJob(stored.ctx, world({
@@ -21,7 +21,7 @@ async function cachedJob(id: string, items: readonly unknown[], artifacts: Retur
     ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
   }));
 
-  await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: 'square', bundle }, cache: { days: 7 } }));
+  await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: task, bundle }, cache: { days: 7 } }));
   await job.alarm();
 
   return { job, begun, pending: stored.pending };
@@ -56,10 +56,28 @@ describe('a cached task', () => {
 
     expect({
       first: first.begun, second: second.begun, events, copied: artifacts.objects.get(taskKey('j2', 1, 'output')),
-      key: artifacts.objects.has(await cacheKey(bundle, await environmentKey(v.parse(RecipeSchema, {})), { b: 2, a: 1 })), third: third.begun,
+      key: artifacts.objects.has(await cacheKey(bundle, 'square', await environmentKey(v.parse(RecipeSchema, {})), { b: 2, a: 1 })), third: third.begun,
     }).toEqual({
       first: ['j1/v1', 'j1/v2'], second: ['j2/v1'], events: [{ index: 1, cached: true, value: '{"ok":true,"value":3}' }], copied: '{"ok":true,"value":3}',
       key: true, third: ['j3/v1'],
+    });
+  });
+
+  test('is its own: two tasks of one push, with one recipe and one item, each get their own answer', async () => {
+    const artifacts = bucket();
+    const square = await cachedJob('s1', [3], artifacts, 'square');
+
+    await answer(square.job, 's1', artifacts, 'v1', 0, '{"ok":true,"value":9}');
+    await Promise.all(square.pending);
+    const cube = await cachedJob('c1', [3], artifacts, 'cube');
+
+    await answer(cube.job, 'c1', artifacts, 'v1', 0, '{"ok":true,"value":27}');
+    await Promise.all(cube.pending);
+    const [squareAgain, cubeAgain] = [await cachedJob('s2', [3], artifacts, 'square'), await cachedJob('c2', [3], artifacts, 'cube')];
+    const answered = async (job: ArmadaJob) => (await job.events(0)).events.map((event) => brief(event.outcome));
+
+    expect({ cubeRan: cube.begun, square: await answered(squareAgain.job), cube: await answered(cubeAgain.job) }).toEqual({
+      cubeRan: ['c1/v1'], square: [{ index: 0, cached: true, value: '{"ok":true,"value":9}' }], cube: [{ index: 0, cached: true, value: '{"ok":true,"value":27}' }],
     });
   });
 });

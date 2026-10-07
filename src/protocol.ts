@@ -276,9 +276,10 @@ export function canonical(value: Json): string {
     ? Object.fromEntries(Object.entries(held).sort(([left], [right]) => (left < right ? -1 : 1))) : held);
 }
 
-/** The R2 key a pushed task's answer is cached under: its bundle, its environment and its item decide it. */
-export async function cacheKey(bundle: string, environment: string, item: Json): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${bundle}\n${environment}\n${canonical(item)}`));
+/** The R2 key a pushed task's answer is cached under: its bundle, its id, its environment and its item decide it. A
+ *  bundle holds every task of its project, so the id tells apart two tasks with the same recipe and item. */
+export async function cacheKey(bundle: string, task: string, environment: string, item: Json): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${bundle}\n${task}\n${environment}\n${canonical(item)}`));
 
   return `cache/${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }

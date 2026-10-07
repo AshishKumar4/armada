@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { Armada } from '../../src/sdk';
 import type { Env } from '../src/env';
-import { ArmadaFleet } from '../src/fleet';
+import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
 import { namespace, state, world } from './harness';
@@ -60,6 +60,22 @@ describe('a drained version', () => {
     expect({ open, refused, after, admitted }).toEqual({
       open: 1, refused: 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes', after: 0, admitted: 'admitted',
     });
+  });
+
+  test('lapses by itself when the deploy that drained it stops asking, as one killed mid-deploy does', async () => {
+    const { armada } = deployment();
+
+    await armada.drain();
+    const refused = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+
+    setSystemTime(new Date(Date.now() + DRAIN_MS + 1000));
+    try {
+      const admitted = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+
+      expect({ refused, admitted }).toEqual({ refused: 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes', admitted: 'admitted' });
+    } finally {
+      setSystemTime();
+    }
   });
 
   test('is drained, and read, by a client of any version, which a deploy across a version bump needs', async () => {
