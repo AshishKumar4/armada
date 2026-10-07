@@ -66,6 +66,22 @@ export function connect(): Armada {
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
 }
 
+/** A failed response in one line: the Worker's JSON error as it is, or the status and the title or first line of any
+ *  other page, such as the error page a Worker still rolling out answers with. */
+async function failureOf(response: Response): Promise<string> {
+  const text = await response.text();
+
+  try {
+    JSON.parse(text);
+
+    return `${String(response.status)} ${text}`;
+  } catch {
+    const line = (/<title>([^<]*)<\/title>/iu.exec(text)?.[1] ?? text.split('\n').find((each) => each.trim() !== '') ?? '').trim().slice(0, 200);
+
+    return `${String(response.status)} from the Worker (it may still be deploying)${line === '' ? '' : `: ${line}`}`;
+  }
+}
+
 export class Armada {
   constructor(readonly connection: Connection) {}
 
@@ -75,7 +91,7 @@ export class Armada {
     headers.set('authorization', `Bearer ${this.connection.token}`);
     const response = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers });
 
-    if (!response.ok && response.status !== 404) throw new Error(`${init.method ?? 'GET'} ${path}: ${String(response.status)} ${await response.text()}`);
+    if (!response.ok && response.status !== 404) throw new Error(`${init.method ?? 'GET'} ${path}: ${await failureOf(response)}`);
 
     return response;
   }

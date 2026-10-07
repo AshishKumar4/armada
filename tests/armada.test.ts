@@ -199,6 +199,30 @@ describe('uploading a pack', () => {
   });
 });
 
+describe('a failed request', () => {
+  test('says the Worker\'s JSON error as it is, and an HTML error page by its status and title', async () => {
+    const page = '<!DOCTYPE html>\n<html>\n<head>\n<title>Service Unavailable</title>\n</head>\n<body>' + '<p>retry</p>'.repeat(500) + '</body>\n</html>\n';
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => new URL(request.url).pathname === '/jobs'
+        ? Response.json({ error: 'upload the pack first' }, { status: 409 })
+        : new Response(page, { status: 503, headers: { 'content-type': 'text/html' } }),
+    });
+
+    try {
+      const armada = new Armada({ url: server.url.href, token: 't', account: 'a' });
+      const failed = async (path: string) => await armada.call(path, { method: 'POST' }).then(() => '', (cause: unknown) => String(cause));
+
+      expect([await failed('/jobs'), await failed('/environments/resolve')]).toEqual([
+        'Error: POST /jobs: 409 {"error":"upload the pack first"}',
+        'Error: POST /environments/resolve: 503 from the Worker (it may still be deploying): Service Unavailable',
+      ]);
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
 describe('packing a commit', () => {
   test('a clone without the environment\'s commit packs from the root, and that pack checks out where the environment is', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
