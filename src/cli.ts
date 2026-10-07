@@ -29,9 +29,16 @@ import { BaseSchema, INSTANCES } from './protocol';
 
 const ROOT = join(import.meta.dir, '..');
 
-const option = (name: string): string | undefined => process.argv.find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
+const dash = process.argv.indexOf('--');
 
-const flag = (name: string): boolean => process.argv.includes(`--${name}`);
+/** The arguments before `--`, which are armada's, and the words after it, which are the command's. */
+const args = (dash < 0 ? process.argv : process.argv.slice(0, dash)).slice(2);
+
+const rest = dash < 0 ? [] : process.argv.slice(dash + 1);
+
+const option = (name: string): string | undefined => args.find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
+
+const flag = (name: string): boolean => args.includes(`--${name}`);
 
 const RecipeFileSchema = v.object({
   base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), instance: v.optional(v.picklist(INSTANCES)),
@@ -60,8 +67,7 @@ function itemsFrom(source: string): unknown[] {
 }
 
 async function map(): Promise<number> {
-  const dash = process.argv.indexOf('--');
-  const command = dash < 0 ? [] : process.argv.slice(dash + 1);
+  const command = rest;
   const items = option('items');
   const times = option('times');
 
@@ -170,13 +176,11 @@ async function main(): Promise<number> {
   const connection = option('connection');
 
   if (connection !== undefined) process.env['ARMADA_CONNECTION'] = resolve(connection);
-  const dash = process.argv.indexOf('--');
-  const words = (dash < 0 ? process.argv : process.argv.slice(0, dash)).slice(2).filter((argument) => !argument.startsWith('--'));
-  const [command, target] = words;
+  const [command, target] = args.filter((argument) => !argument.startsWith('--'));
 
   if (command === 'map') return await map();
 
-  if (command === 'run' && target !== undefined) return await runCI(connect(), target, option('label') ?? '', dash < 0 ? [] : process.argv.slice(dash + 1));
+  if (command === 'run' && target !== undefined) return await runCI(connect(), target, option('label') ?? '', rest);
 
   if (command === 'status' && target !== undefined) {
     console.log(JSON.stringify(await connect().job(target).status(), null, 2));

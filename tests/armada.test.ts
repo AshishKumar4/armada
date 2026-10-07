@@ -296,6 +296,40 @@ describe('a commit checkout', () => {
   });
 });
 
+describe('the CLI\'s arguments', () => {
+  test('are its own before --, and every word after -- is the command\'s', async () => {
+    const jobs: unknown[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        if (pathname === '/jobs') {
+          jobs.push(await request.json());
+
+          return Response.json({ id: 'j1' });
+        }
+        if (pathname === '/jobs/j1/events') return Response.json({ events: [], done: true });
+
+        return Response.json({
+          id: 'j1', label: '', phase: 'done', key: 'k', createdAt: 0, startedAt: 0, finishedAt: 1, vessels: [], problems: [], environment: null,
+          tasks: { total: 2, queued: 0, running: 0, exited: 2, red: 0, failed: 0 },
+        });
+      },
+    });
+
+    try {
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=2', '--', 'tool', '--output', '--items=x'], {
+        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+
+      expect({ exit: await cli.exited, jobs }).toMatchObject({ exit: 0, jobs: [{ items: [1, 2], run: { command: ['tool', '--output', '--items=x'] }, output: false }] });
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
 describe('the CLI following a job', () => {
   test('interrupted, it cancels the job and exits 2, even when the job finishes green while the cancel is answered', async () => {
     const seen: string[] = [];
