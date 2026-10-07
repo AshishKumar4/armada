@@ -32,13 +32,20 @@ async function prepare(answer: Answer, alarms = 40): Promise<Prepared> {
   return { generations, failures };
 }
 
-/** A container where every phase's command exits 0 at once, and the waits for `phase` the platform loses `lost` times. */
+/** A container where every phase's command exits 0 at once, and the waits for `phase` the platform loses `lost` times.
+ *  As on the platform, an exec whose working directory the container lacks finds no command: the work directory exists
+ *  once the base phase (the runner's layer) has run. */
 function answering(phase: string, lost: number): Answer & { readonly launched: string[]; readonly paths: (string | undefined)[] } {
   const launched: string[] = [];
   const paths: (string | undefined)[] = [];
   let waits = 0;
+  let layered = false;
 
   return Object.assign((argv: readonly string[], options?: ContainerExecOptions) => {
+    if (options?.cwd !== undefined && !layered) return new Error('Command `/bin/sh` was not found in the container. Check the path or install the binary.');
+
+    if (argv[3] === 'wait' && (argv[2] ?? '').includes('/phases/base/')) layered = true;
+
     if (argv[3] === 'launch') {
       launched.push(argv[4] ?? '');
       paths.push(options?.env?.['PATH']);

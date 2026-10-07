@@ -150,6 +150,8 @@ interface Command {
   readonly asUser: boolean;
   /** Its environment; the container's own where absent. */
   readonly env?: Record<string, string>;
+  /** Where it runs: the work directory, once the runner's layer has made it. */
+  readonly cwd?: string;
 }
 
 export class ArmadaPreparer extends DurableObject<Env> {
@@ -200,7 +202,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       case 'setup':
         return recipe.setup === '' ? {} : await this.command(preparation, {
-          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH }, argv: ['/bin/sh', `${STATE}/setup.sh`],
+          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH }, cwd: workdir, argv: ['/bin/sh', `${STATE}/setup.sh`],
           inputs: async () => { await pipeIn(container, recipe.setup, `${STATE}/setup.sh`); },
         });
 
@@ -209,7 +211,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
         const { sha } = preparation;
 
         return repo === undefined || sha === null ? {} : await this.command(preparation, {
-          doing: 'the checkout', asUser: true, env, argv: ['/bin/sh', '-c', receive(workdir, repo.history), 'receive', sha],
+          doing: 'the checkout', asUser: true, env, cwd: workdir, argv: ['/bin/sh', '-c', receive(workdir, repo.history), 'receive', sha],
           inputs: async () => {
             const pack = await this.env.ARTIFACTS.get(packKey(repo.project, sha, 'root', preparation.packer));
 
@@ -221,7 +223,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       case 'install':
         return recipe.install === '' ? {} : await this.command(preparation, {
-          doing: 'the recipe\'s install', asUser: true, env, argv: ['/bin/sh', `${STATE}/install.sh`],
+          doing: 'the recipe\'s install', asUser: true, env, cwd: workdir, argv: ['/bin/sh', `${STATE}/install.sh`],
           inputs: async () => { await pipeIn(container, recipe.install, `${STATE}/install.sh`); },
         });
 
@@ -242,7 +244,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
         // A snapshot that does not start, or starts without what it was given, is no environment.
         const checks = [recipe.repo === undefined ? 'true' : 'git rev-parse HEAD', ...recipe.smoke === '' ? [] : [recipe.smoke]].join(' && ');
         const verified = await this.command(preparation, {
-          doing: recipe.smoke === '' ? 'the restored environment' : 'the restored environment and the recipe\'s smoke', asUser: true, env, argv: ['/bin/sh', '-c', checks],
+          doing: recipe.smoke === '' ? 'the restored environment' : 'the restored environment and the recipe\'s smoke', asUser: true, env, cwd: workdir, argv: ['/bin/sh', '-c', checks],
           inputs: async () => { await startAndAnswer(container, { containerSnapshot: { id: snapshot.id }, instance: recipe.instance, enableInternet: true, entrypoint: ENTRYPOINT }, 300_000, LEASE_MS); },
         });
 
@@ -256,7 +258,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
   /** A phase's command, run once in its container whatever alarms see it: the first gives the container its inputs and
    *  launches the command detached, and each waits on it for a slice. A launch or a wait whose exec the platform lost is
    *  made again; three lost in a row, and the container is lost. */
-  private async command(preparation: Preparation, { doing, inputs, argv, asUser, env }: Command): Promise<'running' | Record<string, never>> {
+  private async command(preparation: Preparation, { doing, inputs, argv, asUser, env, cwd }: Command): Promise<'running' | Record<string, never>> {
     const container = this.container();
     const dir = phaseDir(preparation.phase);
     let { started } = preparation;
@@ -267,7 +269,6 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.put('preparation', { ...preparation, started } satisfies Preparation);
     }
 
-    const cwd = workdirOf(preparation.recipe);
     let lost = 0;
     // An exec's output, or null where the platform lost it and it is to be made again.
     const attempt = async (what: string, exec: readonly string[], options: Exec): Promise<string | null> => {
