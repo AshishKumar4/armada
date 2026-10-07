@@ -2,8 +2,7 @@
 
 Run a command or a TypeScript function over many inputs at once, on Cloudflare Containers.
 
-The CLI and `armada run` run any command, so a task can be written in any language its environment installs. Only the
-SDK's typed functions are TypeScript.
+The CLI and `armada run` work with any language the environment installs. The typed SDK is TypeScript.
 
 For example, you can use it for CI. It takes about 7 seconds to spawn 100 containers and run a 3-second command on
 each, all in parallel.
@@ -31,21 +30,15 @@ Anything a task leaves running is stopped before the next task starts.
 
 <p align="center"><img src=".github/arch.svg" alt="Clients call the Worker's bearer API. The Worker keeps its state in Durable Objects: ArmadaJob, ArmadaVessel, ArmadaEnvironments, ArmadaPreparer, ArmadaTimings and ArmadaFleet. Vessels start containers from a snapshot, the preparer from the base image, and packs, bundles, outputs, logs and verdicts live in R2." width="100%"></p>
 
-Every client speaks one bearer API to armada's Worker, which keeps its state in Durable Objects. ArmadaJob holds a
-job's queue and its outcome events. One ArmadaVessel per container pulls task after task on alarms, and holds its
-vCPUs in ArmadaFleet before its container starts. ArmadaFleet belongs to one deployment, so `--vcpus` caps only that
-deployment. Packs, bundles, outputs, logs and verdicts live in R2.
+The CLI and the SDK call one Worker. Its Durable Objects hold the state: each job's queue, one object per container,
+the fleet's vCPU count, and the prepared environments. Code, outputs, logs and verdicts go to R2.
 
 ### The preparer
 
-Every container of a job has to be the same, and has to start with its tools already installed. So an environment is
-prepared once, and every container after that starts from its snapshot. One ArmadaPreparer per environment key starts
-a container from the base image, adds armada's runner layer, runs the recipe's `setup` as root, checks out the commit
-for a repository, runs `install` as the user, and snapshots the container. That takes a few minutes. A container then
-starts from the snapshot in 0.2 to 2 seconds. The key hashes the runner layer's version, the base image, the two
-scripts' text, the size and, for a repository, the content of the files `environment.key` lists. Changing any of them
-prepares a new environment, and an unchanged recipe reuses its snapshot. If a snapshot does not start, the job's
-containers fail, and the job names the environment once.
+Installing the tools in every container would cost minutes per container. So armada prepares each environment once:
+it starts a container from the base image, runs the recipe's `setup` and `install` (checking out the commit first, for
+CI), and snapshots it. Every container after that starts from the snapshot in 0.2 to 2 seconds. Changing the recipe,
+or a file listed in `environment.key`, prepares a new snapshot.
 
 ## Examples
 
@@ -69,7 +62,12 @@ The CLI and `.armada.json` fill these in a command's words; an unknown one is an
 
 ## From TypeScript
 
-After `bun add github:AshishKumar4/armada`, a project names itself and the folder its tasks live in:
+This example takes a list of image URLs. One task makes a half-size thumbnail of each image with ImageMagick; the
+other downloads each image and reports its size and type. Both tasks run in one environment with curl and ImageMagick
+installed.
+
+Add armada with `bun add github:AshishKumar4/armada`. `armada.config.ts` names the project and the folder its tasks
+live in:
 
 ```ts
 // armada.config.ts
@@ -107,6 +105,8 @@ export const measure = task({
 });
 ```
 
+Any script in the project can then run them:
+
 ```ts
 import { measure, thumbnail } from './armada/thumbnails';
 
@@ -121,28 +121,21 @@ const one = await thumbnail.run(urls[0]);               // one item, on one cont
 const here = await thumbnail.local(urls[0]);            // one item, on this machine, no container
 ```
 
-- `armada push` bundles every task the project's folders export and sends it. A task runs by its `id`, which one
-  project owns in a deployment; a push drops the ids its project no longer exports. A script run inside the project
-  pushes it once by itself, so `bun run sweep.ts` needs no separate step. An app deployed elsewhere runs `armada push`
-  in its own release. `armada dev` pushes again on each save.
-- `.map` returns the values in input order, or throws a `MapError` holding every result. `.stream` returns the job,
-  whose results arrive as they land, with `ordered()`, `settled()`, `cancel()` and `outputStream(i)`.
-- A result has `ok`. When it is false, `kind` says why: `error` (the body threw, its value failed its schema, or its
-  command exited nonzero), `timeout`, `cancelled` or `lost`. Each result carries its `meta`: seconds, container, exit
-  code, the tail of its log, and its peak memory and CPU.
-- A recipe is built a step at a time: `recipe.debian()` or `recipe.from(image)`, then `.apt(...packages)` and
-  `.setup(script)` as root, `.install(script)` as the user, and `.size(size)`. Each step returns a new recipe, and the
-  environment's key hashes the scripts the steps make. `recipe({ setup, install, size })` takes them whole.
-- A body can also run commands and answer with a value: `` (await sh`git rev-parse HEAD`.text()).trim() ``.
-  `` sh.raw`...` `` interpolates without escaping, for a script that is itself shell.
-- Schemas are any [Standard Schema](https://standardschema.dev): valibot, zod or arktype. An item is checked before
-  it is sent, and a value in the container before it counts as ok.
-- Items and values are plain JSON, or bytes for a value. The types refuse a `Date`, a `Map`, `any` or `unknown` at
-  the task's definition.
-- An output may be any size up to 4.995 GiB, R2's limit for one upload. `job.outputStream(i)` downloads one too large
-  to hold in memory.
-- `map(items, { pool, label, env, files, tmpfs })` sets a job's options. A task takes `timeout`, and `speculative`,
-  which lets an idle container run a straggler again.
+- `armada push` uploads the project's tasks, and drops the ones it no longer exports. A script inside the project
+  pushes on its first run, and `armada dev` pushes on every save.
+- `.map` returns the values in input order, and throws a `MapError` if any item fails. `.stream` hands back each
+  result as it lands. `.run` runs one item on a container, and `.local` runs it on this machine.
+- A failed result's `kind` says why: `error`, `timeout`, `cancelled` or `lost`. Every result's `meta` has its seconds,
+  exit code, log tail, and peak memory and CPU.
+- A recipe is built in steps: `recipe.debian()` or `recipe.from(image)`, then `.apt()`, `.setup()`, `.install()` and
+  `.size()`.
+- `sh` passes each `${}` as one word. `` sh.raw`...` `` doesn't escape, for a script that is itself shell.
+- Schemas can be valibot, zod or arktype (any [Standard Schema](https://standardschema.dev)). Items are checked before
+  they're sent, and values inside the container.
+- Items and values are plain JSON, or bytes for a value. A `Date`, a `Map`, `any` or `unknown` is a type error.
+- An output can be up to 4.995 GiB, R2's limit for one upload. `job.outputStream(i)` streams a large one.
+- `map(items, { pool, label, env, files, tmpfs })` sets a job's options. A task takes `timeout`, and `speculative` to
+  let an idle container rerun a straggler.
 
 ## CI with `armada run`
 
