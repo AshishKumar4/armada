@@ -3,8 +3,7 @@
 Run a command over many inputs at once, on Cloudflare Containers.
 
 For example, you can use it for CI. It takes about 7 seconds to spawn 100 containers and run a 3-second command on
-each, all in parallel. That was `armada map --times=100 --pool=100 -- sleep 3`, on an environment armada had already
-prepared.
+each, all in parallel.
 
 ## Install
 
