@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { grade, PlanSchema, rowName, taskName, VerdictFileSchema, type TaskAnswer, type VerdictRow } from './grade';
-import { TimingsSchema, type Manifest, type Outcome, type Recipe } from './protocol';
+import { TimingsSchema, type Manifest, type Outcome, type Recipe, type JobSpec } from './protocol';
 import type { Armada, Job } from './sdk';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -114,6 +114,18 @@ function printReds(reds: readonly VerdictRow[]): void {
     console.log(`\nRED  ${rowName(row)}  (exit ${String(row.exitCode)}, ${seconds(row.seconds * 1000)})`);
     console.log(row.output.split('\n').slice(-TAIL_LINES).map((line) => `  | ${line}`).join('\n'));
   }
+}
+
+/** The job fields that run a command on a commit in the environment its `.armada.json` names, its pack uploaded. */
+export async function onCommit(armada: Armada, target: string): Promise<Pick<JobSpec, 'recipe' | 'commit' | 'env' | 'tmpfs'>> {
+  const { sha, repo } = resolveCommit(target);
+  const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
+  const recipe = recipeOf(repo, sha, config);
+  const { base } = await armada.resolve(recipe);
+
+  await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history));
+
+  return { recipe, commit: { sha, base }, env: config.env, tmpfs: config.tmpfs };
 }
 
 export async function runCI(armada: Armada, target: string, label: string): Promise<number> {

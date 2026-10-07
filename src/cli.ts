@@ -2,13 +2,14 @@
 /**
  * armada: fast, mappable compute on Cloudflare Containers.
  *
- *   armada map [--env=<recipe.json>] --items=<file|-> [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command with {item}>
+ *   armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command with {item}>
  *   armada run <commit|worktree> [--label=<text>]     a project's CI from its `.armada.json`; exits 0, 1 red, 2 not graded
  *   armada status <job-id>
  *   armada deploy --account=<id>                      with this machine's wrangler login
  *   armada prune [--keep=3]                           needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
  *
- * `map` items are a JSON array, or one item per line. A recipe file is `{"base", "setup", "install", "smoke",
+ * `map` items are a JSON array, or one item per line; `--times=N` maps over 1..N. `--commit` runs in the commit's checkout,
+ * in the environment its `.armada.json` names, as `armada run` does. A recipe file is `{"base", "setup", "install", "smoke",
  * "instance"}`, its scripts given as paths relative to it. Each outcome is printed as it lands (`--json` for JSON
  * lines), then a summary; `map` exits 0 when every task exited 0, 1 when one did not, 2 when one could not run.
  */
@@ -16,7 +17,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
-import { runCI } from './ci';
+import { onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, ConnectionSchema } from './sdk';
 import { INSTANCES } from './protocol';
@@ -57,12 +58,16 @@ async function map(): Promise<number> {
   const dash = process.argv.indexOf('--');
   const command = dash < 0 ? [] : process.argv.slice(dash + 1);
   const items = option('items');
+  const times = option('times');
 
-  if (command.length === 0 || items === undefined) throw new Error('usage: armada map [--env=<recipe.json>] --items=<file|-> [--pool=N] [--output] [--idempotent] -- <command with {item}>');
+  if (command.length === 0 || (items === undefined && times === undefined)) throw new Error('usage: armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] -- <command with {item}>');
   const armada = connect();
   const began = Date.now();
+  const target = option('commit');
+  const where = target === undefined ? { recipe: recipeFrom(option('env')) } : await onCommit(armada, target);
   const job = await armada.map({
-    recipe: recipeFrom(option('env')), items: itemsFrom(items), run: { command }, output: flag('output'), idempotent: flag('idempotent'),
+    ...where, items: items === undefined ? Array.from({ length: Number(times) }, (_, index) => index + 1) : itemsFrom(items),
+    run: { command }, output: flag('output'), idempotent: flag('idempotent'),
     pool: Number(option('pool') ?? '50'), timeout: Number(option('timeout') ?? '3600'), label: option('label') ?? '',
   });
   let worst = 0;
