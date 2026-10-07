@@ -57,7 +57,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
   }
 
   /** The key's environment, or its preparation begun; a repository recipe prepares only from a `root` pack. */
-  async ensure(key: string, recipe: Recipe, commit: { readonly sha: string; readonly base: string } | null, now = Date.now()): Promise<Readiness> {
+  async ensure(key: string, recipe: Recipe, commit: { readonly sha: string; readonly base: string; readonly packer?: number } | null, now = Date.now()): Promise<Readiness> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     if (entry?.state === 'ready') {
@@ -74,7 +74,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: commit?.sha ?? null, since: now } satisfies Entry);
     // Each attempt on its own object: one key's preparer refused every standard-4 start for 20 minutes while a new
     // object on the same account started one at once.
-    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, recipe, commit?.sha ?? null);
+    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, recipe, commit?.sha ?? null, commit?.packer);
 
     return { kind: 'preparing', since: now };
   }
@@ -113,6 +113,8 @@ interface Preparation {
   readonly since: number;
   readonly recipe: Recipe;
   readonly sha: string | null;
+  /** The packer of the commit's pack: absent for an earlier client's. */
+  readonly packer?: number;
   readonly phase: Phase;
   readonly seconds: Record<string, number>;
   readonly snapshot: Generation['snapshot'] | null;
@@ -126,8 +128,8 @@ const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 const STEP_MS = 12 * 60_000;
 
 export class ArmadaPreparer extends DurableObject<Env> {
-  async begin(key: string, since: number, recipe: Recipe, sha: string | null): Promise<void> {
-    await this.ctx.storage.put('preparation', { key, since, recipe, sha, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
+  async begin(key: string, since: number, recipe: Recipe, sha: string | null, packer?: number): Promise<void> {
+    await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
     await this.ctx.storage.setAlarm(Date.now());
   }
 
@@ -180,7 +182,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       case 'receive': {
         if (recipe.repo === undefined || preparation.sha === null) return undefined;
-        const pack = await this.env.ARTIFACTS.get(packKey(recipe.repo.project, preparation.sha, 'root'));
+        const pack = await this.env.ARTIFACTS.get(packKey(recipe.repo.project, preparation.sha, 'root', preparation.packer));
 
         if (pack === null) throw new Error(`the pack of ${preparation.sha} is not in R2`);
         await pipeIn(container, pack.body, `${STATE}/pack`);

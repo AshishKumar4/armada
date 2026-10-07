@@ -21,7 +21,7 @@ export interface VesselSpec {
   readonly instance: 'lite' | 'standard-1' | 'standard-2' | 'standard-3' | 'standard-4';
   readonly vcpus: number;
   readonly workdir: string;
-  readonly commit: { readonly sha: string; readonly base: string; readonly project: string; readonly history: 'full' | 'commit' } | null;
+  readonly commit: { readonly sha: string; readonly base: string; readonly packer?: number; readonly project: string; readonly history: 'full' | 'commit' } | null;
   readonly tmpfs: readonly string[];
   readonly files: Record<string, string>;
   readonly handler: string | null;
@@ -135,7 +135,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     await must(container, 'the tmpfs mounts', ['/bin/sh', '-c', mounts(spec.tmpfs)], { ms: EXEC_MS });
 
     if (spec.commit !== null) {
-      const pack = await this.env.ARTIFACTS.get(packKey(spec.commit.project, spec.commit.sha, spec.commit.base));
+      const pack = await this.env.ARTIFACTS.get(packKey(spec.commit.project, spec.commit.sha, spec.commit.base, spec.commit.packer));
 
       if (pack === null) throw new Error(`the pack of ${spec.commit.sha} is not in R2`);
       await pipeIn(container, pack.body, `${STATE}/pack`);

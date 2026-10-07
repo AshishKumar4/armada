@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type TaskAnswer, type VerdictRow } from './grade';
-import { TimingsSchema, type Manifest, type Outcome, type Recipe, type JobSpec } from './protocol';
+import { PACKER, TimingsSchema, type JobSpec, type Manifest, type Outcome, type Recipe } from './protocol';
 import type { Armada, Job } from './sdk';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -176,7 +176,7 @@ export async function onCommit(armada: Armada, target: string): Promise<Pick<Job
 
   await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history));
 
-  return { recipe, commit: { sha, base }, env: config.env, tmpfs: config.tmpfs };
+  return { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs };
 }
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
@@ -195,7 +195,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
-  const common = { recipe, commit: { sha, base }, env: config.env, tmpfs: config.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
+  const common = { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
   // The plan's stdout is its output; its stderr stays in its log.
   const planJob = await armada.map({ ...common, items: [{}], run: { command: ['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs] }, output: true, pool: 1, timeout: 900 });
 

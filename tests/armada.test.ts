@@ -186,9 +186,12 @@ describe('uploading a pack', () => {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
       expect(await armada.uploadPack('dew', 'a'.repeat(40), 'root', () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
-      expect(seen.splice(0)).toEqual(['HEAD root', 'PUT root']);
+      expect(seen.splice(0)).toEqual(['HEAD root?packer=2', 'PUT root?packer=2']);
       expect(await armada.uploadPack('dew', 'b'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
-      expect(seen).toEqual(['HEAD root', 'POST root?uploads', 'PUT root?upload=u1&part=1', 'PUT root?upload=u1&part=2', 'PUT root?upload=u1&part=3', 'POST root?upload=u1']);
+      expect(seen).toEqual([
+        'HEAD root?packer=2', 'POST root?packer=2&uploads', 'PUT root?packer=2&upload=u1&part=1', 'PUT root?packer=2&upload=u1&part=2',
+        'PUT root?packer=2&upload=u1&part=3', 'POST root?packer=2&upload=u1',
+      ]);
       expect(sent).toEqual([PACK_PART, PACK_PART, 5]);
     } finally {
       globalThis.fetch = original;

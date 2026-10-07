@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { EventsSchema, JobStatusSchema, type JobSpec, type JobSpecSchema, type JobStatus, type Outcome, type Recipe, type RecipeSchema } from './protocol';
+import { EventsSchema, JobStatusSchema, PACKER, type JobSpec, type JobSpecSchema, type JobStatus, type Outcome, type Recipe, type RecipeSchema } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -86,10 +86,10 @@ export class Armada {
     return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe }));
   }
 
-  /** Stores a commit's pack once; `pack` is called only when the runner lacks it. One larger than a request may
-   *  carry goes in parts of PACK_PART bytes. */
+  /** Stores a commit's pack once, under this client's `PACKER`; `pack` is called only when the runner lacks it. One
+   *  larger than a request may carry goes in parts of PACK_PART bytes. */
   async uploadPack(project: string, sha: string, base: string, pack: () => Blob): Promise<number | null> {
-    const path = `/packs/${project}/${sha}/${base}`;
+    const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}`;
 
     if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
     const body = pack();
@@ -99,16 +99,16 @@ export class Armada {
 
       return body.size;
     }
-    const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}?uploads`, {}));
+    const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}&uploads`, {}));
     const bytes = new Uint8Array(await body.arrayBuffer());
     const parts = [];
 
     for (let start = 0, partNumber = 1; start < bytes.length; start += PACK_PART, partNumber += 1) {
-      const stored = await (await this.call(`${path}?upload=${encodeURIComponent(upload)}&part=${String(partNumber)}`, { method: 'PUT', body: bytes.subarray(start, start + PACK_PART) })).json();
+      const stored = await (await this.call(`${path}&upload=${encodeURIComponent(upload)}&part=${String(partNumber)}`, { method: 'PUT', body: bytes.subarray(start, start + PACK_PART) })).json();
 
       parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
     }
-    await this.post(`${path}?upload=${encodeURIComponent(upload)}`, { parts });
+    await this.post(`${path}&upload=${encodeURIComponent(upload)}`, { parts });
 
     return body.size;
   }

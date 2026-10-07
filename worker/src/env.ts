@@ -19,12 +19,10 @@ export interface Env {
   readonly FLEET_VCPUS: string;
 }
 
-/** The packer a stored pack came from. A `commit` checkout's pack from the first one could lack objects the checkout
- *  needs, and a client finding one stored would not upload it again, so a pack is keyed by its packer. */
-const PACKER = 2;
-
-/** The R2 key of a commit's pack: from the root, or what it adds to an environment's commit. */
-export const packKey = (project: string, sha: string, base: string): string => `packs/${project}/${sha}.${base}.p${String(PACKER)}.pack`;
+/** The R2 key of a commit's pack: from the root, or what it adds to an environment's commit, under its packer
+ *  (`PACKER`), or under the key an earlier client's pack has always had. */
+export const packKey = (project: string, sha: string, base: string, packer: number | undefined): string =>
+  `packs/${project}/${sha}.${base}${packer === undefined ? '' : `.p${String(packer)}`}.pack`;
 
 /** The R2 keys of a task's output and log. */
 export const taskKey = (job: string, index: number, leaf: 'output' | 'log'): string => `jobs/${job}/tasks/${String(index)}/${leaf === 'log' ? 'log.gz' : 'output'}`;

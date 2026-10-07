@@ -64,6 +64,14 @@ export type Recipe = v.InferOutput<typeof RecipeSchema>;
 /** What a job's pack holds: `root`, the commit with its history, or what it adds to the environment's commit. */
 export const PackBase = v.union([v.literal('root'), Sha]);
 
+/** The packer this client is. A pack is stored under the packer that made it, so one an earlier client made (whose
+ *  `commit` checkout packs could lack objects) is never served for this client's, and an earlier client's packs keep
+ *  their own key. */
+export const PACKER = 2;
+
+/** A pack's packer: absent for a pack an earlier client made. */
+export const Packer = v.optional(v.pipe(v.number(), v.integer(), v.minValue(2)));
+
 /** A command, its words filled per item (`{item}`, an object item's scalar keys, `{out}`, `{files}`, `{index}`), or a
  *  JavaScript function's source, called with the item under `node`; its return value is the task's output. */
 export const RunSchema = v.union([
@@ -74,7 +82,7 @@ export const RunSchema = v.union([
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,
   /** For a repository recipe: the commit each container checks out, packed against `base`. */
-  commit: v.optional(v.object({ sha: Sha, base: PackBase })),
+  commit: v.optional(v.object({ sha: Sha, base: PackBase, packer: Packer })),
   items: v.pipe(v.array(v.unknown()), v.minLength(1), v.maxLength(100_000)),
   run: RunSchema,
   /** Whether a task writes `{out}`, kept as its output (a handler's return value always is). */

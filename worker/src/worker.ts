@@ -4,7 +4,7 @@
  * bearer the deploy wrote. CI is a client of it (`src/ci.ts`).
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, JobSpecSchema, PackBase, RecipeSchema, Sha, TimingsSchema } from '../../src/protocol';
+import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, RecipeSchema, Sha, TimingsSchema } from '../../src/protocol';
 import { packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
@@ -55,7 +55,8 @@ const Parts = v.object({ parts: v.array(v.object({ partNumber: v.pipe(v.number()
  *  parts' etags completes it. */
 const packs: Handler = async (request, env, [project, sha, base], url) => {
   if (!v.is(Project, project) || !v.is(Sha, sha) || !v.is(PackBase, base)) return undefined;
-  const key = packKey(project, sha, base);
+  const packer = url.searchParams.get('packer');
+  const key = packKey(project, sha, base, v.parse(Packer, packer === null ? undefined : Number(packer)));
   const upload = url.searchParams.get('upload');
 
   if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(key)) === null ? 404 : 200 });
@@ -88,7 +89,7 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
     if (spec.commit !== undefined) {
       if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
 
-      if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
+      if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base, spec.commit.packer))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
     }
 
     const created = jobId();
