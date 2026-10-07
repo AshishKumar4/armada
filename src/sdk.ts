@@ -137,7 +137,7 @@ export class Armada {
   }
 
   /** Stores a function's bundle once, under the sha-256 of its bytes, and returns that digest. */
-  async uploadBundle(bytes: Uint8Array): Promise<string> {
+  async uploadBundle(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
     const digest = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
     const path = `/bundles/${digest}`;
 

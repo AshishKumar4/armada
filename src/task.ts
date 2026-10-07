@@ -446,7 +446,7 @@ async function check<S extends StandardSchemaV1>(schema: S, value: unknown, what
 }
 
 /** `task`'s module and what it imports, bundled for `node` with the runner as its entry. */
-async function bundleOf(url: string, task: Runnable): Promise<Uint8Array> {
+async function bundleOf(url: string, task: Runnable): Promise<Uint8Array<ArrayBuffer>> {
   const path = fileURLToPath(url);
   // The module is the caller's, known only at run time.
   const loaded: Record<string, unknown> = await import(url);
