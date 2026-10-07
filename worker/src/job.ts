@@ -16,10 +16,10 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, BUNDLE_PATH, environmentKey, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
-import { said, SINGLE, type Env } from './env';
+import { said, SINGLE, taskKey, textOf, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { instanceOf, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
@@ -59,6 +59,23 @@ const STRAGGLER_MS = 30_000;
 
 const JOB_DEADLINE_MS = 6 * 60 * 60_000;
 
+/** The cache lookups a job makes at once. */
+const CACHE_READS = 32;
+
+const DAY_MS = 24 * 60 * 60_000;
+
+/** An R2 object into `key`: `small` when it was read whole, else streamed at its known size. */
+async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, small: ArrayBuffer | null, customMetadata?: Record<string, string>): Promise<void> {
+  if (small !== null) {
+    await bucket.put(key, small, { httpMetadata: source.httpMetadata, customMetadata });
+
+    return;
+  }
+  const known = new FixedLengthStream(source.size);
+
+  await Promise.all([source.body.pipeTo(known.writable), bucket.put(key, known.readable, { httpMetadata: source.httpMetadata, customMetadata })]);
+}
+
 export class ArmadaJob extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
 
@@ -78,12 +95,15 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.env.FLEET.getByName(SINGLE).opened(id);
   }
 
-  private insert(items: readonly Task[]): void {
+  /** The new tasks' indexes. */
+  private insert(items: readonly Task[]): number[] {
     const first = this.count('1 = 1');
 
     items.forEach((task, at) => {
       this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued');
     });
+
+    return items.map((_, at) => first + at);
   }
 
   /** More items for an open job, and the vessels they need; or why the job refuses them. */
@@ -94,7 +114,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const refused = refusal(spec.run, items) ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
 
     if (refused !== null) return refused;
-    this.insert(items);
+    const added = this.insert(items);
+
+    await this.answerFromCache(spec, added);
     await this.grow();
 
     return null;
@@ -153,9 +175,46 @@ export class ArmadaJob extends DurableObject<Env> {
       return await this.cancel(`the environment was rebuilt from ${String(readiness.generation.sha).slice(0, 10)} after this job was packed against ${spec.commit.base.slice(0, 10)}; run again`, 'lost');
     }
 
+    await this.answerFromCache(spec, this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'queued' AND attempts = 0`).toArray().map((row) => row.idx));
+
+    if ((await this.ctx.storage.get<Phase>('phase')) !== 'preparing') return;
     await this.ctx.storage.put({ phase: 'running' satisfies Phase, environment: readiness.generation, startedAt: Date.now() });
     await this.grow();
     await this.settle();
+  }
+
+  /**
+   * Answers each of `indexes` the job's cache holds, with nothing run: its output is copied to the task's, and its
+   * outcome says `cached`. A task a vessel claimed meanwhile runs as it would have.
+   */
+  private async answerFromCache(spec: Kept, indexes: readonly number[]): Promise<void> {
+    if (spec.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || indexes.length === 0) return;
+    const { bundle } = spec.run;
+    const id = (await this.ctx.storage.get<string>('id')) ?? '';
+    const environment = (await this.ctx.storage.get<string>('key')) ?? '';
+
+    for (let from = 0; from < indexes.length; from += CACHE_READS) {
+      await Promise.all(indexes.slice(from, from + CACHE_READS).map(async (index) => {
+        const [row] = this.sql.exec<{ item: string }>('SELECT item FROM tasks WHERE idx = ?', index).toArray();
+
+        if (row === undefined) return;
+        const cached = await this.env.ARTIFACTS.get(await cacheKey(bundle, environment, v.parse(TaskSchema, JSON.parse(row.item)).item));
+
+        if (cached === null || Number(cached.customMetadata?.['expires'] ?? 0) < Date.now()) return;
+        const small = cached.size <= INLINE_BYTES ? await cached.arrayBuffer() : null;
+
+        await copyInto(this.env.ARTIFACTS, taskKey(id, index, 'output'), cached, small);
+        const answer = cached.customMetadata?.['answer'];
+        const value = small === null ? undefined : textOf(small);
+        const outcome: Outcome = {
+          index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true,
+          ...value === undefined ? {} : { value }, ...answer === 'value' || answer === 'command' ? { answer } : {},
+        };
+        const landed = this.sql.exec<{ idx: number }>(`UPDATE tasks SET state = 'exited' WHERE idx = ? AND state = 'queued' AND attempts = 0 RETURNING idx`, index).toArray();
+
+        if (landed.length > 0) this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
+      }));
+    }
   }
 
   /** Vessels for the tasks not yet done, up to the pool, beside those still alive. */
@@ -286,9 +345,26 @@ export class ArmadaJob extends DurableObject<Env> {
       // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
       this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ?`, outcome.kind, outcome.index);
       this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
+      this.ctx.waitUntil(this.keep(outcome));
     }
     this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
     await this.settle();
+  }
+
+  /** A green answer into the cache, when the job keeps one: a later item like it is answered from it. */
+  private async keep(outcome: Outcome): Promise<void> {
+    const spec = await this.spec();
+
+    if (spec?.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || outcome.kind !== 'exited' || outcome.exitCode !== 0 || !outcome.output) return;
+    const id = (await this.ctx.storage.get<string>('id')) ?? '';
+    const [row] = this.sql.exec<{ item: string }>('SELECT item FROM tasks WHERE idx = ?', outcome.index).toArray();
+    const output = await this.env.ARTIFACTS.get(taskKey(id, outcome.index, 'output'));
+
+    if (row === undefined || output === null) return;
+    const key = await cacheKey(spec.run.bundle, (await this.ctx.storage.get<string>('key')) ?? '', v.parse(TaskSchema, JSON.parse(row.item)).item);
+    const expires = String(Date.now() + spec.cache.days * DAY_MS);
+
+    await copyInto(this.env.ARTIFACTS, key, output, output.size <= INLINE_BYTES ? await output.arrayBuffer() : null, { expires, answer: outcome.answer ?? '' });
   }
 
   /** Whether a vessel should keep running `index`: no, once someone else's answer landed or the job ended. */

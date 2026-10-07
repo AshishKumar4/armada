@@ -131,6 +131,8 @@ export interface Meta {
   /** The most memory its cgroup held, in bytes, and the CPU it used. */
   readonly peakMemory?: number;
   readonly cpuSeconds?: number;
+  /** Answered from the task's cache, with nothing run. */
+  readonly cached: boolean;
 }
 
 /** A job whose results are not all `ok`: every result is here, in input order. */
@@ -214,6 +216,9 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string, S
   /** The deployment's secrets the body gets in `context.secrets`, by name (`armada secret set <name>`). `.local` reads
    *  them from this machine's environment. */
   readonly secrets?: readonly S[];
+  /** Keeps each green answer this many days: an item answered before, by the same push of the task in the same
+   *  environment, comes back with `meta.cached` and runs nothing. Only for a task whose answer its item decides. */
+  readonly cache?: { readonly days: number };
   readonly run: (input: I, context: Context<S>) => R | Promise<R>;
 }
 
@@ -238,6 +243,7 @@ interface TaskOptions {
   readonly speculative?: boolean;
   readonly retries?: Retries;
   readonly secrets?: readonly string[];
+  readonly cache?: { readonly days: number };
 }
 
 /** How a job is created and its outcomes read, for one kind of task. */
@@ -288,7 +294,7 @@ abstract class Base<I, O> {
     const spec = {
       recipe, commit, run, output, pool: options.pool, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       timeout: this.options.timeout, speculative: this.options.speculative, retries: this.options.retries,
-      secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets],
+      secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };
 
     if (Array.isArray(items)) {
@@ -721,7 +727,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
   private async resultOf(id: string, outcome: Outcome): Promise<Result<I, O>> {
     const item = await this.item(id, outcome.index);
     const meta: Meta = {
-      seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail,
+      seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true,
       ...outcome.peakMemory === undefined ? {} : { peakMemory: outcome.peakMemory }, ...outcome.cpuSeconds === undefined ? {} : { cpuSeconds: outcome.cpuSeconds },
     };
     const base = { index: outcome.index, item, meta };

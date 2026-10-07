@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 5;
+export const PROTOCOL = 6;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -185,6 +185,9 @@ export const JobSpecSchema = v.object({
   retries: v.optional(RetriesSchema),
   /** The deployment's secrets each task gets in its environment, by name. Only names travel and are kept. */
   secrets: v.optional(v.array(SecretName), []),
+  /** A pushed task's answers kept this many days, by its bundle, environment and item: an item answered before runs
+   *  nothing. Only for a task whose answer those three decide. */
+  cache: v.optional(v.object({ days: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(365)) })),
   label: v.optional(v.pipe(v.string(), v.maxLength(200)), ''),
 });
 
@@ -215,6 +218,8 @@ export const OutcomeSchema = v.object({
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),
+  /** Answered from the job's cache: nothing ran. */
+  cached: v.optional(v.boolean()),
 });
 
 export type Outcome = v.InferOutput<typeof OutcomeSchema>;
@@ -264,6 +269,19 @@ export const TimingsSchema = v.object({
 });
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;
+
+/** JSON with every object's keys sorted, so two equal items read the same. */
+export function canonical(value: Json): string {
+  return JSON.stringify(value, (_, held: unknown) => typeof held === 'object' && held !== null && !Array.isArray(held)
+    ? Object.fromEntries(Object.entries(held).sort(([left], [right]) => (left < right ? -1 : 1))) : held);
+}
+
+/** The R2 key a pushed task's answer is cached under: its bundle, its environment and its item decide it. */
+export async function cacheKey(bundle: string, environment: string, item: Json): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${bundle}\n${environment}\n${canonical(item)}`));
+
+  return `cache/${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
 
 /** One environment per driver and recipe: base, scripts, size and, for a repository, its key files. */
 export async function environmentKey(recipe: Recipe): Promise<string> {

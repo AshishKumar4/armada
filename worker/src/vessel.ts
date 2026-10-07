@@ -11,7 +11,7 @@ import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Out
 import {
   ENTRYPOINT, KILL, MASK, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
-import { bundleKey, packKey, said, SINGLE, taskKey, type Env } from './env';
+import { bundleKey, packKey, said, SINGLE, taskKey, textOf, type Env } from './env';
 import type { Claim } from './job';
 
 export interface VesselSpec {
@@ -330,14 +330,5 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.env.JOB.getByName(spec.jobId).retired(spec.name);
 
     return false;
-  }
-}
-
-/** Bytes as text, or undefined when they are not UTF-8. */
-function textOf(bytes: ArrayBuffer): string | undefined {
-  try {
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    return undefined;
   }
 }

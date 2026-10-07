@@ -68,3 +68,6 @@ export const flaky = task({
 
 /** Answers the length of the secret it names, and of no other. */
 export const keyed = task({ id: 'keyed', secrets: ['ARMADA_TEST_KEY'], run: (_: null, { secrets }) => secrets.ARMADA_TEST_KEY.length });
+
+/** Its answers are kept a week. */
+export const remembered = task({ id: 'remembered', cache: { days: 7 }, run: (n: number) => n * 2 });

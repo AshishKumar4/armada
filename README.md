@@ -147,6 +147,9 @@ for await (const result of transcode.stream(videos)) { // each file as soon as i
   in the deployment, and a task with `secrets: ['OPENAI_API_KEY']` reads `context.secrets.OPENAI_API_KEY`; a command
   gets it in its environment. Reading a secret the task didn't name is a type error, no call reads a value back, and
   each value of 4 bytes or more shows as `***` in the task's log. `.local` reads them from your environment.
+- `cache: { days: 7 }` keeps each green answer for a week. An item answered before comes back at once with
+  `meta.cached`, and no container starts for it. The key is the item, the recipe and the pushed task files, so a push
+  that changes any of them starts afresh. Use it only for a task whose answer its item decides.
 
 ## CI with `armada run`
 
