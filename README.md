@@ -16,8 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh
 ```
 
 The script installs [Bun](https://bun.sh) if you don't have it, checks armada out into `~/.armada`, and puts the
-`armada` command next to Bun's. Run it again to update. You need git, and Node.js 22 or newer for the wrangler that
-`armada deploy` runs.
+`armada` command next to Bun's. Run it again to update. It needs git.
 
 armada runs on your own Cloudflare account, on the Workers Paid plan that Containers need. Deploy it once, then map:
 
@@ -26,8 +25,8 @@ armada deploy
 armada map --times=3 --json -- echo hello {item}
 ```
 
-`armada deploy` uses your wrangler login (`bunx wrangler login`), and needs `--account=<id>` only when the login has
-more than one account. It creates the `armada-artifacts` bucket (packs and artifacts expire after 7 days; verdicts
+`armada deploy` opens a Cloudflare login in your browser if this machine has none, or uses `CLOUDFLARE_API_TOKEN`.
+It needs `--account=<id>` only when the login has more than one account. It creates the `armada-artifacts` bucket (packs and artifacts expire after 7 days; verdicts
 stay), deploys the Worker, sets its bearer token and writes `~/.config/armada/connection.json`. There is no image to
 build. `ARMADA_URL` and `ARMADA_TOKEN` override the connection file.
 

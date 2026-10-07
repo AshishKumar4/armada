@@ -37,7 +37,4 @@ case ":$path:" in
   *":$bin:"*) ;;
   *) echo "$bin is not on your PATH yet: open a new shell, or add it" ;;
 esac
-if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) < 22 ? 1 : 0)' >/dev/null 2>&1; then
-  echo "armada deploy runs wrangler, which needs Node.js 22 or newer: install it before you deploy"
-fi
 echo "next: armada deploy"

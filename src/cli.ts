@@ -15,7 +15,7 @@ const USAGE = `armada runs a command over many inputs at once, on Cloudflare Con
 
 Usage:
   armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
-                                       deploy armada with your wrangler login
+                                       deploy armada to your Cloudflare account, logging in if needed
   armada map [options] -- <command>    run the command once per item
   armada run <commit|worktree> [--label=<text>] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json
@@ -35,7 +35,7 @@ map options:
   --label=<text>       name the job
 
 deploy options:
-  --account=<id>       the account, when the wrangler login has more than one
+  --account=<id>       the account to use, if your login has more than one
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
@@ -151,10 +151,11 @@ async function map(): Promise<number> {
   return worst;
 }
 
-const WRANGLER = join(ROOT, 'node_modules', '.bin', 'wrangler');
+/** The checkout's wrangler, run by the Bun that runs armada, so it needs no Node.js. */
+const WRANGLER = [process.execPath, join(ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js')];
 
 function wrangler(args: readonly string[], account: string, stdin?: string): string {
-  const ran = Bun.spawnSync([WRANGLER, ...args], {
+  const ran = Bun.spawnSync([...WRANGLER, ...args], {
     cwd: ROOT, env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: account }, stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe',
   });
   const output = ran.stdout.toString() + ran.stderr.toString();
@@ -164,26 +165,53 @@ function wrangler(args: readonly string[], account: string, stdin?: string): str
   return output;
 }
 
-const WhoamiSchema = v.object({ accounts: v.array(v.object({ id: v.string(), name: v.string() })) });
+const WhoamiSchema = v.object({ loggedIn: v.boolean(), accounts: v.optional(v.array(v.object({ id: v.string(), name: v.string() })), []) });
 
-/** `--account`, else the wrangler login's one account. */
+function whoami(): v.InferOutput<typeof WhoamiSchema> {
+  const ran = Bun.spawnSync([...WRANGLER, 'whoami', '--json'], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
+  const output = ran.stdout.toString();
+  let json: unknown = null;
+
+  try {
+    json = JSON.parse(output);
+  } catch {
+    // Not JSON: wrangler printed an error instead, which is said below.
+  }
+  const parsed = v.safeParse(WhoamiSchema, json);
+
+  if (!parsed.success) throw new Error(`wrangler whoami failed:\n${(output + ran.stderr.toString()).trim().slice(-2000)}`);
+
+  return parsed.output;
+}
+
+/** The Cloudflare login's accounts. With no login and no CLOUDFLARE_API_TOKEN, wrangler's own login runs first. */
+function accounts(): readonly { readonly id: string; readonly name: string }[] {
+  const first = whoami();
+
+  if (first.loggedIn) return first.accounts;
+
+  if (process.env['CLOUDFLARE_API_TOKEN'] !== undefined) throw new Error('Cloudflare did not accept CLOUDFLARE_API_TOKEN');
+  console.log('Log in to Cloudflare in your browser to continue.');
+  const login = Bun.spawnSync([...WRANGLER, 'login'], { cwd: ROOT, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' });
+  const after = login.exitCode === 0 ? whoami() : null;
+
+  if (after?.loggedIn !== true) throw new Error('the Cloudflare login did not finish; run armada deploy again');
+
+  return after.accounts;
+}
+
+/** `--account`, else the login's one account. */
 function accountOf(): string {
+  const all = accounts();
   const named = option('account');
+  const [only] = all;
 
   if (named !== undefined) return named;
-  const whoami = Bun.spawnSync([WRANGLER, 'whoami', '--json'], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
-  const output = whoami.stdout.toString();
 
-  if (output.includes('"loggedIn":false')) throw new Error('log in to Cloudflare first, with `bunx wrangler login`, or set CLOUDFLARE_API_TOKEN');
+  if (only !== undefined && all.length === 1) return only.id;
 
-  if (whoami.exitCode !== 0) throw new Error(`wrangler whoami exited ${String(whoami.exitCode)}:\n${(output + whoami.stderr.toString()).slice(-2000)}`);
-  const { accounts } = v.parse(WhoamiSchema, JSON.parse(output));
-  const [only] = accounts;
-
-  if (only !== undefined && accounts.length === 1) return only.id;
-
-  throw new Error(accounts.length === 0 ? 'wrangler lists no account for this login; name one with --account=<id>'
-    : `this login has ${String(accounts.length)} accounts; name one with --account=<id>:${accounts.map((each) => `\n  ${each.id}  ${each.name}`).join('')}`);
+  throw new Error(all.length === 0 ? 'this login has no Cloudflare account; name one with --account=<id>'
+    : `this login has ${String(all.length)} accounts; pick one with --account=<id>:${all.map((each) => `\n  ${each.id}  ${each.name}`).join('')}`);
 }
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
