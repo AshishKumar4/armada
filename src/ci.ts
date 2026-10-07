@@ -167,35 +167,44 @@ function printReds(reds: readonly VerdictRow[]): void {
   }
 }
 
-/** The job fields that run a command on a commit in the environment its `.armada.json` names, its pack uploaded. */
-export async function onCommit(armada: Armada, target: string): Promise<Pick<JobSpec, 'recipe' | 'commit' | 'env' | 'tmpfs'>> {
+/** The job fields that run a command on a commit, in the environment its `.armada.json` names. */
+type OnCommit = Pick<JobSpec, 'recipe' | 'commit' | 'env' | 'tmpfs'>;
+
+/** A commit and its `.armada.json`: its environment, its job fields, and the upload of its pack, which sends nothing
+ *  when the runner has it. */
+async function commitOf(armada: Armada, target: string) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const recipe = recipeOf(repo, sha, config);
-  const base = packBase(repo, (await armada.resolve(recipe)).base);
+  const environment = await armada.resolve(recipe);
+  const base = packBase(repo, environment.base);
+  const spec: OnCommit = { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs };
 
-  await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history));
+  return { sha, config, environment, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
+}
 
-  return { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs };
+/** A commit's job fields, its pack uploaded. */
+export async function onCommit(armada: Armada, target: string): Promise<OnCommit> {
+  const commit = await commitOf(armada, target);
+
+  await commit.upload();
+
+  return commit.spec;
 }
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
 export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = []): Promise<number> {
   const began = Date.now();
-  const { sha, repo } = resolveCommit(target);
-  const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
-  const recipe = recipeOf(repo, sha, config);
-  const environment = await armada.resolve(recipe);
-  const base = packBase(repo, environment.base);
+  const { sha, config, environment, spec, upload } = await commitOf(armada, target);
 
   console.log(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
-  const uploaded = await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history));
+  const uploaded = await upload();
 
   if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
-  const common = { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
+  const common = { ...spec, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
   // The plan's stdout is its output; its stderr stays in its log.
   const planJob = await armada.map({ ...common, items: [{}], run: { command: ['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs] }, output: true, pool: 1, timeout: 900 });
 
