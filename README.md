@@ -1,122 +1,151 @@
 # armada
 
-Fast, mappable compute on Cloudflare Containers. It maps a command, or a JavaScript handler, over many items. The
-items run on a fleet of containers started from one environment snapshot, and each task's outcome streams back as it
-lands. CI is one client of it: `armada run` proves a commit from the `.armada.json` it holds.
+Run a command over many inputs at once, on Cloudflare Containers.
 
-```
-armada map [--env=<recipe.json>] --items=<file|-> [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command with {item}>
-armada run <commit|worktree> [--label=<text>]   exits 0 pass, 1 a red row, 2 not graded
-armada status <job-id>
-armada deploy --account=<id>                    with this machine's wrangler login
-armada prune [--keep=3]                         needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
+I wanted one tool for fast, parallel compute that all my projects could share. You give armada a list of items and a
+command. It starts a fleet of containers from a prepared snapshot, each container pulls items until the list is done,
+and every result streams back as it lands. CI is the first thing I use it for, but it isn't the only thing it's for.
+
+Some numbers from Kinu, its first user:
+
+- Kinu's full CI tier, 90 rows, finishes in about 17 minutes on 60 containers.
+- A container started from a snapshot answers in 0.2 to 2.3 seconds.
+- Running Kinu's heap gate 6 times in parallel took 137 seconds.
+
+## Examples
+
+Run a flaky test 20 times at once, each run in its own clean container, in the commit's own environment:
+
+```sh
+armada map --commit=HEAD --times=20 -- bun test tests/local-session-turns.test.ts
 ```
 
-## The SDK
+Each run prints one JSON line with its exit code and the tail of its output. This is how Kinu found a test that
+deadlocked on itself in 2 runs out of 8.
+
+Resize a pile of images straight from their URLs, and keep each result:
 
 ```ts
 import { connect } from 'armada';
 
 const armada = connect();
-const job = await armada.map({ recipe: { setup: 'apt-get install -y imagemagick' }, items: files, run: { command: ['convert', '{item}', '{out}'] }, output: true });
+const job = await armada.map({
+  recipe: { setup: 'apt-get install -y curl imagemagick' },
+  items: imageUrls,
+  run: { command: ['sh', '-c', 'curl -sL {item} | convert - -resize 50% {out}'] },
+  output: true,
+});
 
 for await (const outcome of job.outcomes()) console.log(outcome.index, outcome.exitCode);
-const summary = await job.summary();
+```
 
+Run a JavaScript function over your items instead of a command:
+
+```ts
 await armada.map({ items: [1, 2, 3], handler: (n: number) => n * n });
 ```
 
-A command's words are filled per item:
+Prove a commit with your project's CI, from the `.armada.json` in that commit:
 
-- `{item}` is the item's text, or its JSON.
-- An object item's scalar keys fill placeholders of the same name.
-- `{out}` is the file a task writes when `output` is set.
-- `{files}` is the directory holding the job's small `files`.
-- `{index}` is the item's position.
+```sh
+armada run HEAD
+```
+
+It exits 0 when every row is green, 1 when a row is red, and 2 when the run can't be graded.
+
+## Commands
+
+```
+armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command>
+armada run <commit|worktree> [--label=<text>]
+armada status <job-id>
+armada deploy --account=<id>      uses this machine's wrangler login
+armada prune [--keep=3]           needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
+```
+
+`--items` takes a JSON array or one item per line. `--times=N` maps over 1 to N.
+
+Placeholders in a command are filled per item:
+
+| Placeholder | Becomes |
+|---|---|
+| `{item}` | The item's text, or its JSON. An object item's scalar keys also fill placeholders of the same name. |
+| `{out}` | The file the task writes when `output` is set. |
+| `{files}` | The directory holding the job's small `files`. |
+| `{index}` | The item's position. |
 
 An unknown placeholder is an error, never an empty string. A handler is a function's source, called with the item
-under `node`, and its return value is the task's output.
+under `node`; its return value is the task's output.
 
-## How a job goes
+## How a job runs
 
-1. **The environment.** A recipe is a base image started by name, the runner's own layer, a root `setup` script and
-   a user `install` script. The runner's layer is tini, setpriv, the `ci` user, git 2.53, iproute2, strace and a
-   compiler. Its key hashes the driver version, the recipe's text, the instance type and, for a repository recipe,
-   the object ids of the commit's key files. So a changed script or lockfile means a new environment.
-2. **Preparing it.** A new key is prepared once, on the `durable_object` scheduling policy, one phase per alarm:
-   base, setup, receive (the commit, for a repository recipe), install, snapshot, then a verify start from the
-   snapshot. Every later container starts from that snapshot.
-3. **The queue.** The job's tasks are queued longest first, by an object item's numeric `weight`.
-4. **The fleet.** Up to `pool` containers each pull task after task until the queue drains. Every command runs as
-   the unprivileged user under tini, on fresh tmpfs mounts (`/tmp` and `/dev/shm` by default). The account-wide
-   fleet holds concurrent vCPUs under `FLEET_VCPUS`, Cloudflare's ceiling of 1,500.
-5. **Retries.** A task the infrastructure failed is run once more. That covers a container that never answered, a
-   lost exec, and a container not heard from while it works. A task that exited is never run again; one that runs
-   past `timeout` is killed and exits 124. With `idempotent`, an idle container may run a
-   straggler a second time, keeping the first answer.
-6. **Outcomes.** Each outcome (exit code, seconds, container, attempt, the output's tail) is an event on
-   `/jobs/<id>/events`. A task's `{out}` and its gzipped log are kept in R2 for 7 days.
+1. **Environment.** A recipe is a base image, armada's runner layer, a root `setup` script and a user `install`
+   script. The runner layer adds tini, setpriv, a `ci` user, git 2.53, iproute2, strace and a compiler. The
+   environment's key hashes the runner version, the recipe text, the instance type and, for a repository, the content
+   of the files you list. Change a script or a lockfile and you get a new environment.
+2. **Snapshot.** A new environment is prepared once, on the `durable_object` scheduling policy: base, setup, the commit,
+   install, snapshot, then a test start from the snapshot. Every container after that starts from the snapshot.
+3. **Queue.** Tasks are queued longest first, by an object item's numeric `weight`.
+4. **Fleet.** Up to `pool` containers each pull task after task until the queue is empty. Every command runs as the
+   unprivileged user under tini, on fresh tmpfs mounts (`/tmp` and `/dev/shm` by default). The whole account's fleet
+   stays under `FLEET_VCPUS`, which is Cloudflare's ceiling of 1,500 vCPUs.
+5. **Retries.** A task the infrastructure dropped runs once more: a container that never answered, a lost exec, or a
+   container that went quiet mid-task. A task that exited never runs again. A task past its `timeout` is killed and
+   exits 124. With `idempotent`, an idle container may run a straggler a second time, and the first answer wins.
+6. **Results.** Each outcome (exit code, seconds, container, attempt, the tail of its output) is an event on
+   `/jobs/<id>/events`. A task's `{out}` file and its gzipped log stay in R2 for 7 days.
 
-## `armada run` and `.armada.json`
+## CI with `armada run`
 
-A project's CI is two maps over one repository environment. The CLI reads `.armada.json` from the commit, so the
-recipe that proves a commit is the one it holds, and packs the commit into R2:
+A project's CI is two maps over its repository environment. The CLI reads `.armada.json` from the commit itself, so the
+recipe always matches the code it tests. It packs the commit into R2: the first pack for an environment starts from
+the root, later ones carry only what changed. Private repositories and unpushed commits work, and the containers hold
+no credentials.
 
-- The first time an environment is prepared, the pack starts from the root.
-- After that it carries only what the commit adds to the environment's commit.
-
-Private trees and unpushed commits work, and the containers hold no credentials.
-
-1. **The plan.** One task runs `plan.command` on the commit. It prints the tasks as a GitHub-Actions-shaped matrix,
+1. **Plan.** One task runs `plan.command`, which prints the tasks as a GitHub Actions style matrix,
    `{"include": [{...}, ...]}`.
-2. **The tasks.** A second job maps `task.command` over the entries, filling it from each entry's keys.
-3. **Grading.** Every task's verdict file is graded. Each row an entry names in `rows` must be reported exactly
-   once, by that task, with a timing for each file it declares. Anything short of that exits 2. Otherwise each red
-   row is printed with its output's tail.
-4. **What is kept.** The collected verdict `{sha, part: "all", rows}` is stored at `/verdicts/<project>/<sha>`. Green
-   rows' timings feed the next plan's `{timings}`: the median of each row's last five green runs. The report is
-   written under `~/.local/state/armada/runs/`.
+2. **Tasks.** A second job runs `task.command` for each entry, filled from the entry's keys.
+3. **Grading.** Every row an entry names must be reported exactly once, by that task, with a timing for each file it
+   declares. Anything less exits 2. A task that exits nonzero fails every row it reported green.
+4. **Records.** The verdict `{sha, part: "all", rows}` is stored at `/verdicts/<project>/<sha>`. Green rows' timings
+   feed the next plan as the median of each row's last five green runs. A report goes to
+   `~/.local/state/armada/runs/`.
 
 | Field | Meaning |
 |---|---|
-| `name` | The project's slug; it scopes environments, packs, timings and verdicts. |
+| `name` | The project's slug. It scopes environments, packs, timings and verdicts. |
 | `environment.base` | A Debian or Ubuntu image the runtime starts by name. Default `cloudflare/debian-trixie`. |
 | `environment.setup` | A script in the commit, run as root in the checkout, once per environment. |
 | `environment.install` | A script in the commit, run as the user in the checkout, once per environment. |
 | `environment.key` | Globs (`*`, `?`, `**`) over the commit's paths whose content keys the environment. |
-| `environment.smoke` | A user command run after the snapshot is restored; it must exit 0. |
+| `environment.smoke` | A command run after the snapshot is restored. It must exit 0. |
 | `checkout` | Where the commit is checked out. Default `/home/ci/work/<name>/<name>`, as on a GitHub runner. |
 | `history` | `full` (default) carries the whole history; `commit` carries only the tree. |
-| `env` | The environment the plan and the tasks run under; `{workdir}` is the checkout. |
+| `env` | The environment the plan and tasks run under; `{workdir}` is the checkout. |
 | `tmpfs` | Fresh tmpfs mounts before each command. Default `/tmp`, `/dev/shm`. |
 | `instance` | Default `standard-4` (4 vCPU, 12 GiB, 20 GB). |
 | `pool` | The most containers the task job runs at once. Default 40. |
-| `target` | Seconds, given to the plan as `{target}`. Default 300. |
+| `target` | Seconds per task the plan aims for, passed as `{target}`. Default 300. |
 | `plan.command` | Prints the matrix. Placeholders: `{target}`, `{timings}` (a file of `{"rows": {...}, "files": {...}}`). |
-| `task.command` | Each entry's command, filled from its keys; `{out}` is its verdict file. |
+| `task.command` | Each entry's command; `{out}` is its verdict file. |
 | `task.name` | The entry key that names a task. Default `name`, else the first string-valued key. |
 | `task.verdict` | `true` (default): the command writes `{"rows": [{"name" or "run", "exitCode", "seconds", "output", "timings"}]}` to `{out}`. `false`: its exit code is the task's one row. |
-| `task.idempotent` | Whether a straggling task may be run again. Default `false`. |
-| `task.timeout` | A task's own bound, in seconds. Default 3600. |
+| `task.idempotent` | Whether a straggling task may run again. Default `false`. |
+| `task.timeout` | A task's limit, in seconds. Default 3600. |
 
 ## Deploying
 
-`armada deploy --account=<id>` does four things:
+`armada deploy --account=<id>` creates the `armada-artifacts` bucket (packs and artifacts expire after 7 days; verdicts
+stay), deploys the Worker, sets its bearer token and writes `~/.config/armada/connection.json`. There is no image to
+build. `ARMADA_URL` and `ARMADA_TOKEN` override the connection file.
 
-1. It creates the `armada-artifacts` bucket. Packs and job artifacts expire after 7 days; verdicts are kept.
-2. It deploys the Worker.
-3. It sets its bearer token.
-4. It writes `~/.config/armada/connection.json`.
+## Things I learned about the containers
 
-There is no image to build or roll out. `ARMADA_URL` and `ARMADA_TOKEN` override the connection file.
-
-## Container findings
-
-These shape the runner's layer and how it runs a command:
+These decided how the runner layer works:
 
 - The exec `user` option fails with "internal error", so commands drop privileges with `setpriv`.
-- An exec given a large stdin stream fails, so bodies are piped in.
+- An exec given a large stdin stream fails, so bodies are piped in instead.
 - A container restored from a snapshot needs its hostname set.
-- The container's `/tmp` reports no free inodes and `/dev/shm` is root-only, so fresh tmpfs is mounted on both.
+- `/tmp` reports no free inodes and `/dev/shm` is root-only, so armada mounts fresh tmpfs on both.
 - Daemons a task leaves behind are reaped by running under tini.
-- Trixie's git 2.47 lacks `path=` in `rev-list --objects -z`, so git 2.53 is built.
+- Trixie's git 2.47 lacks `path=` in `rev-list --objects -z`, so the layer builds git 2.53.
