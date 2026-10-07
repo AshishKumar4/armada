@@ -102,7 +102,8 @@ under `node`; its return value is the task's output.
 
 A project's CI is two maps over its repository environment. The CLI reads `.armada.json` from the commit itself, so the
 recipe always matches the code it tests. It packs the commit into R2: the first pack for an environment starts from
-the root, later ones carry only what changed. Private repositories and unpushed commits work, and the containers hold
+the root, later ones carry only what changed (or start from the root again in a clone that lacks the environment's
+commit, such as a shallow CI checkout). Private repositories and unpushed commits work, and the containers hold
 no credentials.
 
 1. **Plan.** One task runs `plan.command`, which prints the tasks as a GitHub Actions style matrix,

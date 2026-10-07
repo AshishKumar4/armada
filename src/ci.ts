@@ -71,8 +71,14 @@ function recipeOf(repo: string, sha: string, config: Config): Recipe {
   };
 }
 
+/** What the commit is packed against: the environment's commit, where this repository has it. A shallow clone (a CI
+ *  runner's checkout) does not, and a pack from the root carries the whole commit. */
+export function packBase(repo: string, environment: string): string {
+  return environment !== 'root' && Bun.spawnSync(['git', 'cat-file', '-e', `${environment}^{commit}`], { cwd: repo }).exitCode === 0 ? environment : 'root';
+}
+
 /** The commit from the root (with its history, or alone), or what it adds to the environment's commit. */
-function packOf(repo: string, sha: string, base: string, history: Config['history']): Blob {
+export function packOf(repo: string, sha: string, base: string, history: Config['history']): Blob {
   const walk = history === 'commit' ? ['--no-walk'] : [];
   const objects = git(repo, ['rev-list', '--objects', ...walk, sha, ...base === 'root' ? [] : ['--not', base]]);
 
@@ -121,7 +127,7 @@ export async function onCommit(armada: Armada, target: string): Promise<Pick<Job
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const recipe = recipeOf(repo, sha, config);
-  const { base } = await armada.resolve(recipe);
+  const base = packBase(repo, (await armada.resolve(recipe)).base);
 
   await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history));
 
@@ -133,9 +139,10 @@ export async function runCI(armada: Armada, target: string, label: string): Prom
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const recipe = recipeOf(repo, sha, config);
-  const { key, base } = await armada.resolve(recipe);
+  const environment = await armada.resolve(recipe);
+  const base = packBase(repo, environment.base);
 
-  console.log(`${config.name} ${sha}, environment ${key.slice(0, 12)}${base === 'root' ? ' (to prepare)' : ''}`);
+  console.log(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
   const uploaded = await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history));
 
   if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);

@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { packBase, packOf } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
@@ -155,6 +159,55 @@ describe('uploading a pack', () => {
       expect(sent).toEqual([PACK_PART, PACK_PART, 5]);
     } finally {
       globalThis.fetch = original;
+    }
+  });
+});
+
+describe('packing a commit', () => {
+  test('a clone without the environment\'s commit packs from the root, and that pack checks out where the environment is', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
+    const git = (cwd: string, ...args: string[]): string => {
+      const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+
+      if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString()}`);
+
+      return ran.stdout.toString().trim();
+    };
+
+    try {
+      const origin = join(scratch, 'origin');
+
+      git(scratch, 'init', '-q', origin);
+      writeFileSync(join(origin, 'a.txt'), 'one\n');
+      git(origin, 'add', '.');
+      git(origin, 'commit', '-qm', 'environment');
+      const environment = git(origin, 'rev-parse', 'HEAD');
+
+      writeFileSync(join(origin, 'b.txt'), 'two\n');
+      git(origin, 'add', '.');
+      git(origin, 'commit', '-qm', 'head');
+      const head = git(origin, 'rev-parse', 'HEAD');
+
+      git(scratch, 'clone', '-q', '--depth=1', `file://${origin}`, 'shallow');
+      const shallow = join(scratch, 'shallow');
+
+      expect([packBase(origin, environment), packBase(shallow, environment), packBase(origin, 'root')]).toEqual([environment, 'root', 'root']);
+      // A container's checkout (`receive`, `history: commit`): the environment's commit from its preparation's pack,
+      // then the head, packed in the shallow clone.
+      const checkout = join(scratch, 'checkout');
+
+      git(scratch, 'init', '-q', checkout);
+      for (const { sha, from, base } of [{ sha: environment, from: origin, base: 'root' }, { sha: head, from: shallow, base: packBase(shallow, environment) }]) {
+        const pack = new Uint8Array(await packOf(from, sha, base, 'commit').arrayBuffer());
+
+        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
+        appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
+        git(checkout, 'checkout', '-q', '-f', '-B', 'armada', sha);
+      }
+
+      expect({ head: git(checkout, 'rev-parse', 'HEAD'), status: git(checkout, 'status', '--porcelain'), files: git(checkout, 'ls-files') }).toEqual({ head, status: '', files: 'a.txt\nb.txt' });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 });
