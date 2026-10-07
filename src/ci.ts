@@ -11,8 +11,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
-import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type TaskAnswer, type VerdictRow } from './grade';
-import { PACKER, TimingsSchema, type JobSpec, type Manifest, type Outcome, type Recipe } from './protocol';
+import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { PACKER, TimingsSchema, type JobSpec, type Manifest, type Outcome, type Recipe, type Timings } from './protocol';
 import type { Armada, Job } from './sdk';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -192,6 +192,35 @@ export async function onCommit(armada: Armada, target: string): Promise<OnCommit
   return commit.spec;
 }
 
+/** A task's seconds: its plan entry's `weight`, else the last runs' medians of the rows it names, or of the task. */
+function estimateOf(entry: PlanEntry, name: string, timings: Timings): number | undefined {
+  const rows = entry.rows?.map((row) => timings.rows[typeof row === 'string' ? row : row.name]) ?? [timings.rows[name]];
+
+  return entry.weight ?? (rows.every((seconds) => seconds !== undefined) ? rows.reduce((sum, seconds) => sum + seconds, 0) : undefined);
+}
+
+/** The fewest containers, up to `most`, that finish these tasks as soon as `most` would, queued longest first: every
+ *  container that runs more than one task must finish a fifth of the longest task's time before it does. */
+export function poolFor(estimates: readonly number[], most: number): number {
+  const longest = Math.max(0, ...estimates);
+  const queue = [...estimates].sort((left, right) => right - left);
+
+  for (let pool = 1; pool < most; pool += 1) {
+    const loads = Array.from({ length: pool }, () => ({ seconds: 0, tasks: 0 }));
+
+    for (const seconds of queue) {
+      const next = loads.reduce((least, load) => load.seconds < least.seconds ? load : least);
+
+      next.seconds += seconds;
+      next.tasks += 1;
+    }
+
+    if (loads.every((load) => load.tasks === 1 || load.seconds <= longest * 0.8)) return pool;
+  }
+
+  return most;
+}
+
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
 export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = []): Promise<number> {
@@ -220,12 +249,15 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
   const plan = v.parse(PlanSchema, JSON.parse(planText));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
+  const most = Math.min(config.pool, plan.include.length);
+  const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
+  const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
   const job = await armada.map({
     ...common, items: plan.include, run: { command: config.task.command.map(placed) }, output: config.task.verdict,
-    pool: config.pool, idempotent: config.task.idempotent, timeout: config.task.timeout,
+    pool, idempotent: config.task.idempotent, timeout: config.task.timeout,
   });
 
-  console.log(`task job ${job.id}: ${String(plan.include.length)} tasks on up to ${String(config.pool)} containers`);
+  console.log(`task job ${job.id}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);
   const nameOf = (index: number) => names[index] ?? String(index);
   // Each task's rows, read from its verdict file as its outcome lands, and graded as read: a task that reports many rows
   // exits 0 with red ones among them, so its exit alone would say green. Null for a file missing or malformed.

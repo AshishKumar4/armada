@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { packBase, packOf } from '../src/ci';
+import { packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, failureTail, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
@@ -160,6 +160,19 @@ describe('grading a CI run', () => {
       'one was reported by both a and b',
       'c wrote no verdict',
     ]);
+  });
+});
+
+describe('a CI run\'s pool', () => {
+  test('is the fewest containers that finish as soon as the most would, with a fifth of the longest task to spare', () => {
+    const tail = Array.from({ length: 89 }, (_, index) => 20 + index % 40);
+
+    expect({
+      oneLong: poolFor([500, ...tail], 60),
+      even: poolFor(Array.from({ length: 30 }, () => 300), 60),
+      capped: poolFor(Array.from({ length: 30 }, () => 300), 12),
+      pairs: poolFor([100, 40, 40, 40, 40], 5),
+    }).toEqual({ oneLong: 10, even: 30, capped: 12, pairs: 3 });
   });
 });
 

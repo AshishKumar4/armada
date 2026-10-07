@@ -104,7 +104,7 @@ The commit is uploaded from your machine, so private repos and unpushed commits 
 | `env` | `{}` | Environment variables for the plan and tasks. `{workdir}` is the checkout. |
 | `tmpfs` | `["/tmp", "/dev/shm"]` | Paths that get a fresh tmpfs in each container. |
 | `size` | `medium` | The container size, from the table below. |
-| `pool` | `40` | The most containers the tasks run on at once. |
+| `pool` | `40` | The most containers the tasks run on. The plan's `weight`s or past timings can make it fewer. |
 | `target` | `300` | Seconds per task the plan aims for, passed as `{target}`. |
 | `plan.command` | | Prints `{"include": [...]}`. Gets `{target}`, and `{timings}`, a file of past timings. |
 | `task.command` | | Runs one matrix entry. The entry's keys fill its placeholders. |
