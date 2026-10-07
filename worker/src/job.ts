@@ -17,7 +17,7 @@ import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
   ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
-  type JobSpec, type JobStatus, type Outcome, type Task, type VesselRow,
+  type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, taskKey, textOf, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
@@ -79,6 +79,9 @@ async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, sma
 export class ArmadaJob extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
 
+  /** The tasks whose cache read this object is making now (`answerFromCache`). */
+  private readonly looking = new Set<number>();
+
   async create(id: string, spec: JobSpec): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS tasks (idx INTEGER PRIMARY KEY, item TEXT NOT NULL, weight REAL NOT NULL, state TEXT NOT NULL,
@@ -118,6 +121,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     await this.answerFromCache(spec, added);
     await this.grow();
+    await this.settle();
 
     return null;
   }
@@ -152,6 +156,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const phase = await this.ctx.storage.get<Phase>('phase');
 
     if (spec === undefined || phase === undefined || phase === 'done') return;
+    this.requeueUnread();
 
     if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_DEADLINE_MS) return await this.cancel('the job passed its deadline', 'cancelled');
 
@@ -185,35 +190,65 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /**
    * Answers each of `indexes` the job's cache holds, with nothing run: its output is copied to the task's, and its
-   * outcome says `cached`. A task a vessel claimed meanwhile runs as it would have.
+   * outcome says `cached`. Each task is reserved (`checking`) before the first read, so no vessel claims one whose
+   * output a copy could overwrite; a miss, or a read or copy that fails, gives it back to the queue.
    */
   private async answerFromCache(spec: Kept, indexes: readonly number[]): Promise<void> {
-    if (spec.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || indexes.length === 0) return;
+    if (spec.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined) return;
+    const reserved = indexes.flatMap((index) => this.sql.exec<{ idx: number; item: string }>(
+      `UPDATE tasks SET state = 'checking' WHERE idx = ? AND state = 'queued' AND attempts = 0 RETURNING idx, item`, index,
+    ).toArray());
+
+    for (const row of reserved) this.looking.add(row.idx);
     const { bundle, id: task } = spec.run;
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const environment = (await this.ctx.storage.get<string>('key')) ?? '';
 
-    for (let from = 0; from < indexes.length; from += CACHE_READS) {
-      await Promise.all(indexes.slice(from, from + CACHE_READS).map(async (index) => {
-        const [row] = this.sql.exec<{ item: string }>('SELECT item FROM tasks WHERE idx = ?', index).toArray();
+    for (let from = 0; from < reserved.length; from += CACHE_READS) {
+      await Promise.all(reserved.slice(from, from + CACHE_READS).map(async (row) => {
+        const index = row.idx;
+        const answered = await this.cachedAnswer(bundle, task, environment, id, index, v.parse(TaskSchema, JSON.parse(row.item)).item).catch((cause: unknown) => {
+          console.error(JSON.stringify({ job: id, index, cache: said(cause) }));
 
-        if (row === undefined) return;
-        const cached = await this.env.ARTIFACTS.get(await cacheKey(bundle, task, environment, v.parse(TaskSchema, JSON.parse(row.item)).item));
+          return null;
+        });
 
-        if (cached === null || Number(cached.customMetadata?.['expires'] ?? 0) < Date.now()) return;
-        const small = cached.size <= INLINE_BYTES ? await cached.arrayBuffer() : null;
+        this.looking.delete(index);
 
-        await copyInto(this.env.ARTIFACTS, taskKey(id, index, 'output'), cached, small);
-        const answer = cached.customMetadata?.['answer'];
-        const value = small === null ? undefined : textOf(small);
-        const outcome: Outcome = {
-          index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true,
-          ...value === undefined ? {} : { value }, ...answer === 'value' || answer === 'command' ? { answer } : {},
-        };
-        const landed = this.sql.exec<{ idx: number }>(`UPDATE tasks SET state = 'exited' WHERE idx = ? AND state = 'queued' AND attempts = 0 RETURNING idx`, index).toArray();
+        if (answered === null) {
+          this.sql.exec(`UPDATE tasks SET state = 'queued' WHERE idx = ? AND state = 'checking'`, index);
 
-        if (landed.length > 0) this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
+          return;
+        }
+        const landed = this.sql.exec<{ idx: number }>(`UPDATE tasks SET state = 'exited' WHERE idx = ? AND state = 'checking' RETURNING idx`, index).toArray();
+
+        if (landed.length > 0) this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(answered));
       }));
+    }
+  }
+
+  /** The cached answer of `item`, copied to task `index`'s output, as its outcome; or null when the cache holds none. */
+  private async cachedAnswer(bundle: string, task: string, environment: string, id: string, index: number, item: Json): Promise<Outcome | null> {
+    const cached = await this.env.ARTIFACTS.get(await cacheKey(bundle, task, environment, item));
+
+    if (cached === null || Number(cached.customMetadata?.['expires'] ?? 0) < Date.now()) return null;
+    const small = cached.size <= INLINE_BYTES ? await cached.arrayBuffer() : null;
+
+    await copyInto(this.env.ARTIFACTS, taskKey(id, index, 'output'), cached, small);
+    const answer = cached.customMetadata?.['answer'];
+    const value = small === null ? undefined : textOf(small);
+
+    return {
+      index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true,
+      ...value === undefined ? {} : { value }, ...answer === 'value' || answer === 'command' ? { answer } : {},
+    };
+  }
+
+  /** Tasks reserved for a cache read this object is not making: one an earlier start of it was, cut off. They go back
+   *  to the queue, since no copy of theirs can still land. */
+  private requeueUnread(): void {
+    for (const row of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'checking'`).toArray()) {
+      if (!this.looking.has(row.idx)) this.sql.exec(`UPDATE tasks SET state = 'queued' WHERE idx = ?`, row.idx);
     }
   }
 
@@ -417,9 +452,12 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.settle();
   }
 
-  /** Done once the job is closed, no task is queued or running, and no vessel can still take one. */
+  /** Done once the job is closed, no task is queued or running, and no vessel can still take one. A task whose cache read
+   *  is still out is settled by the method that reads it. */
   private async settle(): Promise<void> {
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'running' || (await this.ctx.storage.get<boolean>('open')) === true) return;
+
+    if (this.count(`state = 'checking'`) > 0) return;
     const open = this.count(`state IN ('queued', 'running', 'landing')`);
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
 
@@ -461,7 +499,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return;
     await this.ctx.storage.put({ problems: [...(await this.ctx.storage.get<string[]>('problems')) ?? [], reason], open: false });
 
-    for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state IN ('queued', 'running', 'landing')`).toArray()) {
+    for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state IN ('queued', 'checking', 'running', 'landing')`).toArray()) {
       const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: reason, output: false };
 
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
@@ -515,7 +553,7 @@ export class ArmadaJob extends DurableObject<Env> {
       startedAt: (await this.ctx.storage.get<number>('startedAt')) ?? null,
       finishedAt: (await this.ctx.storage.get<number>('finishedAt')) ?? null,
       tasks: {
-        total: this.count('1 = 1'), queued: this.count(`state = 'queued'`), running: this.count(`state IN ('running', 'landing')`),
+        total: this.count('1 = 1'), queued: this.count(`state IN ('queued', 'checking')`), running: this.count(`state IN ('running', 'landing')`),
         exited: this.count(`state = 'exited'`), red, failed: this.count(`state = 'failed'`),
       },
       vessels: vessels.map((row) => ({ name: row.name, state: row.state, tasks: row.tasks, bootMs: row.boot_ms, busyMs: row.busy_ms, error: row.error })),
