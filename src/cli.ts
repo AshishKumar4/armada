@@ -123,6 +123,12 @@ async function map(): Promise<number> {
   let worst = 0;
 
   console.error(`job ${job.id}`);
+  // A ready environment starts the job at once; a new one is prepared first, which is a wait worth a word.
+  const preparing = setTimeout(() => {
+    void job.status().then((status) => {
+      if (status.phase === 'preparing') console.error(`preparing environment ${status.key.slice(0, 12)}: once per recipe, and it takes a few minutes`);
+    }, () => undefined);
+  }, 3_000);
 
   await cancelOnInterrupt(job, async () => {
     for await (const outcome of job.outcomes()) {
@@ -133,7 +139,9 @@ async function map(): Promise<number> {
       else if (outcome.exitCode !== 0 && worst === 0) worst = 1;
     }
   });
+  clearTimeout(preparing);
 
+  for (const problem of (await job.status()).problems) console.error(`problem: ${problem}`);
   const summary = await job.summary();
 
   console.error(`${String(summary.tasks)} tasks: ${String(summary.green)} green, ${String(summary.red)} red, ${String(summary.failed)} failed; wall ${((Date.now() - began) / 1000).toFixed(1)} s, `
