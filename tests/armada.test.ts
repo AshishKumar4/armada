@@ -66,6 +66,28 @@ describe('a project\'s CI config', () => {
     expect(() => parseConfig(JSON.stringify({ ...base, environment: { setup: '../outside.sh' } }))).toThrow('a path inside the commit');
   });
 
+  test('a base the runtime cannot start by name is refused before anything starts, by `run` and by `map --env`', async () => {
+    const base = { name: 'nimbus', environment: {}, plan: { command: ['plan'] }, task: { command: ['run'] } };
+
+    expect(parseConfig(JSON.stringify(base)).environment.base).toBe('cloudflare/debian-trixie');
+    expect(() => parseConfig(JSON.stringify({ ...base, environment: { base: 'ubuntu:26.04' } }))).toThrow('Cloudflare-managed image');
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-base-'));
+    const requests: string[] = [];
+    const server = Bun.serve({ port: 0, fetch: (request) => { requests.push(new URL(request.url).pathname); return Response.json({ id: 'j1' }); } });
+
+    try {
+      writeFileSync(join(scratch, 'recipe.json'), JSON.stringify({ base: 'ubuntu:26.04@sha256:' + 'f'.repeat(64) }));
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', `--env=${join(scratch, 'recipe.json')}`, '--times=1', '--', 'true'], {
+        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+
+      expect({ exit: await cli.exited, said: (await new Response(cli.stderr).text()).includes('Cloudflare-managed image'), requests }).toEqual({ exit: 2, said: true, requests: [] });
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
   test('key globs match within a segment with * and across segments with **', () => {
     const globs = ['bun.lock', 'packages/*/package.json', 'patches/**'];
     const paths = ['bun.lock', 'packages/core/package.json', 'packages/core/src/package.json', 'patches/a.patch', 'patches/deep/b.patch', 'package.json'];

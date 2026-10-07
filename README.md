@@ -119,7 +119,7 @@ no credentials.
 | Field | Meaning |
 |---|---|
 | `name` | The project's slug. It scopes environments, packs, timings and verdicts. |
-| `environment.base` | A Debian or Ubuntu image the runtime starts by name. Default `cloudflare/debian-trixie`. |
+| `environment.base` | A Cloudflare-managed image the runtime starts by name. Default `cloudflare/debian-trixie`, which is the only one today: the runtime refuses Docker Hub images and pushed ones the Worker's configuration does not name. |
 | `environment.setup` | A script in the commit, run as root in the checkout, once per environment. |
 | `environment.install` | A script in the commit, run as the user in the checkout, once per environment. |
 | `environment.key` | Globs (`*`, `?`, `**`) over the commit's paths whose content keys the environment. |

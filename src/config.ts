@@ -15,14 +15,14 @@
  *                code is its one row.
  */
 import * as v from 'valibot';
-import { INSTANCES } from './protocol';
+import { BaseSchema, DEFAULT_BASE, INSTANCES } from './protocol';
 
 const Path = v.pipe(v.string(), v.minLength(1), v.check((path) => !path.startsWith('/') && !path.split('/').includes('..'), 'a path inside the commit'));
 
 export const ConfigSchema = v.object({
   name: v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u)),
   environment: v.object({
-    base: v.optional(v.string(), 'cloudflare/debian-trixie'),
+    base: v.optional(BaseSchema, DEFAULT_BASE),
     setup: v.optional(Path),
     install: v.optional(Path),
     key: v.optional(v.array(v.string()), []),

@@ -20,7 +20,7 @@ import * as v from 'valibot';
 import { cancelOnInterrupt, onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, ConnectionSchema } from './sdk';
-import { INSTANCES } from './protocol';
+import { BaseSchema, INSTANCES } from './protocol';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -29,7 +29,7 @@ const option = (name: string): string | undefined => process.argv.find((argument
 const flag = (name: string): boolean => process.argv.includes(`--${name}`);
 
 const RecipeFileSchema = v.object({
-  base: v.optional(v.string()), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), instance: v.optional(v.picklist(INSTANCES)),
+  base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), instance: v.optional(v.picklist(INSTANCES)),
 });
 
 /** A recipe file, its scripts read as text relative to it. */

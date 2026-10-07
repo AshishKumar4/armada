@@ -24,12 +24,26 @@ export const ManifestSchema = v.array(v.object({ path: v.string(), id: Sha }));
 export type Manifest = v.InferOutput<typeof ManifestSchema>;
 
 /**
+ * A base the runtime starts by name: a Cloudflare-managed image, `cloudflare/debian-trixie`, optionally pinned. The
+ * `durable_object` policy refuses any other reference unless the Worker's own configuration names it as an image:
+ * Docker Hub's `ubuntu:26.04` answers "must be digest-pinned", pinned "must include a registry and repository", and a
+ * digest pushed to the account's registry "Image not found" (2026-10-07). Each refusal surfaced only after a
+ * preparation's five-minute start bound, so a recipe naming one is refused here, before anything starts.
+ */
+export const BaseSchema = v.pipe(
+  v.string(),
+  v.regex(/^cloudflare\/[a-z0-9][a-z0-9._-]*(@sha256:[0-9a-f]{64})?$/u, 'a base is a Cloudflare-managed image, such as cloudflare/debian-trixie; the runtime starts no other by name'),
+);
+
+export const DEFAULT_BASE = 'cloudflare/debian-trixie';
+
+/**
  * What every container of a job starts from: a base image started by name, the runner's layer, then the recipe's
  * own `setup` (as root) and `install` (as the user, in the work directory, after any checkout), snapshotted once.
  * The scripts are carried as text, so the key hashes the recipe itself, never a path to it.
  */
 export const RecipeSchema = v.object({
-  base: v.optional(v.string(), 'cloudflare/debian-trixie'),
+  base: v.optional(BaseSchema, DEFAULT_BASE),
   setup: v.optional(v.string(), ''),
   install: v.optional(v.string(), ''),
   /** Run as the user after the snapshot is restored once; it must exit 0. */
