@@ -2,9 +2,8 @@
 
 Run a command over many inputs at once, on Cloudflare Containers.
 
-I wanted one tool for fast, parallel compute that all my projects could share. You give armada a list of items and a
-command. It starts a fleet of containers from a prepared snapshot, each container pulls items until the list is done,
-and every result streams back as it lands.
+You give armada a list of items and a command. It starts a fleet of containers from a prepared snapshot, each
+container pulls items until the list is done, and every result streams back as it lands.
 
 For example, you can use it for CI. It takes about 7 seconds to spawn 100 containers and run a 3-second command on
 each, all in parallel. The command was `armada map --times=100 --pool=100 -- sleep 3`, on an environment armada had
@@ -174,7 +173,7 @@ no credentials.
 
 armada proves itself the same way: its own `.armada.json` runs `bun test` and the typecheck, each as one row.
 
-## Things I learned about the containers
+## Notes on Cloudflare Containers
 
 These decided how the runner layer works:
 
