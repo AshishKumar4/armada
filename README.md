@@ -83,6 +83,7 @@ armada tests itself this way. Its `.armada.json`:
     "smoke": "bun --version"
   },
   "pool": 2,
+  "size": "auto",
   "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}]}"] },
   "task": { "command": ["bun", "run", "{name}"], "verdict": false, "timeout": 600 }
 }
