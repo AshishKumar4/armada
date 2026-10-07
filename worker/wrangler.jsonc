@@ -29,6 +29,6 @@
     { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] }
   ],
   "vars": { "FLEET_VCPUS": "1500" },
-  // Packs and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept.
+  // Packs, bundles and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept.
   "r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "armada-artifacts" }]
 }

@@ -23,7 +23,7 @@ async function running(readiness: Readiness = { kind: 'ready', generation }): Pr
     ENVIRONMENTS: namespace(() => ({ ensure: async () => readiness })),
   }));
 
-  await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: ['a', 'b'], run: { command: ['true'] }, env: { TOKEN: SECRET } }));
+  await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } }));
   await job.alarm();
 
   return { job, stored };
@@ -49,7 +49,7 @@ describe('a job\'s env', () => {
     },
     'cancelled by its client': async ({ job }) => {
       await job.claim('v1');
-      await job.cancel('cancelled by its client');
+      await job.cancel('cancelled by its client', 'cancelled');
     },
     'past its deadline': async ({ job, stored }) => {
       await stored.ctx.storage.put('createdAt', 0);
@@ -88,20 +88,20 @@ describe('a job\'s env', () => {
   test('of a job created before it had a key of its own reaches its claims while it runs, and is gone once it ends', async () => {
     const stored = state();
     const job = new ArmadaJob(stored.ctx, world({ VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })) }));
-    const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: ['a'], run: { command: ['true'] }, env: { TOKEN: SECRET } });
+    const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } });
 
-    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { command: ['true'] } }));
+    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { kind: 'command' } }));
     // The layout an earlier Worker left: the env inside the spec.
     await stored.ctx.storage.put({ spec: { ...kept, env }, phase: 'running', environment: generation, startedAt: 0 });
     stored.ctx.storage.sql.exec(`INSERT INTO vessels (name, state, beat) VALUES ('v1', 'working', ?)`, Date.now());
     const claimed = (await job.claim('v1'))?.env['TOKEN'];
 
-    await job.cancel('cancelled by its client');
+    await job.cancel('cancelled by its client', 'cancelled');
     const running = stored.dump().includes(SECRET);
     const done = state();
     const finished = new ArmadaJob(done.ctx, world({}));
 
-    await finished.create('j2', v.parse(JobSpecSchema, { recipe: {}, items, run: { command: ['true'] } }));
+    await finished.create('j2', v.parse(JobSpecSchema, { recipe: {}, items, run: { kind: 'command' } }));
     await done.ctx.storage.put({ spec: { ...kept, env }, phase: 'done' });
     await finished.status();
 
@@ -111,11 +111,11 @@ describe('a job\'s env', () => {
   test('an earlier Worker left inside a job\'s spec, or a vessel\'s claim, is gone at the end with nothing read before', async () => {
     const jobState = state();
     const job = new ArmadaJob(jobState.ctx, world({ VESSEL: namespace(() => ({ stop: async () => undefined })) }));
-    const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: ['a'], run: { command: ['true'] }, env: { TOKEN: SECRET } });
+    const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } });
 
-    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { command: ['true'] } }));
+    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { kind: 'command' } }));
     await jobState.ctx.storage.put({ spec: { ...kept, env }, phase: 'running' });
-    await job.cancel('cancelled by its client');
+    await job.cancel('cancelled by its client', 'cancelled');
     const claim = { index: 0, attempt: 1, argv: ['true'], env: { TOKEN: SECRET }, duplicate: false };
     const ends: Record<string, (vessel: ArmadaVessel) => Promise<void>> = {
       stopped: async (vessel) => { await vessel.stop(); },
@@ -157,7 +157,7 @@ describe('a job\'s env', () => {
     }));
 
     vessel = new ArmadaVessel(vesselState.ctx, world({ JOB: namespace(() => job) }));
-    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: ['a'], run: { command: ['true'] }, env: { TOKEN: SECRET }, pool: 1 }));
+    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET }, pool: 1 }));
     await job.alarm();
     await vessel.alarm();
 

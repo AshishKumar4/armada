@@ -4,7 +4,8 @@
  * pays its boot once and then pulls task after task, so short and long tasks balance themselves. Each task's outcome
  * is appended to the job's event stream as it lands. A task a vessel lost to the infrastructure is queued again once;
  * a task that exited, red or green, never is. When the queue is empty, an idle vessel may run a straggler again only
- * if the job says its tasks are speculative; the first answer is kept.
+ * if the job says its tasks are speculative; the first answer is kept. An open job takes more items until its client
+ * closes it, starting vessels for them as they come.
  *
  * Concurrency: storage keeps the input gate shut, an RPC or R2 call opens it, so a method decides from storage and
  * writes before it calls out.
@@ -15,18 +16,19 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  environmentKey, fill, itemValues, OutcomeSchema, SIZES, weightOf, workdirOf,
-  type JobSpec, type JobStatus, type Outcome, type VesselRow,
+  BUNDLE_PATH, environmentKey, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  type JobSpec, type JobStatus, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { instanceOf, STATE, TASK, TASK_GROUP } from './container';
+import { instanceOf, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
 
 type Phase = JobStatus['phase'];
 
-/** What the job keeps of its spec: everything but its items (in the `tasks` table) and its env (under `env`). */
-type Kept = Omit<JobSpec, 'items' | 'env'>;
+/** What the job keeps of its spec: everything but its items (in the `tasks` table), its env (under `env`) and whether
+ *  it is open (under `open`). */
+type Kept = Omit<JobSpec, 'items' | 'env' | 'open'>;
 
 /** A task the vessel should run: its index, attempt, argv and environment. */
 export interface Claim {
@@ -64,13 +66,44 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT NOT NULL)');
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vessels (name TEXT PRIMARY KEY, state TEXT NOT NULL, tasks INTEGER NOT NULL DEFAULT 0,
       boot_ms INTEGER, busy_ms INTEGER NOT NULL DEFAULT 0, error TEXT, beat INTEGER NOT NULL)`);
-    const { items, env, ...kept } = spec;
+    const { items, env, open, ...kept } = spec;
 
-    items.forEach((item, index) => {
-      this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', index, JSON.stringify(item), weightOf(item), 'queued');
-    });
-    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
+    this.insert(items);
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  private insert(items: readonly Task[]): void {
+    const first = this.count('1 = 1');
+
+    items.forEach((task, at) => {
+      this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued');
+    });
+  }
+
+  /** More items for an open job, and the vessels they need; or why the job refuses them. */
+  async add(items: readonly Task[]): Promise<string | null> {
+    const spec = await this.spec();
+
+    if (spec === undefined || (await this.ctx.storage.get<boolean>('open')) !== true || (await this.ctx.storage.get<Phase>('phase')) === 'done') return 'the job takes no more items';
+    const refused = refusal(spec.run, items) ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
+
+    if (refused !== null) return refused;
+    this.insert(items);
+    await this.grow();
+
+    return null;
+  }
+
+  /** No more items: the job settles once its queue drains. */
+  async close(): Promise<void> {
+    await this.ctx.storage.put('open', false);
+    await this.settle();
+  }
+
+  /** Each task's item, in order, as the JSON `{"items": [...]}`: a JSON value is too deep a type for an RPC's. */
+  async items(): Promise<string> {
+    return JSON.stringify({ items: this.sql.exec<{ item: string }>('SELECT item FROM tasks ORDER BY idx').toArray().map((row) => v.parse(TaskSchema, JSON.parse(row.item)).item) });
   }
 
   private async spec(): Promise<Kept | undefined> {
@@ -93,7 +126,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (spec === undefined || phase === undefined || phase === 'done') return;
 
-    if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_DEADLINE_MS) return await this.cancel('the job passed its deadline');
+    if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_DEADLINE_MS) return await this.cancel('the job passed its deadline', 'cancelled');
 
     if (phase === 'preparing') await this.awaitEnvironment(spec);
     else await this.watch();
@@ -107,22 +140,32 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'preparing') return;
 
-    if (readiness.kind === 'failed') return await this.cancel(`the environment ${key.slice(0, 12)} could not be prepared: ${readiness.reason}`);
+    if (readiness.kind === 'failed') return await this.cancel(`the environment ${key.slice(0, 12)} could not be prepared: ${readiness.reason}`, 'lost');
 
     if (readiness.kind === 'preparing') return;
 
     if (spec.commit !== undefined && spec.commit.base !== 'root' && spec.commit.base !== readiness.generation.sha) {
-      return await this.cancel(`the environment was rebuilt from ${String(readiness.generation.sha).slice(0, 10)} after this job was packed against ${spec.commit.base.slice(0, 10)}; run again`);
+      return await this.cancel(`the environment was rebuilt from ${String(readiness.generation.sha).slice(0, 10)} after this job was packed against ${spec.commit.base.slice(0, 10)}; run again`, 'lost');
     }
 
-    const total = this.count('1 = 1');
-    const pool = Math.min(spec.pool, total);
-    const names = Array.from({ length: pool }, (_, index) => `v${String(index + 1)}`);
-
     await this.ctx.storage.put({ phase: 'running' satisfies Phase, environment: readiness.generation, startedAt: Date.now() });
+    await this.grow();
+    await this.settle();
+  }
+
+  /** Vessels for the tasks not yet done, up to the pool, beside those still alive. */
+  private async grow(): Promise<void> {
+    const spec = await this.spec();
+    const generation = await this.ctx.storage.get<Generation>('environment');
+
+    if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
+    const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
+    const named = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name LIKE 'v%'`).one()['n']);
+    const wanted = Math.min(spec.pool, this.count(`state IN ('queued', 'running', 'landing')`)) - alive;
+    const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => `v${String(named + index + 1)}`);
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
-    await Promise.all(names.map(async (name) => await this.launch(spec, readiness.generation, name)));
+    await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
   }
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
@@ -130,7 +173,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const vessel: VesselSpec = {
       jobId: id, name, snapshot: generation.snapshot.id, instance: instanceOf(spec.recipe.size), vcpus: SIZES[spec.recipe.size].vcpus,
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
-      tmpfs: spec.tmpfs, files: spec.files, handler: 'handler' in spec.run ? spec.run.handler : null, output: spec.output, timeout: spec.timeout,
+      tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'fn' ? spec.run.bundle : null, output: spec.output, timeout: spec.timeout,
     };
 
     try {
@@ -174,23 +217,32 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (next !== undefined) return this.claimOf(spec, env, next.idx, next.item, next.attempts, false);
 
-    if (!spec.speculative) return null;
+    if (!spec.speculative) {
+      this.beat(name, 'done');
+
+      return null;
+    }
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ?
        AND started < ? AND started < ? - weight * 2000 ORDER BY started LIMIT 1) RETURNING idx, item, attempts`, name, name, now - STRAGGLER_MS, now,
     ).toArray()[0];
 
-    return straggler === undefined ? null : this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true);
+    if (straggler !== undefined) return this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true);
+    // It retires: marked now, so items an open job takes before its retirement lands get a vessel of their own.
+    this.beat(name, 'done');
+
+    return null;
   }
 
-  private claimOf(spec: Kept, own: Record<string, string>, index: number, item: string, attempt: number, duplicate: boolean): Claim {
-    const parsed: unknown = JSON.parse(item);
-    const env = { ...commandEnv(spec.recipe, own), ARMADA_ITEM: item, ARMADA_INDEX: String(index), ARMADA_OUT: `${TASK}/out`, ARMADA_CGROUP: TASK_GROUP };
-    const values = { ...itemValues(parsed, index), out: `${TASK}/out`, files: `${STATE}/files`, workdir: workdirOf(spec.recipe), commit: spec.commit?.sha ?? '' };
-    const argv = 'command' in spec.run ? spec.run.command.map((word) => fill(word, values)) : ['node', `${STATE}/handler.mjs`];
+  private claimOf(spec: Kept, own: Record<string, string>, index: number, stored: string, attempt: number, duplicate: boolean): Claim {
+    const task = v.parse(TaskSchema, JSON.parse(stored));
+    const env = {
+      ...commandEnv(spec.recipe, own), ARMADA_ITEM: JSON.stringify(task.item) ?? 'null', ARMADA_INDEX: String(index), ARMADA_ATTEMPT: String(attempt),
+      ARMADA_OUT: OUT_PATH, ARMADA_CGROUP: TASK_GROUP,
+    };
 
-    return { index, attempt, argv, env, duplicate };
+    return { index, attempt, argv: spec.run.kind === 'fn' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, duplicate };
   }
 
   /** Whether `name`'s answer for `index` is the one kept: the first to land wins, a late duplicate is told no. */
@@ -205,8 +257,10 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** The kept answer, once its output and log are in R2: appended to the stream. */
   async complete(name: string, outcome: Outcome, busyMs: number): Promise<void> {
-    this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ? AND state = 'landing'`, outcome.kind, outcome.index);
-    this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
+    // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
+    const landed = this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ? AND state = 'landing' RETURNING idx`, outcome.kind, outcome.index).toArray().length > 0;
+
+    if (landed) this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
     this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
     await this.settle();
   }
@@ -241,7 +295,7 @@ export class ArmadaJob extends DurableObject<Env> {
         this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, infra = infra + 1 WHERE idx = ?`, task.idx);
       } else {
         this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
-        const outcome: Outcome = { index: task.idx, kind: 'failed', exitCode: -1, seconds: 0, vessel: name, attempt: INFRA_ATTEMPTS, tail: error.slice(-4000), output: false };
+        const outcome: Outcome = { index: task.idx, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: name, attempt: INFRA_ATTEMPTS, tail: error.slice(-4000), output: false };
 
         this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
       }
@@ -261,9 +315,9 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.settle();
   }
 
-  /** Done once no task is queued or running and no vessel can still take one. */
+  /** Done once the job is closed, no task is queued or running, and no vessel can still take one. */
   private async settle(): Promise<void> {
-    if ((await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
+    if ((await this.ctx.storage.get<Phase>('phase')) !== 'running' || (await this.ctx.storage.get<boolean>('open')) === true) return;
     const open = this.count(`state IN ('queued', 'running', 'landing')`);
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
 
@@ -271,7 +325,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (open > 0) {
       for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state IN ('queued', 'running', 'landing')`).toArray()) {
-        const outcome: Outcome = { index: task.idx, kind: 'failed', exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: 'no vessel was left to run it', output: false };
+        const outcome: Outcome = { index: task.idx, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: 'no vessel was left to run it', output: false };
 
         this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
         this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
@@ -289,12 +343,13 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
   }
 
-  async cancel(reason: string): Promise<void> {
+  /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */
+  async cancel(reason: string, why: 'cancelled' | 'lost'): Promise<void> {
     if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return;
-    await this.ctx.storage.put('problems', [...(await this.ctx.storage.get<string[]>('problems')) ?? [], reason]);
+    await this.ctx.storage.put({ problems: [...(await this.ctx.storage.get<string[]>('problems')) ?? [], reason], open: false });
 
     for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state IN ('queued', 'running', 'landing')`).toArray()) {
-      const outcome: Outcome = { index: task.idx, kind: 'failed', exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: reason, output: false };
+      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: reason, output: false };
 
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
       this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));

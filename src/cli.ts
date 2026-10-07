@@ -4,10 +4,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
-import { cancelOnInterrupt, onCommit, runCI } from './ci';
+import { argvOf, cancelOnInterrupt, onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, SizeSchema, usageOf, type Outcome } from './protocol';
+import { BaseSchema, describeUsage, SizeSchema, usageOf } from './protocol';
+import { cmd, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -98,10 +99,11 @@ function recipeFrom(path: string | undefined): v.InferOutput<typeof RecipeFileSc
   return recipe;
 }
 
-function itemsFrom(source: string): unknown[] {
+function itemsFrom(source: string): Json[] {
   const text = readFileSync(source === '-' ? 0 : source, 'utf8').trim();
 
-  if (text.startsWith('[')) return v.parse(v.array(v.unknown()), JSON.parse(text));
+  // Parsed from JSON, so JSON.
+  if (text.startsWith('[')) return v.parse(v.array(v.unknown()), JSON.parse(text)) as Json[];
 
   return text.split('\n').filter((line) => line.trim() !== '');
 }
@@ -117,17 +119,18 @@ async function map(): Promise<number> {
   const began = Date.now();
   const target = option('commit');
   const size = option('size');
-  const where = target === undefined ? { recipe: recipeFrom(option('env')) } : await onCommit(armada, target);
-
-  if (size !== undefined) where.recipe = { ...where.recipe, size: v.parse(SizeSchema, size) };
-  const job = await armada.map({
-    ...where, items: times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1),
-    run: { command: rest }, output: flag('output'), speculative: flag('speculative'), pool: whole('pool'), timeout: whole('timeout'), label: option('label') ?? '',
-  });
+  const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))), env: {}, tmpfs: undefined } : await onCommit(armada, target);
+  const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
+  const argv = argvOf(rest, base);
+  const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout') };
+  const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
+  const options = { armada, pool: whole('pool'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const job = flag('output') ? cmd(base, argv, { ...taskOptions, output: 'text' }).map(all, options) : cmd(base, argv, taskOptions).map(all, options);
+  const id = await job.id;
   let worst = 0;
-  const outcomes: Outcome[] = [];
+  const metas: Meta[] = [];
 
-  console.error(`job ${job.id}`);
+  console.error(`job ${id}`);
   // A ready environment starts the job at once; a new one is prepared first, which is a wait worth a word.
   const preparing = setTimeout(() => {
     void job.status().then((status) => {
@@ -135,22 +138,22 @@ async function map(): Promise<number> {
     }, () => undefined);
   }, 3_000);
 
-  await cancelOnInterrupt(job, async () => {
-    for await (const outcome of job.outcomes()) {
-      outcomes.push(outcome);
+  await cancelOnInterrupt(job, id, async () => {
+    for await (const result of job) {
+      metas.push(result.meta);
 
-      if (flag('json')) console.log(JSON.stringify(outcome));
-      else console.log(`${String(outcome.index).padStart(6)}  ${outcome.kind === 'failed' ? 'FAILED' : `exit ${String(outcome.exitCode)}`}  ${outcome.seconds.toFixed(2)} s  ${outcome.vessel}`);
+      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: result.error } : {} }));
+      else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
 
-      if (outcome.kind === 'failed') worst = 2;
-      else if (outcome.exitCode !== 0 && worst === 0) worst = 1;
+      if (result.kind === 'lost' || result.kind === 'cancelled') worst = 2;
+      else if (result.kind !== 'ok' && worst === 0) worst = 1;
     }
   });
   clearTimeout(preparing);
 
   for (const problem of (await job.status()).problems) console.error(`problem: ${problem}`);
   const summary = await job.summary();
-  const usage = usageOf(outcomes);
+  const usage = usageOf(metas);
 
   if (usage !== null) console.error(`one task used at most ${describeUsage(usage)}`);
   console.error(`${String(summary.tasks)} tasks: ${String(summary.green)} green, ${String(summary.red)} red, ${String(summary.failed)} failed; wall ${((Date.now() - began) / 1000).toFixed(1)} s, `
@@ -223,7 +226,7 @@ function accountOf(): string {
     : `this login has ${String(all.length)} accounts; pick one with --account=<id>:${all.map((each) => `\n  ${each.id}  ${each.name}`).join('')}`);
 }
 
-/** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
+/** The bucket (packs, bundles and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
 function deploy(name: string, vcpus: number | undefined): number {
   const account = accountOf();
   const bucket = `${name}-artifacts`;
@@ -231,7 +234,7 @@ function deploy(name: string, vcpus: number | undefined): number {
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
   const rules = wrangler(['r2', 'bucket', 'lifecycle', 'list', bucket], account);
 
-  for (const prefix of ['packs/', 'jobs/']) {
+  for (const prefix of ['packs/', 'jobs/', 'bundles/']) {
     const rule = `expire-${prefix.slice(0, -1)}`;
 
     if (!rules.includes(rule)) wrangler(['r2', 'bucket', 'lifecycle', 'add', bucket, rule, prefix, '--expire-days', '7', '--force'], account);
@@ -329,7 +332,7 @@ async function main(): Promise<number> {
 
     case 'status':
       if (target === undefined) throw new Error('status needs a job id, which map and run print');
-      console.log(JSON.stringify(await connect().job(target).status(), null, 2));
+      console.log(JSON.stringify(await connect().status(target), null, 2));
 
       return 0;
 

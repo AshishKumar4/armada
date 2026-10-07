@@ -1,5 +1,5 @@
 /**
- * What the armada SDK and the Worker agree on: an environment recipe and its key, a job (a command or a handler
+ * What the armada SDK and the Worker agree on: an environment recipe and its key, a job (a command or a function
  * mapped over items), each task's outcome, a job's status and its event stream. Plain TypeScript with valibot, so the
  * Bun SDK and the Worker compile the same file.
  */
@@ -81,20 +81,60 @@ export const PACKER = 2;
 /** A pack's packer: absent for a pack an earlier client made. */
 export const Packer = v.optional(v.pipe(v.number(), v.integer(), v.minValue(2)));
 
-/** A command, its words filled per item (`{item}`, an object item's scalar keys, `{out}`, `{files}`, `{index}`), or a
- *  JavaScript function's source, called with the item under `node`; its return value is the task's output. */
-const RunSchema = v.union([
-  v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)) }),
-  v.object({ handler: v.pipe(v.string(), v.minLength(1)) }),
-]);
+/** Where a task's container keeps what armada gives it: the job's files, a function's bundle, and the file a task
+ *  writes its output to. */
+export const FILES_DIR = '/armada/files';
+
+export const BUNDLE_PATH = '/armada/bundle.mjs';
+
+export const OUT_PATH = '/armada/task/out';
+
+const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
+
+/** Each task runs its own argv, or a function: `node` runs the bundle, which reads the item and writes the result. */
+const RunSchema = v.union([v.object({ kind: v.literal('command') }), v.object({ kind: v.literal('fn'), bundle: Digest })]);
+
+/** A JSON value. */
+export type Json = string | number | boolean | null | readonly Json[] | { readonly [key: string]: Json };
+
+/** Any value a request's JSON parsed to, which is JSON by construction. */
+export const JsonSchema = v.custom<Json>(() => true);
+
+/** `text` as JSON, or null when it is not JSON: a task's output file, which the task may have left half written. */
+export function jsonOf(text: string): Json {
+  try {
+    return v.parse(JsonSchema, JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+/** One task: its item, which `ARMADA_ITEM` carries as JSON and whose numeric `weight` queues it, and a command's argv. */
+export const TaskSchema = v.object({ item: JsonSchema, argv: v.optional(v.pipe(v.array(v.string()), v.minLength(1))) });
+
+export type Task = v.InferOutput<typeof TaskSchema>;
+
+export const MAX_TASKS = 100_000;
+
+/** Why a job refuses these tasks: a command's task carries its argv, and a function's carries none. */
+export function refusal(run: { readonly kind: 'command' | 'fn' }, tasks: readonly Task[]): string | null {
+  const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
+
+  return odd < 0 ? null : `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a function takes none of'}`;
+}
+
+/** A task's output up to this size rides in its event; a larger one is read from R2. */
+export const INLINE_BYTES = 32 * 1024;
 
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,
   /** For a repository recipe: the commit each container checks out, packed against `base`. */
   commit: v.optional(v.object({ sha: Sha, base: PackBase, packer: Packer })),
-  items: v.pipe(v.array(v.unknown()), v.minLength(1), v.maxLength(100_000)),
+  items: v.pipe(v.array(TaskSchema), v.maxLength(MAX_TASKS)),
+  /** An open job takes more items until it is closed. */
+  open: v.optional(v.boolean(), false),
   run: RunSchema,
-  /** Whether a task writes `{out}`, kept as its output (a handler's return value always is). */
+  /** Whether a task's output file is kept (a function's result always is). */
   output: v.optional(v.boolean(), false),
   /** Small files every container gets under `{files}`, by name. */
   files: v.optional(v.record(v.pipe(v.string(), v.regex(/^[A-Za-z0-9._-]+$/u)), v.string()), {}),
@@ -114,16 +154,20 @@ export type JobSpec = v.InferOutput<typeof JobSpecSchema>;
 /** What a container reports for one task, and what the job streams. */
 export const OutcomeSchema = v.object({
   index: v.number(),
-  /** `exited` with its code, or `failed` when the infrastructure could not run it twice. */
+  /** `exited` with its code, or `failed` when it never finished. */
   kind: v.picklist(['exited', 'failed']),
+  /** Why: past its timeout (exited 124), cancelled, or lost by the platform twice. */
+  reason: v.optional(v.picklist(['timeout', 'cancelled', 'lost'])),
   exitCode: v.number(),
   seconds: v.number(),
   vessel: v.string(),
   attempt: v.number(),
   /** The last lines the task printed. */
   tail: v.string(),
-  /** Whether `{out}` (or a handler's value) is stored, at `/jobs/<id>/tasks/<index>/output`. */
+  /** Whether the task's output is stored, at `/jobs/<id>/tasks/<index>/output`, and the output itself when it is text
+   *  of at most INLINE_BYTES. */
   output: v.boolean(),
+  value: v.optional(v.string()),
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),
@@ -232,8 +276,8 @@ export function failureTail(stdout: string, stderr: string, limit = 3000): strin
 /** What a job's tasks used at most: the highest peak memory, in bytes, and the most cores one task kept busy on average. */
 export type Usage = v.InferOutput<typeof UsageSchema>;
 
-/** The most any of these outcomes used, or null when none was measured. */
-export function usageOf(outcomes: readonly Outcome[]): Usage | null {
+/** The most any of these tasks used, or null when none was measured. */
+export function usageOf(outcomes: readonly { readonly seconds: number; readonly peakMemory?: number; readonly cpuSeconds?: number }[]): Usage | null {
   const measured = outcomes.filter((outcome) => outcome.peakMemory !== undefined && outcome.cpuSeconds !== undefined && outcome.seconds > 0);
 
   if (measured.length === 0) return null;

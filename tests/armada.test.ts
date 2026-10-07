@@ -401,7 +401,9 @@ describe('the CLI\'s arguments', () => {
         env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
-      expect({ exit: await cli.exited, jobs }).toMatchObject({ exit: 0, jobs: [{ items: [1, 2], run: { command: ['tool', '--output', '--items=x'] }, output: false }] });
+      const argv = ['tool', '--output', '--items=x'];
+
+      expect({ exit: await cli.exited, jobs }).toMatchObject({ exit: 0, jobs: [{ items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false }] });
     } finally {
       await server.stop(true);
     }
@@ -458,7 +460,7 @@ describe('the CLI following a job', () => {
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: unknown, verdict: unknown) {
+  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const git = (...words: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo }).exitCode).toBe(0);
@@ -478,11 +480,11 @@ describe('armada run', () => {
         if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json({ rows: {}, files: {} });
         if (pathname === '/jobs') {
-          commands.push(v.parse(v.object({ run: v.object({ command: v.array(v.string()) }) }), await request.json()).run.command);
+          commands.push(v.parse(v.object({ items: v.array(v.object({ argv: v.array(v.string()) })) }), await request.json()).items[0]?.argv ?? []);
 
           return Response.json({ id: commands.length === 1 ? 'plan' : 'tasks' });
         }
-        if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome }], done: true });
+        if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: pathname.startsWith('/jobs/tasks/') ? { ...outcome, exitCode: taskExit } : outcome }], done: true });
         if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify(plan));
         if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify(verdict));
         if (pathname.startsWith('/jobs/')) return Response.json(status(pathname.split('/')[2] ?? ''));
@@ -523,6 +525,12 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, line: line?.replace(/^\s*\d+:\d+\s+/u, ''), told: ran.stdout.includes('AssertionError: y broke') })
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
+  });
+
+  test('a task that wrote its verdict and then exited nonzero is graded, its green rows red with its exit', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] }, 7);
+
+    expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), red: ran.stdout.includes('RED  x.mjs  (exit 7') }).toEqual({ exit: 1, graded: true, red: true });
   });
 });
 

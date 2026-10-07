@@ -1,21 +1,12 @@
 /**
- * The armada SDK: map a command or a handler over items on a fleet of containers started from an environment
- * snapshot, and read each task's outcome as it lands.
- *
- *   const armada = connect();
- *   const job = await armada.map({ recipe: { setup: 'apt-get install -y imagemagick' }, items: files, run: { command: ['convert', '{item}', '{out}'] }, output: true });
- *   for await (const outcome of job.outcomes()) console.log(outcome.index, outcome.exitCode);
- *   const summary = await job.summary();
- *
- * A handler is a function's source, called under `node` with the item; its return value is the task's output:
- *
- *   await armada.map({ items: [1, 2, 3], handler: (n: number) => n * n });
+ * A deployment of armada and the requests it answers: jobs, their events and outputs, packs and bundles. The typed
+ * API (`task.ts`) and the CLI are built on it.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { EventsSchema, JobStatusSchema, PACKER, type JobSpec, type JobSpecSchema, type JobStatus, type Outcome, type Recipe, type RecipeSchema } from './protocol';
+import { EventsSchema, JobStatusSchema, JsonSchema, PACKER, type JobSpecSchema, type JobStatus, type Json, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -28,11 +19,6 @@ export const PACK_PART = 64 * 1024 * 1024;
 export const ConnectionSchema = v.object({ url: v.string(), token: v.string(), account: v.string() });
 
 export type Connection = v.InferOutput<typeof ConnectionSchema>;
-
-/** What `map` takes: a job spec, with a recipe's defaults filled and a handler given as a function if wanted. */
-export type MapSpec = Omit<v.InferInput<typeof JobSpecSchema>, 'run' | 'recipe'> & {
-  readonly recipe?: v.InferInput<typeof RecipeSchema>;
-} & ({ readonly run: JobSpec['run'] } | { readonly handler: ((item: never) => unknown) | string });
 
 export interface Summary {
   readonly tasks: number;
@@ -113,8 +99,9 @@ export class Armada {
     }
   }
 
-  async post(path: string, body: unknown): Promise<unknown> {
-    return await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  /** `body` as JSON, and the answer's JSON. */
+  async post<Body>(path: string, body: Body): Promise<Json> {
+    return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json());
   }
 
   /** A recipe's environment key, and what a commit for it should be packed against. */
@@ -149,80 +136,69 @@ export class Armada {
     return body.size;
   }
 
-  async map(spec: MapSpec): Promise<Job> {
-    const run = 'run' in spec ? spec.run : { handler: typeof spec.handler === 'string' ? spec.handler : spec.handler.toString() };
-    const body: Record<string, unknown> = { ...spec, recipe: spec.recipe ?? {}, run };
+  /** Stores a function's bundle once, under the sha-256 of its bytes, and returns that digest. */
+  async uploadBundle(bytes: Uint8Array): Promise<string> {
+    const digest = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
+    const path = `/bundles/${digest}`;
 
-    delete body['handler'];
-    const { id } = v.parse(v.object({ id: v.string() }), await this.post('/jobs', body));
+    if ((await this.call(path, { method: 'HEAD' })).status === 404) await this.call(path, { method: 'PUT', body: bytes });
 
-    return new Job(this, id);
+    return digest;
   }
 
-  job(id: string): Job {
-    return new Job(this, id);
-  }
-}
-
-export class Job {
-  constructor(private readonly armada: Armada, readonly id: string) {}
-
-  async status(): Promise<JobStatus> {
-    return v.parse(JobStatusSchema, await (await this.armada.call(`/jobs/${this.id}`)).json());
+  async create(spec: v.InferInput<typeof JobSpecSchema>): Promise<string> {
+    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', spec)).id;
   }
 
-  /** Each task's outcome, as it lands, until the job is done. Read in batches, never a round trip per line. */
-  async *outcomes(pollMs = 1_000): AsyncGenerator<Outcome> {
-    let after = 0;
-
-    for (;;) {
-      const batch = v.parse(EventsSchema, await (await this.armada.call(`/jobs/${this.id}/events?after=${String(after)}`)).json());
-
-      for (const event of batch.events) {
-        after = event.seq;
-        yield event.outcome;
-      }
-
-      if (batch.done) return;
-
-      if (batch.events.length === 0) await Bun.sleep(pollMs);
-    }
+  async add(id: string, items: readonly Task[]): Promise<void> {
+    await this.post(`/jobs/${id}/items`, { items });
   }
 
-  /** A task's stored output (`{out}`, or a handler's JSON value) as text, or null. */
-  async output(index: number): Promise<string | null> {
-    const response = await this.armada.call(`/jobs/${this.id}/tasks/${String(index)}/output`);
-
-    return response.status === 404 ? null : await response.text();
+  async close(id: string): Promise<void> {
+    await this.call(`/jobs/${id}/close`, { method: 'POST' });
   }
 
-  /** A task's stored output as its exact bytes (an image, an archive), or null. */
-  async outputBytes(index: number): Promise<Uint8Array | null> {
-    const response = await this.armada.call(`/jobs/${this.id}/tasks/${String(index)}/output`);
+  async cancel(id: string): Promise<void> {
+    await this.call(`/jobs/${id}/cancel`, { method: 'POST' });
+  }
+
+  async status(id: string): Promise<JobStatus> {
+    return v.parse(JobStatusSchema, await (await this.call(`/jobs/${id}`)).json());
+  }
+
+  /** Outcomes after `after`, in batches, and whether the job is done. */
+  async events(id: string, after: number): Promise<v.InferOutput<typeof EventsSchema>> {
+    return v.parse(EventsSchema, await (await this.call(`/jobs/${id}/events?after=${String(after)}`)).json());
+  }
+
+  /** Each task's item, in order. */
+  async items(id: string): Promise<Json[]> {
+    return v.parse(v.object({ items: v.array(JsonSchema) }), await (await this.call(`/jobs/${id}/items`)).json()).items;
+  }
+
+  /** A task's stored output as its bytes, or null. */
+  async output(id: string, index: number): Promise<Uint8Array | null> {
+    const response = await this.call(`/jobs/${id}/tasks/${String(index)}/output`);
 
     return response.status === 404 ? null : new Uint8Array(await response.arrayBuffer());
   }
 
-  async log(index: number): Promise<string | null> {
-    const response = await this.armada.call(`/jobs/${this.id}/tasks/${String(index)}/log`);
+  async log(id: string, index: number): Promise<string | null> {
+    const response = await this.call(`/jobs/${id}/tasks/${String(index)}/log`);
 
     return response.status === 404 ? null : await response.text();
   }
+}
 
-  async cancel(): Promise<void> {
-    await this.armada.call(`/jobs/${this.id}/cancel`, { method: 'POST' });
-  }
+/** A job's times and counts, from its status. */
+export function summaryOf(status: JobStatus): Summary {
+  const finished = status.finishedAt ?? Date.now();
+  const mapMs = finished - (status.startedAt ?? finished);
+  const bootMs = status.vessels.flatMap((vessel) => vessel.bootMs === null ? [] : [vessel.bootMs]).sort((left, right) => left - right);
+  const done = status.tasks.exited + status.tasks.failed;
 
-  async summary(): Promise<Summary> {
-    const status = await this.status();
-    const finished = status.finishedAt ?? Date.now();
-    const mapMs = finished - (status.startedAt ?? finished);
-    const bootMs = status.vessels.flatMap((vessel) => vessel.bootMs === null ? [] : [vessel.bootMs]).sort((left, right) => left - right);
-    const done = status.tasks.exited + status.tasks.failed;
-
-    return {
-      tasks: status.tasks.total, green: status.tasks.exited - status.tasks.red, red: status.tasks.red, failed: status.tasks.failed,
-      wallMs: finished - status.createdAt, mapMs, vessels: status.vessels.length, bootMs, tasksPerSecond: mapMs > 0 ? done / (mapMs / 1000) : 0,
-    };
-  }
+  return {
+    tasks: status.tasks.total, green: status.tasks.exited - status.tasks.red, red: status.tasks.red, failed: status.tasks.failed,
+    wallMs: finished - status.createdAt, mapMs, vessels: status.vessels.length, bootMs, tasksPerSecond: mapMs > 0 ? done / (mapMs / 1000) : 0,
+  };
 }

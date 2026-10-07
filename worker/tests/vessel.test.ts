@@ -6,18 +6,20 @@ import { container, namespace, state, world } from './harness';
 
 const spec: VesselSpec = {
   jobId: 'job', name: 'v1', snapshot: 'snapshot', instance: 'standard-4', vcpus: 4, workdir: '/home/ci/work', commit: null,
-  tmpfs: [], files: {}, handler: null, output: false, timeout: 600,
+  tmpfs: [], files: {}, bundle: null, output: false, timeout: 600,
 };
 
-/** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read, and whose
- *  cgroup reads `usage`. */
-async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }) {
+/** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read, whose cgroup
+ *  reads `usage`, and whose output file holds `out` when the job keeps outputs. */
+async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }, out?: string) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   let claimed = false;
   let waits = 0;
   const stored = state(container((argv) => {
     if (argv[2] === USAGE) return usage;
+
+    if (argv[0] === 'cat') return { exitCode: 0, stdout: out ?? '' };
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     waits += 1;
@@ -41,7 +43,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
   };
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job) }));
 
-  await vessel.begin(spec);
+  await vessel.begin({ ...spec, output: out !== undefined });
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
@@ -61,5 +63,14 @@ describe('a finished task', () => {
     const [lost] = (await run(0, new Error('Network connection lost.'))).completed;
 
     expect([measured, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds])).toEqual([[0, 734003200, 2.5], [0, undefined, undefined]]);
+  });
+});
+
+describe('a task\'s output', () => {
+  test('rides in its outcome as text up to 32 KiB, and is only stored beyond that', async () => {
+    const small = (await run(0, undefined, '{"n": 1}')).completed[0];
+    const large = (await run(0, undefined, 'x'.repeat(32 * 1024 + 1))).completed[0];
+
+    expect([small?.output, small?.value, large?.output, large?.value]).toEqual([true, '{"n": 1}', true, undefined]);
   });
 });

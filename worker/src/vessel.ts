@@ -1,17 +1,17 @@
 /**
  * ArmadaVessel: one container of a job's pool. It waits for fleet capacity, starts from the job's environment snapshot
- * (taking in the commit, the job's files and its handler once), then pulls tasks from the job until the queue has
+ * (taking in the commit, the job's files and its function's bundle once), then pulls tasks from the job until the queue has
  * none left for it: launch one detached, wait on it in short blocking reads, store its output and log in R2 once, and
  * report its outcome. Its loop runs in alarms of about a minute each, so no request holds it, and its state is in
  * storage, so a restarted object takes the same task up again. A task it was told to drop (another vessel's answer
  * landed first, or the job ended) is killed with its whole session.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { failureTail, type Outcome } from '../../src/protocol';
+import { BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KILL, TASK, USAGE, WAIT, handlerModule, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, usageFrom,
+  ENTRYPOINT, KILL, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, usageFrom,
 } from './container';
-import { packKey, said, taskKey, type Env } from './env';
+import { bundleKey, packKey, said, taskKey, type Env } from './env';
 import type { Claim } from './job';
 
 export interface VesselSpec {
@@ -24,7 +24,8 @@ export interface VesselSpec {
   readonly commit: { readonly sha: string; readonly base: string; readonly packer?: number; readonly project: string; readonly history: 'full' | 'commit' } | null;
   readonly tmpfs: readonly string[];
   readonly files: Record<string, string>;
-  readonly handler: string | null;
+  /** A function job's bundle, by digest. */
+  readonly bundle: string | null;
   /** Whether a task's `{out}` is kept. */
   readonly output: boolean;
   /** A task's own bound, in seconds. */
@@ -148,7 +149,12 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     for (const [name, text] of Object.entries(spec.files)) await pipeIn(container, text, `${STATE}/files/${name}`);
 
-    if (spec.handler !== null) await pipeIn(container, handlerModule(spec.handler), `${STATE}/handler.mjs`);
+    if (spec.bundle !== null) {
+      const bundle = await this.env.ARTIFACTS.get(bundleKey(spec.bundle));
+
+      if (bundle === null) throw new Error(`the bundle ${spec.bundle} is not in R2`);
+      await pipeIn(container, bundle.body, BUNDLE_PATH);
+    }
     await this.ctx.storage.put('state', 'working' satisfies State);
     await this.env.JOB.getByName(spec.jobId).booted(spec.name, bootMs);
   }
@@ -195,7 +201,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
       if (Date.now() - current.startedAt > spec.timeout * 1000) {
         await must(container, 'the kill', ['/bin/sh', '-c', KILL], { ms: EXEC_MS });
-        await this.finish(spec, current, 124);
+        await this.finish(spec, current, 124, 'timeout');
         continue;
       }
 
@@ -209,7 +215,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
-  private async finish(spec: VesselSpec, current: Current, exitCode: number): Promise<void> {
+  private async finish(spec: VesselSpec, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
     const container = this.container();
     const { index, attempt } = current.claim;
     const job = this.env.JOB.getByName(spec.jobId);
@@ -225,18 +231,20 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     await this.env.ARTIFACTS.put(taskKey(spec.jobId, index, 'log'), log.stdout, { httpMetadata: { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' } });
     let output = false;
+    let value: string | undefined;
 
-    if (spec.output || spec.handler !== null) {
+    if (spec.output || spec.bundle !== null) {
       // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
-      const out = await (await container.exec(['cat', `${TASK}/out`], { signal: AbortSignal.timeout(EXEC_MS) })).output();
+      const out = await (await container.exec(['cat', OUT_PATH], { signal: AbortSignal.timeout(EXEC_MS) })).output();
 
       if (out.exitCode === 0) {
         await this.env.ARTIFACTS.put(taskKey(spec.jobId, index, 'output'), out.stdout);
         output = true;
+        value = out.stdout.byteLength <= INLINE_BYTES ? textOf(out.stdout) : undefined;
       }
     }
 
-    const outcome: Outcome = { index, kind: 'exited', exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output, ...usage };
+    const outcome: Outcome = { index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output, value, ...usage };
 
     await job.complete(spec.name, outcome, seconds * 1000);
   }
@@ -248,5 +256,14 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.env.JOB.getByName(spec.jobId).retired(spec.name);
 
     return false;
+  }
+}
+
+/** Bytes as text, or undefined when they are not UTF-8. */
+function textOf(bytes: ArrayBuffer): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return undefined;
   }
 }

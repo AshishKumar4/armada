@@ -21,6 +21,6 @@
     "wrangler": "4.145.0"
   },
   "exports": {
-    ".": "./src/sdk.ts"
+    ".": "./src/index.ts"
   }
 }

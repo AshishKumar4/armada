@@ -9,7 +9,7 @@ import { failureTail, SIZES, type Size } from '../../src/protocol';
  *  a command drops to the user inside. */
 export const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
 
-/** The runner's own state in a container: the pack, the job's files, the handler, the current task. */
+/** The runner's own state in a container: the pack, the job's files, a function's bundle, the current task. */
 export const STATE = '/armada';
 
 export const TASK = `${STATE}/task`;
@@ -44,7 +44,7 @@ const GIT = { version: '2.53.0', sha256: '5818bd7d80b061bbbdfec8a433d609dc8818a0
 
 /**
  * The runner's layer on any Debian or Ubuntu base, as root, before the recipe's own setup: the user and the
- * directories; tini, which reaps what a task's daemons orphan; setpriv, to drop to the user; node, for handlers; and
+ * directories; tini, which reaps what a task's daemons orphan; setpriv, to drop to the user; node, for functions; and
  * the tools a GitHub runner has that a stock container lacks and suites reach for (git as the runner has it, iproute2,
  * strace, procps, zip, a compiler). Every recipe inherits it, and `DRIVER` keys it.
  */
@@ -150,15 +150,6 @@ if [ -n "$pid" ]; then
   kill -KILL -- "-$pid" 2>/dev/null || true
 fi
 ${END_GROUP}`;
-
-/** A handler: a function's source, called with the item, its value written to `{out}`. */
-export function handlerModule(source: string): string {
-  return `import { writeFileSync } from 'node:fs';
-const handler = (${source});
-const value = await handler(JSON.parse(process.env.ARMADA_ITEM));
-writeFileSync(process.env.ARMADA_OUT, JSON.stringify(value === undefined ? null : value));
-`;
-}
 
 /** A size's instance type, as a start takes it. */
 export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;

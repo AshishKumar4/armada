@@ -1,10 +1,10 @@
 /**
- * armada's Worker. A job maps a command or a handler over items on a pool of containers started from an environment
+ * armada's Worker. A job maps a command or a function over items on a pool of containers started from an environment
  * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote.
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, Project, RecipeSchema, Sha, TimingsSchema } from '../../src/protocol';
-import { packKey, SINGLE, taskKey, type Env } from './env';
+import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, Project, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
+import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
 
@@ -76,12 +76,38 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
   return Response.json({ stored: key });
 };
 
-/** `POST /jobs` starts one; `/jobs/<id>` is its status, `/events?after=n` its outcomes, `/cancel` ends it, and
- *  `/tasks/<index>/{output,log}` a task's stored output and log. */
+/** `/bundles/<digest>`: a function's bundle, stored once under the digest of its bytes. */
+const bundles: Handler = async (request, env, [digest]) => {
+  if (digest === undefined || !/^[0-9a-f]{64}$/u.test(digest)) return undefined;
+
+  if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(bundleKey(digest))) === null ? 404 : 200 });
+
+  if (request.method !== 'PUT') return undefined;
+  const bytes = await request.arrayBuffer();
+  const actual = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+
+  if (actual !== digest) return Response.json({ error: `the bundle's digest is ${actual}, not ${digest}` }, { status: 400 });
+  await env.ARTIFACTS.put(bundleKey(digest), bytes);
+
+  return Response.json({ stored: digest });
+};
+
+const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
+
+/** `POST /jobs` starts one; `/jobs/<id>` is its status, `/events?after=n` its outcomes, `/cancel` ends it, an open
+ *  job takes `POST /items` and `POST /close`, `GET /items` lists its items, and `/tasks/<index>/{output,log}` are a
+ *  task's stored output and log. */
 const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
   if (id === undefined) {
     if (request.method !== 'POST') return undefined;
     const spec = v.parse(JobSpecSchema, await request.json());
+    const refused = refusal(spec.run, spec.items);
+
+    if (refused !== null) return Response.json({ error: refused }, { status: 400 });
+
+    if (!spec.open && spec.items.length === 0) return Response.json({ error: 'a job that is not open needs an item' }, { status: 400 });
+
+    if (spec.run.kind === 'fn' && (await env.ARTIFACTS.head(bundleKey(spec.run.bundle))) === null) return Response.json({ error: `upload the bundle ${spec.run.bundle} first` }, { status: 409 });
 
     if (spec.commit !== undefined) {
       if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
@@ -103,9 +129,24 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
   if (tail === 'events') return Response.json(await job.events(Number(url.searchParams.get('after') ?? '0')));
 
   if (tail === 'cancel' && request.method === 'POST') {
-    await job.cancel('cancelled by its client');
+    await job.cancel('cancelled by its client', 'cancelled');
 
     return Response.json({ cancelled: id });
+  }
+
+  if (tail === 'items' && request.method === 'GET') return new Response(await job.items(), { headers: { 'content-type': 'application/json' } });
+
+  if (tail === 'items' && request.method === 'POST') {
+    const { items } = v.parse(Items, await request.json());
+    const refused = await job.add(items);
+
+    return refused === null ? Response.json({ added: items.length }) : Response.json({ error: refused }, { status: 400 });
+  }
+
+  if (tail === 'close' && request.method === 'POST') {
+    await job.close();
+
+    return Response.json({ closed: id });
   }
 
   return tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && (leaf === 'output' || leaf === 'log') ? await object(env, taskKey(id, Number(index), leaf)) : undefined;
@@ -158,7 +199,7 @@ const environments: Handler = async (request, env, [key]) => {
   return Response.json({ forgotten: key });
 };
 
-const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments]]);
+const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['bundles', bundles], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments]]);
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);

@@ -12,8 +12,9 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { describeUsage, fitSize, PACKER, TimingsSchema, usageOf, type JobSpec, type Manifest, type Outcome, type Recipe, type Size, type Timings } from './protocol';
-import type { Armada, Job } from './sdk';
+import { describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
+import type { Armada } from './sdk';
+import { cmd, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
 
@@ -62,7 +63,7 @@ function manifestOf(repo: string, sha: string, config: Config): Manifest {
 }
 
 /** The recipe the commit names, its scripts read from the commit as text. */
-function recipeOf(repo: string, sha: string, config: Config, size: Size): Recipe {
+function recipeOf(repo: string, sha: string, config: Config, size: Size): Omit<Recipe, 'commit'> {
   const text = (path: string | undefined) => path === undefined ? '' : git(repo, ['show', `${sha}:${path}`]).toString();
 
   return {
@@ -94,15 +95,15 @@ const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
 
 const clock = (ms: number): string => `${String(Math.floor(ms / 60_000))}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 
-/** `body`, while it follows `job`: interrupting the CLI (Ctrl-C, or a CI job cancelled) cancels the job, rather than
+/** `body`, while it follows job `id`: interrupting the CLI (Ctrl-C, or a CI job cancelled) cancels the job, rather than
  *  leaving its containers to run for an answer nobody reads, and exits 2. */
-export async function cancelOnInterrupt<T>(job: Job, body: () => Promise<T>): Promise<T> {
+export async function cancelOnInterrupt<T>(job: { cancel(): Promise<void> }, id: string, body: () => Promise<T>): Promise<T> {
   // Once interrupted, the cancel's end is the CLI's: a job that finishes meanwhile does not answer for it.
   let cancelling: Promise<never> | null = null;
   const interrupted = (signal: NodeJS.Signals): void => {
-    console.error(`armada: ${signal}: cancelling job ${job.id}`);
+    console.error(`armada: ${signal}: cancelling job ${id}`);
     cancelling ??= job.cancel().then(() => process.exit(2), (cause: unknown) => {
-      console.error(`armada: cancelling job ${job.id} failed: ${String(cause)}`);
+      console.error(`armada: cancelling job ${id} failed: ${String(cause)}`);
       process.exit(2);
     });
   };
@@ -118,23 +119,23 @@ export async function cancelOnInterrupt<T>(job: Job, body: () => Promise<T>): Pr
   }
 }
 
-/** A task's verdict file as JSON, or null when it is not: the grader names it, and the job runs on. */
-function jsonOf(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
+/** A result's word by its exit: green, RED with the exit code, or FAILED with why it never finished. */
+function exitWord(result: Result<Json, string | null>): string {
+  return result.kind === 'lost' || result.kind === 'cancelled' ? `FAILED: ${result.reason.slice(-300)}` : result.kind === 'ok' ? 'green' : `RED (exit ${String(result.meta.exitCode)})`;
 }
 
-/** An outcome's word by its exit: green, RED with the exit code, or FAILED with what the infrastructure said. */
-function exitWord(outcome: Outcome): string {
-  return outcome.kind === 'failed' ? `FAILED: ${outcome.tail.slice(-300)}` : outcome.exitCode === 0 ? 'green' : `RED (exit ${String(outcome.exitCode)})`;
+/** A command template's argv for one item: `{item}`, an object item's scalar keys, `{index}`, `{out}`, `{files}`,
+ *  `{workdir}` and `{commit}` filled; any other placeholder is an error, never an empty string. */
+export function argvOf(template: readonly string[], recipe: Recipe): (item: Json, at: { readonly index: number }) => string[] {
+  const fixed = { out: OUT_PATH, files: FILES_DIR, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
+
+  return (item, { index }) => template.map((word) => fill(word, { ...itemValues(item, index), ...fixed }));
 }
 
 /** Follows a job to its end, saying each phase once and each outcome as it lands, in the words `say` finds for it. */
-async function follow(job: Job, began: number, name: (outcome: Outcome) => string, say: (outcome: Outcome) => Promise<string> = async (outcome) => exitWord(outcome)): Promise<Outcome[]> {
-  const outcomes: Outcome[] = [];
+async function follow<O extends string | null>(job: Job<Json, O>, began: number, name: (index: number) => string, say: (result: Result<Json, O>) => Promise<string> | string = exitWord): Promise<Result<Json, O>[]> {
+  const results: Result<Json, O>[] = [];
+  const id = await job.id;
   let phase = '';
   const watcher = setInterval(() => {
     void job.status().then((status) => {
@@ -145,15 +146,13 @@ async function follow(job: Job, began: number, name: (outcome: Outcome) => strin
   }, 3_000);
 
   try {
-    return await cancelOnInterrupt(job, async () => {
-      for await (const outcome of job.outcomes()) {
-        outcomes.push(outcome);
-        const verdict = await say(outcome);
-
-        console.log(`${clock(Date.now() - began).padStart(6)}  ${name(outcome).padEnd(14)} ${verdict} in ${clock(outcome.seconds * 1000)} on ${outcome.vessel}`);
+    return await cancelOnInterrupt(job, id, async () => {
+      for await (const result of job) {
+        results.push(result);
+        console.log(`${clock(Date.now() - began).padStart(6)}  ${name(result.index).padEnd(14)} ${await say(result)} in ${clock(result.meta.seconds * 1000)} on ${result.meta.container}`);
       }
 
-      return outcomes;
+      return results;
     });
   } finally {
     clearInterval(watcher);
@@ -168,7 +167,12 @@ function printReds(reds: readonly VerdictRow[]): void {
 }
 
 /** The job fields that run a command on a commit, in the environment its `.armada.json` names. */
-type OnCommit = Pick<JobSpec, 'recipe' | 'commit' | 'env' | 'tmpfs'>;
+/** What runs a command on a commit: its recipe, and the env and tmpfs its `.armada.json` names. */
+interface OnCommit {
+  readonly recipe: Recipe;
+  readonly env: Readonly<Record<string, string>>;
+  readonly tmpfs: readonly string[];
+}
 
 /** A commit and its `.armada.json`: its environment, its job fields, and the upload of its pack, which sends nothing
  *  when the runner has it. */
@@ -180,7 +184,7 @@ async function commitOf(armada: Armada, target: string) {
   const recipe = recipeOf(repo, sha, config, size);
   const environment = await armada.resolve(recipe);
   const base = packBase(repo, environment.base);
-  const spec: OnCommit = { recipe, commit: { sha, base, packer: PACKER }, env: config.env, tmpfs: config.tmpfs };
+  const spec: OnCommit = { recipe: { ...recipe, commit: { sha, base, packer: PACKER } }, env: config.env, tmpfs: config.tmpfs };
 
   return { sha, config, timings, environment, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
 }
@@ -238,67 +242,72 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
   if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
-  const common = { ...spec, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
+  const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada };
   // The plan's stdout is its output; its stderr stays in its log.
-  const planJob = await armada.map({ ...common, items: [{}], run: { command: ['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs] }, output: true, pool: 1, timeout: 900 });
+  const planTask = cmd(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
+  const planJob = planTask.map([{}], { ...options, pool: 1 });
+  const planId = await planJob.id;
 
-  console.log(`plan job ${planJob.id}`);
-  const planned = await follow(planJob, began, () => 'plan');
-  const planText = await planJob.output(0);
+  console.log(`plan job ${planId}`);
+  const [planned] = await follow(planJob, began, () => 'plan');
 
-  if (planned[0]?.kind !== 'exited' || planned[0].exitCode !== 0 || planText === null) {
-    console.log(`\nNOT GRADED: the plan command did not print a plan\n${planned[0]?.tail ?? (await planJob.status()).problems.join('\n')}`);
+  if (planned?.kind !== 'ok') {
+    console.log(`\nNOT GRADED: the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`);
 
     return 2;
   }
 
-  const plan = v.parse(PlanSchema, JSON.parse(planText));
+  const plan = v.parse(PlanSchema, JSON.parse(planned.value));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const most = Math.min(config.pool, plan.include.length);
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
   const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
-  const job = await armada.map({
-    ...common, items: plan.include, run: { command: config.task.command.map(placed) }, output: config.task.verdict,
-    pool, speculative: config.task.speculative, timeout: config.task.timeout,
-  });
+  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative };
+  const argv = argvOf(config.task.command.map(placed), spec.recipe);
+  // A matrix entry came from JSON, so it is JSON.
+  const entries = plan.include as Json[];
+  const job = config.task.verdict ? cmd(spec.recipe, argv, { ...taskOptions, output: 'text' }).map(entries, { ...options, pool }) : cmd(spec.recipe, argv, taskOptions).map(entries, { ...options, pool });
+  const jobId = await job.id;
 
-  console.log(`task job ${job.id}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);
+  console.log(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);
   const nameOf = (index: number) => names[index] ?? String(index);
-  // Each task's rows, read from its verdict file as its outcome lands, and graded as read: a task that reports many rows
+  // Each task's rows, read from its verdict file as its result lands, and graded as read: a task that reports many rows
   // exits 0 with red ones among them, so its exit alone would say green. Null for a file missing or malformed.
   const verdicts = new Map<number, VerdictRow[] | null>();
-  const say = async (outcome: Outcome): Promise<string> => {
-    if (!config.task.verdict || outcome.kind !== 'exited') return exitWord(outcome);
-    const text = await job.output(outcome.index);
+  const say = async (result: Result<Json, string | null>): Promise<string> => {
+    if (!config.task.verdict || result.kind === 'lost' || result.kind === 'cancelled') return exitWord(result);
+    // A task that exited nonzero may still have written its verdict, whose rows its exit then fails.
+    const written = result.kind === 'ok' ? null : await job.output(result.index);
+    const text = result.kind === 'ok' ? result.value : written === null ? null : new TextDecoder().decode(written);
     const parsed = text === null ? null : v.safeParse(VerdictFileSchema, jsonOf(text));
-    const rows = parsed?.success === true ? underExit(parsed.output.rows, outcome, nameOf(outcome.index)) : null;
+    const rows = parsed?.success === true ? underExit(parsed.output.rows, result.meta, nameOf(result.index)) : null;
 
-    verdicts.set(outcome.index, rows);
+    verdicts.set(result.index, rows);
 
-    if (rows === null) return `${exitWord(outcome)}, with no verdict it can be graded by`;
+    if (rows === null) return `${exitWord(result)}, with no verdict it can be graded by`;
     const reds = rows.filter((row) => row.exitCode !== 0).map(rowName);
 
-    return reds.length === 0 ? exitWord(outcome) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
+    return reds.length === 0 ? exitWord(result) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
   };
-  const outcomes = await follow(job, began, (outcome) => nameOf(outcome.index), say);
+  const results = await follow(job, began, nameOf, say);
   const status = await job.status();
   const answers: TaskAnswer[] = plan.include.map((entry, index) => {
     const name = nameOf(index);
-    const outcome = outcomes.find((each) => each.index === index);
+    const result = results.find((each) => each.index === index);
 
-    if (outcome === undefined || outcome.kind === 'failed') return { name, entry, rows: null };
+    if (result === undefined || result.kind === 'lost' || result.kind === 'cancelled') return { name, entry, rows: null };
 
-    if (!config.task.verdict) return { name, entry, rows: [{ name, exitCode: outcome.exitCode, seconds: outcome.seconds, output: outcome.tail }] };
+    if (!config.task.verdict) return { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] };
 
     return { name, entry, rows: verdicts.get(index) ?? null };
   });
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };
-  const report = join(REPORTS, `${config.name}-${job.id}.json`);
+  const report = join(REPORTS, `${config.name}-${jobId}.json`);
   const summary = await job.summary();
 
   mkdirSync(REPORTS, { recursive: true });
-  writeFileSync(report, JSON.stringify({ sha, planJob: planJob.id, job: job.id, status, summary, problems: graded.problems, verdicts: file }, null, 2));
+  writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, status, summary, problems: graded.problems, verdicts: file }, null, 2));
 
   for (const problem of status.problems) console.log(`problem: ${problem}`);
 
@@ -313,7 +322,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   else console.log(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
-  const usage = usageOf([...planned, ...outcomes]);
+  const usage = usageOf([planned, ...results].map((result) => result.meta));
 
   await armada.post(`/timings/${config.name}`, {
     rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
