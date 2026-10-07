@@ -82,22 +82,23 @@ dirty="$(git status --porcelain)"
 if [ -n "$dirty" ]; then printf 'the checkout of %s is not clean:\n%s\n' "$sha" "$dirty" >&2; exit 1; fi`;
 }
 
-/** As root, once per container: fresh tmpfs at each path (a container's own disk may report no free inodes), the
- *  group that holds each task's (`TASK_GROUP`), and `/proc` whole. The runtime masks parts of it as Docker does (`/proc/sys`, `/proc/kcore`, …), and the kernel then
+/** As root, once per container: fresh tmpfs at each path (a container's own disk may report no free inodes), and
+ *  `/proc` whole. The runtime masks parts of it as Docker does (`/proc/sys`, `/proc/kcore`, …), and the kernel then
  *  refuses a new proc mount in a user namespace, so `bwrap --proc` fails here where a GitHub runner's VM allows it. */
 export function mounts(tmpfs: readonly string[]): string {
   return `set -eu\nfor dir in ${tmpfs.join(' ')}; do mkdir -p "$dir"; mount -t tmpfs -o mode=1777,size=6g tmpfs "$dir"; done
-mkdir -p ${PARENT_GROUP}
-echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); do umount -l "$masked"; done`;
 }
 
 /** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
  *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
  *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
- *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. */
+ *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. The
+ *  groups are set up here, at each launch, so a container an earlier Worker started has them. */
 export function launchTask(workdir: string): string {
   return String.raw`set -eu
+mkdir -p ${PARENT_GROUP}
+echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 ${END_GROUP}
 mkdir -p ${TASK_GROUP}/runner
 echo '${CONTROLLERS}' > ${TASK_GROUP}/cgroup.subtree_control
@@ -106,7 +107,7 @@ rm -rf ${TASK}
 mkdir -p ${TASK}
 chown ci:ci ${TASK}
 cd ${workdir}
-setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c '"$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
+setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
 /** Waits up to `$1` seconds for the task, then prints its exit code, or nothing while it runs. */
@@ -114,11 +115,14 @@ export const WAIT = String.raw`end=$(( $(date +%s) + $1 ))
 while [ ! -f ${TASK}/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.05; done
 cat ${TASK}/exit 2>/dev/null || true`;
 
-/** Ends the task and everything it started: a TERM to each of its processes, then, 2 s later, its whole group. */
+/** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
 export const KILL = String.raw`set -eu
-[ -d ${TASK_GROUP} ] || exit 0
-for pid in $(find ${TASK_GROUP} -name cgroup.procs -exec cat {} +); do kill -TERM "$pid" 2>/dev/null || true; done
-sleep 2
+pid="$(cat ${TASK}/pid 2>/dev/null || true)"
+if [ -n "$pid" ]; then
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  sleep 2
+  kill -KILL -- "-$pid" 2>/dev/null || true
+fi
 ${END_GROUP}`;
 
 /** A handler: a function's source, called with the item, its value written to `{out}`. */
