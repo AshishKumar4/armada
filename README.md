@@ -110,7 +110,8 @@ no credentials.
 1. **Plan.** One task runs `plan.command`, which prints the tasks as a GitHub Actions style matrix,
    `{"include": [{...}, ...]}`. Words after `armada run <commit> --` are added to it, to narrow a run to a tier or a
    few rows.
-2. **Tasks.** A second job runs `task.command` for each entry, filled from the entry's keys.
+2. **Tasks.** A second job runs `task.command` for each entry, filled from the entry's keys. Each task's line names its
+   red rows as it lands.
 3. **Grading.** Every row an entry names must be reported exactly once, by that task, with a timing for each file it
    declares. Anything less exits 2. A task that exits nonzero fails every row it reported green.
 4. **Records.** The verdict `{sha, part: "all", rows}` is stored at `/verdicts/<project>/<sha>`, unless the run was

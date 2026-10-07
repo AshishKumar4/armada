@@ -118,8 +118,22 @@ export async function cancelOnInterrupt<T>(job: Job, body: () => Promise<T>): Pr
   }
 }
 
-/** Follows a job to its end, saying each phase once and each outcome as it lands. */
-async function follow(job: Job, began: number, name: (outcome: Outcome) => string): Promise<Outcome[]> {
+/** A task's verdict file as JSON, or null when it is not: the grader names it, and the job runs on. */
+function jsonOf(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** An outcome's word by its exit: green, RED with the exit code, or FAILED with what the infrastructure said. */
+function exitWord(outcome: Outcome): string {
+  return outcome.kind === 'failed' ? `FAILED: ${outcome.tail.slice(-300)}` : outcome.exitCode === 0 ? 'green' : `RED (exit ${String(outcome.exitCode)})`;
+}
+
+/** Follows a job to its end, saying each phase once and each outcome as it lands, in the words `say` finds for it. */
+async function follow(job: Job, began: number, name: (outcome: Outcome) => string, say: (outcome: Outcome) => Promise<string> = async (outcome) => exitWord(outcome)): Promise<Outcome[]> {
   const outcomes: Outcome[] = [];
   let phase = '';
   const watcher = setInterval(() => {
@@ -134,7 +148,7 @@ async function follow(job: Job, began: number, name: (outcome: Outcome) => strin
     return await cancelOnInterrupt(job, async () => {
       for await (const outcome of job.outcomes()) {
         outcomes.push(outcome);
-        const verdict = outcome.kind === 'failed' ? `FAILED: ${outcome.tail.slice(-300)}` : outcome.exitCode === 0 ? 'green' : `RED (exit ${String(outcome.exitCode)})`;
+        const verdict = await say(outcome);
 
         console.log(`${clock(Date.now() - began).padStart(6)}  ${name(outcome).padEnd(14)} ${verdict} in ${clock(outcome.seconds * 1000)} on ${outcome.vessel}`);
       }
@@ -203,21 +217,35 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   });
 
   console.log(`task job ${job.id}: ${String(plan.include.length)} tasks on up to ${String(config.pool)} containers`);
-  const outcomes = await follow(job, began, (outcome) => names[outcome.index] ?? String(outcome.index));
+  const nameOf = (index: number) => names[index] ?? String(index);
+  // Each task's rows, read from its verdict file as its outcome lands, and graded as read: a task that reports many rows
+  // exits 0 with red ones among them, so its exit alone would say green. Null for a file missing or malformed.
+  const verdicts = new Map<number, VerdictRow[] | null>();
+  const say = async (outcome: Outcome): Promise<string> => {
+    if (!config.task.verdict || outcome.kind !== 'exited') return exitWord(outcome);
+    const text = await job.output(outcome.index);
+    const parsed = text === null ? null : v.safeParse(VerdictFileSchema, jsonOf(text));
+    const rows = parsed?.success === true ? underExit(parsed.output.rows, outcome, nameOf(outcome.index)) : null;
+
+    verdicts.set(outcome.index, rows);
+
+    if (rows === null) return `${exitWord(outcome)}, with no verdict it can be graded by`;
+    const reds = rows.filter((row) => row.exitCode !== 0).map(rowName);
+
+    return reds.length === 0 ? exitWord(outcome) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
+  };
+  const outcomes = await follow(job, began, (outcome) => nameOf(outcome.index), say);
   const status = await job.status();
-  const answers: TaskAnswer[] = await Promise.all(plan.include.map(async (entry, index) => {
-    const name = names[index] ?? String(index);
+  const answers: TaskAnswer[] = plan.include.map((entry, index) => {
+    const name = nameOf(index);
     const outcome = outcomes.find((each) => each.index === index);
 
     if (outcome === undefined || outcome.kind === 'failed') return { name, entry, rows: null };
 
     if (!config.task.verdict) return { name, entry, rows: [{ name, exitCode: outcome.exitCode, seconds: outcome.seconds, output: outcome.tail }] };
-    const text = await job.output(index);
 
-    if (text === null) return { name, entry, rows: null };
-
-    return { name, entry, rows: underExit(v.parse(VerdictFileSchema, JSON.parse(text)).rows, outcome, name) };
-  }));
+    return { name, entry, rows: verdicts.get(index) ?? null };
+  });
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };
   const report = join(REPORTS, `${config.name}-${job.id}.json`);

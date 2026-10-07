@@ -341,11 +341,12 @@ describe('the CLI following a job', () => {
 });
 
 describe('armada run', () => {
-  test('words after -- reach the plan, and a narrowed run stores no verdict but records its timings', async () => {
+  /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
+   *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
+  async function run(args: readonly string[], plan: unknown, verdict: unknown) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
-    const git = (...args: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: repo }).exitCode).toBe(0);
-    const config = { name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task', '{out}'] } };
+    const git = (...words: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo }).exitCode).toBe(0);
     const commands: string[][] = [];
     const seen: string[] = [];
     const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
@@ -367,8 +368,8 @@ describe('armada run', () => {
           return Response.json({ id: commands.length === 1 ? 'plan' : 'tasks' });
         }
         if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome }], done: true });
-        if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] }));
-        if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify({ rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }));
+        if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify(plan));
+        if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify(verdict));
         if (pathname.startsWith('/jobs/')) return Response.json(status(pathname.split('/')[2] ?? ''));
 
         return request.method === 'HEAD' ? new Response(null) : Response.json({ ok: true });
@@ -378,19 +379,34 @@ describe('armada run', () => {
     try {
       mkdirSync(repo);
       git('init', '-q');
-      writeFileSync(join(repo, '.armada.json'), JSON.stringify(config));
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task', '{out}'] } }));
       git('add', '.');
       git('commit', '-qm', 'one');
-      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', '--', '--tier', 'fast'], {
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
-      const exit = await cli.exited;
 
-      expect({ exit, plan: commands[0]?.slice(-3), verdicts: seen.filter((each) => each.startsWith('PUT /verdicts')), timings: seen.includes('POST /timings/proj') })
-        .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], verdicts: [], timings: true });
+      return { exit: await cli.exited, stdout: await new Response(cli.stdout).text(), commands, seen };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
     }
+  }
+
+  test('words after -- reach the plan, and a narrowed run stores no verdict but records its timings', async () => {
+    const ran = await run(['--', '--tier', 'fast'], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] });
+
+    expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), verdicts: ran.seen.filter((each) => each.startsWith('PUT /verdicts')), timings: ran.seen.includes('POST /timings/proj') })
+      .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], verdicts: [], timings: true });
+  });
+
+  test('a task that exits 0 with a red row among its rows is named RED as it lands, with the row', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, {
+      rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }, { name: 'y.mjs', exitCode: 1, seconds: 1, output: 'AssertionError: y broke' }],
+    });
+    const line = ran.stdout.split('\n').find((each) => each.includes('part-1'));
+
+    expect({ exit: ran.exit, line: line?.replace(/^\s*\d+:\d+\s+/u, ''), told: ran.stdout.includes('AssertionError: y broke') })
+      .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
   });
 });
