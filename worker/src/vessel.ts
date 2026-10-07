@@ -69,6 +69,8 @@ export class ArmadaVessel extends DurableObject<Env> {
     const spec = await this.ctx.storage.get<VesselSpec>('spec');
 
     await this.ctx.storage.put('state', 'stopped' satisfies State);
+    // A claim an earlier Worker stored kept its env: a stopped vessel takes up no task again.
+    await this.ctx.storage.delete('current');
     await this.ctx.storage.deleteAlarm();
     // Stopping is the job's last word: a container that will not stop ends at its inactivity timeout.
     await Promise.allSettled([this.ctx.container?.destroy()]);
@@ -101,6 +103,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     } catch (cause) {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
       await this.ctx.storage.put('state', 'failed' satisfies State);
+      await this.ctx.storage.delete('current');
       console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said(cause) }));
       await Promise.allSettled([this.ctx.container?.destroy()]);
       await this.fleet().release(this.holder(spec));

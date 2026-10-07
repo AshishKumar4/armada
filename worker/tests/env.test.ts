@@ -108,6 +108,33 @@ describe('a job\'s env', () => {
     expect({ claimed, keptAfterCancel: running, keptWhenDone: done.dump().includes(SECRET) }).toEqual({ claimed: SECRET, keptAfterCancel: false, keptWhenDone: false });
   });
 
+  test('an earlier Worker left inside a job\'s spec, or a vessel\'s claim, is gone at the end with nothing read before', async () => {
+    const jobState = state();
+    const job = new ArmadaJob(jobState.ctx, world({ VESSEL: namespace(() => ({ stop: async () => undefined })) }));
+    const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: ['a'], run: { command: ['true'] }, env: { TOKEN: SECRET } });
+
+    await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { command: ['true'] } }));
+    await jobState.ctx.storage.put({ spec: { ...kept, env }, phase: 'running' });
+    await job.cancel('cancelled by its client');
+    const claim = { index: 0, attempt: 1, argv: ['true'], env: { TOKEN: SECRET }, duplicate: false };
+    const ends: Record<string, (vessel: ArmadaVessel) => Promise<void>> = {
+      stopped: async (vessel) => { await vessel.stop(); },
+      lost: async (vessel) => { await vessel.alarm(); },
+    };
+    const vessels: Record<string, boolean> = {};
+
+    for (const [end, conclude] of Object.entries(ends)) {
+      const stored = state(container(() => new Error('Network connection lost.')));
+      const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => ({ vesselFailed: async () => undefined })) }));
+
+      await stored.ctx.storage.put({ spec: { jobId: 'j1', name: 'v1', vcpus: 4 }, state: 'working', current: { claim, startedAt: 0 } });
+      await conclude(vessel);
+      vessels[end] = stored.dump().includes(SECRET);
+    }
+
+    expect({ job: jobState.dump().includes(SECRET), vessels }).toEqual({ job: false, vessels: { stopped: false, lost: false } });
+  });
+
   test('reaches a vessel\'s task but never its storage, before or after the vessel is lost mid-task', async () => {
     const waits: string[] = [];
     const launched: (string | undefined)[] = [];

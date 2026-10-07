@@ -282,6 +282,8 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   private async conclude(): Promise<void> {
+    // Reading the spec moves the env of a job an earlier Worker created out of it, so this deletes that env too.
+    await this.spec();
     await this.ctx.storage.delete('env');
     await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now() });
     await this.ctx.storage.deleteAlarm();
