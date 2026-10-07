@@ -195,6 +195,14 @@ export function weightOf(item: unknown): number {
   return typeof weight === 'number' && Number.isFinite(weight) ? weight : 0;
 }
 
+/** The end of what a failed command printed, its stderr last and whole up to `limit`: the error a command dies with is
+ *  on stderr, after whatever its stdout said, so stdout never pushes it out. */
+export function failureTail(stdout: string, stderr: string, limit = 3000): string {
+  const error = stderr.slice(-limit);
+
+  return stdout.slice(Math.max(0, stdout.length - (limit - error.length))) + error;
+}
+
 /** The samples an estimate keeps per row or file. */
 export const SAMPLES = 5;
 

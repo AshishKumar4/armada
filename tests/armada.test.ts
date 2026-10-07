@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { packBase, packOf } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
+import { environmentKey, failureTail, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 
 describe('a task\'s command', () => {
@@ -25,6 +25,16 @@ describe('a task\'s command', () => {
 
   test('an item weighs its numeric `weight`, and anything else nothing', () => {
     expect([weightOf({ weight: 301 }), weightOf({ weight: '9' }), weightOf('a'), weightOf(null), weightOf([1])]).toEqual([301, 0, 0, 0, 0]);
+  });
+});
+
+describe('a failed step', () => {
+  test('says its error last and whole, however much its stdout printed before it', () => {
+    const apt = 'Setting up ruby (1:3.3+b1) ...\n'.repeat(500);
+
+    expect(failureTail(apt, 'setup.sh: 14: locale-gen: not found\n').endsWith('Setting up ruby (1:3.3+b1) ...\nsetup.sh: 14: locale-gen: not found\n')).toBe(true);
+    expect(failureTail(apt, 'x'.repeat(5000))).toBe('x'.repeat(3000));
+    expect(failureTail('ok\n', '')).toBe('ok\n');
   });
 });
 

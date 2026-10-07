@@ -4,6 +4,7 @@
  * snapshot otherwise) and its instance: no image to build, push or roll out, and a container starts the way a Kinu
  * devbox wakes (Kinu DEVBOX-DECISIONS D50, D72; 0.3 to 2.3 s measured from a warm snapshot, 2026-10-06).
  */
+import { failureTail } from '../../src/protocol';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`,
  *  measured 2026-10-06), so a command drops to the user inside. */
@@ -132,7 +133,7 @@ export async function must(container: Container, doing: string, argv: readonly s
   if (settled.status === 'rejected') throw new Error(`${doing} failed to run`, { cause: settled.reason });
   const ran = settled.value;
 
-  if (ran.exitCode !== 0) throw new Error(`${doing} exited ${String(ran.exitCode)}: ${(ran.stderr + ran.stdout).slice(-3000)}`);
+  if (ran.exitCode !== 0) throw new Error(`${doing} exited ${String(ran.exitCode)}: ${failureTail(ran.stdout, ran.stderr)}`);
 
   return ran;
 }
