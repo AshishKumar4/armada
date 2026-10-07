@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as v from 'valibot';
 import { packBase, packOf } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
@@ -287,6 +288,61 @@ describe('the CLI following a job', () => {
       expect({ exit: await cli.exited, cancelled: seen.includes('POST /jobs/j1/cancel') }).toEqual({ exit: 2, cancelled: true });
     } finally {
       await server.stop(true);
+    }
+  });
+});
+
+describe('armada run', () => {
+  test('words after -- reach the plan, and a narrowed run stores no verdict but records its timings', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
+    const repo = join(scratch, 'repo');
+    const git = (...args: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: repo }).exitCode).toBe(0);
+    const config = { name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task', '{out}'] } };
+    const commands: string[][] = [];
+    const seen: string[] = [];
+    const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
+    const status = (id: string) => ({
+      id, label: '', phase: 'done', key: 'k'.repeat(64), createdAt: 0, startedAt: 0, finishedAt: 1,
+      tasks: { total: 1, queued: 0, running: 0, exited: 1, red: 0, failed: 0 }, vessels: [], problems: [], environment: null,
+    });
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        seen.push(`${request.method} ${pathname.split('/').slice(0, 3).join('/')}`);
+        if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
+        if (pathname === '/timings/proj' && request.method === 'GET') return Response.json({ rows: {}, files: {} });
+        if (pathname === '/jobs') {
+          commands.push(v.parse(v.object({ run: v.object({ command: v.array(v.string()) }) }), await request.json()).run.command);
+
+          return Response.json({ id: commands.length === 1 ? 'plan' : 'tasks' });
+        }
+        if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome }], done: true });
+        if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] }));
+        if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify({ rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }));
+        if (pathname.startsWith('/jobs/')) return Response.json(status(pathname.split('/')[2] ?? ''));
+
+        return request.method === 'HEAD' ? new Response(null) : Response.json({ ok: true });
+      },
+    });
+
+    try {
+      mkdirSync(repo);
+      git('init', '-q');
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify(config));
+      git('add', '.');
+      git('commit', '-qm', 'one');
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', '--', '--tier', 'fast'], {
+        cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+      const exit = await cli.exited;
+
+      expect({ exit, plan: commands[0]?.slice(-3), verdicts: seen.filter((each) => each.startsWith('PUT /verdicts')), timings: seen.includes('POST /timings/proj') })
+        .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], verdicts: [], timings: true });
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 });

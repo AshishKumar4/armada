@@ -3,7 +3,8 @@
  * armada: fast, mappable compute on Cloudflare Containers.
  *
  *   armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command with {item}>
- *   armada run <commit|worktree> [--label=<text>]     a project's CI from its `.armada.json`; exits 0, 1 red, 2 not graded
+ *   armada run <commit|worktree> [--label=<text>] [-- <plan words>]
+ *                                                     a project's CI from its `.armada.json`; exits 0, 1 red, 2 not graded
  *   armada status <job-id>
  *   armada deploy --account=<id>                      with this machine's wrangler login
  *   armada prune [--keep=3]                           needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
@@ -166,7 +167,7 @@ async function main(): Promise<number> {
 
   if (command === 'map') return await map();
 
-  if (command === 'run' && target !== undefined) return await runCI(connect(), target, option('label') ?? '');
+  if (command === 'run' && target !== undefined) return await runCI(connect(), target, option('label') ?? '', dash < 0 ? [] : process.argv.slice(dash + 1));
 
   if (command === 'status' && target !== undefined) {
     console.log(JSON.stringify(await connect().job(target).status(), null, 2));

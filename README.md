@@ -61,7 +61,7 @@ It exits 0 when every row is green, 1 when a row is red, and 2 when the run can'
 
 ```
 armada map [--env=<recipe.json> | --commit=<rev>] (--items=<file|-> | --times=N) [--pool=N] [--output] [--idempotent] [--timeout=s] -- <command>
-armada run <commit|worktree> [--label=<text>]
+armada run <commit|worktree> [--label=<text>] [-- <plan words>]
 armada status <job-id>
 armada deploy --account=<id>      uses this machine's wrangler login
 armada prune [--keep=3]           needs ARMADA_REGISTRY_TOKEN (Containers: Edit)
@@ -108,11 +108,13 @@ commit, such as a shallow CI checkout). Private repositories and unpushed commit
 no credentials.
 
 1. **Plan.** One task runs `plan.command`, which prints the tasks as a GitHub Actions style matrix,
-   `{"include": [{...}, ...]}`.
+   `{"include": [{...}, ...]}`. Words after `armada run <commit> --` are added to it, to narrow a run to a tier or a
+   few rows.
 2. **Tasks.** A second job runs `task.command` for each entry, filled from the entry's keys.
 3. **Grading.** Every row an entry names must be reported exactly once, by that task, with a timing for each file it
    declares. Anything less exits 2. A task that exits nonzero fails every row it reported green.
-4. **Records.** The verdict `{sha, part: "all", rows}` is stored at `/verdicts/<project>/<sha>`. Green rows' timings
+4. **Records.** The verdict `{sha, part: "all", rows}` is stored at `/verdicts/<project>/<sha>`, unless the run was
+   narrowed. Green rows' timings
    feed the next plan as the median of each row's last five green runs. A report goes to
    `~/.local/state/armada/runs/`.
 

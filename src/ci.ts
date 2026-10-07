@@ -160,7 +160,9 @@ export async function onCommit(armada: Armada, target: string): Promise<Pick<Job
   return { recipe, commit: { sha, base }, env: config.env, tmpfs: config.tmpfs };
 }
 
-export async function runCI(armada: Armada, target: string, label: string): Promise<number> {
+/** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
+ *  printed and reported but never stored as the commit's. */
+export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = []): Promise<number> {
   const began = Date.now();
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
@@ -176,7 +178,7 @@ export async function runCI(armada: Armada, target: string, label: string): Prom
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const common = { recipe, commit: { sha, base }, env: config.env, tmpfs: config.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label };
   // The plan's stdout is its output; its stderr stays in its log.
-  const planJob = await armada.map({ ...common, items: [{}], run: { command: ['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed)] }, output: true, pool: 1, timeout: 900 });
+  const planJob = await armada.map({ ...common, items: [{}], run: { command: ['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs] }, output: true, pool: 1, timeout: 900 });
 
   console.log(`plan job ${planJob.id}`);
   const planned = await follow(planJob, began, () => 'plan');
@@ -228,7 +230,8 @@ export async function runCI(armada: Armada, target: string, label: string): Prom
     return 2;
   }
 
-  await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
+  if (planArgs.length === 0) await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
+  else console.log(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
   await armada.post(`/timings/${config.name}`, { rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})) });
