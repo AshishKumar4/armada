@@ -9,9 +9,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KILL, MASK, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
+  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
-import { bundleKey, packKey, said, SINGLE, taskKey, textOf, type Env } from './env';
+import { bundleKey, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim } from './job';
 
 export interface VesselSpec {
@@ -210,6 +210,11 @@ export class ArmadaVessel extends DurableObject<Env> {
 
           return false;
         }
+        // The values the task gets are the ones its log is masked with, kept as root in the container: a secret set
+        // again or deleted while the task runs changes neither.
+        if (claim.secrets.length > 0) {
+          await must(container, 'keeping the secrets to mask', ['node', '-e', KEEP_MASK, MASK_VALUES], { env: { ...claim.env, ARMADA_MASK: claim.secrets.join(' ') }, ms: EXEC_MS });
+        }
         await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
         const { env, ...kept } = claim;
 
@@ -283,12 +288,11 @@ export class ArmadaVessel extends DurableObject<Env> {
     await job.complete(spec.name, outcome, seconds * 1000);
   }
 
-  /** Each value of `names` that is still set, replaced in the task's log before any of it is read. */
+  /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
+   *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
   private async mask(names: readonly string[] | undefined): Promise<void> {
     if (names === undefined || names.length === 0) return;
-    const values = await this.env.SECRETS.getByName(SINGLE).values(names);
-
-    await must(this.container(), 'masking the secrets', ['node', '-e', MASK, `${TASK}/log`], { env: { ...values, ARMADA_MASK: Object.keys(values).join(' ') }, ms: EXEC_MS });
+    await must(this.container(), 'masking the secrets', ['node', '-e', MASK, `${TASK}/log`, MASK_VALUES], { ms: EXEC_MS });
   }
 
   /**

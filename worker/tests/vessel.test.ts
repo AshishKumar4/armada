@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Outcome } from '../../src/protocol';
-import { MASK, STOPPED, USAGE } from '../src/container';
+import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, USAGE } from '../src/container';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
 
@@ -37,7 +37,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
       if (claimed) return null;
       claimed = true;
 
-      return { index: 0, attempt: 1, argv: ['true'], env: {}, duplicate: false };
+      return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false };
     },
     still: async () => true,
     accept: async () => true,
@@ -53,7 +53,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
   // storage.
   if (launched !== undefined) {
     claimed = true;
-    await stored.ctx.storage.put({ state: 'working', current: { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false }, startedAt: Date.now() - launched } });
+    await stored.ctx.storage.put({ state: 'working', current: { claim: { index: 0, attempt: 1, argv: ['true'], secrets: [], duplicate: false }, startedAt: Date.now() - launched } });
   }
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
@@ -99,7 +99,7 @@ describe('a task\'s output', () => {
 });
 
 describe('a task that names secrets', () => {
-  test('has their values masked in its log before its tail is read or the log is stored', async () => {
+  test('has the values it started with masked in its log before its tail is read or the log is stored, the deployment\'s secrets unread', async () => {
     const seen: { readonly argv: readonly string[]; readonly env: unknown }[] = [];
     let claimed = false;
     const stored = state(container((argv, options) => {
@@ -116,7 +116,7 @@ describe('a task that names secrets', () => {
         if (claimed) return null;
         claimed = true;
 
-        return { index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-value' }, secrets: ['API_KEY'], duplicate: false };
+        return { index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-launched' }, secrets: ['API_KEY'], duplicate: false };
       },
       still: async () => true,
       accept: async () => true,
@@ -124,16 +124,20 @@ describe('a task that names secrets', () => {
       retired: async () => undefined,
       vesselFailed: async () => undefined,
     };
-    const secrets = { values: async (names: readonly string[]) => Object.fromEntries(names.map((name) => [name, 'sk-value'])) };
+    // Set anew while the task runs: the mask must not read it.
+    let read = 0;
+    const secrets = { values: async (names: readonly string[]) => { read += 1; return Object.fromEntries(names.map((name) => [name, 'sk-rotated'])); } };
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), SECRETS: namespace(() => secrets), ARTIFACTS: bucket() }));
 
     await vessel.begin(spec);
 
     for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
+    const kept = seen.findIndex((exec) => exec.argv[0] === 'node' && exec.argv[2] === KEEP_MASK);
+    const launched = seen.findIndex((exec) => exec.argv[3] === 'launch');
     const masked = seen.findIndex((exec) => exec.argv[0] === 'node' && exec.argv[2] === MASK);
-    const read = seen.findIndex((exec) => /^(tail|gzip) /u.test(exec.argv[2] ?? ''));
+    const tailed = seen.findIndex((exec) => /^(tail|gzip) /u.test(exec.argv[2] ?? ''));
 
-    expect({ before: masked !== -1 && masked < read, file: seen[masked]?.argv[3], env: seen[masked]?.env })
-      .toEqual({ before: true, file: '/armada/task/log', env: { API_KEY: 'sk-value', ARMADA_MASK: 'API_KEY' } });
+    expect({ order: kept !== -1 && kept < launched && launched < masked && masked < tailed, keep: [seen[kept]?.argv[3], seen[kept]?.env], mask: seen[masked]?.argv.slice(3), read })
+      .toEqual({ order: true, keep: [MASK_VALUES, { API_KEY: 'sk-launched', ARMADA_MASK: 'API_KEY' }], mask: ['/armada/task/log', MASK_VALUES], read: 0 });
   });
 });

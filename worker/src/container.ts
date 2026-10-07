@@ -151,11 +151,24 @@ export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: n
 /** The shortest secret masked: a shorter one would hide ordinary text. */
 export const MASKED_BYTES = 4;
 
-/** A node program that replaces, in the file it is given, every value of the secrets `ARMADA_MASK` names with `***`,
- *  longest first, streamed in 1 MiB reads that carry a secret's length less one byte across each boundary. */
+/** Where the values of the task's secrets wait for its log's mask: as root, and only root reads it, so the task cannot
+ *  change what is masked. */
+export const MASK_VALUES = `${STATE}/mask.json`;
+
+/** A node program, run as root before the task starts, that writes the values of the secrets `ARMADA_MASK` names to
+ *  the file it is given, readable by root alone: the log is masked with the values the task got, whatever the
+ *  deployment's secrets hold by the time it ends. */
+export const KEEP_MASK = String.raw`const fs = require('fs');
+const names = (process.env.ARMADA_MASK || '').split(' ').filter(Boolean);
+fs.writeFileSync(process.argv[1], JSON.stringify(names.map((name) => process.env[name] || '')), { mode: 0o600 });`;
+
+/** A node program that replaces, in the log it is given first, every value in the `KEEP_MASK` file it is given second
+ *  with `***`, longest first, streamed in 1 MiB reads that carry a secret's length less one byte across each boundary,
+ *  then deletes that file. */
 export const MASK = String.raw`const fs = require('fs');
-const file = process.argv[1];
-const secrets = (process.env.ARMADA_MASK || '').split(' ').filter(Boolean).map((name) => Buffer.from(process.env[name] || ''))
+const [file, kept] = process.argv.slice(1);
+const values = fs.existsSync(kept) ? JSON.parse(fs.readFileSync(kept, 'utf8')) : [];
+const secrets = values.map((value) => Buffer.from(value))
   .filter((secret) => secret.length >= ${String(MASKED_BYTES)}).sort((left, right) => right.length - left.length);
 const keep = Math.max(0, ...secrets.map((secret) => secret.length - 1));
 const mask = Buffer.from('***');
@@ -186,7 +199,8 @@ for (;;) {
 }
 fs.closeSync(input);
 fs.closeSync(output);
-fs.renameSync(file + '.masked', file);`;
+fs.renameSync(file + '.masked', file);
+fs.rmSync(kept, { force: true });`;
 
 /** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
 export const KILL = String.raw`set -eu

@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PROTOCOL } from '../../src/protocol';
-import { MASK } from '../src/container';
+import { KEEP_MASK, MASK } from '../src/container';
 import type { Generation } from '../src/environments';
 import { ArmadaJob } from '../src/job';
 import { ArmadaSecrets } from '../src/secrets';
@@ -69,17 +69,20 @@ describe('a secret', () => {
 });
 
 describe('the mask', () => {
-  test('replaces each value in a log, across a read\'s boundary and longest first, and leaves a value too short to mask', () => {
+  test('replaces each value the task started with, across a read\'s boundary and longest first, and leaves a value too short to mask', () => {
     const dir = mkdtempSync(join(tmpdir(), 'armada-mask-'));
-    const log = join(dir, 'log');
-    // The first value straddles the 1 MiB read.
-    const before = `${'x'.repeat((1 << 20) - 5)}${VALUE} and ${VALUE}-long then abc\n`;
+    const [log, kept] = [join(dir, 'log'), join(dir, 'mask.json')];
 
     try {
-      writeFileSync(log, before);
-      const ran = spawnSync('node', ['-e', MASK, log], { env: { PATH: process.env['PATH'], ARMADA_MASK: 'API_KEY LONG SHORT', API_KEY: VALUE, LONG: `${VALUE}-long`, SHORT: 'abc' }, encoding: 'utf8' });
+      const keep = spawnSync('node', ['-e', KEEP_MASK, kept], { env: { PATH: process.env['PATH'], ARMADA_MASK: 'API_KEY LONG SHORT', API_KEY: VALUE, LONG: `${VALUE}-long`, SHORT: 'abc' }, encoding: 'utf8' });
+      const mode = statSync(kept).mode & 0o777;
 
-      expect({ exit: ran.status, stderr: ran.stderr, after: readFileSync(log, 'utf8') }).toEqual({ exit: 0, stderr: '', after: `${'x'.repeat((1 << 20) - 5)}*** and *** then abc\n` });
+      // The first value straddles the 1 MiB read.
+      writeFileSync(log, `${'x'.repeat((1 << 20) - 5)}${VALUE} and ${VALUE}-long then abc\n`);
+      const ran = spawnSync('node', ['-e', MASK, log, kept], { env: { PATH: process.env['PATH'] }, encoding: 'utf8' });
+
+      expect({ keep: keep.status, mode: mode.toString(8), exit: ran.status, stderr: ran.stderr, after: readFileSync(log, 'utf8'), kept: existsSync(kept) })
+        .toEqual({ keep: 0, mode: '600', exit: 0, stderr: '', after: `${'x'.repeat((1 << 20) - 5)}*** and *** then abc\n`, kept: false });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
