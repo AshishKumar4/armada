@@ -9,7 +9,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KILL, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, usageFrom,
+  ENTRYPOINT, KILL, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
 import { bundleKey, packKey, said, taskKey, type Env } from './env';
 import type { Claim } from './job';
@@ -170,6 +170,10 @@ export class ArmadaVessel extends DurableObject<Env> {
       const current = await this.ctx.storage.get<Current>('current');
 
       if (current === undefined) {
+        // A container the platform is stopping takes no new task: the vessel fails, and the job replaces it.
+        const stopping = (await must(container, 'the stop check', ['/bin/sh', '-c', STOPPED], { ms: EXEC_MS })).stdout.trim();
+
+        if (stopping !== '') throw new Error(`the platform asked the container to stop at ${stopping}`);
         const claim = await job.claim(spec.name);
 
         if (claim === null) return await this.retire(spec);

@@ -14,6 +14,12 @@ export const STATE = '/armada';
 
 export const TASK = `${STATE}/task`;
 
+/** Where the container's main process marks that the platform asked the container to stop (`hold`). */
+export const STOPPING = `${STATE}/stopping`;
+
+/** When the platform asked the container to stop, or nothing while it runs on. */
+export const STOPPED = String.raw`if [ -e ${STOPPING} ]; then cat ${STOPPING}; fi`;
+
 /** Where a preparation's phase runs: its log and its exit code. */
 export const phaseDir = (phase: string): string => `${STATE}/phases/${phase}`;
 
@@ -99,6 +105,7 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
  *  groups are set up here, at each launch, so a container an earlier Worker started has them. */
 export function launchTask(workdir: string): string {
   return String.raw`set -eu
+if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 ${END_GROUP}
@@ -154,8 +161,24 @@ ${END_GROUP}`;
 /** A size's instance type, as a start takes it. */
 export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;
 
-/** A snapshot's container runs under tini, which reaps orphans as PID 1. */
-export const ENTRYPOINT = ['tini', '--', 'sleep', 'infinity'];
+/** What a container's main process runs under tini, which reaps orphans as PID 1. The platform stops an instance (a
+ *  rollout, a host's maintenance) by sending its main process SIGTERM, then SIGKILL 15 minutes later. A bare `sleep`
+ *  ended at the SIGTERM and took the task the container ran with it, which the vessel then found gone ("exec() cannot
+ *  be called on a container that is not running"). This marks the container stopping (`STOPPING`), so its vessel
+ *  claims nothing more, holds while the task under `state` runs, up to `graceSeconds`, then `lingerSeconds` for the
+ *  vessel to read the answer, and exits. */
+export function hold(state: string, graceSeconds: number, lingerSeconds: number): string {
+  return String.raw`trap 'stop=1' TERM
+stop=
+while [ -z "$stop" ]; do sleep 5 & wait $!; done
+date -u +%Y-%m-%dT%H:%M:%SZ > ${state}/stopping
+end=$(( $(date +%s) + ${String(graceSeconds)} ))
+while [ -f ${state}/task/pid ] && [ ! -f ${state}/task/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 1; done
+sleep ${String(lingerSeconds)}`;
+}
+
+/** A container's main process: `hold` under tini, a minute short of the platform's SIGKILL. */
+export const ENTRYPOINT = ['tini', '--', '/bin/sh', '-c', hold(STATE, 14 * 60, 30)];
 
 export interface Exec extends Omit<ContainerExecOptions, 'user' | 'signal'> {
   /** An exec can wait on a container that never answers. */
