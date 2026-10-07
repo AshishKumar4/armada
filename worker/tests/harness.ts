@@ -55,6 +55,7 @@ export function state(container?: Container): Stored {
       for (const [name, each] of typeof key === 'string' ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
     },
     delete: async (key: string) => entries.delete(key),
+    list: async ({ prefix = '' }: { prefix?: string } = {}) => new Map([...entries].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key, structuredClone(value)])),
     setAlarm: async () => undefined,
     deleteAlarm: async () => undefined,
     sql: {
@@ -103,7 +104,8 @@ export function bucket(objects = new Map<string, string>()) {
 /** The bindings an object reaches, each answered in memory: the fleet always has room. */
 export function world(bindings: Partial<Record<keyof Env, unknown>>): Env {
   const all = {
-    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined })),
+    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true })),
+    VERSION: { id: 'version', tag: '', timestamp: '' },
     ARTIFACTS: bucket(),
     ...bindings,
   };

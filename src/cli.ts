@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
 import { deleteSnapshot } from './registry';
-import { CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
+import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
 import { BaseSchema, describeUsage, SizeSchema, usageOf } from './protocol';
 import { cmd, recipe, type Json, type Meta } from './task';
 
@@ -230,9 +230,60 @@ function accountOf(): string {
     : `this login has ${String(all.length)} accounts; pick one with --account=<id>:${all.map((each) => `\n  ${each.id}  ${each.name}`).join('')}`);
 }
 
-/** The bucket (packs, bundles and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. */
-function deploy(name: string, vcpus: number | undefined): number {
+/** How often a deploy asks the deployed version whether its open jobs have finished. */
+const DRAIN_POLL_MS = 15_000;
+
+/** Drains the deployed version: it admits no new job, which `drained` is told of at once, and this waits for its open
+ *  jobs to finish. A Worker too old to drain is said to be, and its running jobs end with the deploy. */
+async function drain(armada: Armada, drained: () => void): Promise<void> {
+  let jobs = await armada.drain();
+
+  if (jobs === null) {
+    console.log('the deployed Worker cannot stop taking jobs, so any job it runs now ends with this deploy');
+
+    return;
+  }
+  drained();
+
+  while (jobs > 0) {
+    console.log(`waiting for ${String(jobs)} open job${jobs === 1 ? '' : 's'} to finish; new jobs are refused until the deploy is done`);
+    await Bun.sleep(DRAIN_POLL_MS);
+    ({ jobs } = await armada.health());
+  }
+}
+
+/** Drains the deployed version first; then the bucket (packs, bundles and job artifacts expire after 7 days), the
+ *  Worker, its bearer, and the connection file. The version deployed admits jobs at once, and a deploy that fails or
+ *  is interrupted lets the drained one admit them again. */
+async function deploy(name: string, vcpus: number | undefined): Promise<number> {
   const account = accountOf();
+  const file = connectionFile(name);
+  const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
+  let drained = false;
+  const admit = async () => {
+    if (drained) await deployed?.admit();
+  };
+  const interrupted = (signal: NodeJS.Signals) => {
+    console.error(`armada: ${signal}: the deployed version admits jobs again`);
+    void admit().finally(() => process.exit(2));
+  };
+
+  process.once('SIGINT', interrupted).once('SIGTERM', interrupted);
+
+  try {
+    if (deployed !== null) await drain(deployed, () => { drained = true; });
+    install(account, name, vcpus, file);
+    // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
+    drained = false;
+  } finally {
+    process.off('SIGINT', interrupted).off('SIGTERM', interrupted);
+    await admit();
+  }
+
+  return 0;
+}
+
+function install(account: string, name: string, vcpus: number | undefined, file: string): void {
   const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -245,7 +296,6 @@ function deploy(name: string, vcpus: number | undefined): number {
   }
 
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
-  const file = connectionFile(name);
 
   writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "${name}",\n  "account_id": "${account}",`)
     .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
@@ -267,8 +317,6 @@ function deploy(name: string, vcpus: number | undefined): number {
   } finally {
     rmSync(config, { force: true });
   }
-
-  return 0;
 }
 
 const EntrySchema = v.object({ key: v.string(), entry: v.looseObject({ state: v.string(), lastUsed: v.optional(v.number()), generation: v.optional(v.object({ snapshot: v.object({ id: v.string() }) })) }) });
@@ -350,7 +398,7 @@ async function main(): Promise<number> {
 
       if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return deploy(name, whole('vcpus'));
+      return await deploy(name, whole('vcpus'));
     }
 
     case 'prune':

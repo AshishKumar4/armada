@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { JobSpecSchema } from '../../src/protocol';
+import { JobSpecSchema, PROTOCOL } from '../../src/protocol';
 import worker from '../src/worker';
 import { bucket, namespace, world } from './harness';
 
@@ -11,7 +11,7 @@ describe('a commit\'s pack', () => {
     const sha = 'a'.repeat(40);
     const stored = bucket(new Map([[`packs/proj/${sha}.root.pack`, 'an earlier client\'s pack']]));
     const env = world({ ARTIFACTS: stored, ARMADA_TOKEN: TOKEN, JOB: namespace(() => ({ create: async () => undefined })) });
-    const call = async (method: string, path: string, body?: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}` } }), env)).status;
+    const call = async (method: string, path: string, body?: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env)).status;
     const job = async (packer?: number) => await call('POST', '/jobs', JSON.stringify(v.parse(JobSpecSchema, {
       recipe: { repo: { project: 'proj', checkout: '/home/ci/work', history: 'commit', manifest: [] } }, commit: { sha, base: 'root', packer }, items: [{ item: 1, argv: ['true'] }], run: { kind: 'command' },
     })));

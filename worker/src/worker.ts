@@ -3,7 +3,7 @@
  * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote.
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, Project, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
+import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema, type Health } from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
@@ -205,7 +205,22 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const [head = '', ...path] = url.pathname.split('/').filter((segment) => segment !== '');
 
-  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, vcpus: await env.FLEET.getByName('all').used() });
+  const fleet = env.FLEET.getByName(SINGLE);
+
+  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, vcpus: await fleet.used(), jobs: await fleet.jobs() } satisfies Health);
+
+  // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
+  if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });
+
+  if (head === 'drain' && request.method === 'DELETE') {
+    await fleet.admit();
+
+    return Response.json({ admitting: true });
+  }
+
+  if (head === 'jobs' && path.length === 0 && request.method === 'POST' && !(await fleet.admits(env.VERSION.id))) {
+    return Response.json({ error: 'armada is being redeployed and takes no new job until that is done; run again in a few minutes' }, { status: 503 });
+  }
 
   return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
 }
@@ -213,6 +228,15 @@ async function route(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
+    // A request with no version is from a client older than the version was.
+    const spoken = Number(request.headers.get(PROTOCOL_HEADER) ?? '1');
+
+    if (spoken !== PROTOCOL) {
+      return Response.json({
+        error: spoken > PROTOCOL ? 'the deployed Worker is older than this armada client: run `armada deploy` to update it'
+          : 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin',
+      }, { status: 426 });
+    }
 
     try {
       return await route(request, env);

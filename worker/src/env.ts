@@ -17,6 +17,8 @@ export interface Env {
   readonly ARMADA_TOKEN: string;
   /** Concurrent vCPUs across every job on the account: Cloudflare's ceiling is 1,500. */
   readonly FLEET_VCPUS: string;
+  /** The deployed version, which a drain names. */
+  readonly VERSION: WorkerVersionMetadata;
 }
 
 /** The R2 key of a commit's pack: from the root, or what it adds to an environment's commit, under its packer

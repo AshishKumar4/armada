@@ -2,6 +2,10 @@
  * ArmadaFleet: the vCPUs running at once across every job on the account, held under Cloudflare's 1,500-vCPU
  * ceiling (375 `standard-4`). A container over the ceiling waits for capacity rather than being
  * refused by the platform mid-job. A hold names its holder and lapses at its lease, so a holder that died returns it.
+ *
+ * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
+ * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
+ * the version deployed after it admits jobs from its first request.
  */
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './env';
@@ -39,5 +43,34 @@ export class ArmadaFleet extends DurableObject<Env> {
 
   private live(holds: Record<string, Hold> | undefined, now: number): Record<string, Hold> {
     return Object.fromEntries(Object.entries(holds ?? {}).filter(([, hold]) => hold.until > now));
+  }
+
+  /** A job not yet done. */
+  async opened(job: string): Promise<void> {
+    await this.ctx.storage.put(`job:${job}`, Date.now());
+  }
+
+  async closed(job: string): Promise<void> {
+    await this.ctx.storage.delete(`job:${job}`);
+  }
+
+  async jobs(): Promise<number> {
+    return (await this.ctx.storage.list({ prefix: 'job:' })).size;
+  }
+
+  /** Admits no new job while `version` runs; answers how many jobs are still open. */
+  async drain(version: string): Promise<number> {
+    await this.ctx.storage.put('drained', version);
+
+    return await this.jobs();
+  }
+
+  /** Admits new jobs again. */
+  async admit(): Promise<void> {
+    await this.ctx.storage.delete('drained');
+  }
+
+  async admits(version: string): Promise<boolean> {
+    return (await this.ctx.storage.get<string>('drained')) !== version;
   }
 }

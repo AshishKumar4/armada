@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { EventsSchema, JobStatusSchema, JsonSchema, PACKER, type JobSpecSchema, type JobStatus, type Json, type Recipe, type Task } from './protocol';
+import { EventsSchema, HealthSchema, JobStatusSchema, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Health, type JobSpecSchema, type JobStatus, type Json, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -55,15 +55,15 @@ export function connect(): Armada {
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
 }
 
-/** A failed response in one line: the Worker's JSON error as it is, or the status and the title or first line of any
- *  other page, such as the error page a Worker still rolling out answers with. */
+/** A failed response in one line: the Worker's own error, or the status and the title or first line of any other page,
+ *  such as the error page a Worker still rolling out answers with. */
 async function failureOf(response: Response): Promise<string> {
   const text = await response.text();
 
   try {
-    JSON.parse(text);
+    const said = v.safeParse(v.object({ error: v.string() }), JSON.parse(text));
 
-    return `${String(response.status)} ${text}`;
+    return `${String(response.status)} ${said.success ? said.output.error : text}`;
   } catch {
     const line = (/<title>([^<]*)<\/title>/iu.exec(text)?.[1] ?? text.split('\n').find((each) => each.trim() !== '') ?? '').trim().slice(0, 200);
 
@@ -83,6 +83,7 @@ export class Armada {
     const attempts = method === 'GET' || method === 'HEAD' ? READ_ATTEMPTS : 1;
 
     headers.set('authorization', `Bearer ${this.connection.token}`);
+    headers.set(PROTOCOL_HEADER, String(PROTOCOL));
 
     for (let attempt = 1; ; attempt += 1) {
       const sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }).catch((error: unknown) => error);
@@ -102,6 +103,22 @@ export class Armada {
   /** `body` as JSON, and the answer's JSON. */
   async post<Body>(path: string, body: Body): Promise<Json> {
     return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json());
+  }
+
+  async health(): Promise<Health> {
+    return v.parse(HealthSchema, await (await this.call('/health')).json());
+  }
+
+  /** Admits no new job until the version deployed now is replaced, or `admit` is called; answers how many jobs are
+   *  still open, or null for a Worker too old to drain. */
+  async drain(): Promise<number | null> {
+    const answer = await this.call('/drain', { method: 'POST' });
+
+    return answer.status === 404 ? null : v.parse(v.object({ jobs: v.number() }), await answer.json()).jobs;
+  }
+
+  async admit(): Promise<void> {
+    await this.call('/drain', { method: 'DELETE' });
   }
 
   /** A recipe's environment key, and what a commit for it should be packed against. */

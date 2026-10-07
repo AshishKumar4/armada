@@ -232,7 +232,7 @@ describe('uploading a pack', () => {
 });
 
 describe('a failed request', () => {
-  test('says the Worker\'s JSON error as it is, and an HTML error page by its status and title', async () => {
+  test('says the Worker\'s own error, and an HTML error page by its status and title', async () => {
     const page = '<!DOCTYPE html>\n<html>\n<head>\n<title>Service Unavailable</title>\n</head>\n<body>' + '<p>retry</p>'.repeat(500) + '</body>\n</html>\n';
     const server = Bun.serve({
       port: 0,
@@ -246,7 +246,7 @@ describe('a failed request', () => {
       const failed = async (path: string) => await armada.call(path, { method: 'POST' }).then(() => '', (cause: unknown) => String(cause));
 
       expect([await failed('/jobs'), await failed('/environments/resolve')]).toEqual([
-        'Error: POST /jobs: 409 {"error":"upload the pack first"}',
+        'Error: POST /jobs: 409 upload the pack first',
         'Error: POST /environments/resolve: 503 from the Worker (it may still be deploying): Service Unavailable',
       ]);
     } finally {

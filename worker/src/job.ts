@@ -72,6 +72,7 @@ export class ArmadaJob extends DurableObject<Env> {
     this.insert(items);
     await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
+    await this.env.FLEET.getByName(SINGLE).opened(id);
   }
 
   private insert(items: readonly Task[]): void {
@@ -342,6 +343,7 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.ctx.storage.delete('env');
     await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now() });
     await this.ctx.storage.deleteAlarm();
+    await this.env.FLEET.getByName(SINGLE).closed((await this.ctx.storage.get<string>('id')) ?? '');
   }
 
   /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */

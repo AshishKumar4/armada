@@ -7,6 +7,12 @@ import * as v from 'valibot';
 
 export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
+/** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
+ *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
+export const PROTOCOL = 2;
+
+export const PROTOCOL_HEADER = 'armada-protocol';
+
 /** The driver's version: bump when what the Worker installs or runs in a container changes. It is in every
  *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it. */
 export const DRIVER = 1;
@@ -204,6 +210,12 @@ export const JobStatusSchema = v.object({
 });
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
+
+/** A deployment's state: its runner layer, its wire, the vCPUs its fleet holds, and the jobs not yet done, those
+ *  waiting for an environment or for a container included. */
+export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), vcpus: v.number(), jobs: v.number() });
+
+export type Health = v.InferOutput<typeof HealthSchema>;
 
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });
 
