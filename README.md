@@ -1,6 +1,6 @@
 <p align="center"><img src=".github/banner.svg" alt="armada" width="100%"></p>
 
-Run a command over many inputs at once, on Cloudflare Containers.
+Run a command or a TypeScript function over many inputs at once, on Cloudflare Containers.
 
 For example, you can use it for CI. It takes about 7 seconds to spawn 100 containers and run a 3-second command on
 each, all in parallel.
@@ -34,26 +34,6 @@ armada map --commit=HEAD --times=20 -- bun test tests/flaky.test.ts
 armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 ```
 
-From code, after `bun add github:AshishKumar4/armada`:
-
-```ts
-import { connect } from 'armada';
-
-const armada = connect();
-const job = await armada.map({
-  recipe: { setup: 'apt-get install -y curl imagemagick' },
-  items: imageUrls,
-  run: { command: ['sh', '-c', 'curl -sL {item} | convert - -resize 50% {out}'] },
-  output: true,
-});
-
-for await (const outcome of job.outcomes()) {
-  const png = await job.outputBytes(outcome.index);
-}
-
-await armada.map({ items: [1, 2, 3], handler: (n: number) => n * n });
-```
-
 | Placeholder | Becomes |
 |---|---|
 | `{item}` | The item's text, or its JSON. An object item's scalar keys fill placeholders of the same name. |
@@ -61,7 +41,59 @@ await armada.map({ items: [1, 2, 3], handler: (n: number) => n * n });
 | `{out}` | The file a task writes when `output` is set. |
 | `{files}` | The directory with the job's small `files`. |
 
-An unknown placeholder is an error. An object item's numeric `weight` moves it up the queue.
+The CLI and `.armada.json` fill these in a command's words; an unknown one is an error. An object item's numeric
+`weight` moves it up the queue.
+
+## From TypeScript
+
+After `bun add github:AshishKumar4/armada`:
+
+```ts
+// tasks.ts
+import { cmd, fn, recipe } from 'armada';
+import * as v from 'valibot';
+
+export const imaging = recipe({ setup: 'apt-get install -y curl imagemagick', size: 'small' });
+
+// A function. Its module is bundled with what it imports and run in each container, so it is exported.
+export const measure = fn(import.meta, {
+  recipe: imaging,
+  input: v.object({ url: v.pipe(v.string(), v.url()) }),
+  output: v.object({ bytes: v.number(), type: v.string() }),
+}, async ({ url }) => {
+  const response = await fetch(url);
+
+  return { bytes: (await response.arrayBuffer()).byteLength, type: response.headers.get('content-type') ?? '' };
+});
+
+// A command. Its argv is built per item here, so an item is never pasted into a shell string.
+export const thumbnail = cmd(imaging, (url: string) => ['sh', '-c', 'curl -sL "$1" | convert - -resize 50% "$ARMADA_OUT"', 'thumbnail', url], {
+  output: 'bytes',
+});
+```
+
+```ts
+import { measure, thumbnail } from './tasks';
+
+const sizes = await measure.map(rows).values();     // { bytes: number; type: string }[], in input order
+
+for await (const result of thumbnail.map(urls)) {    // in the order they land
+  if (result.kind === 'ok') await Bun.write(`thumbs/${result.index}.png`, result.value);
+  else console.error(result.item, result.kind);
+}
+```
+
+- A result's `kind` is `ok`, `error` (the function threw, its value failed its schema, or the command exited
+  nonzero), `timeout`, `cancelled` or `lost`. Each carries its `meta`: seconds, container, exit code, the tail of its
+  log, and its peak memory and CPU.
+- `job.ordered()` yields results in input order, `job.settled()` returns them all, and `job.values()` returns the
+  values or throws a `MapError` holding every result. `task.run(item)` runs one item.
+- Items may be an array, or an iterable or async iterable that streams into the job as it yields.
+- Schemas are any [Standard Schema](https://standardschema.dev): valibot, zod or arktype. An item is checked before
+  it is sent, and a value in the container before it counts as `ok`.
+- Items and values are plain JSON, or bytes for a value; the types refuse a `Date` or a `Map`.
+- `map(items, { pool, label, env, files, tmpfs })` sets a job's options; `fn` and `cmd` take `timeout` and
+  `speculative`, which lets an idle container run a straggler again.
 
 ## CI with `armada run`
 
