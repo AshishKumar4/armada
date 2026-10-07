@@ -6,7 +6,11 @@
  */
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { mock } from 'bun:test';
+import { timingSafeEqual } from 'node:crypto';
 import type { Env } from '../src/env';
+
+// workerd's constant-time comparison, which the Worker checks its bearer with.
+Object.assign(crypto.subtle, { timingSafeEqual: (left: Uint8Array, right: Uint8Array) => timingSafeEqual(left, right) });
 
 void mock.module('cloudflare:workers', () => ({
   DurableObject: class {
@@ -63,11 +67,23 @@ export function namespace<T>(named: (name: string) => T): DurableObjectNamespace
   return { getByName: named } as unknown as DurableObjectNamespace;
 }
 
-/** The bindings an object reaches, each answered in memory: the fleet always has room, and R2 stores nothing. */
+/** An R2 bucket in memory: what a test reads back of what was put, by key. */
+export function bucket(objects = new Map<string, string>()) {
+  return {
+    objects,
+    head: async (key: string) => objects.has(key) ? { key } : null,
+    get: async (key: string) => objects.has(key) ? { body: new Blob([objects.get(key) ?? '']).stream() } : null,
+    put: async (key: string, body: ReadableStream | string | ArrayBuffer | null) => {
+      objects.set(key, typeof body === 'string' ? body : await new Response(body).text());
+    },
+  };
+}
+
+/** The bindings an object reaches, each answered in memory: the fleet always has room. */
 export function world(bindings: Partial<Record<keyof Env, unknown>>): Env {
   const all = {
     FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined })),
-    ARTIFACTS: { put: async () => undefined, get: async () => null },
+    ARTIFACTS: bucket(),
     ...bindings,
   };
 
