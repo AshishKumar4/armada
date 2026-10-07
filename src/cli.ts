@@ -7,7 +7,7 @@ import * as v from 'valibot';
 import { cancelOnInterrupt, onCommit, runCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, SizeSchema } from './protocol';
+import { BaseSchema, describeUsage, SizeSchema, usageOf, type Outcome } from './protocol';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -125,6 +125,7 @@ async function map(): Promise<number> {
     run: { command: rest }, output: flag('output'), idempotent: flag('idempotent'), pool: whole('pool'), timeout: whole('timeout'), label: option('label') ?? '',
   });
   let worst = 0;
+  const outcomes: Outcome[] = [];
 
   console.error(`job ${job.id}`);
   // A ready environment starts the job at once; a new one is prepared first, which is a wait worth a word.
@@ -136,6 +137,8 @@ async function map(): Promise<number> {
 
   await cancelOnInterrupt(job, async () => {
     for await (const outcome of job.outcomes()) {
+      outcomes.push(outcome);
+
       if (flag('json')) console.log(JSON.stringify(outcome));
       else console.log(`${String(outcome.index).padStart(6)}  ${outcome.kind === 'failed' ? 'FAILED' : `exit ${String(outcome.exitCode)}`}  ${outcome.seconds.toFixed(2)} s  ${outcome.vessel}`);
 
@@ -147,7 +150,9 @@ async function map(): Promise<number> {
 
   for (const problem of (await job.status()).problems) console.error(`problem: ${problem}`);
   const summary = await job.summary();
+  const usage = usageOf(outcomes);
 
+  if (usage !== null) console.error(`one task used at most ${describeUsage(usage)}`);
   console.error(`${String(summary.tasks)} tasks: ${String(summary.green)} green, ${String(summary.red)} red, ${String(summary.failed)} failed; wall ${((Date.now() - began) / 1000).toFixed(1)} s, `
     + `map ${(summary.mapMs / 1000).toFixed(1)} s on ${String(summary.vessels)} containers (${summary.tasksPerSecond.toFixed(1)} tasks/s); `
     + `first answers ${((summary.bootMs[0] ?? 0) / 1000).toFixed(1)} to ${((summary.bootMs.at(-1) ?? 0) / 1000).toFixed(1)} s`);

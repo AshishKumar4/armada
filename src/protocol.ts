@@ -124,6 +124,9 @@ export const OutcomeSchema = v.object({
   tail: v.string(),
   /** Whether `{out}` (or a handler's value) is stored, at `/jobs/<id>/tasks/<index>/output`. */
   output: v.boolean(),
+  /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
+  peakMemory: v.optional(v.number()),
+  cpuSeconds: v.optional(v.number()),
 });
 
 export type Outcome = v.InferOutput<typeof OutcomeSchema>;
@@ -220,6 +223,26 @@ export function failureTail(stdout: string, stderr: string, limit = 3000): strin
 
   return stdout.slice(Math.max(0, stdout.length - (limit - error.length))) + error;
 }
+
+/** What a job's tasks used at most: the highest peak memory, in bytes, and the most cores one task kept busy on average. */
+export interface Usage {
+  readonly memory: number;
+  readonly cores: number;
+}
+
+/** The most any of these outcomes used, or null when none was measured. */
+export function usageOf(outcomes: readonly Outcome[]): Usage | null {
+  const measured = outcomes.filter((outcome) => outcome.peakMemory !== undefined && outcome.cpuSeconds !== undefined && outcome.seconds > 0);
+
+  if (measured.length === 0) return null;
+
+  return {
+    memory: Math.max(...measured.map((outcome) => outcome.peakMemory ?? 0)),
+    cores: Math.max(...measured.map((outcome) => (outcome.cpuSeconds ?? 0) / outcome.seconds)),
+  };
+}
+
+export const describeUsage = (usage: Usage): string => `${(usage.memory / 2 ** 30).toFixed(2)} GiB and ${usage.cores.toFixed(2)} cores`;
 
 /** The samples an estimate keeps per row or file. */
 const SAMPLES = 5;

@@ -131,6 +131,16 @@ mkdir -p ${STATE}/phases
 mkdir "$dir" 2>/dev/null || exit 0
 setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
+/** The task's cgroup after it exited: its peak memory in bytes, then its CPU time in microseconds. */
+export const USAGE = String.raw`cat ${TASK_GROUP}/memory.peak; sed -n 's/^usage_usec //p' ${TASK_GROUP}/cpu.stat`;
+
+/** `USAGE`'s answer, or nothing for a group already gone. */
+export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: number } {
+  const [memory, cpu] = stdout.trim().split('\n').map(Number);
+
+  return memory !== undefined && cpu !== undefined && Number.isFinite(memory) && Number.isFinite(cpu) ? { peakMemory: memory, cpuSeconds: cpu / 1e6 } : {};
+}
+
 /** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
 export const KILL = String.raw`set -eu
 pid="$(cat ${TASK}/pid 2>/dev/null || true)"

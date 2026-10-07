@@ -9,7 +9,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { failureTail, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KILL, TASK, WAIT, handlerModule, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE,
+  ENTRYPOINT, KILL, TASK, USAGE, WAIT, handlerModule, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, usageFrom,
 } from './container';
 import { packKey, said, taskKey, type Env } from './env';
 import type { Claim } from './job';
@@ -220,6 +220,8 @@ export class ArmadaVessel extends DurableObject<Env> {
     const seconds = (Date.now() - current.startedAt) / 1000;
     const log = await (await container.exec(['/bin/sh', '-c', `gzip -c ${TASK}/log 2>/dev/null || true`], { signal: AbortSignal.timeout(EXEC_MS) })).output();
     const tail = await run(container, ['/bin/sh', '-c', `tail -n ${String(TAIL_LINES)} ${TASK}/log 2>/dev/null || true`], { ms: EXEC_MS });
+    // What it used is a measurement, never a reason to lose the task.
+    const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
     await this.env.ARTIFACTS.put(taskKey(spec.jobId, index, 'log'), log.stdout, { httpMetadata: { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' } });
     let output = false;
@@ -234,7 +236,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       }
     }
 
-    const outcome: Outcome = { index, kind: 'exited', exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output };
+    const outcome: Outcome = { index, kind: 'exited', exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output, ...usage };
 
     await job.complete(spec.name, outcome, seconds * 1000);
   }
