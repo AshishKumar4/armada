@@ -176,7 +176,7 @@ export async function runCI(armada: Armada, target: string, label: string): Prom
 
     if (text === null) return { name, entry, rows: null };
 
-    return { name, entry, rows: underExit(v.parse(VerdictFileSchema, JSON.parse(text)).rows, outcome) };
+    return { name, entry, rows: underExit(v.parse(VerdictFileSchema, JSON.parse(text)).rows, outcome, name) };
   }));
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };

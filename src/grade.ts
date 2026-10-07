@@ -49,11 +49,17 @@ export interface TaskExit {
   readonly exitCode: number;
   /** The end of its output. */
   readonly tail: string;
+  readonly seconds?: number;
 }
 
 /** A verdict file's rows under its task's exit: a task that exited nonzero failed, so every row it reported green is
- *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's. */
-export function underExit(rows: readonly VerdictRow[], exit: TaskExit): VerdictRow[] {
+ *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's.
+ *  A task that exited nonzero having reported no row is a red row of its own, under its name. */
+export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string): VerdictRow[] {
+  if (rows.length === 0 && exit.exitCode !== 0) {
+    return [{ name: task, exitCode: exit.exitCode, seconds: exit.seconds ?? 0, output: `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}` }];
+  }
+
   return rows.map((row) => {
     if (row.exitCode === 0 && exit.exitCode !== 0) {
       return { ...row, exitCode: exit.exitCode, output: `the task exited ${String(exit.exitCode)} after reporting this row green\n${exit.tail}` };

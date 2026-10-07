@@ -87,7 +87,7 @@ describe('grading a CI run', () => {
   });
 
   test('a task that exits nonzero fails every row it reported green; one it reported red keeps its own exit', () => {
-    const exited = underExit([row('one'), row('two', 1), { ...row('three', 1), output: '' }], { exitCode: 7, tail: 'Segmentation fault' });
+    const exited = underExit([row('one'), row('two', 1), { ...row('three', 1), output: '' }], { exitCode: 7, tail: 'Segmentation fault' }, 'a');
 
     expect(exited.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
       ['one', 7, 'the task exited 7 after reporting this row green\nSegmentation fault'],
@@ -95,7 +95,17 @@ describe('grading a CI run', () => {
       ['three', 1, 'Segmentation fault'],
     ]);
     expect(grade([{ name: 'a', entry: {}, rows: exited }]).reds.map(rowName)).toEqual(['one', 'two', 'three']);
-    expect(underExit([row('one')], { exitCode: 0, tail: '' })).toEqual([row('one')]);
+    expect(underExit([row('one')], { exitCode: 0, tail: '' }, 'a')).toEqual([row('one')]);
+  });
+
+  test('a task that exits nonzero having reported no row is a red row of its own', () => {
+    const exited = underExit([], { exitCode: 7, tail: 'Segmentation fault' }, 'a');
+
+    expect(exited.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
+      ['a', 7, 'the task exited 7 and reported no row\nSegmentation fault'],
+    ]);
+    expect(grade([{ name: 'a', entry: {}, rows: exited }])).toMatchObject({ problems: [], reds: exited });
+    expect(underExit([], { exitCode: 0, tail: '' }, 'a')).toEqual([]);
   });
 
   test('a missing verdict, a missing or extra row, a row twice, and an untimed file are each named, and none is green', () => {
