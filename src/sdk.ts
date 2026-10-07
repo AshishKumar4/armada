@@ -19,6 +19,9 @@ import { EventsSchema, JobStatusSchema, type JobSpec, type JobSpecSchema, type J
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
+/** The largest pack, in bytes, sent in one request; a Worker takes 100 MB, and R2 wants every part but the last alike. */
+export const PACK_PART = 64 * 1024 * 1024;
+
 export interface Connection {
   readonly url: string;
   readonly token: string;
@@ -83,14 +86,29 @@ export class Armada {
     return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe }));
   }
 
-  /** Stores a commit's pack once; `pack` is called only when the runner lacks it. */
+  /** Stores a commit's pack once; `pack` is called only when the runner lacks it. One larger than a request may
+   *  carry goes in parts of PACK_PART bytes. */
   async uploadPack(project: string, sha: string, base: string, pack: () => Blob): Promise<number | null> {
     const path = `/packs/${project}/${sha}/${base}`;
 
     if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
     const body = pack();
 
-    await this.call(path, { method: 'PUT', body });
+    if (body.size <= PACK_PART) {
+      await this.call(path, { method: 'PUT', body });
+
+      return body.size;
+    }
+    const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}?uploads`, {}));
+    const bytes = new Uint8Array(await body.arrayBuffer());
+    const parts = [];
+
+    for (let start = 0, partNumber = 1; start < bytes.length; start += PACK_PART, partNumber += 1) {
+      const stored = await (await this.call(`${path}?upload=${encodeURIComponent(upload)}&part=${String(partNumber)}`, { method: 'PUT', body: bytes.subarray(start, start + PACK_PART) })).json();
+
+      parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
+    }
+    await this.post(`${path}?upload=${encodeURIComponent(upload)}`, { parts });
 
     return body.size;
   }

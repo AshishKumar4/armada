@@ -48,12 +48,29 @@ async function object(env: Env, key: string): Promise<Response> {
 
 type Handler = (request: Request, env: Env, path: readonly string[], url: URL) => Promise<Response | undefined>;
 
-/** `/packs/<project>/<sha>/<base>`: a commit's pack, stored once (`packKey`). */
-const packs: Handler = async (request, env, [project, sha, base]) => {
+const Parts = v.object({ parts: v.array(v.object({ partNumber: v.pipe(v.number(), v.integer(), v.minValue(1)), etag: v.string() })) });
+
+/** `/packs/<project>/<sha>/<base>`: a commit's pack, stored once (`packKey`). A pack larger than a request may carry
+ *  arrives in parts: `POST ?uploads` opens it, `PUT ?upload=<id>&part=<n>` stores each, `POST ?upload=<id>` with the
+ *  parts' etags completes it. */
+const packs: Handler = async (request, env, [project, sha, base], url) => {
   if (!v.is(Project, project) || !v.is(Sha, sha) || !v.is(PackBase, base)) return undefined;
   const key = packKey(project, sha, base);
+  const upload = url.searchParams.get('upload');
 
   if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(key)) === null ? 404 : 200 });
+
+  if (request.method === 'POST' && url.searchParams.has('uploads')) return Response.json({ upload: (await env.ARTIFACTS.createMultipartUpload(key)).uploadId });
+
+  if (upload !== null && request.method === 'PUT' && request.body !== null) {
+    return Response.json(await env.ARTIFACTS.resumeMultipartUpload(key, upload).uploadPart(Number(url.searchParams.get('part')), request.body));
+  }
+
+  if (upload !== null && request.method === 'POST') {
+    await env.ARTIFACTS.resumeMultipartUpload(key, upload).complete(v.parse(Parts, await request.json()).parts);
+
+    return Response.json({ stored: key });
+  }
 
   if (request.method !== 'PUT' || request.body === null) return undefined;
   await env.ARTIFACTS.put(key, request.body);

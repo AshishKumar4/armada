@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
+import { Armada, PACK_PART } from '../src/sdk';
 
 describe('a task\'s command', () => {
   test('fills from the item: a string as itself, an object\'s scalar keys, its JSON as {item}', () => {
@@ -122,5 +123,38 @@ describe('grading a CI run', () => {
       'one was reported by both a and b',
       'c wrote no verdict',
     ]);
+  });
+});
+
+describe('uploading a pack', () => {
+  test('one no larger than a part goes in one PUT; a larger one in equal parts, then completes', async () => {
+    const seen: string[] = [];
+    const sent: number[] = [];
+    const original = globalThis.fetch;
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? 'GET';
+
+      seen.push(`${method} ${url.pathname.split('/').slice(-1)[0] ?? ''}${url.search}`);
+      if (init?.body instanceof Uint8Array) sent.push(init.body.length);
+      if (method === 'HEAD') return new Response(null, { status: 404 });
+      if (url.searchParams.has('uploads')) return Response.json({ upload: 'u1' });
+      if (url.searchParams.has('part')) return Response.json({ partNumber: Number(url.searchParams.get('part')), etag: `e${url.searchParams.get('part') ?? ''}` });
+
+      return Response.json({ stored: 'key' });
+    }) as typeof fetch;
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+
+      expect(await armada.uploadPack('dew', 'a'.repeat(40), 'root', () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
+      expect(seen.splice(0)).toEqual(['HEAD root', 'PUT root']);
+      expect(await armada.uploadPack('dew', 'b'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
+      expect(seen).toEqual(['HEAD root', 'POST root?uploads', 'PUT root?upload=u1&part=1', 'PUT root?upload=u1&part=2', 'PUT root?upload=u1&part=3', 'POST root?upload=u1']);
+      expect(sent).toEqual([PACK_PART, PACK_PART, 5]);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });
