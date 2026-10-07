@@ -194,6 +194,21 @@ export class Armada {
     return digest;
   }
 
+  /** Sets the deployment's secret `name`, which a task that names it gets in its environment. */
+  async setSecret(name: string, value: string): Promise<void> {
+    await this.call(`/secrets/${name}`, { method: 'PUT', body: value });
+  }
+
+  /** The names of the deployment's secrets: no call reads a value back. */
+  async secrets(): Promise<string[]> {
+    return v.parse(v.object({ names: v.array(v.string()) }), await (await this.call('/secrets')).json()).names;
+  }
+
+  /** Whether there was one to delete. */
+  async deleteSecret(name: string): Promise<boolean> {
+    return v.parse(v.object({ deleted: v.boolean() }), await (await this.call(`/secrets/${name}`, { method: 'DELETE' })).json()).deleted;
+  }
+
   async create(spec: v.InferInput<typeof JobSpecSchema>): Promise<string> {
     return v.parse(v.object({ id: v.string() }), await this.post('/jobs', spec)).id;
   }

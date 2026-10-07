@@ -93,3 +93,9 @@ export const unknownValue = task({ id: 'unknown-value', output: v.unknown(), run
 
 // @ts-expect-error a command's JSON cannot be a Date
 export const datedCommand = task({ id: 'dated-command', output: v.date(), run: () => sh`true` });
+
+// @ts-expect-error a body reads only the secrets its task names
+export const unnamed = task({ id: 'unnamed', secrets: ['API_KEY'], run: (_: null, { secrets }) => secrets.OTHER_KEY });
+
+// A secret the task names is a string.
+export const named: Task<null, number> = task({ id: 'named', secrets: ['API_KEY'], run: (_: null, { secrets }) => secrets.API_KEY.length });

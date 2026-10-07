@@ -148,6 +148,46 @@ export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: n
   return memory !== undefined && cpu !== undefined && Number.isFinite(memory) && Number.isFinite(cpu) ? { peakMemory: memory, cpuSeconds: cpu / 1e6 } : {};
 }
 
+/** The shortest secret masked: a shorter one would hide ordinary text. */
+export const MASKED_BYTES = 4;
+
+/** A node program that replaces, in the file it is given, every value of the secrets `ARMADA_MASK` names with `***`,
+ *  longest first, streamed in 1 MiB reads that carry a secret's length less one byte across each boundary. */
+export const MASK = String.raw`const fs = require('fs');
+const file = process.argv[1];
+const secrets = (process.env.ARMADA_MASK || '').split(' ').filter(Boolean).map((name) => Buffer.from(process.env[name] || ''))
+  .filter((secret) => secret.length >= ${String(MASKED_BYTES)}).sort((left, right) => right.length - left.length);
+const keep = Math.max(0, ...secrets.map((secret) => secret.length - 1));
+const mask = Buffer.from('***');
+const input = fs.openSync(file, 'r');
+const output = fs.openSync(file + '.masked', 'w');
+const chunk = Buffer.alloc(1 << 20);
+let carry = Buffer.alloc(0);
+for (;;) {
+  const read = fs.readSync(input, chunk, 0, chunk.length, null);
+  let text = Buffer.concat([carry, chunk.subarray(0, read)]);
+  for (const secret of secrets) {
+    const parts = [];
+    let from = 0;
+    for (let at = text.indexOf(secret); at !== -1; at = text.indexOf(secret, from)) {
+      parts.push(text.subarray(from, at), mask);
+      from = at + secret.length;
+    }
+    parts.push(text.subarray(from));
+    text = Buffer.concat(parts);
+  }
+  if (read === 0) {
+    fs.writeSync(output, text);
+    break;
+  }
+  const cut = Math.max(0, text.length - keep);
+  fs.writeSync(output, text.subarray(0, cut));
+  carry = text.subarray(cut);
+}
+fs.closeSync(input);
+fs.closeSync(output);
+fs.renameSync(file + '.masked', file);`;
+
 /** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
 export const KILL = String.raw`set -eu
 pid="$(cat ${TASK}/pid 2>/dev/null || true)"

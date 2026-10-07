@@ -1,5 +1,6 @@
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaFleet } from './fleet';
+import type { ArmadaSecrets } from './secrets';
 import type { ArmadaTasks } from './tasks';
 import type { ArmadaJob } from './job';
 import type { ArmadaTimings } from './timings';
@@ -13,6 +14,7 @@ export interface Env {
   readonly TIMINGS: DurableObjectNamespace<ArmadaTimings>;
   readonly FLEET: DurableObjectNamespace<ArmadaFleet>;
   readonly TASKS: DurableObjectNamespace<ArmadaTasks>;
+  readonly SECRETS: DurableObjectNamespace<ArmadaSecrets>;
   /** Packs, task outputs and logs, verdicts. */
   readonly ARTIFACTS: R2Bucket;
   /** The bearer the SDK presents (`~/.config/armada/connection.json`). */

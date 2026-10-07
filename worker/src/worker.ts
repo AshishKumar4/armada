@@ -3,7 +3,7 @@
  * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote.
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
+import { DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
@@ -17,6 +17,8 @@ export { ArmadaTimings } from './timings';
 export { ArmadaFleet } from './fleet';
 
 export { ArmadaTasks } from './tasks';
+
+export { ArmadaSecrets } from './secrets';
 
 /** The bearer, compared in constant time. */
 function authorized(request: Request, env: Env): boolean {
@@ -154,6 +156,11 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
       spec.run = { ...spec.run, bundle };
     }
 
+    const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
+    const unset = spec.secrets.find((name) => !(name in held));
+
+    if (unset !== undefined) return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
+
     if (spec.commit !== undefined) {
       if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
 
@@ -195,6 +202,26 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
   }
 
   return tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && (leaf === 'output' || leaf === 'log') ? await object(env, taskKey(id, Number(index), leaf)) : undefined;
+};
+
+/** `/secrets` lists the names set; `PUT /secrets/<name>` sets one from the body, `DELETE` removes it. No route answers
+ *  a value. */
+const secrets: Handler = async (request, env, [name]) => {
+  const held = env.SECRETS.getByName(SINGLE);
+
+  if (name === undefined) return request.method === 'GET' ? Response.json({ names: await held.names() }) : undefined;
+
+  if (!v.is(SecretName, name)) return Response.json({ error: v.safeParse(SecretName, name).issues?.[0].message }, { status: 400 });
+
+  if (request.method === 'DELETE') return Response.json({ deleted: await held.delete(name) });
+
+  if (request.method !== 'PUT') return undefined;
+  const value = await request.text();
+
+  if (value === '' || new TextEncoder().encode(value).byteLength > SECRET_BYTES) return Response.json({ error: `a secret holds 1 to ${String(SECRET_BYTES)} bytes` }, { status: 400 });
+  await held.set(name, value);
+
+  return Response.json({ stored: name });
 };
 
 /** `/verdicts/<project>/<sha>`: a graded CI run's collected verdict file. */
@@ -244,7 +271,7 @@ const environments: Handler = async (request, env, [key]) => {
   return Response.json({ forgotten: key });
 };
 
-const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments]]);
+const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments], ['secrets', secrets]]);
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);

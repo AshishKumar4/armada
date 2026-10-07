@@ -11,8 +11,8 @@ import { execute, isShell, outFile, type OutFile, type Shell } from './sh';
  *  module still finds it. */
 export const RUN: unique symbol = Symbol.for('armada.run');
 
-/** What a body gets beside its input. */
-export interface Context {
+/** What a body gets beside its input: `S` is the names of the secrets its task asks for. */
+export interface Context<S extends string = string> {
   /** The item's position in the job. */
   readonly index: number;
   /** 1, or more when the platform lost an attempt. */
@@ -23,6 +23,8 @@ export interface Context {
   readonly out: OutFile;
   /** The directory holding the job's `files`. */
   readonly files: string;
+  /** The deployment's secrets the task asked for, by name. A command gets each in its environment too. */
+  readonly secrets: Readonly<Record<S, string>>;
 }
 
 export interface RemoteError {
@@ -38,11 +40,27 @@ export type Envelope = { readonly ok: true; readonly value: Json } | { readonly 
 
 export interface Runnable {
   readonly id: string;
+  /** The secrets it asks for, which its container has in its environment. */
+  readonly secrets: readonly string[];
   readonly [RUN]: (item: Json, context: Context) => Promise<Envelope | Shell>;
 }
 
 export function remoteError(cause: unknown): RemoteError {
   return cause instanceof Error ? { name: cause.name, message: cause.message, stack: cause.stack ?? '' } : { name: 'Error', message: String(cause), stack: '' };
+}
+
+/** The secrets `names` from `env`, or the first name it lacks. */
+export function secretsFrom(names: readonly string[], env: NodeJS.ProcessEnv): { readonly secrets: Record<string, string> } | { readonly missing: string } {
+  const secrets: Record<string, string> = {};
+
+  for (const name of names) {
+    const value = env[name];
+
+    if (value === undefined) return { missing: name };
+    secrets[name] = value;
+  }
+
+  return { secrets };
 }
 
 /** Whether `value` is a task: a pushed module's exports are read for them. */
@@ -64,8 +82,16 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
 
   process.once('SIGTERM', () => { controller.abort(new Error('the task was stopped')); });
   const out = process.env['ARMADA_OUT'] ?? OUT_PATH;
+  const given = secretsFrom(task.secrets, process.env);
+
+  // Only a secret deleted after its job started is missing here: the job is refused one that is not set.
+  if ('missing' in given) {
+    console.error(`armada: the secret ${given.missing} was deleted; set it again with armada secret set ${given.missing}`);
+    process.exit(1);
+  }
   const context: Context = {
     index: Number(process.env['ARMADA_INDEX'] ?? '0'), attempt: Number(process.env['ARMADA_ATTEMPT'] ?? '1'), signal: controller.signal, out: outFile(out), files: FILES_DIR,
+    secrets: given.secrets,
   };
   const answer = await task[RUN](JSON.parse(process.env['ARMADA_ITEM'] ?? 'null') as Json, context);
   const marker = process.env['ARMADA_ANSWER'] ?? ANSWER_PATH;

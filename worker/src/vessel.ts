@@ -9,9 +9,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KILL, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
+  ENTRYPOINT, KILL, MASK, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
-import { bundleKey, packKey, said, taskKey, type Env } from './env';
+import { bundleKey, packKey, said, SINGLE, taskKey, type Env } from './env';
 import type { Claim } from './job';
 
 export interface VesselSpec {
@@ -261,6 +261,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     if (!(await job.accept(spec.name, index))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
+
+    await this.mask(current.claim.secrets);
     const tail = await run(container, ['/bin/sh', '-c', `tail -n ${String(TAIL_LINES)} ${TASK}/log 2>/dev/null || true`], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
@@ -279,6 +281,14 @@ export class ArmadaVessel extends DurableObject<Env> {
     };
 
     await job.complete(spec.name, outcome, seconds * 1000);
+  }
+
+  /** Each value of `names` that is still set, replaced in the task's log before any of it is read. */
+  private async mask(names: readonly string[] | undefined): Promise<void> {
+    if (names === undefined || names.length === 0) return;
+    const values = await this.env.SECRETS.getByName(SINGLE).values(names);
+
+    await must(this.container(), 'masking the secrets', ['node', '-e', MASK, `${TASK}/log`], { env: { ...values, ARMADA_MASK: Object.keys(values).join(' ') }, ms: EXEC_MS });
   }
 
   /**

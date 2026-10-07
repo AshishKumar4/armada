@@ -36,6 +36,8 @@ export interface Claim {
   readonly attempt: number;
   readonly argv: readonly string[];
   readonly env: Record<string, string>;
+  /** The names of the secrets in `env`, whose values the vessel masks in the task's log. */
+  readonly secrets: readonly string[];
   /** A second run of a straggler: its answer is kept only if it lands first. */
   readonly duplicate: boolean;
 }
@@ -217,7 +219,8 @@ export class ArmadaJob extends DurableObject<Env> {
        WHERE idx = (SELECT idx FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1) RETURNING idx, item, attempts`, name, now, now,
     ).toArray()[0];
 
-    const env = (await this.ctx.storage.get<Record<string, string>>('env')) ?? {};
+    // Secrets are read for each claim and never kept: the job holds only their names.
+    const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec) };
 
     if (next !== undefined) return this.claimOf(spec, env, next.idx, next.item, next.attempts, false);
     const [later] = this.sql.exec<{ at: number | null }>(`SELECT MIN(not_before) AS at FROM tasks WHERE state = 'queued'`).toArray();
@@ -250,7 +253,12 @@ export class ArmadaJob extends DurableObject<Env> {
       ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
     };
 
-    return { index, attempt, argv: spec.run.kind === 'task' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, duplicate };
+    return { index, attempt, argv: spec.run.kind === 'task' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, secrets: spec.secrets, duplicate };
+  }
+
+  /** The values of the secrets the job names that are still set: the runner says which was deleted. */
+  private async secrets(spec: Kept): Promise<Record<string, string>> {
+    return spec.secrets.length === 0 ? {} : await this.env.SECRETS.getByName(SINGLE).values(spec.secrets);
   }
 
   /** Whether `name`'s answer for `index` is the one kept: the first to land wins, a late duplicate is told no. */

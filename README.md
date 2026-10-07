@@ -143,6 +143,10 @@ for await (const result of transcode.stream(videos)) { // each file as soon as i
 - `retries` runs a failed item again, only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
   exitCodes: [75], errors: ['FetchError'] }`, an item that exits 75 or throws a `FetchError` runs up to three times,
   waiting 5 s, then 10 s. Any other failure is final.
+- `secrets` gives a task values you keep out of your code. `echo "$KEY" | armada secret set OPENAI_API_KEY` stores one
+  in the deployment, and a task with `secrets: ['OPENAI_API_KEY']` reads `context.secrets.OPENAI_API_KEY`; a command
+  gets it in its environment. Reading a secret the task didn't name is a type error, no call reads a value back, and
+  each value of 4 bytes or more shows as `***` in the task's log. `.local` reads them from your environment.
 
 ## CI with `armada run`
 

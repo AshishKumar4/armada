@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Result } from '../src/index';
-import { echo, encode, flaky, fromFile, greet, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
+import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
 
@@ -258,6 +258,23 @@ describe('a task\'s retries', () => {
     await flaky.stream([1], { armada }).settled();
 
     expect([...jobs.values()].at(-1)?.spec.retries).toEqual({ attempts: 3, backoffSeconds: 0, exitCodes: [], errors: ['Flake'] });
+  });
+});
+
+describe('a task\'s secrets', () => {
+  test('travel by name with its job, reach its body from the container\'s environment, and locally from this machine\'s', async () => {
+    const { armada, jobs } = await fleet();
+
+    process.env['ARMADA_TEST_KEY'] = 'sk-1234';
+    try {
+      const remote = await keyed.run(null, { armada });
+
+      expect({ remote, local: await keyed.local(null), names: [...jobs.values()].at(-1)?.spec.secrets }).toEqual({ remote: 7, local: 7, names: ['ARMADA_TEST_KEY'] });
+    } finally {
+      delete process.env['ARMADA_TEST_KEY'];
+    }
+    expect(await keyed.local(null).catch((error: unknown) => String(error)))
+      .toBe('Error: .local reads the secret ARMADA_TEST_KEY from this machine\'s environment, which lacks it');
   });
 });
 

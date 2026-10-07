@@ -50,7 +50,8 @@ export function state(container?: Container): Stored {
   const entries = new Map<string, unknown>();
   const db = new Database(':memory:');
   const storage = {
-    get: async (key: string) => structuredClone(entries.get(key)),
+    get: async (key: string | readonly string[]) => typeof key === 'string' ? structuredClone(entries.get(key))
+      : new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : [])),
     put: async (key: string | Record<string, unknown>, value?: unknown) => {
       for (const [name, each] of typeof key === 'string' ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
     },

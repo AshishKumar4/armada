@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Outcome } from '../../src/protocol';
-import { STOPPED, USAGE } from '../src/container';
+import { MASK, STOPPED, USAGE } from '../src/container';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
 
@@ -95,5 +95,45 @@ describe('a task\'s output', () => {
 
     expect([small.completed[0]?.value, large.completed[0]?.output, large.completed[0]?.value, large.stored.get('jobs/job/tasks/0/output')?.length])
       .toEqual(['{"n": 1}', true, undefined, 32 * 1024 + 1]);
+  });
+});
+
+describe('a task that names secrets', () => {
+  test('has their values masked in its log before its tail is read or the log is stored', async () => {
+    const seen: { readonly argv: readonly string[]; readonly env: unknown }[] = [];
+    let claimed = false;
+    const stored = state(container((argv, options) => {
+      seen.push({ argv, env: options?.env });
+
+      if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
+
+      return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+    }));
+    const job = {
+      booted: async () => undefined,
+      waiting: async () => undefined,
+      claim: async () => {
+        if (claimed) return null;
+        claimed = true;
+
+        return { index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-value' }, secrets: ['API_KEY'], duplicate: false };
+      },
+      still: async () => true,
+      accept: async () => true,
+      complete: async () => undefined,
+      retired: async () => undefined,
+      vesselFailed: async () => undefined,
+    };
+    const secrets = { values: async (names: readonly string[]) => Object.fromEntries(names.map((name) => [name, 'sk-value'])) };
+    const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), SECRETS: namespace(() => secrets), ARTIFACTS: bucket() }));
+
+    await vessel.begin(spec);
+
+    for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
+    const masked = seen.findIndex((exec) => exec.argv[0] === 'node' && exec.argv[2] === MASK);
+    const read = seen.findIndex((exec) => /^(tail|gzip) /u.test(exec.argv[2] ?? ''));
+
+    expect({ before: masked !== -1 && masked < read, file: seen[masked]?.argv[3], env: seen[masked]?.env })
+      .toEqual({ before: true, file: '/armada/task/log', env: { API_KEY: 'sk-value', ARMADA_MASK: 'API_KEY' } });
   });
 });

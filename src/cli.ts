@@ -26,6 +26,8 @@ Usage:
   armada push                          send this project's tasks (armada.config.ts) to armada
   armada dev                           push them again on every save
   armada status <job-id>               print a job's status as JSON
+  armada secret set <NAME>             set a secret from stdin, for the tasks that name it
+  armada secret list | delete <NAME>   list the secrets' names, or delete one
   armada prune [--keep=3]              delete the snapshots of all but the newest environments
 
 map options:
@@ -38,6 +40,7 @@ map options:
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
   --speculative        let an idle container run a straggler again
+  --secrets=<A,B>      give each task these secrets (armada secret set) in its environment
   --json               print each outcome as a JSON line
   --label=<text>       name the job
 
@@ -58,12 +61,13 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus='], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'json', 'label='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label='], words: 0 }],
   ['run', { options: ['label='], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
   ['status', { options: [], words: 1 }],
+  ['secret', { options: [], words: 2 }],
   ['prune', { options: ['keep='], words: 0 }],
 ]);
 
@@ -131,7 +135,7 @@ async function map(): Promise<number> {
   const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target);
   const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
   const argv = argvOf(rest, base);
-  const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout') };
+  const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const options = { armada, pool: whole('pool'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
@@ -404,6 +408,29 @@ async function dev(armada: Armada): Promise<number> {
   return 0;
 }
 
+/** `secret set <NAME>` reads the value from stdin, less one trailing newline, so `echo` and a typed line both work. */
+async function secret(armada: Armada, verb: string | undefined, name: string | undefined): Promise<number> {
+  if (verb === 'list') {
+    for (const each of await armada.secrets()) console.log(each);
+
+    return 0;
+  }
+
+  if (name === undefined || (verb !== 'set' && verb !== 'delete')) throw new Error('secret takes set <NAME>, list or delete <NAME>; see armada --help');
+
+  if (verb === 'delete') {
+    console.log(await armada.deleteSecret(name) ? `deleted ${name}` : `no secret ${name} was set`);
+
+    return 0;
+  }
+  const value = (await Bun.stdin.text()).replace(/\r?\n$/u, '');
+
+  await armada.setSecret(name, value);
+  console.log(`set ${name}; a task gets it with secrets: ['${name}']`);
+
+  return 0;
+}
+
 async function main(): Promise<number> {
   const [command, ...words] = args.filter((argument) => !argument.startsWith('-'));
 
@@ -447,6 +474,9 @@ async function main(): Promise<number> {
       console.log(JSON.stringify(await connect().status(target), null, 2));
 
       return 0;
+
+    case 'secret':
+      return await secret(connect(), target, words[1]);
 
     case 'deploy': {
       const name = option('name') ?? 'armada';

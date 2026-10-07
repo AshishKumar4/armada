@@ -23,12 +23,14 @@
       { "name": "PREPARER", "class_name": "ArmadaPreparer" },
       { "name": "TIMINGS", "class_name": "ArmadaTimings" },
       { "name": "FLEET", "class_name": "ArmadaFleet" },
-      { "name": "TASKS", "class_name": "ArmadaTasks" }
+      { "name": "TASKS", "class_name": "ArmadaTasks" },
+      { "name": "SECRETS", "class_name": "ArmadaSecrets" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] },
-    { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] }
+    { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] },
+    { "tag": "v3", "new_sqlite_classes": ["ArmadaSecrets"] }
   ],
   "vars": { "FLEET_VCPUS": "1500" },
   "version_metadata": { "binding": "VERSION" },

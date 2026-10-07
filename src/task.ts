@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { jsonOf, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
-import { remoteError, RUN, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
+import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
 import { execute, isShell, outFile, quote, ShellError, type Shell } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
@@ -198,7 +198,7 @@ type OutputChecked<Out> = Out extends StandardSchemaV1
   : { readonly 'a task answers plain JSON or bytes, and this output schema gives neither': OutputOf<Out> }
   : string;
 
-export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
+export interface TaskConfig<I, R, Out extends Output | undefined, Id = string, S extends string = string> {
   /** Unique in the deployment: `armada push` refuses a second task with it. */
   readonly id: Id;
   /** Default `recipe()`: `cloudflare/debian-trixie` on medium. A function is called only when a job is made, on the
@@ -211,7 +211,10 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
   readonly speculative?: boolean;
   /** Runs a task again when it fails one of the named ways: an exit code, or an error its body threw, by name. */
   readonly retries?: Retries;
-  readonly run: (input: I, context: Context) => R | Promise<R>;
+  /** The deployment's secrets the body gets in `context.secrets`, by name (`armada secret set <name>`). `.local` reads
+   *  them from this machine's environment. */
+  readonly secrets?: readonly S[];
+  readonly run: (input: I, context: Context<S>) => R | Promise<R>;
 }
 
 /**
@@ -221,8 +224,8 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
  */
 // TypeScript first infers without a body whose parameters it must type itself, and checks the id then too: the
 // defaults of I and R pass that check, so the body's own types decide it.
-export function task<SI extends StandardSchemaV1, R = Shell, const Out extends Output | undefined = undefined>(config: TaskConfig<OutputOf<SI>, R, Out, NoInfer<Checked<InputOf<SI>, R, Out>>> & { readonly input: SI }): Task<InputOf<SI>, Answer<R, Out>>;
-export function task<I = null, R = Shell, const Out extends Output | undefined = undefined>(config: TaskConfig<I, R, Out, NoInfer<Checked<I, R, Out>>> & { readonly input?: undefined }): Task<I, Answer<R, Out>>;
+export function task<SI extends StandardSchemaV1, R = Shell, const Out extends Output | undefined = undefined, const S extends string = never>(config: TaskConfig<OutputOf<SI>, R, Out, NoInfer<Checked<InputOf<SI>, R, Out>>, S> & { readonly input: SI }): Task<InputOf<SI>, Answer<R, Out>>;
+export function task<I = null, R = Shell, const Out extends Output | undefined = undefined, const S extends string = never>(config: TaskConfig<I, R, Out, NoInfer<Checked<I, R, Out>>, S> & { readonly input?: undefined }): Task<I, Answer<R, Out>>;
 // The overloads check the config's types; past them its body takes and returns JSON, or returns a Shell.
 export function task(config: TaskConfig<Json, unknown, Output | undefined, unknown> & { readonly input?: StandardSchemaV1 }): Task<Json, unknown> {
   // The overloads' id is a string once its checks pass.
@@ -234,6 +237,7 @@ interface TaskOptions {
   readonly timeout?: number;
   readonly speculative?: boolean;
   readonly retries?: Retries;
+  readonly secrets?: readonly string[];
 }
 
 /** How a job is created and its outcomes read, for one kind of task. */
@@ -284,6 +288,7 @@ abstract class Base<I, O> {
     const spec = {
       recipe, commit, run, output, pool: options.pool, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       timeout: this.options.timeout, speculative: this.options.speculative, retries: this.options.retries,
+      secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets],
     };
 
     if (Array.isArray(items)) {
@@ -413,6 +418,8 @@ type Config = TaskConfig<Json, unknown, Output | undefined> & { readonly input?:
 class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
   readonly id: string;
 
+  readonly secrets: readonly string[];
+
   constructor(private readonly config: Config) {
     super(() => {
       const given = typeof config.recipe === 'function' ? config.recipe() : config.recipe;
@@ -420,6 +427,7 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
       return given instanceof RecipeBuilder ? given.spec : given ?? recipe().spec;
     }, config);
     this.id = config.id;
+    this.secrets = config.secrets ?? [];
   }
 
   protected async runOf(armada: Armada) {
@@ -456,7 +464,10 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
 
     try {
       const out = join(scratch, 'out');
-      const context: Context = { index: 0, attempt: 1, signal: new AbortController().signal, out: outFile(out), files: scratch };
+      const given = secretsFrom(this.secrets, process.env);
+
+      if ('missing' in given) throw new Error(`.local reads the secret ${given.missing} from this machine's environment, which lacks it`);
+      const context: Context = { index: 0, attempt: 1, signal: new AbortController().signal, out: outFile(out), files: scratch, secrets: given.secrets };
       const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
       const returned = await this.config.run(input as Json, context);
 
