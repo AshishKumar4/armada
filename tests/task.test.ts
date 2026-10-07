@@ -184,13 +184,20 @@ describe('a command', () => {
     const json = await cmd(recipe(), write, { output: v.object({ n: v.number() }) }).map([1, 2, 3], { armada }).settled();
     const text: string = await cmd(recipe(), (word: string) => ['sh', '-c', 'printf %s "$1" > "$ARMADA_OUT"', 'echo', word], { output: 'text' }).run('a b; c', { armada });
     const bytes = await cmd(recipe(), () => ['sh', '-c', 'printf "\\377\\376" > "$ARMADA_OUT"'], { output: 'bytes' }).run(null, { armada });
+    const streamed = cmd(recipe(), () => ['sh', '-c', 'head -c 300000 /dev/zero > "$ARMADA_OUT"'], { output: 'bytes' }).map([null], { armada });
+
+    await streamed.settled();
+    let downloaded = 0;
+
+    for await (const chunk of await streamed.outputStream(0) ?? new ReadableStream<Uint8Array>()) downloaded += chunk.byteLength;
     const none: null = await cmd(recipe(), () => ['true']).run(null, { armada });
 
-    expect({ json: json.map(brief), text, bytes: [...bytes], none }).toEqual({
+    expect({ json: json.map(brief), text, bytes: [...bytes], none, downloaded }).toEqual({
       json: [{ index: 0, kind: 'ok', value: { n: 1 } }, { index: 1, kind: 'ok', value: { n: 2 } }, { index: 2, kind: 'error', error: 'Exit: the command exited 3' }],
       text: 'a b; c',
       bytes: [255, 254],
       none: null,
+      downloaded: 300_000,
     });
   });
 });

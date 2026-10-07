@@ -195,9 +195,16 @@ export class Armada {
 
   /** A task's stored output as its bytes, or null. */
   async output(id: string, index: number): Promise<Uint8Array | null> {
+    const stream = await this.outputStream(id, index);
+
+    return stream === null ? null : await new Response(stream).bytes();
+  }
+
+  /** A task's stored output as it downloads, for one too large to hold, or null. */
+  async outputStream(id: string, index: number): Promise<ReadableStream<Uint8Array> | null> {
     const response = await this.call(`/jobs/${id}/tasks/${String(index)}/output`);
 
-    return response.status === 404 ? null : new Uint8Array(await response.arrayBuffer());
+    return response.status === 404 ? null : response.body;
   }
 
   async log(id: string, index: number): Promise<string | null> {

@@ -579,6 +579,11 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     return await this.armada.output(await this.id, index);
   }
 
+  /** The same as it downloads, for an output too large to hold in memory. */
+  async outputStream(index: number): Promise<ReadableStream<Uint8Array> | null> {
+    return await this.armada.outputStream(await this.id, index);
+  }
+
   private result(id: string, outcome: Outcome): Promise<Result<I, O>> {
     const known = this.answers.get(outcome.index);
 
