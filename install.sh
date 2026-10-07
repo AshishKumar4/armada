@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs armada: Bun if it is missing, a checkout of armada in ~/.armada, and the armada command beside Bun's.
+# Installs armada: Bun if it is missing or too old, a checkout of armada in ~/.armada, and the armada command beside Bun's.
 # Run it again to update.
 #
 #   curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh
@@ -27,6 +27,11 @@ else
 fi
 
 cd "$dir"
+# The lockfile's format needs the Bun that package.json names; an older Bun cannot read it.
+if ! bun -e 'process.exit(Bun.semver.satisfies(Bun.version, require("./package.json").engines.bun) ? 0 : 1)'; then
+  echo "armada needs Bun $(bun -e 'console.log(require("./package.json").engines.bun)'), and this is Bun $(bun --version): upgrading it"
+  bun upgrade
+fi
 bun install --frozen-lockfile
 mkdir -p "$bin"
 ln -sf "$dir/src/cli.ts" "$bin/armada"
