@@ -69,56 +69,77 @@ The CLI and `.armada.json` fill these in a command's words; an unknown one is an
 
 ## From TypeScript
 
-After `bun add github:AshishKumar4/armada`:
+After `bun add github:AshishKumar4/armada`, a project names itself and the folder its tasks live in:
 
 ```ts
-// tasks.ts
-import { cmd, fn, recipe } from 'armada';
+// armada.config.ts
+import { defineConfig } from 'armada';
+
+export default defineConfig({ project: 'media', tasks: ['armada'] });
+```
+
+```ts
+// armada/thumbnails.ts
+import { recipe, sh, task } from 'armada';
 import * as v from 'valibot';
 
 export const imaging = recipe({ setup: 'apt-get install -y curl imagemagick', size: 'small' });
 
-// A function. Its module is bundled with what it imports and run in each container, so it is exported.
-export const measure = fn(import.meta, {
+// A command: the body returns sh, which escapes every ${} as one word. `out` is the file the task answers with.
+export const thumbnail = task({
+  id: 'thumbnail',
+  recipe: imaging,
+  output: 'bytes',
+  run: (url: string, { out }) => sh`curl -sL ${url} | convert - -resize 50% ${out}`,
+});
+
+// A function: the body's value is the answer, checked by its schema in the container.
+export const measure = task({
+  id: 'measure',
   recipe: imaging,
   input: v.object({ url: v.pipe(v.string(), v.url()) }),
   output: v.object({ bytes: v.number(), type: v.string() }),
-}, async ({ url }) => {
-  const response = await fetch(url);
+  run: async ({ url }) => {
+    const response = await fetch(url);
 
-  return { bytes: (await response.arrayBuffer()).byteLength, type: response.headers.get('content-type') ?? '' };
-});
-
-// A command. Its argv is built per item here, so an item is never pasted into a shell string.
-export const thumbnail = cmd(imaging, (url: string) => ['sh', '-c', 'curl -sL "$1" | convert - -resize 50% "$ARMADA_OUT"', 'thumbnail', url], {
-  output: 'bytes',
+    return { bytes: (await response.arrayBuffer()).byteLength, type: response.headers.get('content-type') ?? '' };
+  },
 });
 ```
 
 ```ts
-import { measure, thumbnail } from './tasks';
+import { measure, thumbnail } from './armada/thumbnails';
 
-const sizes = await measure.map(rows).values();     // { bytes: number; type: string }[], in input order
+const sizes = await measure.map(rows);                  // { bytes: number; type: string }[], in input order
 
-for await (const result of thumbnail.map(urls)) {    // in the order they land
-  if (result.kind === 'ok') await Bun.write(`thumbs/${result.index}.png`, result.value);
+for await (const result of thumbnail.stream(urls)) {    // in the order they land
+  if (result.ok) await Bun.write(`thumbs/${String(result.index)}.png`, result.value);
   else console.error(result.item, result.kind);
 }
+
+const one = await thumbnail.run(urls[0]);               // one item, on one container
+const here = await thumbnail.local(urls[0]);            // one item, on this machine, no container
 ```
 
-- A result's `kind` is `ok`, `error` (the function threw, its value failed its schema, or the command exited
-  nonzero), `timeout`, `cancelled` or `lost`. Each carries its `meta`: seconds, container, exit code, the tail of its
-  log, and its peak memory and CPU.
-- `job.ordered()` yields results in input order, `job.settled()` returns them all, and `job.values()` returns the
-  values or throws a `MapError` holding every result. `task.run(item)` runs one item.
+- `armada push` bundles every task the project's folders export and sends it; a task runs by its `id`, which must be
+  unique in the deployment. A script run inside the project pushes it once by itself, so `bun run sweep.ts` needs no
+  separate step. An app deployed elsewhere runs `armada push` in its own release. `armada dev` pushes again on each
+  save.
+- `.map` returns the values in input order, or throws a `MapError` holding every result. `.stream` returns the job,
+  whose results arrive as they land, with `ordered()`, `settled()`, `cancel()` and `outputStream(i)`.
+- A result has `ok`. When it is false, `kind` says why: `error` (the body threw, its value failed its schema, or its
+  command exited nonzero), `timeout`, `cancelled` or `lost`. Each result carries its `meta`: seconds, container, exit
+  code, the tail of its log, and its peak memory and CPU.
+- A body can also run commands and answer with a value: `` (await sh`git rev-parse HEAD`.text()).trim() ``.
+  `` sh.raw`...` `` interpolates without escaping, for a script that is itself shell.
+- Schemas are any [Standard Schema](https://standardschema.dev): valibot, zod or arktype. An item is checked before
+  it is sent, and a value in the container before it counts as ok.
+- Items and values are plain JSON, or bytes for a value. The types refuse a `Date`, a `Map`, `any` or `unknown` at
+  the task's definition.
 - An output may be any size up to 4.995 GiB, R2's limit for one upload. `job.outputStream(i)` downloads one too large
   to hold in memory.
-- Items may be an array, or an iterable or async iterable that streams into the job as it yields.
-- Schemas are any [Standard Schema](https://standardschema.dev): valibot, zod or arktype. An item is checked before
-  it is sent, and a value in the container before it counts as `ok`.
-- Items and values are plain JSON, or bytes for a value; the types refuse a `Date` or a `Map`.
-- `map(items, { pool, label, env, files, tmpfs })` sets a job's options; `fn` and `cmd` take `timeout` and
-  `speculative`, which lets an idle container run a straggler again.
+- `map(items, { pool, label, env, files, tmpfs })` sets a job's options. A task takes `timeout`, and `speculative`,
+  which lets an idle container run a straggler again.
 
 ## CI with `armada run`
 
@@ -193,6 +214,8 @@ armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
 armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
+armada push
+armada dev
 armada status <job-id>
 armada prune [--keep=3]
 ```

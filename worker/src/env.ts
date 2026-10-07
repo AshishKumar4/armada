@@ -26,8 +26,11 @@ export interface Env {
 export const packKey = (project: string, sha: string, base: string, packer: number | undefined): string =>
   `packs/${project}/${sha}.${base}${packer === undefined ? '' : `.p${String(packer)}`}.pack`;
 
-/** The R2 key of a function's bundle, by the digest of its bytes. */
+/** The R2 key of a pushed bundle, by the digest of its bytes. */
 export const bundleKey = (digest: string): string => `bundles/${digest}.mjs`;
+
+/** The R2 key of a task id's current bundle digest, kept with its project. Never expires, unlike the bundle itself. */
+export const taskIdKey = (id: string): string => `tasks/${id}`;
 
 /** The R2 keys of a task's output and log. */
 export const taskKey = (job: string, index: number, leaf: 'output' | 'log'): string => `jobs/${job}/tasks/${String(index)}/${leaf === 'log' ? 'log.gz' : 'output'}`;

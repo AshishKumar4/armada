@@ -7,7 +7,7 @@
  * landed first, or the job ended) is killed with its whole session.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
+import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, KILL, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
@@ -263,7 +263,10 @@ export class ArmadaVessel extends DurableObject<Env> {
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
     const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output'), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
-    const outcome: Outcome = { index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, ...usage };
+    // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
+    const said = spec.bundle === null ? '' : (await run(container, ['cat', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
+    const answer = said === 'value' || said === 'command' ? said : undefined;
+    const outcome: Outcome = { index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...usage };
 
     await job.complete(spec.name, outcome, seconds * 1000);
   }

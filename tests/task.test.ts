@@ -1,20 +1,23 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { INLINE_BYTES, JobSpecSchema, type Outcome } from '../src/protocol';
+import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
-import { cmd, fn, MapError, recipe, type Result } from '../src/index';
-import { encode, greet, lie, refuse, square } from './fixtures/tasks';
+import { MapError, push, task, type Result } from '../src/index';
+import { echo, encode, greet, lie, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
+
+const FIXTURES = join(import.meta.dir, 'fixtures');
 
 /**
- * A deployment that runs each task on this machine as a container would: a function's bundle under `node`, a
+ * A deployment that runs each task on this machine as a container would: a pushed task's bundle under `node`, a
  * command's argv, each with the item in `ARMADA_ITEM` and its output to `ARMADA_OUT`. Tasks at `lose` are lost.
  */
 function localFleet(lose: readonly number[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'armada-fleet-'));
   const bundles = new Map<string, Uint8Array>();
+  const ids = new Map<string, string>();
   const outputs = new Map<string, Uint8Array>();
   const jobs = new Map<string, { spec: v.InferOutput<typeof JobSpecSchema>; events: Outcome[]; running: Promise<void>[]; open: boolean }>();
   const seen: string[] = [];
@@ -30,15 +33,24 @@ function localFleet(lose: readonly number[] = []) {
         return;
       }
       const out = join(dir, `${id}-${String(index)}.out`);
-      const argv = job.spec.run.kind === 'fn' ? ['node', join(dir, `${job.spec.run.bundle}.mjs`)] : task.argv ?? [];
-      const ran = Bun.spawn(argv, { env: { ...process.env, ARMADA_ITEM: JSON.stringify(task.item), ARMADA_INDEX: String(index), ARMADA_ATTEMPT: '1', ARMADA_OUT: out }, stdout: 'pipe', stderr: 'pipe' });
+      const marker = join(dir, `${id}-${String(index)}.answer`);
+      const { run: spec } = job.spec;
+      const argv = spec.kind === 'task' ? ['node', join(dir, `${spec.bundle ?? ''}.mjs`)] : task.argv ?? [];
+      const ran = Bun.spawn(argv, {
+        env: { ...process.env, ARMADA_ITEM: JSON.stringify(task.item), ARMADA_INDEX: String(index), ARMADA_ATTEMPT: '1', ARMADA_OUT: out, ARMADA_ANSWER: marker, ARMADA_TASK: spec.kind === 'task' ? spec.id : '' },
+        stdout: 'pipe', stderr: 'pipe',
+      });
       const exitCode = await ran.exited;
       const tail = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
-      const kept = job.spec.output || job.spec.run.kind === 'fn' ? readFileSync(out, { flag: 'a+' }) : null;
+      const kept = job.spec.output || spec.kind === 'task' ? readFileSync(out, { flag: 'a+' }) : null;
       const text = kept === null || kept.byteLength > INLINE_BYTES ? undefined : new TextDecoder('utf-8', { fatal: false }).decode(kept);
+      const said = spec.kind === 'task' ? readFileSync(marker, { flag: 'a+' }).toString() : '';
 
       if (kept !== null) outputs.set(`${id}/${String(index)}`, new Uint8Array(kept));
-      job.events.push({ index, kind: 'exited', exitCode, seconds: 0.1, vessel: 'v1', attempt: 1, tail, output: kept !== null, ...text === undefined || text.includes('\uFFFD') ? {} : { value: text } });
+      job.events.push({
+        index, kind: 'exited', exitCode, seconds: 0.1, vessel: 'v1', attempt: 1, tail, output: kept !== null, ...text === undefined || text.includes('\uFFFD') ? {} : { value: text },
+        ...said === 'value' || said === 'command' ? { answer: said } : {},
+      });
     })());
   };
   const server = Bun.serve({
@@ -59,10 +71,25 @@ function localFleet(lose: readonly number[] = []) {
         return Response.json({ stored: id });
       }
 
+      if (head === 'tasks' && request.method === 'POST') {
+        const pushed = v.parse(PushSchema, await request.json());
+
+        for (const each of pushed.ids) ids.set(each, pushed.bundle);
+
+        return Response.json({ pushed: pushed.ids.length });
+      }
+
       if (head !== 'jobs') return Response.json({ error: 'not found' }, { status: 404 });
 
       if (id === undefined) {
         const spec = v.parse(JobSpecSchema, await request.json());
+
+        if (spec.run.kind === 'task') {
+          const bundle = spec.run.bundle ?? ids.get(spec.run.id);
+
+          if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed` }, { status: 409 });
+          spec.run = { ...spec.run, bundle };
+        }
         const created = `j${String(jobs.size + 1)}`;
 
         jobs.set(created, { spec, events: [], running: [], open: spec.open });
@@ -122,32 +149,34 @@ const fleets: { stop: () => Promise<void> }[] = [];
 
 afterAll(async () => { await Promise.all(fleets.map(async (fleet) => { await fleet.stop(); })); });
 
-function fleet(lose: readonly number[] = []) {
+/** A local deployment with the fixtures' project pushed to it. */
+async function fleet(lose: readonly number[] = []) {
   const made = localFleet(lose);
 
   fleets.push(made);
+  await push(made.armada, FIXTURES);
 
   return made;
 }
 
 const brief = <I, O>(result: Result<I, O>) => ({ index: result.index, kind: result.kind, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: `${result.error.name}: ${result.error.message}` } : {} });
 
-describe('a function', () => {
-  test('runs in a container from its bundle, its imports with it, its schemas checked there, and its value typed', async () => {
-    const { armada, seen } = fleet();
-    const squares: number[] = await square.map([1, 2, 3], { armada }).values();
+describe('a pushed task', () => {
+  test('runs from the project\'s bundle by its id, its imports with it, its schemas checked in the container, its value typed', async () => {
+    const { armada, seen } = await fleet();
+    const squares: number[] = await square.map([1, 2, 3], { armada });
     const greeting: { text: string } = await greet.run({ name: 'ada' }, { armada });
     const bytes: Uint8Array = await encode.run('hi', { armada });
 
-    expect({ squares, greeting, bytes: [...bytes], uploads: seen.filter((each) => each.startsWith('PUT /bundles')).length })
-      .toEqual({ squares: [1, 4, 9], greeting: { text: 'hello, ada' }, bytes: [104, 105], uploads: 3 });
+    expect({ squares, greeting, bytes: [...bytes], pushes: seen.filter((each) => each === 'POST /tasks').length })
+      .toEqual({ squares: [1, 4, 9], greeting: { text: 'hello, ada' }, bytes: [104, 105], pushes: 1 });
   });
 
-  test('that throws, answers what its schema refuses, or is lost is a result of its own, and values() rejects with all of them', async () => {
-    const { armada } = fleet([1]);
-    const thrown = await refuse.map([7, 8], { armada }).settled();
-    const lied = await lie.map([3], { armada }).settled();
-    const rejected = await square.map([2, 3], { armada }).values().catch((error: unknown) => error);
+  test('that throws, answers what its schema refuses, or is lost is a result of its own, and map rejects with all of them', async () => {
+    const { armada } = await fleet([1]);
+    const thrown = await refuse.stream([7, 8], { armada }).settled();
+    const lied = await lie.stream([3], { armada }).settled();
+    const rejected = await square.map([2, 3], { armada }).catch((error: unknown) => error);
 
     expect({
       thrown: thrown.map(brief),
@@ -163,54 +192,83 @@ describe('a function', () => {
   });
 
   test('refuses an item its input schema refuses before anything is sent', async () => {
-    const { armada, seen } = fleet();
-    const refused = await greet.map([{ name: 'ada' }, { name: '' }], { armada }).values().catch((error: unknown) => String(error));
+    const { armada, seen } = await fleet();
+    const refused = await greet.map([{ name: 'ada' }, { name: '' }], { armada }).catch((error: unknown) => String(error));
 
     expect({ refused, jobs: seen.filter((each) => each === 'POST /jobs') }).toEqual({ refused: 'SchemaError: item 1 does not fit its schema: name: Invalid length: Expected >=1 but received 0', jobs: [] });
   });
 
-  test('that its module does not export is refused with what to do', async () => {
-    const { armada } = fleet();
-    const hidden = fn(import.meta, (n: number) => n);
+  test('whose id no push recorded is refused with what to do', async () => {
+    const { armada } = await fleet();
+    const unpushed = task({ id: 'nowhere', run: (n: number) => n });
 
-    expect(await hidden.map([1], { armada }).values().catch((error: unknown) => String(error))).toContain('export the function from');
+    expect(await unpushed.map([1], { armada }).catch((error: unknown) => String(error))).toContain('no task nowhere is pushed');
+  });
+
+  test('a push refuses two tasks that share an id', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-twice-'));
+
+    try {
+      mkdirSync(join(scratch, 'armada'));
+      writeFileSync(join(scratch, 'armada.config.ts'), `export default { project: 'twice' };\n`);
+      const source = (name: string) => `import { task } from ${JSON.stringify(join(import.meta.dir, '..', 'src', 'index.ts'))};\nexport const ${name} = task({ id: 'same', run: (n: number) => n });\n`;
+
+      writeFileSync(join(scratch, 'armada', 'a.ts'), source('a'));
+      writeFileSync(join(scratch, 'armada', 'b.ts'), source('b'));
+
+      expect(await push(localFleet().armada, scratch).catch((error: unknown) => String(error))).toBe('Error: two tasks have the id same: in armada/a.ts and armada/b.ts');
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 
-describe('a command', () => {
-  test('builds its argv per item, and answers its output as text, bytes or JSON its schema checks, or its exit as an error', async () => {
-    const { armada } = fleet();
-    const write = (n: number) => ['sh', '-c', 'printf "{\\"n\\": %s}" "$1" > "$ARMADA_OUT"; exit "$2"', 'write', String(n), String(n > 2 ? 3 : 0)];
-    const json = await cmd(recipe(), write, { output: v.object({ n: v.number() }) }).map([1, 2, 3], { armada }).settled();
-    const text: string = await cmd(recipe(), (word: string) => ['sh', '-c', 'printf %s "$1" > "$ARMADA_OUT"', 'echo', word], { output: 'text' }).run('a b; c', { armada });
-    const bytes = await cmd(recipe(), () => ['sh', '-c', 'printf "\\377\\376" > "$ARMADA_OUT"'], { output: 'bytes' }).run(null, { armada });
-    const streamed = cmd(recipe(), () => ['sh', '-c', 'head -c 300000 /dev/zero > "$ARMADA_OUT"'], { output: 'bytes' }).map([null], { armada });
+describe('a command task', () => {
+  test('runs the sh its body returns, every word escaped, and answers with its out file as text, bytes, JSON or null', async () => {
+    const { armada } = await fleet();
+    const json = await write.stream([1, 2, 3], { armada }).settled();
+    const text: string = await echo.run('a b; c $(rm -rf /) \'q\'', { armada });
+    const bytes: Uint8Array = await twoBytes.run(null, { armada });
+    const none: null = await touch.run(1, { armada });
+    const shouted: string = await shout.run('hi there', { armada });
 
-    await streamed.settled();
-    let downloaded = 0;
-
-    for await (const chunk of await streamed.outputStream(0) ?? new ReadableStream<Uint8Array>()) downloaded += chunk.byteLength;
-    const none: null = await cmd(recipe(), () => ['true']).run(null, { armada });
-
-    expect({ json: json.map(brief), text, bytes: [...bytes], none, downloaded }).toEqual({
+    expect({ json: json.map(brief), text, bytes: [...bytes], none, shouted }).toEqual({
       json: [{ index: 0, kind: 'ok', value: { n: 1 } }, { index: 1, kind: 'ok', value: { n: 2 } }, { index: 2, kind: 'error', error: 'Exit: the command exited 3' }],
-      text: 'a b; c',
+      text: 'a b; c $(rm -rf /) \'q\'',
       bytes: [255, 254],
       none: null,
-      downloaded: 300_000,
+      shouted: 'HI THERE',
+    });
+  });
+});
+
+describe('a task run locally', () => {
+  test('gives the same values and errors on this machine, with no deployment', async () => {
+    const thrown = await refuse.local(3).catch((error: unknown) => String(error));
+    const lied = await lie.local(3).catch((error: unknown) => String(error));
+    const failed = await write.local(3).catch((error: unknown) => String(error));
+
+    expect({
+      square: await square.local(4), greet: await greet.local({ name: 'ada' }), text: await echo.local('a b; c'), json: await write.local(2),
+      bytes: [...await twoBytes.local(null)], none: await touch.local(1), shouted: await shout.local('hi'), thrown, lied: String(lied).startsWith('SchemaError: the value does not fit its schema'), failed,
+    }).toEqual({
+      square: 16, greet: { text: 'hello, ada' }, text: 'a b; c', json: { n: 2 }, bytes: [255, 254], none: null, shouted: 'HI', thrown: 'RangeError: no 3', lied: true,
+      failed: expect.stringContaining('ShellError: `printf \'{"n": %s}\' 3 > ') as unknown as string,
     });
   });
 });
 
 describe('a job\'s items', () => {
   test('stream from an async iterable into an open job in batches, and come back in input order through ordered()', async () => {
-    const { armada, seen, jobs } = fleet();
+    const { armada, seen, jobs } = await fleet();
     const items = async function* numbers() {
       for (let n = 0; n < 1_100; n += 1) yield n;
     };
     const ordered: number[] = [];
 
-    for await (const result of cmd(recipe(), (n: number) => ['true', String(n)]).map(items(), { armada }).ordered()) ordered.push(result.item);
+    seen.length = 0;
+
+    for await (const result of touch.stream(items(), { armada }).ordered()) ordered.push(result.item);
     const requests = seen.filter((each) => each !== 'GET /jobs/events');
 
     expect({
@@ -220,12 +278,12 @@ describe('a job\'s items', () => {
   }, 60_000);
 
   test('from a source that waits are sent on a timer, and a cancel ends the job without waiting on the source', async () => {
-    const { armada } = fleet();
+    const { armada } = await fleet();
     const items = async function* stalls() {
       yield 'a';
       await new Promise(() => undefined);
     };
-    const job = cmd(recipe(), (word: string) => ['echo', word]).map(items(), { armada });
+    const job = echo.stream(items(), { armada });
     const [first] = await (async () => {
       for await (const result of job) return [result];
 
@@ -234,12 +292,11 @@ describe('a job\'s items', () => {
 
     await job.cancel();
 
-    expect({ first: first?.item, settled: (await job.settled()).map(brief) }).toEqual({ first: 'a', settled: [{ index: 0, kind: 'ok', value: null }] });
+    expect({ first: first?.item, settled: (await job.settled()).map(brief) }).toEqual({ first: 'a', settled: [{ index: 0, kind: 'ok', value: 'a' }] });
   });
 
   test('of a job read by its id come from the job, read again as it grows', async () => {
-    const { armada } = fleet();
-    const echo = cmd(recipe(), (word: string) => ['echo', word]);
+    const { armada } = await fleet();
     let more: () => void = () => undefined;
     const later = new Promise<void>((resolve) => { more = resolve; });
     const items = async function* twoParts() {
@@ -247,7 +304,7 @@ describe('a job\'s items', () => {
       await later;
       yield 'b';
     };
-    const streamed = echo.map(items(), { armada });
+    const streamed = echo.stream(items(), { armada });
     const attached = echo.job(await streamed.id, { armada });
     const seen: [number, string][] = [];
 

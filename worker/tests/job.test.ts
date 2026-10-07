@@ -61,14 +61,14 @@ describe('an open job', () => {
 });
 
 describe('a task\'s claim', () => {
-  test('runs a function\'s bundle under node with the item as JSON, and a command\'s own argv', async () => {
+  test('runs a pushed task\'s bundle under node with its id and the item as JSON, and a command\'s own argv', async () => {
     const bundle = 'b'.repeat(64);
-    const { job: fnJob } = await job({ recipe: {}, items: [{ item: { n: 1 } }], run: { kind: 'fn', bundle } });
+    const { job: taskJob } = await job({ recipe: {}, items: [{ item: { n: 1 } }], run: { kind: 'task', id: 'square', bundle } });
     const { job: cmdJob } = await job({ recipe: {}, items: [{ item: 'x', argv: ['echo', 'x'] }], run: { kind: 'command' } });
-    const [fnClaim, cmdClaim] = [await fnJob.claim('v1'), await cmdJob.claim('v1')];
+    const [taskClaim, cmdClaim] = [await taskJob.claim('v1'), await cmdJob.claim('v1')];
 
-    expect([fnClaim?.argv, fnClaim?.env['ARMADA_ITEM'], fnClaim?.env['ARMADA_ATTEMPT'], cmdClaim?.argv, cmdClaim?.env['ARMADA_ITEM']])
-      .toEqual([['node', '/armada/bundle.mjs'], '{"n":1}', '1', ['echo', 'x'], '"x"']);
+    expect([taskClaim?.argv, taskClaim?.env['ARMADA_TASK'], taskClaim?.env['ARMADA_ITEM'], taskClaim?.env['ARMADA_ATTEMPT'], cmdClaim?.argv, cmdClaim?.env['ARMADA_TASK'], cmdClaim?.env['ARMADA_ITEM']])
+      .toEqual([['node', '/armada/bundle.mjs'], 'square', '{"n":1}', '1', ['echo', 'x'], undefined, '"x"']);
   });
 });
 

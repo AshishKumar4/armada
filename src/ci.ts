@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './co
 import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
-import { cmd, type Job, type Json, type Recipe, type Result } from './task';
+import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
 
@@ -270,8 +270,8 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada };
   // The plan's stdout is its output; its stderr stays in its log.
-  const planTask = cmd(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
-  const planJob = planTask.map([{}], { ...options, pool: 1 });
+  const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
+  const planJob = planTask.stream([{}], { ...options, pool: 1 });
   const planId = await planJob.id;
 
   console.log(`plan job ${planId}`);
@@ -292,7 +292,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
   // A matrix entry came from JSON, so it is JSON.
   const entries = plan.include as Json[];
-  const job = config.task.verdict ? cmd(spec.recipe, argv, { ...taskOptions, output: 'text' }).map(entries, { ...options, pool }) : cmd(spec.recipe, argv, taskOptions).map(entries, { ...options, pool });
+  const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
   const jobId = await job.id;
 
   console.log(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);

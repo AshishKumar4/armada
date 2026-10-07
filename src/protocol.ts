@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 2;
+export const PROTOCOL = 3;
 
 export const PROTOCOL_HEADER = 'armada-protocol';
 
@@ -85,18 +85,24 @@ export const PACKER = 2;
 /** A pack's packer: absent for a pack an earlier client made. */
 export const Packer = v.optional(v.pipe(v.number(), v.integer(), v.minValue(2)));
 
-/** Where a task's container keeps what armada gives it: the job's files, a function's bundle, and the file a task
- *  writes its output to. */
+/** Where a task's container keeps what armada gives it: the job's files, the pushed tasks' bundle, the file a task
+ *  writes its output to, and the file the runner says there which kind of answer that is. */
 export const FILES_DIR = '/armada/files';
 
 export const BUNDLE_PATH = '/armada/bundle.mjs';
 
 export const OUT_PATH = '/armada/task/out';
 
-const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
+export const ANSWER_PATH = '/armada/task/answer';
 
-/** Each task runs its own argv, or a function: `node` runs the bundle, which reads the item and writes the result. */
-const RunSchema = v.union([v.object({ kind: v.literal('command') }), v.object({ kind: v.literal('fn'), bundle: Digest })]);
+export const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
+
+/** A task's id: unique in a deployment, so a client names a task by it alone. */
+export const TaskId = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9._/-]{0,99}$/u, 'a task id is lowercase letters, digits and . _ / -, at most 100'));
+
+/** Each task runs its own argv, or a pushed task: `node` runs the bundle, which runs the task named `id` on the item. A
+ *  client that just pushed names the bundle; otherwise the Worker takes the id's current one. */
+const RunSchema = v.union([v.object({ kind: v.literal('command') }), v.object({ kind: v.literal('task'), id: TaskId, bundle: v.optional(Digest) })]);
 
 /** A JSON value. */
 export type Json = string | number | boolean | null | readonly Json[] | { readonly [key: string]: Json };
@@ -120,12 +126,17 @@ export type Task = v.InferOutput<typeof TaskSchema>;
 
 export const MAX_TASKS = 100_000;
 
-/** Why a job refuses these tasks: a command's task carries its argv, and a function's carries none. */
-export function refusal(run: { readonly kind: 'command' | 'fn' }, tasks: readonly Task[]): string | null {
+/** Why a job refuses these tasks: a command's task carries its argv, and a pushed task's carries none. */
+export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[]): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
-  return odd < 0 ? null : `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a function takes none of'}`;
+  return odd < 0 ? null : `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
 }
+
+/** What `armada push` records: a project's bundle, and the ids of the tasks in it. */
+export const PushSchema = v.object({ project: Project, bundle: Digest, ids: v.pipe(v.array(TaskId), v.minLength(1)) });
+
+export type Push = v.InferOutput<typeof PushSchema>;
 
 /** A task's output up to this size rides in its event; a larger one is read from R2. */
 export const INLINE_BYTES = 32 * 1024;
@@ -172,6 +183,9 @@ export const OutcomeSchema = v.object({
    *  of at most INLINE_BYTES. */
   output: v.boolean(),
   value: v.optional(v.string()),
+  /** A pushed task's answer, as its runner says: `value` is an envelope with the body's value or error, `command` the
+   *  file the body's command wrote. */
+  answer: v.optional(v.picklist(['value', 'command'])),
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),

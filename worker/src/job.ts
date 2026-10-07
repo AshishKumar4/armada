@@ -16,7 +16,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  BUNDLE_PATH, environmentKey, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, BUNDLE_PATH, environmentKey, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, type Env } from './env';
@@ -175,7 +175,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const vessel: VesselSpec = {
       jobId: id, name, snapshot: generation.snapshot.id, instance: instanceOf(spec.recipe.size), vcpus: SIZES[spec.recipe.size].vcpus,
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
-      tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'fn' ? spec.run.bundle : null, output: spec.output, timeout: spec.timeout,
+      tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'task' ? spec.run.bundle ?? null : null, output: spec.output, timeout: spec.timeout,
     };
 
     try {
@@ -241,10 +241,10 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = v.parse(TaskSchema, JSON.parse(stored));
     const env = {
       ...commandEnv(spec.recipe, own), ARMADA_ITEM: JSON.stringify(task.item) ?? 'null', ARMADA_INDEX: String(index), ARMADA_ATTEMPT: String(attempt),
-      ARMADA_OUT: OUT_PATH, ARMADA_CGROUP: TASK_GROUP,
+      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
     };
 
-    return { index, attempt, argv: spec.run.kind === 'fn' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, duplicate };
+    return { index, attempt, argv: spec.run.kind === 'task' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, duplicate };
   }
 
   /** Whether `name`'s answer for `index` is the one kept: the first to land wins, a late duplicate is told no. */

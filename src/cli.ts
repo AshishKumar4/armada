@@ -1,14 +1,15 @@
 #!/usr/bin/env bun
 /** The armada CLI; `armada --help` prints its usage. */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
 import { deleteSnapshot } from './registry';
+import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, SizeSchema, usageOf } from './protocol';
-import { cmd, recipe, type Json, type Meta } from './task';
+import { BaseSchema, describeUsage, SizeSchema, usageOf, type Push } from './protocol';
+import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -22,6 +23,8 @@ Usage:
                                        run a project's CI from the commit's .armada.json
   armada verdict <commit|worktree> [--json]
                                        print the verdict armada run stored for the commit
+  armada push                          send this project's tasks (armada.config.ts) to armada
+  armada dev                           push them again on every save
   armada status <job-id>               print a job's status as JSON
   armada prune [--keep=3]              delete the snapshots of all but the newest environments
 
@@ -58,6 +61,8 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'json', 'label='], words: 0 }],
   ['run', { options: ['label='], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
+  ['push', { options: [], words: 0 }],
+  ['dev', { options: [], words: 0 }],
   ['status', { options: [], words: 1 }],
   ['prune', { options: ['keep='], words: 0 }],
 ]);
@@ -129,7 +134,7 @@ async function map(): Promise<number> {
   const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout') };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const options = { armada, pool: whole('pool'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
-  const job = flag('output') ? cmd(base, argv, { ...taskOptions, output: 'text' }).map(all, options) : cmd(base, argv, taskOptions).map(all, options);
+  const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   const id = await job.id;
   let worst = 0;
   const metas: Meta[] = [];
@@ -357,6 +362,48 @@ function checkArguments(command: string, words: readonly string[]): void {
   if (words.length > wanted) throw new Error(`${command} does not take ${words.slice(wanted).join(' ')}; see armada --help`);
 }
 
+async function pushProject(armada: Armada): Promise<Push> {
+  const pushed = await push(armada, process.cwd());
+
+  if (pushed === null) throw new Error('no armada.config.ts here or above: a project names its tasks there');
+
+  return pushed;
+}
+
+function say(pushed: Push): void {
+  console.log(`pushed ${String(pushed.ids.length)} task${pushed.ids.length === 1 ? '' : 's'} of ${pushed.project}, bundle ${pushed.bundle.slice(0, 12)}: ${pushed.ids.join(', ')}`);
+}
+
+/** Pushes the project, then again after each save in its task folders, until interrupted. */
+async function dev(armada: Armada): Promise<number> {
+  const project = await findProject(process.cwd());
+
+  if (project === null) throw new Error('no armada.config.ts here or above: a project names its tasks there');
+  let pushing = Promise.resolve();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // A task file is a module this process already imported, so each push runs in a fresh process.
+  const again = () => {
+    pushing = pushing.then(() => {
+      const ran = Bun.spawnSync([process.execPath, import.meta.path, 'push'], { cwd: process.cwd(), stdout: 'inherit', stderr: 'inherit' });
+
+      if (ran.exitCode !== 0) console.error('armada: that push failed; the last one stays current');
+    });
+  };
+
+  say(await pushProject(armada));
+
+  for (const folder of project.config.tasks) {
+    watch(join(project.root, folder), { recursive: true }, () => {
+      clearTimeout(timer);
+      timer = setTimeout(again, 300);
+    });
+  }
+  console.log('watching for changes; Ctrl-C stops');
+  await new Promise<never>(() => undefined);
+
+  return 0;
+}
+
 async function main(): Promise<number> {
   const [command, ...words] = args.filter((argument) => !argument.startsWith('-'));
 
@@ -386,6 +433,14 @@ async function main(): Promise<number> {
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');
 
       return await verdictCI(connect(), target, flag('json'));
+
+    case 'push':
+      say(await pushProject(connect()));
+
+      return 0;
+
+    case 'dev':
+      return await dev(connect());
 
     case 'status':
       if (target === undefined) throw new Error('status needs a job id, which map and run print');

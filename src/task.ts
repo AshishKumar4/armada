@@ -1,18 +1,20 @@
 /**
- * armada's typed API. `fn` and `cmd` define a task, `task.map(items)` runs it once per item on a fleet of containers,
- * and the `Job` it returns yields each item's result, typed by the task.
+ * armada's typed API. `task` defines one, by an id unique in its deployment: its body runs in a container on each item,
+ * returning a value, or a `sh` command whose `out` file is the answer. `armada push` sends a project's task folder, and
+ * `.map`, `.stream`, `.run` and `.local` run a task by its id.
  *
- *   export const square = fn(import.meta, (n: number) => n * n);
- *   const squares = await square.map([1, 2, 3]).values();   // number[]
+ *   export const square = task({ id: 'square', run: (n: number) => n * n });
+ *   const squares = await square.map([1, 2, 3]);   // number[]
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as v from 'valibot';
 import { jsonOf, MAX_TASKS, RecipeSchema, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { pushed } from './push';
 import { remoteError, RUN, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
+import { execute, outFile, Shell, ShellError } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
 
 export type { Context, Json, RemoteError };
@@ -29,7 +31,7 @@ export type Plain<T> = 0 extends 1 & T ? never
 /** What a task may answer: plain JSON, or bytes. */
 export type Value<T> = 0 extends 1 & T ? never : T extends Uint8Array ? T : Plain<T>;
 
-/** A task's value as it arrives: bytes come back as a plain `Uint8Array`, whatever subclass the function returned. */
+/** A task's value as it arrives: bytes come back as a plain `Uint8Array`, whatever subclass the body returned. */
 export type Arrived<T> = T extends Uint8Array ? Uint8Array : T;
 
 /** An environment's recipe: a base image, a root `setup` script, a user `install` script and a size. */
@@ -49,19 +51,12 @@ export function recipe(options: RecipeOptions = {}): Recipe {
   return v.parse(RecipeSchema, options);
 }
 
-export interface TaskOptions {
-  /** A task's limit, in seconds. Default 3600. */
-  readonly timeout?: number;
-  /** Lets an idle container run a straggler again, the first answer kept. Only for tasks safe to repeat. */
-  readonly speculative?: boolean;
-}
-
 export interface MapOptions {
   /** The most containers at once. Default 50. */
   readonly pool?: number;
   readonly label?: string;
   readonly env?: Readonly<Record<string, string>>;
-  /** Small files every container gets under `context.files`, or `/armada/files` for a command. */
+  /** Small files every container gets under `context.files`. */
   readonly files?: Readonly<Record<string, string>>;
   /** Paths that get a fresh tmpfs in each container. Default `/tmp` and `/dev/shm`. */
   readonly tmpfs?: readonly string[];
@@ -71,13 +66,13 @@ export interface MapOptions {
 
 /** What each item's task came to, in completion order or input order. */
 export type Result<I, O> = { readonly index: number; readonly item: I; readonly meta: Meta } & (
-  | { readonly kind: 'ok'; readonly value: O }
-  /** The function threw, its value failed its schema, or the command exited nonzero. */
-  | { readonly kind: 'error'; readonly error: RemoteError }
-  | { readonly kind: 'timeout' }
-  | { readonly kind: 'cancelled'; readonly reason: string }
-  /** The platform lost it twice. */
-  | { readonly kind: 'lost'; readonly reason: string }
+  | { readonly ok: true; readonly kind: 'ok'; readonly value: O }
+  /** The body threw, its value failed its schema, or its command exited nonzero. */
+  | { readonly ok: false; readonly kind: 'error'; readonly error: RemoteError }
+  | { readonly ok: false; readonly kind: 'timeout' }
+  | { readonly ok: false; readonly kind: 'cancelled'; readonly reason: string }
+  /** The platform lost it on every attempt. */
+  | { readonly ok: false; readonly kind: 'lost'; readonly reason: string }
 );
 
 export interface Meta {
@@ -96,7 +91,7 @@ export interface Meta {
 /** A job whose results are not all `ok`: every result is here, in input order. */
 export class MapError<I, O> extends Error {
   constructor(readonly results: readonly Result<I, O>[]) {
-    const failed = results.filter((result) => result.kind !== 'ok');
+    const failed = results.filter((result) => !result.ok);
     const first = failed[0];
 
     super(`${String(failed.length)} of ${String(results.length)} tasks did not succeed${first === undefined ? '' : `; item ${String(first.index)}: ${describe(first)}`}`);
@@ -114,77 +109,85 @@ function describe<I, O>(result: Result<I, O>): string {
 }
 
 export interface Task<I, O> {
-  /** Runs the task once per item. Items stream in when given as an iterable, and results stream out as they land. */
-  map(items: Iterable<I> | AsyncIterable<I>, options?: MapOptions): Job<I, O>;
-  /** One item's value, or its MapError. */
+  readonly id: string;
+  /** Every item's value, in input order, or a MapError holding every result when one is not ok. */
+  map(items: Iterable<I> | AsyncIterable<I>, options?: MapOptions): Promise<O[]>;
+  /** The job, whose results arrive as they land. Items stream in when given as an iterable. */
+  stream(items: Iterable<I> | AsyncIterable<I>, options?: MapOptions): Job<I, O>;
+  /** One item's value, on one container. */
   run(item: I, options?: MapOptions): Promise<O>;
+  /** One item's value, on this machine, with no container. */
+  local(item: I): Promise<O>;
   /** A job this task ran, by its id. */
   job(id: string, options?: Pick<MapOptions, 'armada'>): Job<I, O>;
 }
-
-type Handler<I, O> = (input: I, context: Context) => O | Promise<O>;
 
 type InputOf<S extends StandardSchemaV1> = StandardSchemaV1.InferInput<S>;
 
 type OutputOf<S extends StandardSchemaV1> = StandardSchemaV1.InferOutput<S>;
 
-/** `Then` when items of type `I` can be sent and values of type `O` can come back, else a type naming the one that
- *  cannot, which the argument it checks then fails to match. */
-type Checked<I, O, Then> = [I] extends [Plain<I>] ? [O] extends [Value<O>] ? Then
-  : { readonly 'a task answers plain JSON or bytes, and this value type is neither': O }
+/** What a task answers with: its body's value, or, for a body that returns `sh`, its `out` file read as text, as
+ *  bytes, or as JSON a schema checks. */
+export type Output = 'text' | 'bytes' | StandardSchemaV1;
+
+/** A task's value: a command's `out` read as `output` says, or the body's own value, as its output schema parses it. */
+export type Answer<R, Out> = [R] extends [Shell]
+  ? Out extends 'bytes' ? Uint8Array : Out extends 'text' ? string : Out extends StandardSchemaV1 ? Arrived<OutputOf<Out>> : null
+  : Out extends StandardSchemaV1 ? Arrived<OutputOf<Out>> : Arrived<R>;
+
+/** A task id's type: a string when the task's types travel, else a type naming the one that cannot, which the id then
+ *  fails to be, so the error stands at the task's definition. */
+type Checked<I, R, Out> = 0 extends 1 & I ? { readonly 'a task takes plain JSON, and this item type is any': I }
+  : 0 extends 1 & R ? { readonly 'a task answers plain JSON or bytes, and this body returns any': R }
+  : [I] extends [Plain<I>]
+  ? [R] extends [Shell] ? string
+  : Out extends 'text' | 'bytes' ? { readonly 'output text or bytes is for a body that returns sh': Out }
+  : Out extends StandardSchemaV1 ? [R] extends [InputOf<Out>] ? [OutputOf<Out>] extends [Value<OutputOf<Out>>] ? string
+    : { readonly 'a task answers plain JSON or bytes, and this output schema gives neither': OutputOf<Out> }
+    : { readonly 'the body returns what its output schema does not take': R }
+  : [R] extends [Value<R>] ? string : { readonly 'a task answers plain JSON or bytes, and this body returns neither': R }
   : { readonly 'a task takes plain JSON, and this item type is not': I };
 
-export interface FnOptions extends TaskOptions {
+export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
+  /** Unique in the deployment: `armada push` refuses a second task with it. */
+  readonly id: Id;
   /** Default `recipe()`: `cloudflare/debian-trixie` on medium. */
   readonly recipe?: Recipe;
+  readonly output?: Out;
+  /** A task's limit, in seconds. Default 3600. */
+  readonly timeout?: number;
+  /** Lets an idle container run a straggler again, the first answer kept. Only for tasks safe to repeat. */
+  readonly speculative?: boolean;
+  readonly run: (input: I, context: Context) => R | Promise<R>;
 }
 
 /**
- * A function to run in containers. `module` is the defining module's `import.meta`: its file is bundled with what it
- * imports and imported in each container, so the function must be exported from it. With `input` and `output`
- * schemas, callers pass the input schema's input, the handler gets its output, and the value is checked in the
- * container before it counts as `ok`.
+ * A task. Export it from a file in the project's task folder (`armada.config.ts`), so `armada push` finds it. With an
+ * `input` schema, callers pass its input and the body gets its output. A body's value, or a command's JSON, is checked
+ * by the `output` schema before it counts as ok.
  */
-export function fn<SI extends StandardSchemaV1, SO extends StandardSchemaV1>(module: NoInfer<Checked<InputOf<SI>, OutputOf<SO>, ImportMeta>>, options: FnOptions & { readonly input: SI; readonly output: SO }, handler: Handler<OutputOf<SI>, InputOf<SO>>): Task<InputOf<SI>, Arrived<OutputOf<SO>>>;
-export function fn<SI extends StandardSchemaV1, O>(module: NoInfer<Checked<InputOf<SI>, O, ImportMeta>>, options: FnOptions & { readonly input: SI; readonly output?: undefined }, handler: Handler<OutputOf<SI>, O>): Task<InputOf<SI>, Arrived<O>>;
-export function fn<I, SO extends StandardSchemaV1>(module: NoInfer<Checked<I, OutputOf<SO>, ImportMeta>>, options: FnOptions & { readonly input?: undefined; readonly output: SO }, handler: Handler<I, InputOf<SO>>): Task<I, Arrived<OutputOf<SO>>>;
-export function fn<I, O>(module: NoInfer<Checked<I, O, ImportMeta>>, options: FnOptions & { readonly input?: undefined; readonly output?: undefined }, handler: Handler<I, O>): Task<I, Arrived<O>>;
-export function fn<I, O>(module: NoInfer<Checked<I, O, ImportMeta>>, handler: Handler<I, O>): Task<I, Arrived<O>>;
-// The overloads above check `module`; past them it is the caller's `import.meta`.
-export function fn(module: object, ...rest: [Handler<Json, unknown>] | [FnOptions & { readonly input?: StandardSchemaV1; readonly output?: StandardSchemaV1 }, Handler<Json, unknown>]): Task<Json, unknown> {
-  const [options, handler] = rest.length === 1 ? [{}, rest[0]] : rest;
-
-  return new FnTask((module as ImportMeta).url, options, handler);
+// TypeScript first infers without a body whose parameters it must type itself, and checks the id then too: the
+// defaults of I and R pass that check, so the body's own types decide it.
+export function task<SI extends StandardSchemaV1, R = Shell, const Out extends Output | undefined = undefined>(config: TaskConfig<OutputOf<SI>, R, Out, NoInfer<Checked<InputOf<SI>, R, Out>>> & { readonly input: SI }): Task<InputOf<SI>, Answer<R, Out>>;
+export function task<I = null, R = Shell, const Out extends Output | undefined = undefined>(config: TaskConfig<I, R, Out, NoInfer<Checked<I, R, Out>>> & { readonly input?: undefined }): Task<I, Answer<R, Out>>;
+// The overloads check the config's types; past them its body takes and returns JSON, or returns a Shell.
+export function task(config: TaskConfig<Json, unknown, Output | undefined, unknown> & { readonly input?: StandardSchemaV1 }): Task<Json, unknown> {
+  // The overloads' id is a string once its checks pass.
+  return new PushedTask({ ...config, id: String(config.id) });
 }
 
-export interface CmdOptions extends TaskOptions {
-  /** What a command writes to `$ARMADA_OUT` and the task answers: its text, its bytes, or JSON a schema checks. Without
-   *  it, the answer is null. */
-  readonly output?: 'text' | 'bytes' | StandardSchemaV1;
-}
-
-/** An item's argv. A builder that takes no item maps over nulls. */
-type Argv<I> = (item: I, at: { readonly index: number }) => readonly string[];
-
-/**
- * A command to run in containers, its argv built per item here, so an item is never pasted into a shell string. It
- * succeeds when it exits 0.
- */
-export function cmd<S extends StandardSchemaV1, I = null>(recipe: NoInfer<Checked<I, OutputOf<S>, Recipe>>, argv: Argv<I>, options: CmdOptions & { readonly output: S }): Task<I, Arrived<OutputOf<S>>>;
-export function cmd<I = null>(recipe: NoInfer<Checked<I, string, Recipe>>, argv: Argv<I>, options: CmdOptions & { readonly output: 'text' }): Task<I, string>;
-export function cmd<I = null>(recipe: NoInfer<Checked<I, Uint8Array, Recipe>>, argv: Argv<I>, options: CmdOptions & { readonly output: 'bytes' }): Task<I, Uint8Array>;
-export function cmd<I = null>(recipe: NoInfer<Checked<I, null, Recipe>>, argv: Argv<I>, options?: CmdOptions & { readonly output?: undefined }): Task<I, null>;
-// The overloads above check `recipe`; past them it is a Recipe.
-export function cmd(recipe: object, argv: Argv<Json>, options: CmdOptions = {}): Task<Json, unknown> {
-  return new CmdTask(recipe as Recipe, argv, options);
+/** A job's options of the task itself. */
+interface TaskOptions {
+  readonly timeout?: number;
+  readonly speculative?: boolean;
 }
 
 /** How a job is created and its outcomes read, for one kind of task. */
-abstract class Base<I, O> implements Task<I, O> {
+abstract class Base<I, O> {
   constructor(protected readonly recipe: Recipe, protected readonly options: TaskOptions) {}
 
   /** The job's `run` and whether it keeps each task's output. */
-  protected abstract runOf(armada: Armada): Promise<{ readonly run: { readonly kind: 'command' } | { readonly kind: 'fn'; readonly bundle: string }; readonly output: boolean }>;
+  protected abstract runOf(armada: Armada): Promise<{ readonly run: { readonly kind: 'command' } | { readonly kind: 'task'; readonly id: string; readonly bundle?: string }; readonly output: boolean }>;
 
   /** An item as a task, checked first. */
   protected abstract task(item: I, index: number): Promise<WireTask>;
@@ -192,16 +195,20 @@ abstract class Base<I, O> implements Task<I, O> {
   /** An exited task's answer. */
   abstract answer(outcome: Outcome, read: () => Promise<Uint8Array | null>): Promise<{ readonly kind: 'ok'; readonly value: O } | { readonly kind: 'error'; readonly error: RemoteError }>;
 
-  map(items: Iterable<I> | AsyncIterable<I>, options: MapOptions = {}): Job<I, O> {
+  async map(items: Iterable<I> | AsyncIterable<I>, options: MapOptions = {}): Promise<O[]> {
+    return await this.stream(items, options).values();
+  }
+
+  stream(items: Iterable<I> | AsyncIterable<I>, options: MapOptions = {}): Job<I, O> {
     const armada = options.armada ?? connect();
 
     return new Job(armada, this, new Submission(armada, (submission) => this.submit(armada, items, submission, options)));
   }
 
   async run(item: I, options?: MapOptions): Promise<O> {
-    const [result] = await this.map([item], options).settled();
+    const [result] = await this.stream([item], options).settled();
 
-    if (result?.kind !== 'ok') throw new MapError(result === undefined ? [] : [result]);
+    if (result?.ok !== true) throw new MapError(result === undefined ? [] : [result]);
 
     return result.value;
   }
@@ -342,35 +349,43 @@ const EnvelopeSchema = v.union([
   v.object({ ok: v.literal(false), error: v.object({ name: v.string(), message: v.string(), stack: v.string() }) }),
 ]);
 
-class FnTask<I, O> extends Base<I, O> implements Runnable {
-  private readonly bundles = new WeakMap<Armada, Promise<string>>();
+/** Whether `value` is a command a body returned: one from another copy of this module is one too. */
+function isShell(value: unknown): value is Shell {
+  return value instanceof Shell || (typeof value === 'object' && value !== null && 'script' in value && typeof value.script === 'string' && 'text' in value);
+}
 
-  constructor(private readonly url: string, private readonly fnOptions: FnOptions & { readonly input?: StandardSchemaV1; readonly output?: StandardSchemaV1 }, private readonly handler: Handler<Json, unknown>) {
-    super(fnOptions.recipe ?? recipe(), fnOptions);
+/** A task's config, past the overloads' checks. */
+type Config = TaskConfig<Json, unknown, Output | undefined> & { readonly input?: StandardSchemaV1 };
+
+class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
+  readonly id: string;
+
+  constructor(private readonly config: Config) {
+    super(config.recipe ?? recipe(), config);
+    this.id = config.id;
   }
 
   protected async runOf(armada: Armada) {
-    const bundle = this.bundles.get(armada) ?? armada.uploadBundle(await bundleOf(this.url, this));
+    const bundle = await pushed(armada);
 
-    this.bundles.set(armada, bundle);
-
-    return { run: { kind: 'fn' as const, bundle: await bundle }, output: true };
+    return { run: { kind: 'task' as const, id: this.id, ...bundle === null ? {} : { bundle } }, output: true };
   }
 
   protected async task(item: I, index: number): Promise<WireTask> {
-    if (this.fnOptions.input !== undefined) await check(this.fnOptions.input, item, `item ${String(index)}`);
+    if (this.config.input !== undefined) await check(this.config.input, item, `item ${String(index)}`);
 
     // `Checked` let only plain JSON be an item.
     return { item: item as Json };
   }
 
   async answer(outcome: Outcome, read: () => Promise<Uint8Array | null>) {
+    if (outcome.answer === 'command') return await commandAnswer<O>(this.config.output, outcome, read);
     const bytes = outcome.value === undefined && outcome.output ? await read() : null;
     const text = outcome.value ?? (bytes === null ? null : new TextDecoder().decode(bytes));
     // A process that died before it answered left no envelope.
-    const envelope = text === null ? null : v.safeParse(EnvelopeSchema, jsonOf(text));
+    const envelope = outcome.answer === 'value' && text !== null ? v.safeParse(EnvelopeSchema, jsonOf(text)) : null;
 
-    if (envelope?.success !== true) return { kind: 'error' as const, error: { name: 'Exit', message: `the function's process exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
+    if (envelope?.success !== true) return { kind: 'error' as const, error: { name: 'Exit', message: `the task's process exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
 
     if (!envelope.output.ok) return { kind: 'error' as const, error: envelope.output.error };
     const answered = envelope.output;
@@ -378,12 +393,49 @@ class FnTask<I, O> extends Base<I, O> implements Runnable {
     return { kind: 'ok' as const, value: ('bytes' in answered ? new Uint8Array(Buffer.from(answered.bytes, 'base64')) : answered.value) as O };
   }
 
-  /** In the container: the item through the input schema, the handler and the output schema. */
-  readonly [RUN] = async (item: Json, context: Context): Promise<Envelope> => {
+  /** On this machine: the same checks and body, a command run under this machine's `/bin/sh`. */
+  async local(item: I): Promise<O> {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-local-'));
+
     try {
-      const input = this.fnOptions.input === undefined ? item : await check(this.fnOptions.input, item, 'the input');
-      const returned = await this.handler(input as Json, context);
-      const value = this.fnOptions.output === undefined ? returned : await check(this.fnOptions.output, returned, 'the value');
+      const out = join(scratch, 'out');
+      const context: Context = { index: 0, attempt: 1, signal: new AbortController().signal, out: outFile(out), files: scratch };
+      const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
+      const returned = await this.config.run(input as Json, context);
+
+      if (!isShell(returned)) {
+        const value = this.config.output === undefined || typeof this.config.output === 'string' ? returned : await check(this.config.output, returned, 'the value');
+
+        return (value instanceof Uint8Array ? new Uint8Array(value) : value) as O;
+      }
+      const ran = await execute(returned.script, { env: { ARMADA_OUT: out } });
+
+      if (ran.exitCode !== 0) throw new ShellError(returned.script, ran.exitCode, ran.stderr);
+      const answered = await commandAnswer<O>(this.config.output, { exitCode: 0, tail: ran.stderr }, async () => {
+        try {
+          return new Uint8Array(readFileSync(out));
+        } catch {
+          return null;
+        }
+      });
+
+      if (answered.kind === 'error') throw Object.assign(new Error(answered.error.message), { name: answered.error.name });
+
+      return answered.value;
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  /** In the container: the item through the input schema and the body, then its value through the output schema, or
+   *  the command it returned. */
+  readonly [RUN] = async (item: Json, context: Context): Promise<Envelope | Shell> => {
+    try {
+      const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
+      const returned = await this.config.run(input as Json, context);
+
+      if (isShell(returned)) return returned;
+      const value = this.config.output === undefined || typeof this.config.output === 'string' ? returned : await check(this.config.output, returned, 'the value');
 
       return value instanceof Uint8Array ? { ok: true, bytes: Buffer.from(value).toString('base64') } : { ok: true, value: value as Json };
     } catch (cause) {
@@ -392,8 +444,36 @@ class FnTask<I, O> extends Base<I, O> implements Runnable {
   };
 }
 
-class CmdTask<I, O> extends Base<I, O> {
-  constructor(recipe: Recipe, private readonly argv: Argv<I>, private readonly cmdOptions: CmdOptions) {
+/** A command's answer: its `out` read as `output` says, once it exited 0. */
+async function commandAnswer<O>(output: Output | undefined, outcome: Pick<Outcome, 'exitCode' | 'tail'> & { readonly value?: string }, read: () => Promise<Uint8Array | null>): Promise<{ readonly kind: 'ok'; readonly value: O } | { readonly kind: 'error'; readonly error: RemoteError }> {
+  if (outcome.exitCode !== 0) return { kind: 'error', error: { name: 'Exit', message: `the command exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
+
+  if (output === undefined) return { kind: 'ok', value: null as O };
+
+  if (output === 'bytes') return { kind: 'ok', value: (await read() ?? new Uint8Array()) as O };
+
+  // An output too large for a string, or not the JSON its schema wants, is this item's error, not the job's.
+  try {
+    const text = outcome.value ?? new TextDecoder().decode(await read() ?? new Uint8Array());
+
+    return { kind: 'ok', value: (output === 'text' ? text : await check(output, JSON.parse(text), 'the output')) as O };
+  } catch (cause) {
+    return { kind: 'error', error: remoteError(cause) };
+  }
+}
+
+/** What a command run by the CLI writes to `$ARMADA_OUT` and answers with: its text, its bytes, or JSON a schema checks.
+ *  Without it, the answer is null. */
+interface CommandOptions extends TaskOptions {
+  readonly output?: 'text' | 'bytes' | StandardSchemaV1;
+}
+
+/** An item's argv. */
+type Argv<I> = (item: I, at: { readonly index: number }) => readonly string[];
+
+/** The CLI's and `armada run`'s commands: each item's argv built here, from a command line with placeholders. */
+class CommandTask<I, O> extends Base<I, O> {
+  constructor(recipe: Recipe, private readonly argv: Argv<I>, private readonly cmdOptions: CommandOptions) {
     super(recipe, cmdOptions);
   }
 
@@ -410,23 +490,15 @@ class CmdTask<I, O> extends Base<I, O> {
   }
 
   async answer(outcome: Outcome, read: () => Promise<Uint8Array | null>) {
-    const { output } = this.cmdOptions;
-
-    if (outcome.exitCode !== 0) return { kind: 'error' as const, error: { name: 'Exit', message: `the command exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
-
-    if (output === undefined) return { kind: 'ok' as const, value: null as O };
-
-    if (output === 'bytes') return { kind: 'ok' as const, value: (await read() ?? new Uint8Array()) as O };
-
-    // An output too large for a string, or not the JSON its schema wants, is this item's error, not the job's.
-    try {
-      const text = outcome.value ?? new TextDecoder().decode(await read() ?? new Uint8Array());
-
-      return { kind: 'ok' as const, value: (output === 'text' ? text : await check(output, JSON.parse(text), 'the output')) as O };
-    } catch (cause) {
-      return { kind: 'error' as const, error: remoteError(cause) };
-    }
+    return await commandAnswer<O>(this.cmdOptions.output, outcome, read);
   }
+}
+
+/** A command over items for the CLI and `armada run`, its value its out file's text, or null. */
+export function commandTask<I extends Json>(recipe: Recipe, argv: Argv<I>, options: TaskOptions & { readonly output: 'text' }): CommandTask<I, string>;
+export function commandTask<I extends Json>(recipe: Recipe, argv: Argv<I>, options?: TaskOptions): CommandTask<I, null>;
+export function commandTask<I extends Json>(recipe: Recipe, argv: Argv<I>, options: CommandOptions = {}): CommandTask<I, string | null> {
+  return new CommandTask(recipe, argv, options);
 }
 
 export class SchemaError extends Error {
@@ -442,34 +514,6 @@ async function check<S extends StandardSchemaV1>(schema: S, value: unknown, what
   if (result.issues !== undefined) throw new SchemaError(what, result.issues);
 
   return result.value as OutputOf<S>;
-}
-
-/** `task`'s module and what it imports, bundled for `node` with the runner as its entry. */
-async function bundleOf(url: string, task: Runnable): Promise<Uint8Array<ArrayBuffer>> {
-  const path = fileURLToPath(url);
-  // The module is the caller's, known only at run time.
-  const loaded: Record<string, unknown> = await import(url);
-  const name = Object.keys(loaded).find((key) => loaded[key] === task);
-
-  if (name === undefined) throw new Error(`export the function from ${path}: a container imports it from there`);
-  const dir = mkdtempSync(join(tmpdir(), 'armada-bundle-'));
-
-  try {
-    const entry = join(dir, 'entry.ts');
-
-    // The runner beside this module is the bundle's entry.
-    const runner = fileURLToPath(new URL('runner.ts', import.meta.url));
-
-    writeFileSync(entry, `import { ${name} as task } from ${JSON.stringify(path)};\nimport { runTask } from ${JSON.stringify(runner)};\nawait runTask(task);\n`);
-    const built = await Bun.build({ entrypoints: [entry], target: 'node', format: 'esm' });
-    const [output] = built.outputs;
-
-    if (!built.success || output === undefined) throw new Error(`bundling ${path} failed:\n${built.logs.map(String).join('\n')}`);
-
-    return new Uint8Array(await output.arrayBuffer());
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 }
 
 /** A job's results: in completion order by iterating it, or in input order. */
@@ -547,7 +591,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
   /** Every value, in input order, or a MapError holding every result when one is not `ok`. */
   async values(): Promise<O[]> {
     const results = await this.settled();
-    const values = results.flatMap((result) => result.kind === 'ok' ? [result.value] : []);
+    const values = results.flatMap((result) => result.ok ? [result.value] : []);
 
     if (values.length !== results.length) throw new MapError(results);
 
@@ -614,11 +658,12 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     };
     const base = { index: outcome.index, item, meta };
 
-    if (outcome.kind === 'failed') return { ...base, kind: outcome.reason === 'cancelled' ? 'cancelled' : 'lost', reason: outcome.tail };
+    if (outcome.kind === 'failed') return { ...base, ok: false, kind: outcome.reason === 'cancelled' ? 'cancelled' : 'lost', reason: outcome.tail };
 
-    if (outcome.reason === 'timeout') return { ...base, kind: 'timeout' };
+    if (outcome.reason === 'timeout') return { ...base, ok: false, kind: 'timeout' };
+    const answered = await this.task.answer(outcome, async () => await this.armada.output(id, outcome.index));
 
-    return { ...base, ...await this.task.answer(outcome, async () => await this.armada.output(id, outcome.index)) };
+    return answered.kind === 'ok' ? { ...base, ok: true, ...answered } : { ...base, ok: false, ...answered };
   }
 }
 

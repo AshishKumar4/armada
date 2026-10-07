@@ -3,8 +3,8 @@
  * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote.
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema, type Health } from '../../src/protocol';
-import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
+import { DRIVER, environmentKey, type Health, JobSpecSchema, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
+import { bundleKey, packKey, SINGLE, taskIdKey, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
 
@@ -76,7 +76,24 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
   return Response.json({ stored: key });
 };
 
-/** `/bundles/<digest>`: a function's bundle, stored once under the digest of its bytes. */
+/** `POST /tasks` records a push: each id now runs from its bundle. An id another project pushed is refused. */
+const tasks: Handler = async (request, env) => {
+  if (request.method !== 'POST') return undefined;
+  const push = v.parse(PushSchema, await request.json());
+
+  if ((await env.ARTIFACTS.head(bundleKey(push.bundle))) === null) return Response.json({ error: `upload the bundle ${push.bundle} first` }, { status: 409 });
+
+  for (const id of push.ids) {
+    const owner = (await env.ARTIFACTS.head(taskIdKey(id)))?.customMetadata?.['project'];
+
+    if (owner !== undefined && owner !== push.project) return Response.json({ error: `the task id ${id} belongs to the project ${owner}` }, { status: 409 });
+  }
+  await Promise.all(push.ids.map(async (id) => await env.ARTIFACTS.put(taskIdKey(id), push.bundle, { customMetadata: { project: push.project } })));
+
+  return Response.json({ pushed: push.ids.length });
+};
+
+/** `/bundles/<digest>`: a pushed project's bundle, stored once under the digest of its bytes. */
 const bundles: Handler = async (request, env, [digest]) => {
   if (digest === undefined || !/^[0-9a-f]{64}$/u.test(digest)) return undefined;
 
@@ -107,7 +124,15 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
 
     if (!spec.open && spec.items.length === 0) return Response.json({ error: 'a job that is not open needs an item' }, { status: 400 });
 
-    if (spec.run.kind === 'fn' && (await env.ARTIFACTS.head(bundleKey(spec.run.bundle))) === null) return Response.json({ error: `upload the bundle ${spec.run.bundle} first` }, { status: 409 });
+    if (spec.run.kind === 'task') {
+      // The bundle the client just pushed, else the one the task's id was last pushed with.
+      const bundle = spec.run.bundle ?? (await env.ARTIFACTS.get(taskIdKey(spec.run.id)).then(async (stored) => await stored?.text()));
+
+      if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed; run armada push in its project` }, { status: 409 });
+
+      if ((await env.ARTIFACTS.head(bundleKey(bundle))) === null) return Response.json({ error: `upload the bundle ${bundle} first` }, { status: 409 });
+      spec.run = { ...spec.run, bundle };
+    }
 
     if (spec.commit !== undefined) {
       if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
@@ -199,7 +224,7 @@ const environments: Handler = async (request, env, [key]) => {
   return Response.json({ forgotten: key });
 };
 
-const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['bundles', bundles], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments]]);
+const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments]]);
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);

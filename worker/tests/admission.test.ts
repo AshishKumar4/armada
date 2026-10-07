@@ -36,10 +36,10 @@ describe('a client and a Worker', () => {
       return [answer.status, (await answer.json() as { error?: string }).error];
     };
 
-    expect({ older: await asked(), newer: await asked('3'), same: (await armada.health()).protocol }).toEqual({
+    expect({ older: await asked(), newer: await asked('4'), same: (await armada.health()).protocol }).toEqual({
       older: [426, 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin'],
       newer: [426, 'the deployed Worker is older than this armada client: run `armada deploy` to update it'],
-      same: 2,
+      same: 3,
     });
   });
 });
