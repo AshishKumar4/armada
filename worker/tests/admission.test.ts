@@ -28,18 +28,19 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
 
 describe('a client and a Worker', () => {
-  test('that speak different versions of the wire say which one to update', async () => {
+  test('that speak versions of the wire too far apart say which one to update, and an older client the wire still fits is served', async () => {
     const { env, armada } = deployment();
     const asked = async (version?: string) => {
-      const answer = await worker.fetch(new Request('https://armada.test/environments', { headers: { authorization: `Bearer ${TOKEN}`, ...version === undefined ? {} : { 'armada-protocol': version } } }), env);
+      const answer = await worker.fetch(new Request('https://armada.test/jobs/none', { headers: { authorization: `Bearer ${TOKEN}`, ...version === undefined ? {} : { 'armada-protocol': version } } }), env);
 
       return [answer.status, (await answer.json() as { error?: string }).error];
     };
 
-    expect({ older: await asked(), newer: await asked('4'), same: (await armada.health()).protocol }).toEqual({
+    expect({ older: await asked('2'), served: await asked('3'), newer: await asked('5'), same: (await armada.health()).protocol }).toEqual({
       older: [426, 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin'],
+      served: [200, 'no such job'],
       newer: [426, 'the deployed Worker is older than this armada client: run `armada deploy` to update it'],
-      same: 3,
+      same: 4,
     });
   });
 });
@@ -87,7 +88,7 @@ describe('a drained version', () => {
       const old = new Armada({ url: server.url.href, token: TOKEN, account: 'a' });
 
       expect({ jobs: await old.drain(), after: (await old.health()).jobs, admitted: await old.admit(), asked })
-        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
+        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
     } finally {
       await server.stop(true);
     }
