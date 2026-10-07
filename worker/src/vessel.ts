@@ -5,6 +5,9 @@
  * report its outcome. Its loop runs in alarms of about a minute each, so no request holds it, and its state is in
  * storage, so a restarted object takes the same task up again. A task it was told to drop (another vessel's answer
  * landed first, or the job ended) is killed with its whole session.
+ *
+ * A rank of a gang task waits for its gang to form, joins the gang's network (`relay.ts`) before it launches, and takes
+ * the WebSockets the other ranks' relays open to it (`fetch`), each a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
@@ -12,7 +15,8 @@ import {
   ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
-import type { Claim } from './job';
+import type { Claim, Gang } from './job';
+import { GANG_DOWN, GANG_UP, RELAY, RELAY_HEADER, RELAY_IN, RELAY_PY } from './relay';
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -69,6 +73,9 @@ export class ArmadaVessel extends DurableObject<Env> {
 
   /** Whether this object watches its container's end (`watch`). */
   private watching = false;
+
+  /** Each relay WebSocket's connection into the container, by the socket. */
+  private readonly relays = new Map<WebSocket, WritableStreamDefaultWriter<Uint8Array>>();
 
   async begin(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.put({ spec, state: 'waiting' satisfies State, requested: Date.now() });
@@ -215,6 +222,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         if (claim.secrets.length > 0) {
           await must(container, 'keeping the secrets to mask', ['node', '-e', KEEP_MASK, MASK_VALUES], { env: { ...claim.env, ARMADA_MASK: claim.secrets.join(' ') }, ms: EXEC_MS });
         }
+        await this.network(container, claim.gang);
         await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
         const { env, ...kept } = claim;
 
@@ -256,10 +264,74 @@ export class ArmadaVessel extends DurableObject<Env> {
     return true;
   }
 
+  /** The container on `gang`'s network as its rank, or off any gang's for a task that is none's. */
+  private async network(container: Container, gang: Gang | undefined): Promise<void> {
+    const ganged = await this.ctx.storage.get<boolean>('ganged');
+
+    if (gang === undefined) {
+      if (ganged === true) await must(container, 'leaving the gang', ['/bin/sh', '-c', GANG_DOWN], { ms: EXEC_MS });
+      await this.ctx.storage.delete('ganged');
+
+      return;
+    }
+
+    if (ganged === undefined) await pipeIn(container, RELAY_PY, RELAY);
+    await must(container, 'joining the gang', ['/bin/sh', '-c', GANG_UP, 'gang', String(gang.rank), String(gang.vessels.length), gang.origin, gang.job, gang.token,
+      ...gang.vessels], { ms: EXEC_MS });
+    await this.ctx.storage.put('ganged', true);
+  }
+
+  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a connection into
+   *  this container's relay, which connects `port` on this rank's address. */
+  override async fetch(request: Request): Promise<Response> {
+    const token = (await this.ctx.storage.get<Current>('current'))?.claim.gang?.token;
+    const expected = new TextEncoder().encode(token ?? '');
+    const supplied = new TextEncoder().encode(request.headers.get(RELAY_HEADER) ?? '');
+
+    if (token === undefined || expected.length !== supplied.length || !crypto.subtle.timingSafeEqual(expected, supplied)) return new Response('forbidden', { status: 403 });
+    const port = Number(new URL(request.url).searchParams.get('port'));
+
+    if (!Number.isInteger(port) || port < 1 || port > 65_535 || request.headers.get('upgrade') !== 'websocket') return new Response('a relay is a WebSocket to a port', { status: 400 });
+    const [client, server] = Object.values(new WebSocketPair());
+
+    if (client === undefined || server === undefined) throw new Error('a WebSocketPair has two ends');
+    this.ctx.acceptWebSocket(server);
+    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
+    const writer = socket.writable.getWriter();
+
+    this.relays.set(server, writer);
+    await writer.write(new TextEncoder().encode(`${String(port)}\n`));
+    void (async () => {
+      const reader = socket.readable.getReader();
+
+      for (let read = await reader.read(); !read.done; read = await reader.read()) server.send(read.value);
+      server.close(1000, 'closed');
+    })().catch(() => { server.close(1011, 'the connection failed'); });
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const writer = this.relays.get(socket);
+
+    if (writer === undefined) return socket.close(1011, 'no connection');
+    await writer.write(typeof message === 'string' ? new TextEncoder().encode(message) : new Uint8Array(message));
+  }
+
+  override async webSocketClose(socket: WebSocket): Promise<void> {
+    await this.relays.get(socket)?.close().catch(() => undefined);
+    this.relays.delete(socket);
+  }
+
+  override async webSocketError(socket: WebSocket): Promise<void> {
+    await this.webSocketClose(socket);
+  }
+
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
   private async finish(spec: VesselSpec, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
     const container = this.container();
     const { index, attempt } = current.claim;
+    const rank = current.claim.gang?.rank ?? 0;
     const job = this.env.JOB.getByName(spec.jobId);
 
     await this.ctx.storage.delete('current');
@@ -273,9 +345,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
     await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz`], { ms: EXEC_MS });
-    await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, index, 'log'), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+    await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, index, 'log', rank), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
-    const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output'), {}) : null;
+    const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output', rank), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
     const said = spec.bundle === null ? '' : (await run(container, ['cat', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));

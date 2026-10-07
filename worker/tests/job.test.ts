@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { JobSpecSchema, type Outcome } from '../../src/protocol';
+import { JobSpecSchema, refusal, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
-import { ArmadaJob } from '../src/job';
+import { ArmadaJob, type Claim } from '../src/job';
 import { namespace, state, world } from './harness';
 
 const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
@@ -170,5 +170,77 @@ describe('a task that failed by itself', () => {
     await finish(waiting, 'v1', 1);
 
     expect(await waiting.claim('v1')).toEqual({ waitMs: 60_000 });
+  });
+});
+
+const gang = (size: number) => ({ recipe: {}, items: [{ item: { gang: size }, argv: ['true'] }], run: { kind: 'command' as const }, pool: 4 });
+
+/** `vessels` ask in turn until each holds its rank of the gang: their claims, by vessel. */
+async function formed(open: ArmadaJob, vessels: readonly string[]): Promise<Record<string, Claim>> {
+  const held: Record<string, Claim> = {};
+
+  for (let round = 0; round < 3; round += 1) {
+    for (const vessel of vessels) {
+      const claim = held[vessel] === undefined ? await open.claim(vessel) : null;
+
+      if (claim !== null && !('waitMs' in claim)) held[vessel] = claim;
+    }
+  }
+
+  return held;
+}
+
+/** `vessel` lands its rank's answer, exiting `exitCode`. */
+async function land(open: ArmadaJob, vessel: string, index: number, exitCode: number): Promise<void> {
+  if (!(await open.accept(vessel, index))) throw new Error(`${vessel}'s answer was refused`);
+  await open.complete(vessel, { ...exited(index, vessel), exitCode, tail: `${vessel} said this` }, 1000);
+}
+
+describe('a gang task', () => {
+  test('is refused unless it is a whole number of containers the pool holds', () => {
+    const items = (gang: number) => [{ item: { gang }, argv: ['true'] }];
+
+    expect([refusal({ kind: 'command' }, items(2), 2), refusal({ kind: 'command' }, items(3), 2), refusal({ kind: 'command' }, items(1.5), 4)])
+      .toEqual([null, 'item 0\'s gang is a whole number of containers from 1 to 2, the job\'s pool', 'item 0\'s gang is a whole number of containers from 1 to 4, the job\'s pool']);
+  });
+
+  test('starts a vessel per rank, keeps the first waiting until every rank joined, and gives each its rank, the gang and one token', async () => {
+    const { job: open, begun } = await job(gang(2));
+    const first = await open.claim('v1');
+    const held = await formed(open, ['v1', 'v2']);
+    const ranks = ['v1', 'v2'].map((vessel) => [held[vessel]?.env['ARMADA_RANK'], held[vessel]?.env['ARMADA_WORLD'], held[vessel]?.gang?.vessels, held[vessel]?.gang?.rank]);
+
+    expect({ begun, first, ranks, tokens: new Set(Object.values(held).map((claim) => claim.gang?.token)).size, length: held['v1']?.gang?.token.length })
+      .toEqual({ begun: ['j1/v1', 'j1/v2'], first: { waitMs: 1000 }, ranks: [['0', '2', ['v1', 'v2'], 0], ['1', '2', ['v1', 'v2'], 1]], tokens: 1, length: 48 });
+  });
+
+  test('lands rank 0\'s outcome once every rank exited 0, and the first failing rank\'s at once, stopping the others', async () => {
+    const { job: green } = await job(gang(2));
+    await formed(green, ['v1', 'v2']);
+
+    await land(green, 'v2', 0, 0);
+    const early = (await green.events(0)).events.length;
+
+    await land(green, 'v1', 0, 0);
+    const { job: red } = await job(gang(2));
+
+    await formed(red, ['v1', 'v2']);
+    await land(red, 'v2', 0, 3);
+    const outcomes = [...(await green.events(0)).events, ...(await red.events(0)).events].map((event) => [event.outcome.vessel, event.outcome.exitCode, event.outcome.tail]);
+
+    expect({ early, outcomes, stillRank0: await red.still('v1', 0) })
+      .toEqual({ early: 0, outcomes: [['v1', 0, 'v1 said this'], ['v2', 3, 'rank 1 of 2:\nv2 said this']], stillRank0: false });
+  });
+
+  test('is lost whole with any rank: the others stop, and it forms again from the vessels left and a replacement', async () => {
+    const { job: lossy, begun } = await job(gang(2));
+
+    await formed(lossy, ['v1', 'v2']);
+    await lossy.vesselFailed('v2', 'the wait failed to run: Network connection lost.');
+    const stopped = await lossy.still('v1', 0);
+    const again = await formed(lossy, ['v1', 'r1']);
+
+    expect({ stopped, begun, again: ['v1', 'r1'].map((vessel) => [again[vessel]?.gang?.rank, again[vessel]?.attempt]), events: (await lossy.events(0)).events })
+      .toEqual({ stopped: false, begun: ['j1/v1', 'j1/v2', 'j1/r1'], again: [[0, 2], [1, 2]], events: [] });
   });
 });

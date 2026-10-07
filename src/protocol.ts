@@ -19,7 +19,7 @@ export const PROTOCOL_HEADER = 'armada-protocol';
 
 /** The driver's version: bump when what the Worker installs or runs in a container changes. It is in every
  *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it. */
-export const DRIVER = 1;
+export const DRIVER = 2;
 
 /** The container sizes, smallest first, each a Cloudflare instance type. Cloudflare's largest is 4 vCPU and 12 GiB. A
  *  container's start refuses its `basic` type, and `lite`, at 1/16 vCPU, is too small to prepare an environment on. */
@@ -123,18 +123,26 @@ export function jsonOf(text: string): Json {
   }
 }
 
-/** One task: its item, which `ARMADA_ITEM` carries as JSON and whose numeric `weight` queues it, and a command's argv. */
+/** One task: its item, which `ARMADA_ITEM` carries as JSON, whose numeric `weight` queues it and whose `gang` runs it on
+ *  that many containers at once (`gangOf`), and a command's argv. */
 export const TaskSchema = v.object({ item: JsonSchema, argv: v.optional(v.pipe(v.array(v.string()), v.minLength(1))) });
 
 export type Task = v.InferOutput<typeof TaskSchema>;
 
 export const MAX_TASKS = 100_000;
 
-/** Why a job refuses these tasks: a command's task carries its argv, and a pushed task's carries none. */
-export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[]): string | null {
+/** The most containers one task runs on: rank r is reachable from the others at 127.0.1.<r + 1>. */
+export const MAX_GANG = 64;
+
+/** Why a job of at most `pool` containers refuses these tasks: a command's task carries its argv, a pushed task's
+ *  carries none, and a gang is a whole number of containers the pool holds. */
+export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], pool: number): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
-  return odd < 0 ? null : `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
+  if (odd >= 0) return `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
+  const ganged = tasks.findIndex((task) => !Number.isInteger(gangOf(task.item)) || gangOf(task.item) < 1 || gangOf(task.item) > Math.min(MAX_GANG, pool));
+
+  return ganged < 0 ? null : `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
 }
 
 /** What `armada push` records: a project's bundle, and the ids of the tasks in it. */
@@ -324,6 +332,15 @@ export function itemValues(item: unknown, index: number): Record<string, string>
   }
 
   return values;
+}
+
+/** How many containers an item runs on at once: an object's `gang`, else 1. Rank r of a gang of n runs with
+ *  ARMADA_RANK=r and ARMADA_WORLD=n, as host `rank<r>`, and each rank reaches the others' ports at theirs. */
+export function gangOf(item: unknown): number {
+  if (typeof item !== 'object' || item === null || !('gang' in item)) return 1;
+  const { gang } = item;
+
+  return typeof gang === 'number' ? gang : Number.NaN;
 }
 
 /** An item's weight for longest-first dispatch: an object's numeric `weight`, else 0. */

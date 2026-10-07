@@ -1,6 +1,7 @@
 /**
  * armada's Worker. A job maps a command or a function over items on a pool of containers started from an environment
- * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote.
+ * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote, but `/relay`,
+ * which a gang's containers reach each other through with the gang's own token (`relay.ts`).
  */
 import * as v from 'valibot';
 import { DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
@@ -140,7 +141,7 @@ const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
   const spec = v.parse(JobSpecSchema, await request.json());
-  const refused = refusal(spec.run, spec.items);
+  const refused = refusal(spec.run, spec.items, spec.pool);
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 
@@ -168,7 +169,7 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
     if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base, spec.commit.packer))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
   }
 
-  await env.JOB.getByName(created).create(created, spec);
+  await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin);
 
   return Response.json({ id: created });
 }
@@ -316,8 +317,20 @@ async function route(request: Request, env: Env): Promise<Response> {
   return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
 }
 
+/** `/relay/<job>/<vessel>?port=n`: a gang rank's relay, reaching the rank `vessel` runs. No container holds the
+ *  deployment's bearer, so the relay presents its gang's token instead, which the vessel checks. */
+async function relayed(request: Request, env: Env, [job, vessel]: readonly string[]): Promise<Response> {
+  if (job === undefined || vessel === undefined || !/^\d{14}-[0-9a-f]{8}$/u.test(job) || !/^[vr]\d{1,4}$/u.test(vessel)) return notFound();
+
+  return await env.VESSEL.getByName(`${job}/${vessel}`).fetch(request);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const [first, ...rest] = new URL(request.url).pathname.split('/').filter((segment) => segment !== '');
+
+    if (first === 'relay') return await relayed(request, env, rest);
+
     if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
     // A request with no version is from a client older than the version was. The drain and the health are the same in
     // every version, so a deploy drains the version it replaces whatever version it speaks.

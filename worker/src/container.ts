@@ -52,14 +52,15 @@ const GIT = { version: '2.53.0', sha256: '5818bd7d80b061bbbdfec8a433d609dc8818a0
  * The runner's layer on any Debian or Ubuntu base, as root, before the recipe's own setup: the user and the
  * directories; tini, which reaps what a task's daemons orphan; setpriv, to drop to the user; node, for functions; and
  * the tools a GitHub runner has that a stock container lacks and suites reach for (git as the runner has it, iproute2,
- * strace, procps, zip, a compiler). Every recipe inherits it, and `DRIVER` keys it.
+ * strace, procps, zip, a compiler); and iptables and python3, which a gang's relay runs on (`relay.ts`). Every recipe
+ * inherits it, and `DRIVER` keys it.
  */
 export function runnerLayer(workdir: string): string {
   return String.raw`set -eu
 export DEBIAN_FRONTEND=noninteractive
 hostname localhost || true
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends ca-certificates curl tini util-linux procps psmisc lsof iproute2 strace \
+apt-get install -y -qq --no-install-recommends ca-certificates curl tini util-linux procps psmisc lsof iproute2 iptables strace \
   zip unzip xz-utils file jq sqlite3 python3 tzdata build-essential \
   libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev libpcre2-dev
 command -v node >/dev/null || apt-get install -y -qq --no-install-recommends nodejs

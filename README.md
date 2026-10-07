@@ -122,6 +122,21 @@ armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 The CLI and `.armada.json` fill these in a command's words; an unknown one is an error. An object item's numeric
 `weight` moves it up the queue.
 
+### Gangs
+
+An object item's `gang` runs it on that many containers at once, for a program that spans hosts, such as a multi-host
+JAX run. Each rank gets `ARMADA_RANK` and `ARMADA_WORLD`, and reaches rank `r` as host `rank<r>` (127.0.1.`r+1`) on any
+port it listens on. jax.distributed's coordinator at `rank0:<port>` and gloo's collectives run over it unchanged.
+
+```sh
+echo '[{"gang": 2}]' | armada map --items=- -- sh -c 'python3 train.py --rank $ARMADA_RANK --coordinator rank0:8476'
+```
+
+The gang starts once every rank has a container, and a rank lost to the platform loses the whole gang, which runs
+again as one task. The task's outcome is its first failing rank's, else rank 0's, whose output and log are the task's.
+Containers have no inbound address, so a connection to another rank goes through the Worker: a few milliseconds a round
+trip and tens of MB/s, which suits tests and coordination, not bandwidth-bound training.
+
 ## From TypeScript
 
 Re-encoding a folder of videos takes a long time on one machine. This example reads each video's length and
