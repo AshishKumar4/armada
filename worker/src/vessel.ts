@@ -7,7 +7,7 @@
  * landed first, or the job ended) is killed with its whole session.
  */
 import { DurableObject } from 'cloudflare:workers';
-import type { INSTANCES, Outcome } from '../../src/protocol';
+import { failureTail, type INSTANCES, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, KILL, TASK, WAIT, handlerModule, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE,
 } from './container';
@@ -51,6 +51,10 @@ const SLICE_MS = 50_000;
 
 /** One blocking wait on a running task. */
 const WAIT_SECONDS = 20;
+
+/** Waits in a row whose exec the platform lost before the container counts as lost: a wait only reads whether the
+ *  task ended, so one lost connection says nothing of the task, which runs on. */
+const LOST_WAITS = 3;
 
 /** Longer than a job may take, so only the job's end stops the container. */
 const INACTIVITY_MS = 6 * 60 * 60_000;
@@ -154,6 +158,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
     const until = Date.now() + SLICE_MS;
+    let lost = 0;
 
     while (Date.now() < until) {
       const current = await this.ctx.storage.get<Current>('current');
@@ -170,7 +175,18 @@ export class ArmadaVessel extends DurableObject<Env> {
       }
 
       const seconds = Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
-      const exit = (await must(container, 'the wait', ['/bin/sh', '-c', WAIT, 'wait', String(seconds)], { ms: (seconds + 30) * 1000 })).stdout.trim();
+      const [waited] = await Promise.allSettled([run(container, ['/bin/sh', '-c', WAIT, 'wait', String(seconds)], { ms: (seconds + 30) * 1000 })]);
+
+      if (waited.status === 'rejected') {
+        lost += 1;
+
+        if (lost < LOST_WAITS) continue;
+        throw new Error('the wait failed to run', { cause: waited.reason });
+      }
+      lost = 0;
+
+      if (waited.value.exitCode !== 0) throw new Error(`the wait exited ${String(waited.value.exitCode)}: ${failureTail(waited.value.stdout, waited.value.stderr)}`);
+      const exit = waited.value.stdout.trim();
 
       if (exit !== '') {
         await this.finish(spec, current, Number(exit));

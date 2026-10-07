@@ -168,6 +168,6 @@ describe('a job\'s env', () => {
       running: waits[0]?.includes('"current"'),
       keptAfter: vesselState.dump().includes(SECRET),
       requeued: (await job.status())?.tasks.queued,
-    }).toEqual({ launchedWith: [SECRET], waits: 2, keptMidTask: false, running: true, keptAfter: false, requeued: 1 });
+    }).toEqual({ launchedWith: [SECRET], waits: 4, keptMidTask: false, running: true, keptAfter: false, requeued: 1 });
   });
 });
