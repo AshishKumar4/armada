@@ -131,7 +131,8 @@ for await (const result of transcode.stream(videos)) { // each file as soon as i
 - A failed result's `kind` says why: `error`, `timeout`, `cancelled` or `lost`. Every result's `meta` has its seconds,
   exit code, log tail, and peak memory and CPU.
 - A recipe is built in steps: `recipe.debian()` or `recipe.from(image)`, then `.apt()`, `.setup()`, `.install()` and
-  `.size()`.
+  `.size()`. Each container also loads the task's file, so a recipe that reads local files goes in a function,
+  `recipe: () => ...`, which runs only on the machine that starts the job.
 - `sh` passes each `${}` as one word. `` sh.raw`...` `` doesn't escape, for a script that is itself shell.
 - Schemas can be valibot, zod or arktype (any [Standard Schema](https://standardschema.dev)). Items are checked before
   they're sent, and values inside the container.

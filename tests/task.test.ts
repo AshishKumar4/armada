@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Result } from '../src/index';
-import { echo, encode, greet, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
+import { echo, encode, fromFile, greet, lie, lookalike, refuse, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
 
@@ -239,6 +239,15 @@ describe('a command task', () => {
       none: null,
       shouted: 'HI THERE',
     });
+  });
+});
+
+describe('a recipe given as a function', () => {
+  test('is called on the machine that makes the job, never in a container', async () => {
+    const { armada, jobs } = await fleet();
+
+    expect({ value: await fromFile.run(1, { armada }), setup: [...jobs.values()].at(-1)?.spec.recipe.setup })
+      .toEqual({ value: 2, setup: readFileSync(join(FIXTURES, 'greeting.ts'), 'utf8') });
   });
 });
 

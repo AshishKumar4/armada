@@ -1,5 +1,6 @@
 import * as v from 'valibot';
-import { sh, task } from '../../../src/index';
+import { readFileSync } from 'node:fs';
+import { recipe, sh, task } from '../../../src/index';
 import { greeting } from '../greeting';
 
 export const square = task({ id: 'square', run: (n: number) => n * n });
@@ -42,3 +43,14 @@ export const shout = task({ id: 'shout', run: async (word: string) => (await sh`
 
 /** A plain value shaped like a command, which must come back as the value it is. */
 export const lookalike = task({ id: 'lookalike', run: (path: string) => ({ script: `touch ${path}`, text: 'not a command' }) });
+
+/** A recipe read from a file on the machine that makes the job, which a container must never read. */
+export const fromFile = task({
+  id: 'from-file',
+  recipe: () => {
+    if (process.env['ARMADA_TASK'] !== undefined) throw new Error('a container read the recipe');
+
+    return recipe.debian().setup(readFileSync(new URL('../greeting.ts', import.meta.url), 'utf8'));
+  },
+  run: (n: number) => n + 1,
+});

@@ -201,8 +201,9 @@ type OutputChecked<Out> = Out extends StandardSchemaV1
 export interface TaskConfig<I, R, Out extends Output | undefined, Id = string> {
   /** Unique in the deployment: `armada push` refuses a second task with it. */
   readonly id: Id;
-  /** Default `recipe()`: `cloudflare/debian-trixie` on medium. */
-  readonly recipe?: Recipe | RecipeBuilder;
+  /** Default `recipe()`: `cloudflare/debian-trixie` on medium. A function is called only when a job is made, on the
+   *  machine that makes it: the task's file also runs in each container, which has none of the files a recipe reads. */
+  readonly recipe?: Recipe | RecipeBuilder | (() => Recipe | RecipeBuilder);
   readonly output?: Out;
   /** A task's limit, in seconds. Default 3600. */
   readonly timeout?: number;
@@ -234,7 +235,11 @@ interface TaskOptions {
 
 /** How a job is created and its outcomes read, for one kind of task. */
 abstract class Base<I, O> {
-  constructor(protected readonly recipe: Recipe, protected readonly options: TaskOptions) {}
+  constructor(private readonly recipeOf: () => Recipe, protected readonly options: TaskOptions) {}
+
+  protected get recipe(): Recipe {
+    return this.recipeOf();
+  }
 
   /** The job's `run` and whether it keeps each task's output. */
   protected abstract runOf(armada: Armada): Promise<{ readonly run: { readonly kind: 'command' } | { readonly kind: 'task'; readonly id: string; readonly bundle?: string }; readonly output: boolean }>;
@@ -406,7 +411,11 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
   readonly id: string;
 
   constructor(private readonly config: Config) {
-    super(config.recipe instanceof RecipeBuilder ? config.recipe.spec : config.recipe ?? recipe().spec, config);
+    super(() => {
+      const given = typeof config.recipe === 'function' ? config.recipe() : config.recipe;
+
+      return given instanceof RecipeBuilder ? given.spec : given ?? recipe().spec;
+    }, config);
     this.id = config.id;
   }
 
@@ -519,7 +528,7 @@ type Argv<I> = (item: I, at: { readonly index: number }) => readonly string[];
 /** The CLI's and `armada run`'s commands: each item's argv built here, from a command line with placeholders. */
 class CommandTask<I, O> extends Base<I, O> {
   constructor(recipe: Recipe, private readonly argv: Argv<I>, private readonly cmdOptions: CommandOptions) {
-    super(recipe, cmdOptions);
+    super(() => recipe, cmdOptions);
   }
 
   protected async runOf() {
