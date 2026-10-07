@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { matches, parseConfig } from '../src/config';
-import { grade, taskName, type TaskAnswer } from '../src/grade';
+import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, fill, itemValues, medians, recordSamples, weightOf, type Recipe } from '../src/protocol';
 
 describe('a task\'s command', () => {
@@ -84,6 +84,18 @@ describe('grading a CI run', () => {
     const graded = grade(answers);
 
     expect({ problems: graded.problems, rows: graded.rows.length, reds: graded.reds.map((each) => each.name) }).toEqual({ problems: [], rows: 3, reds: ['two'] });
+  });
+
+  test('a task that exits nonzero fails every row it reported green; one it reported red keeps its own exit', () => {
+    const exited = underExit([row('one'), row('two', 1), { ...row('three', 1), output: '' }], { exitCode: 7, tail: 'Segmentation fault' });
+
+    expect(exited.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
+      ['one', 7, 'the task exited 7 after reporting this row green\nSegmentation fault'],
+      ['two', 1, 'two said this'],
+      ['three', 1, 'Segmentation fault'],
+    ]);
+    expect(grade([{ name: 'a', entry: {}, rows: exited }]).reds.map(rowName)).toEqual(['one', 'two', 'three']);
+    expect(underExit([row('one')], { exitCode: 0, tail: '' })).toEqual([row('one')]);
   });
 
   test('a missing verdict, a missing or extra row, a row twice, and an untimed file are each named, and none is green', () => {

@@ -44,6 +44,25 @@ export function taskName(entry: PlanEntry, key: string | undefined, index: numbe
   return named !== undefined && /^[A-Za-z0-9._-]{1,80}$/u.test(named) ? named : `task-${String(index + 1)}`;
 }
 
+/** How a task's own command ended. */
+export interface TaskExit {
+  readonly exitCode: number;
+  /** The end of its output. */
+  readonly tail: string;
+}
+
+/** A verdict file's rows under its task's exit: a task that exited nonzero failed, so every row it reported green is
+ *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's. */
+export function underExit(rows: readonly VerdictRow[], exit: TaskExit): VerdictRow[] {
+  return rows.map((row) => {
+    if (row.exitCode === 0 && exit.exitCode !== 0) {
+      return { ...row, exitCode: exit.exitCode, output: `the task exited ${String(exit.exitCode)} after reporting this row green\n${exit.tail}` };
+    }
+
+    return row.exitCode !== 0 && row.output === '' ? { ...row, output: exit.tail } : row;
+  });
+}
+
 export interface TaskAnswer {
   readonly name: string;
   readonly entry: PlanEntry;

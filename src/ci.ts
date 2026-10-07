@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
-import { grade, PlanSchema, rowName, taskName, VerdictFileSchema, type TaskAnswer, type VerdictRow } from './grade';
+import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type TaskAnswer, type VerdictRow } from './grade';
 import { TimingsSchema, type Manifest, type Outcome, type Recipe, type JobSpec } from './protocol';
 import type { Armada, Job } from './sdk';
 
@@ -176,8 +176,7 @@ export async function runCI(armada: Armada, target: string, label: string): Prom
 
     if (text === null) return { name, entry, rows: null };
 
-    // A red row that kept no output is shown with the end of its task's.
-    return { name, entry, rows: v.parse(VerdictFileSchema, JSON.parse(text)).rows.map((row) => row.exitCode !== 0 && row.output === '' ? { ...row, output: outcome.tail } : row) };
+    return { name, entry, rows: underExit(v.parse(VerdictFileSchema, JSON.parse(text)).rows, outcome) };
   }));
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };
