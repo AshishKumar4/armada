@@ -86,6 +86,24 @@ describe('a task\'s outcome', () => {
   });
 });
 
+describe('a task whose container stopped under it', () => {
+  test('is queued again for a live vessel twice, and reported lost the third time', async () => {
+    const { job: lossy } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
+    const lost: (number | null)[] = [];
+
+    for (const vessel of ['v1', 'r1', 'r2']) {
+      const claim = await lossy.claim(vessel);
+
+      lost.push(claim?.index ?? null);
+      await lossy.vesselFailed(vessel, 'the wait failed to run: exec() cannot be called on a container that is not running.');
+    }
+    const { events } = await lossy.events(0);
+
+    expect({ lost, events: events.map((event) => [event.outcome.index, event.outcome.kind, event.outcome.reason, event.outcome.attempt]) })
+      .toEqual({ lost: [0, 0, 0], events: [[0, 'failed', 'lost', 3]] });
+  });
+});
+
 describe('a vessel that found no task', () => {
   test('no longer counts toward the pool, so an item an open job takes before the vessel retires gets a vessel', async () => {
     const task = { item: 'a', argv: ['true'] };

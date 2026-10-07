@@ -48,8 +48,9 @@ const SILENT_MS = { waiting: 60 * 60_000, booting: 8 * 60_000, working: 4 * 60_0
 /** Lost vessels a job replaces before it stops replacing them. */
 const REPLACEMENTS = 8;
 
-/** A task the infrastructure failed this many times is reported failed, not queued again. */
-const INFRA_ATTEMPTS = 2;
+/** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
+ *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. */
+const INFRA_ATTEMPTS = 3;
 
 /** A running task older than this, and than twice its weight, is a straggler an idle vessel may repeat. */
 const STRAGGLER_MS = 30_000;
