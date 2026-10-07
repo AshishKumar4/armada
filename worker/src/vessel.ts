@@ -33,8 +33,9 @@ export interface VesselSpec {
 
 type State = 'waiting' | 'booting' | 'working' | 'done' | 'failed' | 'stopped';
 
+/** The task running, kept without its environment, which only its launch needed: a job's env may carry a credential. */
 interface Current {
-  readonly claim: Claim;
+  readonly claim: Omit<Claim, 'env'>;
   readonly startedAt: number;
 }
 
@@ -159,7 +160,9 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         if (claim === null) return await this.retire(spec);
         await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
-        await this.ctx.storage.put('current', { claim, startedAt: Date.now() } satisfies Current);
+        const { env, ...kept } = claim;
+
+        await this.ctx.storage.put('current', { claim: kept, startedAt: Date.now() } satisfies Current);
         continue;
       }
 

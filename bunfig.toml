@@ -1,0 +1,3 @@
+[test]
+# The Worker's Durable Objects run under Bun with `cloudflare:workers` mocked (worker/tests/harness.ts).
+preload = ["./worker/tests/harness.ts"]

@@ -8,8 +8,8 @@
     "armada": "src/cli.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p worker",
-    "test": "bun test tests/",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p worker && tsc --noEmit -p worker/tests",
+    "test": "bun test tests/ worker/tests/",
     "deploy": "bun src/cli.ts deploy"
   },
   "dependencies": {

@@ -8,6 +8,9 @@
  *
  * Concurrency: storage keeps the input gate shut, an RPC or R2 call opens it, so a method decides from storage and
  * writes before it calls out.
+ *
+ * The job's `env` may carry a credential. It is kept under its own key, read only to build a claim, and deleted before
+ * anything else when the job concludes, however it concludes; no vessel stores it (`vessel.ts`).
  */
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
@@ -21,6 +24,9 @@ import { STATE, TASK } from './container';
 import type { VesselSpec } from './vessel';
 
 type Phase = JobStatus['phase'];
+
+/** What the job keeps of its spec: everything but its items (in the `tasks` table) and its env (under `env`). */
+type Kept = Omit<JobSpec, 'items' | 'env'>;
 
 /** A task the vessel should run: its index, attempt, argv and environment. */
 export interface Claim {
@@ -58,15 +64,27 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT NOT NULL)');
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vessels (name TEXT PRIMARY KEY, state TEXT NOT NULL, tasks INTEGER NOT NULL DEFAULT 0,
       boot_ms INTEGER, busy_ms INTEGER NOT NULL DEFAULT 0, error TEXT, beat INTEGER NOT NULL)`);
-    spec.items.forEach((item, index) => {
+    const { items, env, ...kept } = spec;
+
+    items.forEach((item, index) => {
       this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', index, JSON.stringify(item), weightOf(item), 'queued');
     });
-    await this.ctx.storage.put({ id, spec: { ...spec, items: [] }, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
   }
 
-  private async spec(): Promise<JobSpec | undefined> {
-    return await this.ctx.storage.get<JobSpec>('spec');
+  private async spec(): Promise<Kept | undefined> {
+    const stored = await this.ctx.storage.get<Kept & { readonly env?: Record<string, string> }>('spec');
+
+    if (stored?.env === undefined) return stored;
+    // A job created before its env had a key of its own: the env moves there while the job runs, and is gone once
+    // it is done.
+    const { env, ...kept } = stored;
+
+    if ((await this.ctx.storage.get<Phase>('phase')) !== 'done') await this.ctx.storage.put('env', env);
+    await this.ctx.storage.put('spec', kept);
+
+    return kept;
   }
 
   override async alarm(): Promise<void> {
@@ -83,7 +101,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'done') await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
   }
 
-  private async awaitEnvironment(spec: JobSpec): Promise<void> {
+  private async awaitEnvironment(spec: Kept): Promise<void> {
     const key = (await this.ctx.storage.get<string>('key')) ?? '';
     const readiness = await this.env.ENVIRONMENTS.getByName(SINGLE).ensure(key, spec.recipe, spec.commit ?? null);
 
@@ -107,7 +125,7 @@ export class ArmadaJob extends DurableObject<Env> {
     await Promise.all(names.map(async (name) => await this.launch(spec, readiness.generation, name)));
   }
 
-  private async launch(spec: JobSpec, generation: Generation, name: string): Promise<void> {
+  private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const vessel: VesselSpec = {
       jobId: id, name, snapshot: generation.snapshot.id, instance: spec.recipe.instance, vcpus: VCPUS[spec.recipe.instance],
@@ -152,7 +170,9 @@ export class ArmadaJob extends DurableObject<Env> {
        WHERE idx = (SELECT idx FROM tasks WHERE state = 'queued' ORDER BY weight DESC, idx LIMIT 1) RETURNING idx, item, attempts`, name, now,
     ).toArray()[0];
 
-    if (next !== undefined) return this.claimOf(spec, next.idx, next.item, next.attempts, false);
+    const env = (await this.ctx.storage.get<Record<string, string>>('env')) ?? {};
+
+    if (next !== undefined) return this.claimOf(spec, env, next.idx, next.item, next.attempts, false);
 
     if (!spec.idempotent) return null;
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
@@ -161,12 +181,12 @@ export class ArmadaJob extends DurableObject<Env> {
        AND started < ? AND started < ? - weight * 2000 ORDER BY started LIMIT 1) RETURNING idx, item, attempts`, name, name, now - STRAGGLER_MS, now,
     ).toArray()[0];
 
-    return straggler === undefined ? null : this.claimOf(spec, straggler.idx, straggler.item, straggler.attempts, true);
+    return straggler === undefined ? null : this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true);
   }
 
-  private claimOf(spec: JobSpec, index: number, item: string, attempt: number, duplicate: boolean): Claim {
+  private claimOf(spec: Kept, own: Record<string, string>, index: number, item: string, attempt: number, duplicate: boolean): Claim {
     const parsed: unknown = JSON.parse(item);
-    const env = { ...commandEnv(spec.recipe, spec.env), ARMADA_ITEM: item, ARMADA_INDEX: String(index), ARMADA_OUT: `${TASK}/out` };
+    const env = { ...commandEnv(spec.recipe, own), ARMADA_ITEM: item, ARMADA_INDEX: String(index), ARMADA_OUT: `${TASK}/out` };
     const values = { ...itemValues(parsed, index), out: `${TASK}/out`, files: `${STATE}/files`, workdir: workdirOf(spec.recipe), commit: spec.commit?.sha ?? '' };
     const argv = 'command' in spec.run ? spec.run.command.map((word) => fill(word, values)) : ['node', `${STATE}/handler.mjs`];
 
@@ -262,6 +282,7 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   private async conclude(): Promise<void> {
+    await this.ctx.storage.delete('env');
     await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now() });
     await this.ctx.storage.deleteAlarm();
   }

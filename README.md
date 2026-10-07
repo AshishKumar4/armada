@@ -129,7 +129,7 @@ no credentials.
 | `environment.smoke` | A command run after the snapshot is restored. It must exit 0. |
 | `checkout` | Where the commit is checked out. Default `/home/ci/work/<name>/<name>`, as on a GitHub runner. |
 | `history` | `full` (default) carries the whole history; `commit` carries only the tree. |
-| `env` | The environment the plan and tasks run under; `{workdir}` is the checkout. |
+| `env` | The environment the plan and tasks run under; `{workdir}` is the checkout. The job keeps it only until it ends, and no container's object stores it. |
 | `tmpfs` | Fresh tmpfs mounts before each command. Default `/tmp`, `/dev/shm`. |
 | `instance` | Default `standard-4` (4 vCPU, 12 GiB, 20 GB). |
 | `pool` | The most containers the task job runs at once. Default 40. |
