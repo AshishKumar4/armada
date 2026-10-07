@@ -32,7 +32,7 @@ export type Value<T> = 0 extends 1 & T ? never : T extends Uint8Array ? T : Plai
 /** A task's value as it arrives: bytes come back as a plain `Uint8Array`, whatever subclass the function returned. */
 export type Arrived<T> = T extends Uint8Array ? Uint8Array : T;
 
-/** An environment's recipe: a base image, a root `setup` script, a user `install` script, a `smoke` check and a size. */
+/** An environment's recipe: a base image, a root `setup` script, a user `install` script and a size. */
 export type Recipe = RecipeSpec & {
   /** The commit a repository recipe checks out, which `armada run` and `map --commit` set. */
   readonly commit?: { readonly sha: string; readonly base: string; readonly packer?: number };
@@ -42,7 +42,6 @@ export interface RecipeOptions {
   readonly base?: string;
   readonly setup?: string;
   readonly install?: string;
-  readonly smoke?: string;
   readonly size?: Size;
 }
 

@@ -67,7 +67,7 @@ function recipeOf(repo: string, sha: string, config: Config, size: Size): Omit<R
   const text = (path: string | undefined) => path === undefined ? '' : git(repo, ['show', `${sha}:${path}`]).toString();
 
   return {
-    base: config.environment.base, setup: text(config.environment.setup), install: text(config.environment.install), smoke: config.environment.smoke,
+    base: config.environment.base, setup: text(config.environment.setup), install: text(config.environment.install),
     size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, config) },
   };
 }

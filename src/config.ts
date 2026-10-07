@@ -26,7 +26,6 @@ const ConfigSchema = v.object({
     setup: v.optional(Path),
     install: v.optional(Path),
     key: v.optional(v.array(v.string()), []),
-    smoke: v.optional(v.string(), ''),
   }),
   /** Where the commit is checked out; by default three levels under the user's home, as a GitHub runner's is. */
   checkout: v.optional(v.pipe(v.string(), v.startsWith('/'))),

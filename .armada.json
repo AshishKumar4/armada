@@ -3,8 +3,7 @@
   "environment": {
     "setup": "ci/setup.sh",
     "install": "ci/install.sh",
-    "key": ["bun.lock", "package.json"],
-    "smoke": "bun --version"
+    "key": ["bun.lock", "package.json"]
   },
   "pool": 2,
   "size": "auto",

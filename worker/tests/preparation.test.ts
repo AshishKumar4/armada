@@ -6,7 +6,7 @@ import type { Recipe } from '../../src/protocol';
 import { ArmadaPreparer, type Generation } from '../src/environments';
 import { container, namespace, state, world, type Answer } from './harness';
 
-const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'locale-gen\n', install: '', smoke: 'bun --version', size: 'medium' };
+const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'locale-gen\n', install: '', size: 'medium' };
 
 interface Prepared {
   readonly generations: Generation[];
@@ -70,14 +70,22 @@ describe('preparing an environment', () => {
       .toEqual({ failures: [], path: expect.arrayContaining(['/usr/sbin', '/sbin', '/usr/bin']) });
   });
 
-  test('waits again where the platform lost a wait on the smoke, and counts the container lost after three in a row', async () => {
-    const twice = await prepare(answering('verify', 2));
-    const thrice = await prepare(answering('verify', 3));
+  test('waits again where the platform lost a wait, and counts the container lost after three in a row', async () => {
+    const twice = await prepare(answering('setup', 2));
+    const thrice = await prepare(answering('setup', 3));
 
     expect({ twice: [twice.generations.length, twice.failures], thrice: [thrice.generations.length, thrice.failures] }).toEqual({
       twice: [1, []],
-      thrice: [0, ['verify: the wait failed to run: Network connection lost.']],
+      thrice: [0, ['setup: the wait failed to run: Network connection lost.']],
     });
+  });
+
+  // A snapshot that does not start fails the job's vessels instead, which the job says once (worker/tests/job.test.ts).
+  test('ends at the snapshot, starting nothing from it', async () => {
+    const container = answering('setup', 0);
+    const prepared = await prepare(container);
+
+    expect({ phases: Object.keys(prepared.generations[0]?.seconds ?? {}), launched: container.launched }).toEqual({ phases: ['base', 'setup', 'receive', 'install', 'snapshot'], launched: ['base', 'setup'] });
   });
 });
 

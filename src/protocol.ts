@@ -61,8 +61,6 @@ export const RecipeSchema = v.object({
   base: v.optional(BaseSchema, DEFAULT_BASE),
   setup: v.optional(v.string(), ''),
   install: v.optional(v.string(), ''),
-  /** Run as the user after the snapshot is restored once; it must exit 0. */
-  smoke: v.optional(v.string(), ''),
   size: v.optional(SizeSchema, 'medium'),
   /** A repository environment: the commit is checked out where `checkout` says, and these files key it. */
   repo: v.optional(v.object({
@@ -234,7 +232,7 @@ export async function environmentKey(recipe: Recipe): Promise<string> {
     manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map((entry) => `${entry.path} ${entry.id}`),
   };
   // The size keys by its instance type, as the instance type did before sizes were named.
-  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, recipe.smoke, SIZES[recipe.size].instance, repo];
+  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[recipe.size].instance, repo];
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(inputs)));
 
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');

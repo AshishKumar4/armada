@@ -113,8 +113,7 @@ armada tests itself this way. Its `.armada.json`:
   "environment": {
     "setup": "ci/setup.sh",
     "install": "ci/install.sh",
-    "key": ["bun.lock", "package.json"],
-    "smoke": "bun --version"
+    "key": ["bun.lock", "package.json"]
   },
   "pool": 2,
   "size": "auto",
@@ -137,7 +136,6 @@ proof without running it again.
 | `environment.setup` | | A script in the commit, run as root once per environment. |
 | `environment.install` | | A script in the commit, run as `ci` in the checkout once per environment. |
 | `environment.key` | `[]` | Globs over the files whose content keys the environment, such as the lockfile. |
-| `environment.smoke` | | A command that must exit 0 in the restored snapshot. |
 | `checkout` | `/home/ci/work/<name>/<name>` | Where the commit is checked out. |
 | `history` | `full` | `commit` checks out the tree without its history. |
 | `env` | `{}` | Environment variables for the plan and tasks. `{workdir}` is the checkout. |

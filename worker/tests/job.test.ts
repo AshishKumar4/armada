@@ -118,3 +118,33 @@ describe('a vessel that found no task', () => {
     expect({ idle, begun }).toEqual({ idle: null, begun: ['j1/v1', 'j1/v2'] });
   });
 });
+
+describe('a job none of whose containers starts', () => {
+  test('says so once, naming its environment and why, however many vessels failed', async () => {
+    const { job: broken, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+    const failing = async () => {
+      for (let round = 0; round < 20; round += 1) {
+        const alive = begun.filter((name) => !failed.includes(name));
+
+        if (alive.length === 0) return;
+
+        for (const name of alive) {
+          failed.push(name);
+          await broken.vesselFailed(name.split('/')[1] ?? '', 'the container did not start: snapshot snapshot is not runnable');
+        }
+      }
+    };
+    const failed: string[] = [];
+
+    await failing();
+    const status = await broken.status();
+    const { events } = await broken.events(0);
+
+    expect({ phase: status?.phase, problems: status?.problems, tails: events.map((event) => event.outcome.tail), vessels: failed.length }).toEqual({
+      phase: 'done',
+      problems: [`no container started from environment ${(status?.key ?? '').slice(0, 12)}: the container did not start: snapshot snapshot is not runnable`],
+      tails: ['no vessel was left to run it', 'no vessel was left to run it'],
+      vessels: 10,
+    });
+  });
+});

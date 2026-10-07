@@ -28,7 +28,7 @@ Usage:
 map options:
   --times=N            the items are 1 to N
   --items=<file|->     a JSON array, or one item per line
-  --env=<recipe.json>  {"base", "setup", "install", "smoke", "size"}, scripts relative to it
+  --env=<recipe.json>  {"base", "setup", "install", "size"}, scripts relative to it
   --commit=<rev>       run in the commit's checkout, in the environment its .armada.json names
   --size=<size>        each container's size: micro, mini, small or medium (default medium)
   --pool=N             the most containers at once (default 50)
@@ -86,7 +86,7 @@ function whole(name: string, least = 1): number | undefined {
 }
 
 const RecipeFileSchema = v.object({
-  base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), smoke: v.optional(v.string()), size: v.optional(SizeSchema),
+  base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), size: v.optional(SizeSchema),
 });
 
 /** A recipe file, its scripts read as text relative to it. */

@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import { failureTail, workdirOf, type Recipe } from '../../src/protocol';
-import { AS_USER, ENTRYPOINT, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
+import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
 /** An environment snapshot: what every container with its key starts from. */
@@ -105,9 +105,9 @@ export class ArmadaEnvironments extends DurableObject<Env> {
   }
 }
 
-type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot' | 'verify';
+type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot';
 
-const NEXT: Readonly<Record<Phase, Phase | null>> = { base: 'setup', setup: 'receive', receive: 'install', install: 'snapshot', snapshot: 'verify', verify: null };
+const NEXT: Readonly<Record<Phase, Phase | null>> = { base: 'setup', setup: 'receive', receive: 'install', install: 'snapshot', snapshot: null };
 
 interface Preparation {
   readonly key: string;
@@ -235,22 +235,6 @@ export class ArmadaPreparer extends DurableObject<Env> {
         await container.destroy();
 
         return { snapshot: { id: snapshot.id, size: snapshot.size } };
-      }
-
-      case 'verify': {
-        const { snapshot } = preparation;
-
-        if (snapshot === null) throw new Error('verifying a preparation that has no snapshot');
-        // A snapshot that does not start, or starts without what it was given, is no environment.
-        const checks = [recipe.repo === undefined ? 'true' : 'git rev-parse HEAD', ...recipe.smoke === '' ? [] : [recipe.smoke]].join(' && ');
-        const verified = await this.command(preparation, {
-          doing: recipe.smoke === '' ? 'the restored environment' : 'the restored environment and the recipe\'s smoke', asUser: true, env, cwd: workdir, argv: ['/bin/sh', '-c', checks],
-          inputs: async () => { await startAndAnswer(container, { containerSnapshot: { id: snapshot.id }, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ENTRYPOINT }, 300_000, LEASE_MS); },
-        });
-
-        if (verified !== 'running') await container.destroy();
-
-        return verified;
       }
     }
   }
