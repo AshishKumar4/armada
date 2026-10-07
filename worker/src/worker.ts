@@ -1,10 +1,9 @@
 /**
- * armada: fast, mappable compute on Cloudflare Containers. A job maps a command or a handler over items on a pool of
- * containers started from an environment snapshot; the SDK (`src/sdk.ts`) is its one client, and every route takes the
- * bearer the deploy wrote. CI is a client of it (`src/ci.ts`).
+ * armada's Worker. A job maps a command or a handler over items on a pool of containers started from an environment
+ * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote.
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, RecipeSchema, Sha, TimingsSchema } from '../../src/protocol';
+import { DRIVER, environmentKey, JobSpecSchema, PackBase, Packer, Project, RecipeSchema, Sha, TimingsSchema } from '../../src/protocol';
 import { packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
@@ -16,8 +15,6 @@ export { ArmadaEnvironments, ArmadaPreparer } from './environments';
 export { ArmadaTimings } from './timings';
 
 export { ArmadaFleet } from './fleet';
-
-const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
 
 /** The bearer, compared in constant time. */
 function authorized(request: Request, env: Env): boolean {

@@ -16,7 +16,8 @@ export const INSTANCES = ['lite', 'standard-1', 'standard-2', 'standard-3', 'sta
 /** vCPUs per instance, for the account's concurrent-vCPU ceiling. */
 export const VCPUS: Readonly<Record<(typeof INSTANCES)[number], number>> = { lite: 0.0625, 'standard-1': 0.5, 'standard-2': 1, 'standard-3': 2, 'standard-4': 4 };
 
-const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
+/** A project's slug, which scopes its environments, packs, timings and verdicts. */
+export const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
 
 /** The commit's paths that key a repository environment, by git object id. */
 const ManifestSchema = v.array(v.object({ path: v.string(), id: Sha }));

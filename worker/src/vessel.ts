@@ -7,7 +7,7 @@
  * landed first, or the job ended) is killed with its whole session.
  */
 import { DurableObject } from 'cloudflare:workers';
-import type { Outcome } from '../../src/protocol';
+import type { INSTANCES, Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, KILL, TASK, WAIT, handlerModule, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE,
 } from './container';
@@ -18,7 +18,7 @@ export interface VesselSpec {
   readonly jobId: string;
   readonly name: string;
   readonly snapshot: string;
-  readonly instance: 'lite' | 'standard-1' | 'standard-2' | 'standard-3' | 'standard-4';
+  readonly instance: (typeof INSTANCES)[number];
   readonly vcpus: number;
   readonly workdir: string;
   readonly commit: { readonly sha: string; readonly base: string; readonly packer?: number; readonly project: string; readonly history: 'full' | 'commit' } | null;
