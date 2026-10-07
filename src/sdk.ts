@@ -19,6 +19,9 @@ import { EventsSchema, JobStatusSchema, PACKER, type JobSpec, type JobSpecSchema
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
+/** How often a read is asked of a runner whose gateway failed to answer it (`Armada.call`). */
+export const READ_ATTEMPTS = 5;
+
 /** The largest pack, in bytes, sent in one request; a Worker takes 100 MB, and R2 wants every part but the last alike. */
 export const PACK_PART = 64 * 1024 * 1024;
 
@@ -85,15 +88,29 @@ async function failureOf(response: Response): Promise<string> {
 export class Armada {
   constructor(readonly connection: Connection) {}
 
+  /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, or a dropped connection, is
+   *  asked again, up to READ_ATTEMPTS times a second apart more each time: the Worker answers it again unchanged, and a
+   *  `run` that polls for half an hour should not end on one. */
   async call(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
+    const method = init.method ?? 'GET';
+    const attempts = method === 'GET' || method === 'HEAD' ? READ_ATTEMPTS : 1;
 
     headers.set('authorization', `Bearer ${this.connection.token}`);
-    const response = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers });
 
-    if (!response.ok && response.status !== 404) throw new Error(`${init.method ?? 'GET'} ${path}: ${await failureOf(response)}`);
+    for (let attempt = 1; ; attempt += 1) {
+      const sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }).catch((error: unknown) => error);
+      const passing = sent instanceof Response ? [502, 503, 504].includes(sent.status) : true;
 
-    return response;
+      if (passing && attempt < attempts) {
+        await Bun.sleep(attempt * 1000);
+        continue;
+      }
+      if (!(sent instanceof Response)) throw sent;
+      if (!sent.ok && sent.status !== 404) throw new Error(`${method} ${path}: ${await failureOf(sent)}`);
+
+      return sent;
+    }
   }
 
   async post(path: string, body: unknown): Promise<unknown> {

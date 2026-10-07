@@ -493,3 +493,38 @@ describe('armada run', () => {
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
   });
 });
+
+describe('asking the runner', () => {
+  test('asks a read again past a gateway error, and never a write', async () => {
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const seen: string[] = [];
+    let failures = 2;
+
+    Bun.sleep = (async () => undefined) as typeof Bun.sleep;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+      if (failures > 0) {
+        failures -= 1;
+
+        return new Response('<title>502 Bad Gateway</title>', { status: 502 });
+      }
+
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+
+      expect(await (await armada.call('/health')).json()).toEqual({ ok: true });
+      expect(seen.splice(0)).toEqual(['GET /health', 'GET /health', 'GET /health']);
+      failures = 1;
+      expect(armada.post('/jobs', {})).rejects.toThrow('POST /jobs: 502');
+      await Promise.resolve();
+      expect(seen).toEqual(['POST /jobs']);
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+    }
+  });
+});
