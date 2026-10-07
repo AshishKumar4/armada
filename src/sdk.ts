@@ -94,7 +94,10 @@ export class Armada {
         continue;
       }
       if (!(sent instanceof Response)) throw sent;
-      if (!sent.ok && sent.status !== 404) throw new Error(`${method} ${path}: ${await failureOf(sent)}`);
+      // The Worker's own 404 says a thing is absent; an HTML one is a page from a Worker not yet answering.
+      const absent = sent.status === 404 && sent.headers.get('content-type')?.startsWith('text/html') !== true;
+
+      if (!sent.ok && !absent) throw new Error(`${method} ${path}: ${await failureOf(sent)}`);
 
       return sent;
     }

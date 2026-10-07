@@ -232,22 +232,33 @@ describe('uploading a pack', () => {
 });
 
 describe('a failed request', () => {
-  test('says the Worker\'s own error, and an HTML error page by its status and title', async () => {
+  test('says the Worker\'s own error, and an HTML error page by its status and title, even a 404 one', async () => {
     const page = '<!DOCTYPE html>\n<html>\n<head>\n<title>Service Unavailable</title>\n</head>\n<body>' + '<p>retry</p>'.repeat(500) + '</body>\n</html>\n';
     const server = Bun.serve({
       port: 0,
-      fetch: (request) => new URL(request.url).pathname === '/jobs'
-        ? Response.json({ error: 'upload the pack first' }, { status: 409 })
-        : new Response(page, { status: 503, headers: { 'content-type': 'text/html' } }),
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+
+        if (pathname === '/jobs') return Response.json({ error: 'upload the pack first' }, { status: 409 });
+
+        if (pathname === '/jobs/j1') return Response.json({ error: 'no such job' }, { status: 404 });
+
+        // A workers.dev name a Worker was just deployed to answers with this until it is live.
+        if (pathname === '/health') return new Response('<html><head><title>There is nothing here yet</title></head></html>', { status: 404, headers: { 'content-type': 'text/html' } });
+
+        return new Response(page, { status: 503, headers: { 'content-type': 'text/html' } });
+      },
     });
 
     try {
       const armada = new Armada({ url: server.url.href, token: 't', account: 'a' });
-      const failed = async (path: string) => await armada.call(path, { method: 'POST' }).then(() => '', (cause: unknown) => String(cause));
+      const failed = async (path: string, method = 'POST') => await armada.call(path, { method }).then((answer) => `answered ${String(answer.status)}`, (cause: unknown) => String(cause));
 
-      expect([await failed('/jobs'), await failed('/environments/resolve')]).toEqual([
+      expect([await failed('/jobs'), await failed('/environments/resolve'), await failed('/health', 'GET'), await failed('/jobs/j1', 'GET')]).toEqual([
         'Error: POST /jobs: 409 upload the pack first',
         'Error: POST /environments/resolve: 503 from the Worker (it may still be deploying): Service Unavailable',
+        'Error: GET /health: 404 from the Worker (it may still be deploying): There is nothing here yet',
+        'answered 404',
       ]);
     } finally {
       await server.stop(true);
