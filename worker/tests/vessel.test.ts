@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Outcome } from '../../src/protocol';
 import { STOPPED, USAGE } from '../src/container';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
-import { container, namespace, state, world } from './harness';
+import { bucket, container, namespace, state, world } from './harness';
 
 const spec: VesselSpec = {
   jobId: 'job', name: 'v1', snapshot: 'snapshot', instance: 'standard-4', vcpus: 4, workdir: '/home/ci/work', commit: null,
@@ -21,7 +21,9 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
 
     if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
 
-    if (argv[0] === 'cat') return { exitCode: 0, stdout: out ?? '' };
+    if (argv[0] === 'stat') return argv[3] === '/armada/task/out' && out === undefined ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: String(argv[3] === '/armada/task/out' ? new TextEncoder().encode(out).byteLength : 0) };
+
+    if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? out ?? '' : '' };
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     waits += 1;
@@ -43,7 +45,8 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
     retired: async () => undefined,
     vesselFailed: async (_name: string, error: string) => { failed.push(error); },
   };
-  const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job) }));
+  const artifacts = bucket();
+  const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
 
   await vessel.begin({ ...spec, output: out !== undefined });
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
@@ -55,7 +58,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed, stored: artifacts.objects };
 }
 
 describe('a vessel waiting on its task', () => {
@@ -86,10 +89,11 @@ describe('a finished task', () => {
 });
 
 describe('a task\'s output', () => {
-  test('rides in its outcome as text up to 32 KiB, and is only stored beyond that', async () => {
-    const small = (await run(0, undefined, '{"n": 1}')).completed[0];
-    const large = (await run(0, undefined, 'x'.repeat(32 * 1024 + 1))).completed[0];
+  test('rides in its outcome as text up to 32 KiB, and beyond that streams into R2 whole', async () => {
+    const small = await run(0, undefined, '{"n": 1}');
+    const large = await run(0, undefined, 'x'.repeat(32 * 1024 + 1));
 
-    expect([small?.output, small?.value, large?.output, large?.value]).toEqual([true, '{"n": 1}', true, undefined]);
+    expect([small.completed[0]?.value, large.completed[0]?.output, large.completed[0]?.value, large.stored.get('jobs/job/tasks/0/output')?.length])
+      .toEqual(['{"n": 1}', true, undefined, 32 * 1024 + 1]);
   });
 });

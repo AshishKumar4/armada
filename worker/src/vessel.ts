@@ -254,29 +254,50 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     if (!(await job.accept(spec.name, index))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
-    const log = await (await container.exec(['/bin/sh', '-c', `gzip -c ${TASK}/log 2>/dev/null || true`], { signal: AbortSignal.timeout(EXEC_MS) })).output();
     const tail = await run(container, ['/bin/sh', '-c', `tail -n ${String(TAIL_LINES)} ${TASK}/log 2>/dev/null || true`], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
-    await this.env.ARTIFACTS.put(taskKey(spec.jobId, index, 'log'), log.stdout, { httpMetadata: { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' } });
-    let output = false;
-    let value: string | undefined;
-
-    if (spec.output || spec.bundle !== null) {
-      // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
-      const out = await (await container.exec(['cat', OUT_PATH], { signal: AbortSignal.timeout(EXEC_MS) })).output();
-
-      if (out.exitCode === 0) {
-        await this.env.ARTIFACTS.put(taskKey(spec.jobId, index, 'output'), out.stdout);
-        output = true;
-        value = out.stdout.byteLength <= INLINE_BYTES ? textOf(out.stdout) : undefined;
-      }
-    }
-
-    const outcome: Outcome = { index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output, value, ...usage };
+    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz`], { ms: EXEC_MS });
+    await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, index, 'log'), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+    // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
+    const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output'), {}) : null;
+    const value = out === null || out.small === null ? undefined : textOf(out.small);
+    const outcome: Outcome = { index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, ...usage };
 
     await job.complete(spec.name, outcome, seconds * 1000);
+  }
+
+  /**
+   * A file in the container into R2 under `key`, streamed at any size: R2 takes a stream of a length it knows, so the
+   * file's size is read first. Null when there is no such file; else the file's bytes when it is small enough to ride
+   * in the task's outcome.
+   */
+  private async store(path: string, key: string, httpMetadata: R2HTTPMetadata): Promise<{ readonly small: ArrayBuffer | null } | null> {
+    const container = this.container();
+    const sized = await run(container, ['stat', '-c', '%s', path], { ms: EXEC_MS });
+
+    if (sized.exitCode !== 0) return null;
+    const size = Number(sized.stdout.trim());
+
+    if (size <= INLINE_BYTES) {
+      const read = await (await container.exec(['cat', path], { signal: AbortSignal.timeout(EXEC_MS) })).output();
+
+      await this.env.ARTIFACTS.put(key, read.stdout, { httpMetadata });
+
+      return { small: read.stdout };
+    }
+    const reading = await container.exec(['cat', path], { stdout: 'pipe', stderr: 'ignore' });
+
+    if (reading.stdout === null) throw new Error(`reading ${path}: the exec gave no stdout`);
+    const known = new FixedLengthStream(size);
+
+    await Promise.all([reading.stdout.pipeTo(known.writable), this.env.ARTIFACTS.put(key, known.readable, { httpMetadata })]);
+    const exitCode = await reading.exitCode;
+
+    if (exitCode !== 0) throw new Error(`reading ${path} exited ${String(exitCode)}`);
+
+    return { small: null };
   }
 
   private async retire(spec: VesselSpec): Promise<false> {

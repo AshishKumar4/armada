@@ -12,6 +12,27 @@ import type { Env } from '../src/env';
 // workerd's constant-time comparison, which the Worker checks its bearer with.
 Object.assign(crypto.subtle, { timingSafeEqual: (left: Uint8Array, right: Uint8Array) => timingSafeEqual(left, right) });
 
+/** workerd's stream of a declared length, which refuses to end short or run long. */
+class FixedLengthStream extends TransformStream<Uint8Array, Uint8Array> {
+  constructor(length: number) {
+    let seen = 0;
+
+    super({
+      transform: (chunk, controller) => {
+        seen += chunk.byteLength;
+
+        if (seen > length) throw new Error(`the stream ran past its ${String(length)} bytes`);
+        controller.enqueue(chunk);
+      },
+      flush: () => {
+        if (seen !== length) throw new Error(`the stream ended at ${String(seen)} of its ${String(length)} bytes`);
+      },
+    });
+  }
+}
+
+Object.assign(globalThis, { FixedLengthStream });
+
 void mock.module('cloudflare:workers', () => ({
   DurableObject: class {
     constructor(protected readonly ctx: unknown, protected readonly env: unknown) {}
@@ -107,7 +128,12 @@ export function container(answer: Answer): Container {
 
       if (answered instanceof Error) throw answered;
 
-      return { stdin: new WritableStream(), output: async () => ({ exitCode: answered.exitCode, stdout: new TextEncoder().encode(answered.stdout).buffer, stderr: new ArrayBuffer(0) }) };
+      const stdout = new TextEncoder().encode(answered.stdout);
+
+      return {
+        stdin: new WritableStream(), stdout: new Blob([stdout]).stream(), exitCode: Promise.resolve(answered.exitCode),
+        output: async () => ({ exitCode: answered.exitCode, stdout: stdout.buffer, stderr: new ArrayBuffer(0) }),
+      };
     },
   };
 
