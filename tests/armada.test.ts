@@ -599,7 +599,7 @@ describe('armada run', () => {
 });
 
 describe('asking the runner', () => {
-  test('asks a read again past a gateway error, and never a write', async () => {
+  test('asks a read again past a gateway error or the Worker\'s own 500, and never a write', async () => {
     const original = globalThis.fetch;
     const sleep = Bun.sleep;
     const seen: string[] = [];
@@ -611,7 +611,9 @@ describe('asking the runner', () => {
       if (failures > 0) {
         failures -= 1;
 
-        return new Response('<title>502 Bad Gateway</title>', { status: 502 });
+        // A gateway's page, then the Worker's own exception, as a Durable Object restarted under a read gives.
+        return failures === 1 ? new Response('<title>502 Bad Gateway</title>', { status: 502 })
+          : new Response('Worker threw exception', { status: 500 });
       }
 
       return Response.json({ ok: true });
@@ -623,7 +625,7 @@ describe('asking the runner', () => {
       expect(await (await armada.call('/health')).json()).toEqual({ ok: true });
       expect(seen.splice(0)).toEqual(['GET /health', 'GET /health', 'GET /health']);
       failures = 1;
-      expect(armada.post('/jobs', {})).rejects.toThrow('POST /jobs: 502');
+      expect(armada.post('/jobs', {})).rejects.toThrow('POST /jobs: 500');
       await Promise.resolve();
       expect(seen).toEqual(['POST /jobs']);
     } finally {

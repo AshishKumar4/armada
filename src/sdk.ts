@@ -85,13 +85,14 @@ export class RequestError extends Error {
 export class Armada {
   constructor(readonly connection: Connection) {}
 
-  /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, or a dropped connection, is
-   *  asked again, up to READ_ATTEMPTS times a second apart more each time: the Worker answers it again unchanged, and a
-   *  `run` that polls for half an hour should not end on one. */
   /** The wire's version this client speaks to the deployment: its own, or an older one a drain found the deployed
    *  Worker speaks, for the drain, the health and the admit, which are the same in every version. */
   private spoken = PROTOCOL;
 
+  /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, the Worker's own 500, or a
+   *  dropped connection, is asked again, up to READ_ATTEMPTS times a second apart more each time: the Worker answers it
+   *  again unchanged, and a `run` that polls for half an hour should not end on one. A Durable Object the runtime
+   *  restarted throws once under a read ("Worker threw exception"), and the next read is answered. */
   async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
@@ -102,7 +103,7 @@ export class Armada {
 
     for (let attempt = 1; ; attempt += 1) {
       const sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }).catch((error: unknown) => error);
-      const passing = sent instanceof Response ? [502, 503, 504].includes(sent.status) : true;
+      const passing = sent instanceof Response ? [500, 502, 503, 504].includes(sent.status) : true;
 
       if (passing && attempt < attempts) {
         await Bun.sleep(attempt * 1000);
