@@ -11,7 +11,7 @@ const spec: VesselSpec = {
 
 /** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read, whose cgroup
  *  reads `usage`, and whose output file holds `out` when the job keeps outputs. */
-async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }, out?: string, stopping = '') {
+async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }, out?: string, stopping = '', launched?: number) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   let claimed = false;
@@ -46,6 +46,12 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job) }));
 
   await vessel.begin({ ...spec, output: out !== undefined });
+  // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
+  // storage.
+  if (launched !== undefined) {
+    claimed = true;
+    await stored.ctx.storage.put({ state: 'working', current: { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false }, startedAt: Date.now() - launched } });
+  }
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
@@ -55,7 +61,11 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
 describe('a vessel waiting on its task', () => {
   test('waits again where the platform lost a wait, and counts the container lost after three in a row', async () => {
     expect(await run(2)).toMatchObject({ exits: [0], failed: [] });
-    expect(await run(3)).toMatchObject({ exits: [], failed: ['the wait failed to run: Network connection lost.'] });
+    expect(await run(3)).toMatchObject({ exits: [], failed: ['the wait failed to run (the container ended unseen by this object; this object up since before the task): Network connection lost.'] });
+  });
+
+  test('says, when it loses the container, whether its object was restarted under the task', async () => {
+    expect((await run(3, undefined, undefined, '', 60_000)).failed).toEqual(['the wait failed to run (the container ended unseen by this object; this object restarted 60 s into the task): Network connection lost.']);
   });
 });
 

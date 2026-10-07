@@ -162,11 +162,11 @@ ${END_GROUP}`;
 export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;
 
 /** What a container's main process runs under tini, which reaps orphans as PID 1. The platform stops an instance (a
- *  rollout, a host's maintenance) by sending its main process SIGTERM, then SIGKILL 15 minutes later. A bare `sleep`
- *  ended at the SIGTERM and took the task the container ran with it, which the vessel then found gone ("exec() cannot
- *  be called on a container that is not running"). This marks the container stopping (`STOPPING`), so its vessel
- *  claims nothing more, holds while the task under `state` runs, up to `graceSeconds`, then `lingerSeconds` for the
- *  vessel to read the answer, and exits. */
+ *  rollout, a host's maintenance) by sending its main process SIGTERM, then SIGKILL 15 minutes later, and a bare
+ *  `sleep` would end at the SIGTERM and take the running task with it. This marks the container stopping
+ *  (`STOPPING`), so its vessel claims nothing more, holds while the task under `state` runs, up to `graceSeconds`,
+ *  then `lingerSeconds` for the vessel to read the answer, and exits. The containers Dew's CI lost mid-task were not
+ *  stopped this way: none was marked stopping first. */
 export function hold(state: string, graceSeconds: number, lingerSeconds: number): string {
   return String.raw`trap 'stop=1' TERM
 stop=

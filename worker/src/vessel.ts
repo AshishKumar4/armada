@@ -64,6 +64,12 @@ const INACTIVITY_MS = 6 * 60 * 60_000;
 const TAIL_LINES = 40;
 
 export class ArmadaVessel extends DurableObject<Env> {
+  /** When this object started: one started after its task launched was restarted under it. */
+  private readonly born = Date.now();
+
+  /** Whether this object watches its container's end (`watch`). */
+  private watching = false;
+
   async begin(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.put({ spec, state: 'waiting' satisfies State, requested: Date.now() });
     await this.ctx.storage.setAlarm(Date.now());
@@ -160,9 +166,29 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** Runs the loop for a slice; true while there is more to do, false once the vessel retired. */
+  /** Keeps why the container ended, if it ends while this object runs: the runtime says so only through `monitor()`. */
+  private watch(container: Container): void {
+    if (this.watching) return;
+    this.watching = true;
+    const ended = (how: string) => { void this.ctx.storage.put('ended', `${how} at ${new Date().toISOString()}`); };
+
+    container.monitor().then(() => { ended('exited'); }, (cause: unknown) => { ended(`ended: ${said(cause)}`); });
+  }
+
+  /** What a lost container's error says of it: how it ended, if this object saw, and whether this object was
+   *  restarted under the task. */
+  private async lostAt(current: Current): Promise<string> {
+    const ended = (await this.ctx.storage.get<string>('ended')) ?? 'ended unseen by this object';
+    const restarted = this.born > current.startedAt ? `restarted ${String(Math.round((this.born - current.startedAt) / 1000))} s into the task` : 'up since before the task';
+
+    return `the container ${ended}; this object ${restarted}`;
+  }
+
   private async work(spec: VesselSpec): Promise<boolean> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
+
+    this.watch(container);
     const until = Date.now() + SLICE_MS;
     let lost = 0;
 
@@ -191,7 +217,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         lost += 1;
 
         if (lost < LOST_WAITS) continue;
-        throw new Error('the wait failed to run', { cause: waited.reason });
+        throw new Error(`the wait failed to run (${await this.lostAt(current)})`, { cause: waited.reason });
       }
       lost = 0;
 
