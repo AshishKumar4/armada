@@ -153,34 +153,26 @@ const BUN = { version: '1.4.0', sha256: '2d03fb5fb83ac8b567aca0a281b2ce1a1a19d48
 
 const ARMADA_REPO = 'https://github.com/AshishKumar4/armada.git';
 
-/** The driver task's environment: bun and the armada CLI at the deployment's own commit, installed once when the
- *  environment is prepared. The commit is in the recipe, so a new deployment prepares a new one. */
-function driverRecipe(deploySha: string): v.InferInput<typeof JobSpecSchema>['recipe'] {
-  return {
-    base: 'cloudflare/debian-trixie',
-    setup: String.raw`set -eu
+/** The driver task's environment: bun alone, the same for every deployment, so a redeploy prepares no new one and
+ *  takes no new snapshot. The driver fetches armada at the deployment's commit when it runs. */
+const DRIVER_RECIPE = {
+  base: 'cloudflare/debian-trixie',
+  setup: String.raw`set -eu
 curl -fsSL -o /tmp/bun.zip https://github.com/oven-sh/bun/releases/download/bun-v${BUN.version}/bun-linux-x64.zip
 echo "${BUN.sha256}  /tmp/bun.zip" | sha256sum -c -
 unzip -q /tmp/bun.zip -d /tmp
 install -m 755 /tmp/bun-linux-x64/bun /usr/local/bin/bun
-rm -rf /tmp/bun.zip /tmp/bun-linux-x64
-git init -q /opt/armada
-git -C /opt/armada fetch -q --depth 1 ${ARMADA_REPO} ${deploySha} || { echo "the deployment's commit ${deploySha} is not on GitHub: deploy from a pushed commit for webhook CI" >&2; exit 1; }
-git -C /opt/armada checkout -q FETCH_HEAD
-cd /opt/armada
-bun install --frozen-lockfile
-ln -sf /opt/armada/src/cli.ts /usr/local/bin/armada`,
-    size: 'micro',
-  };
-}
+rm -rf /tmp/bun.zip /tmp/bun-linux-x64`,
+  size: 'micro',
+} as const;
 
-/** The driver script: posts a pending status, clones the commit, runs `armada run <sha> --json` against the
- *  deployment, and posts the verdict's count as the status. The two credentials (the GitHub token, in the secret
- *  `ARMADA_GITHUB_SECRET` names, and ARMADA_TOKEN, added at claim) are read only from the environment, so the job's
- *  log keeps them masked. */
+/** The driver script: posts a pending status, fetches armada at the deployment's commit with its runtime dependencies
+ *  alone, clones the commit, runs `armada run <sha> --json` against the deployment, and posts the verdict's count as
+ *  the status. The two credentials (the GitHub token, in the secret `ARMADA_GITHUB_SECRET` names, and ARMADA_TOKEN,
+ *  added at claim) are read only from the environment, so the job's log keeps them masked. */
 const DRIVER = String.raw`set -eu
 github=$(printenv "$ARMADA_GITHUB_SECRET")
-mkdir -p "$HOME/.config/armada" "$HOME/repo"
+mkdir -p "$HOME/.config/armada" "$HOME/repo" "$HOME/armada"
 printf '{"url":"%s","token":"%s","account":""}\n' "$ARMADA_URL" "$ARMADA_TOKEN" > "$HOME/.config/armada/connection.json"
 status() {
   code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
@@ -189,13 +181,18 @@ status() {
   case "$code" in 2*) ;; *) echo "armada: posting the $1 status failed: HTTP $code" >&2 ;; esac
 }
 status pending 'armada is running'
+git -C "$HOME/armada" init -q
+git -C "$HOME/armada" fetch -q --depth 1 ${ARMADA_REPO} "$ARMADA_DEPLOYED" \
+  || { echo "armada: the deployment's commit $ARMADA_DEPLOYED is not on GitHub: deploy from a pushed commit for webhook CI" >&2; status error "armada's deployed commit is not on GitHub"; exit 2; }
+git -C "$HOME/armada" checkout -q FETCH_HEAD
+(cd "$HOME/armada" && bun install --frozen-lockfile --production --silent)
 git -C "$HOME/repo" init -q
 git -C "$HOME/repo" fetch -q --depth 1 "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
   || git -C "$HOME/repo" fetch -q --depth 1 "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
 git -C "$HOME/repo" checkout -q FETCH_HEAD
 cd "$HOME/repo"
 set +e
-armada run "$ARMADA_COMMIT" --json > verdict.json
+bun "$HOME/armada/src/cli.ts" run "$ARMADA_COMMIT" --json > verdict.json
 code=$?
 set -e
 count=$(bun -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rows; console.log(r.filter((x) => x.exitCode === 0).length + " of " + r.length + " rows green"); } catch { console.log("the run did not grade"); }' verdict.json)
@@ -207,13 +204,13 @@ exit "$code"
  *  the GitHub token's secret and asks for the deployment's bearer at claim, never in its stored env. */
 export function driverSpec(project: string, sha: string, { origin, sha: deploySha }: { readonly origin: string; readonly sha: string }, config: HookConfig): v.InferInput<typeof JobSpecSchema> {
   return {
-    recipe: driverRecipe(deploySha),
+    recipe: DRIVER_RECIPE,
     run: { kind: 'command' },
     items: [{ item: sha, argv: ['/bin/sh', '-c', DRIVER] }],
     output: false,
     pool: 1,
     label: `ci ${project} ${sha.slice(0, 12)}`,
-    env: { ARMADA_URL: origin, ARMADA_REPO: config.repo, ARMADA_COMMIT: sha, ARMADA_GITHUB_SECRET: config.tokenSecret, TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}` },
+    env: { ARMADA_URL: origin, ARMADA_DEPLOYED: deploySha, ARMADA_REPO: config.repo, ARMADA_COMMIT: sha, ARMADA_GITHUB_SECRET: config.tokenSecret, TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}` },
     secrets: [config.tokenSecret],
     deployToken: true,
     timeout: 3600,

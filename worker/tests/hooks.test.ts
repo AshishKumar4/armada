@@ -210,12 +210,14 @@ describe('the github webhook', () => {
     expect(JSON.stringify(spec.env)).not.toContain(TOKEN);
     expect(JSON.stringify(spec)).not.toContain('gh-token-value');
     expect(spec.env['ARMADA_GITHUB_SECRET']).toBe('GITHUB_TOKEN');
-    // bun and armada at the deployment's commit are the environment's, prepared once, not fetched on every run.
-    expect(spec.recipe.setup).toContain('b'.repeat(40));
+    // The environment is bun alone, checked by its digest, and the same for every deployed commit: a redeploy takes
+    // no new snapshot. The driver fetches armada at the deployed commit when it runs.
     expect(spec.recipe.setup).toContain('sha256sum -c');
+    expect(v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'c'.repeat(40) }, CONFIG)).recipe).toEqual(spec.recipe);
+    expect(spec.env['ARMADA_DEPLOYED']).toBe('b'.repeat(40));
     const script = spec.items[0]?.argv?.[2] ?? '';
-    expect(script).toContain('armada run');
-    expect(script).toContain('--json');
+    expect(script).toContain('"$ARMADA_DEPLOYED"');
+    expect(script).toContain('src/cli.ts" run "$ARMADA_COMMIT" --json');
     expect(script).not.toContain('bun.sh/install');
   });
 });
