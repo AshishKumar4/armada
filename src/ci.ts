@@ -14,6 +14,8 @@ import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './co
 import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
+import { poolFor } from './schedule';
+export { poolFor } from './schedule';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -253,28 +255,6 @@ function estimateOf(entry: PlanEntry, name: string, timings: Timings): number | 
   return entry.weight ?? (rows.every((seconds) => seconds !== undefined) ? rows.reduce((sum, seconds) => sum + seconds, 0) : undefined);
 }
 
-/** The fewest containers, up to `most`, that finish these tasks as soon as `most` would, queued longest first: every
- *  container that runs more than one task must finish a fifth of the longest task's time before it does. */
-export function poolFor(estimates: readonly number[], most: number): number {
-  const longest = Math.max(0, ...estimates);
-  const queue = [...estimates].sort((left, right) => right - left);
-
-  for (let pool = 1; pool < most; pool += 1) {
-    const loads = Array.from({ length: pool }, () => ({ seconds: 0, tasks: 0 }));
-
-    for (const seconds of queue) {
-      const next = loads.reduce((least, load) => load.seconds < least.seconds ? load : least);
-
-      next.seconds += seconds;
-      next.tasks += 1;
-    }
-
-    if (loads.every((load) => load.tasks === 1 || load.seconds <= longest * 0.8)) return pool;
-  }
-
-  return most;
-}
-
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
 export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = [], secrets: readonly string[] = []): Promise<number> {
@@ -322,13 +302,13 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const most = Math.min(config.pool, plan.include.length);
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
-  const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
+  const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most, timings.bootSeconds ?? 0) : most;
   // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
   // whole tier never sees them.
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
   // A matrix entry came from JSON, so it is JSON.
-  const entries = plan.include as Json[];
+  const entries = plan.include.map((entry, index) => ({ ...entry, weight: estimates[index] ?? entry.weight ?? 0 })) as Json[];
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
   const jobId = await job.id;
 
@@ -389,6 +369,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
   await armada.post(`/timings/${config.name}`, {
     rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
+    bootSeconds: summary.bootMs.length === 0 ? undefined : (summary.bootMs[Math.floor(summary.bootMs.length / 2)] ?? 0) / 1000,
   });
   printReds(graded.reds);
   const boots = summary.bootMs;

@@ -12,6 +12,7 @@ interface History {
   readonly files: Record<string, number[]>;
   /** `memory` and `cores`, one sample per run. */
   readonly usage?: Record<string, number[]>;
+  readonly boots?: Record<string, number[]>;
 }
 
 export class ArmadaTimings extends DurableObject<Env> {
@@ -23,6 +24,7 @@ export class ArmadaTimings extends DurableObject<Env> {
       rows: recordSamples(history?.rows ?? {}, timings.rows),
       files: recordSamples(history?.files ?? {}, timings.files),
       usage: timings.usage === undefined || timings.usage === null ? usage : recordSamples(usage, timings.usage),
+      boots: timings.bootSeconds === undefined ? history?.boots ?? {} : recordSamples(history?.boots ?? {}, { boot: timings.bootSeconds }),
     } satisfies History);
   }
 
@@ -33,6 +35,7 @@ export class ArmadaTimings extends DurableObject<Env> {
     return {
       rows: medians(history?.rows ?? {}), files: medians(history?.files ?? {}),
       usage: memory.length === 0 ? null : { memory: Math.max(...memory), cores: Math.max(...cores) },
+      bootSeconds: medians(history?.boots ?? {})['boot'],
     };
   }
 }

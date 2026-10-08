@@ -186,6 +186,8 @@ export const JobSpecSchema = v.object({
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
   /** The most containers this job runs at once; the account's ceiling and the item count bound it too. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 50),
+  /** Weighted max-min admission of container capacity between jobs. Existing holds are non-preemptive. */
+  fairWeight: v.optional(v.pipe(v.number(), v.finite(), v.minValue(Number.MIN_VALUE)), 1),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** A task's own bound, in seconds. */
@@ -246,6 +248,11 @@ const VesselSchema = v.object({
 
 export type VesselRow = v.InferOutput<typeof VesselSchema>;
 
+export const ScheduleSchema = v.object({
+  makespan: v.number(), lowerBound: v.number(), ratio: v.number(), exact: v.boolean(), estimated: v.boolean(),
+  model: v.literal('independent tasks; estimated durations and releases'),
+});
+
 export const JobStatusSchema = v.object({
   id: v.string(),
   label: v.string(),
@@ -258,6 +265,7 @@ export const JobStatusSchema = v.object({
   vessels: v.array(VesselSchema),
   problems: v.array(v.string()),
   environment: v.nullable(v.object({ key: v.string(), sha: v.nullable(v.string()), created: v.number(), seconds: v.record(v.string(), v.number()) })),
+  schedule: v.optional(ScheduleSchema),
 });
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
@@ -274,6 +282,7 @@ const UsageSchema = v.object({ memory: v.number(), cores: v.number() });
  *  most one task used in the run reported, or in the last runs read. */
 export const TimingsSchema = v.object({
   rows: v.record(v.string(), v.number()), files: v.record(v.string(), v.number()), usage: v.optional(v.nullable(UsageSchema)),
+  bootSeconds: v.optional(v.pipe(v.number(), v.minValue(0))),
 });
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;

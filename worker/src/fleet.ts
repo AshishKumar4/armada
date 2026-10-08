@@ -18,6 +18,12 @@ interface Hold {
   readonly until: number;
 }
 
+interface Demand extends Hold {
+  readonly since: number;
+}
+
+const jobOf = (holder: string): string => holder.split('/')[0] ?? holder;
+
 /** How long a drain holds unless it is asked again: longer than a deploy's install, the Worker upload and its
  *  secrets, takes between two asks. */
 export const DRAIN_MS = 10 * 60_000;
@@ -32,8 +38,25 @@ export class ArmadaFleet extends DurableObject<Env> {
   async acquire(holder: string, vcpus: number, now = Date.now()): Promise<boolean> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const used = Object.entries(holds).filter(([name]) => name !== holder).reduce((sum, [, hold]) => sum + hold.vcpus, 0);
-    const granted = used + vcpus <= Number(this.env.FLEET_VCPUS);
+    if (holds[holder] !== undefined) {
+      await this.ctx.storage.put('holds', { ...holds, [holder]: { vcpus: holds[holder].vcpus, until: now + LEASE_MS } });
 
+      return holds[holder].vcpus === vcpus;
+    }
+    const stored = (await this.ctx.storage.get<Record<string, Demand>>('demands')) ?? {};
+    const demands = Object.fromEntries(Object.entries(stored).filter(([, demand]) => demand.until > now));
+    demands[holder] = { vcpus, since: demands[holder]?.since ?? now, until: now + LEASE_MS };
+    const weights = (await this.ctx.storage.get<Record<string, number>>('weights')) ?? {};
+    const allocated: Record<string, number> = {};
+    for (const [name, hold] of Object.entries(holds)) allocated[jobOf(name)] = (allocated[jobOf(name)] ?? 0) + hold.vcpus;
+    const share = (name: string) => (allocated[jobOf(name)] ?? 0) / (weights[jobOf(name)] ?? 1);
+    // Non-preemptive weighted least-allocated admission, among requests that fit the free capacity. FIFO breaks ties.
+    const selected = Object.entries(demands).filter(([, demand]) => used + demand.vcpus <= Number(this.env.FLEET_VCPUS))
+      .sort(([a, left], [b, right]) => share(a) - share(b) || left.since - right.since || a.localeCompare(b))[0]?.[0];
+    const granted = selected === holder;
+    if (granted) delete demands[holder];
+
+    await this.ctx.storage.put('demands', demands);
     await this.ctx.storage.put('holds', granted ? { ...holds, [holder]: { vcpus, until: now + LEASE_MS } } : holds);
 
     return granted;
@@ -43,6 +66,9 @@ export class ArmadaFleet extends DurableObject<Env> {
     const holds = { ...(await this.ctx.storage.get<Record<string, Hold>>('holds')) ?? {} };
 
     delete holds[holder];
+    const demands = { ...(await this.ctx.storage.get<Record<string, Demand>>('demands')) ?? {} };
+    delete demands[holder];
+    await this.ctx.storage.put('demands', demands);
     await this.ctx.storage.put('holds', holds);
   }
 
@@ -64,12 +90,18 @@ export class ArmadaFleet extends DurableObject<Env> {
     return true;
   }
 
-  async opened(job: string): Promise<void> {
+  async opened(job: string, weight = 1): Promise<void> {
+    await this.ctx.storage.put('weights', { ...(await this.ctx.storage.get<Record<string, number>>('weights')) ?? {}, [job]: weight });
     await this.ctx.storage.put(`job:${job}`, Date.now());
   }
 
   async closed(job: string): Promise<void> {
     await this.ctx.storage.delete(`job:${job}`);
+    const weights = { ...(await this.ctx.storage.get<Record<string, number>>('weights')) ?? {} };
+    delete weights[job];
+    await this.ctx.storage.put('weights', weights);
+    const demands = (await this.ctx.storage.get<Record<string, Demand>>('demands')) ?? {};
+    await this.ctx.storage.put('demands', Object.fromEntries(Object.entries(demands).filter(([holder]) => jobOf(holder) !== job)));
   }
 
   async jobs(): Promise<number> {

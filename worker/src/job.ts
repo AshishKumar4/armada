@@ -22,13 +22,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, ScheduleSchema, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, textOf, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { instanceOf, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
+import { schedule } from '../../src/schedule';
 
 type Phase = JobStatus['phase'];
 
@@ -116,7 +117,7 @@ export class ArmadaJob extends DurableObject<Env> {
     this.insert(items);
     await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
-    await this.env.FLEET.getByName(SINGLE).opened(id);
+    await this.env.FLEET.getByName(SINGLE).opened(id, spec.fairWeight);
   }
 
   /** The ranks of each gang task, by vessel: `joined` while the gang forms, `ready` once it formed, `running` once the
@@ -125,6 +126,8 @@ export class ArmadaJob extends DurableObject<Env> {
   private members(): void {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS members (idx INTEGER NOT NULL, rank INTEGER NOT NULL, vessel TEXT NOT NULL, state TEXT NOT NULL,
       outcome TEXT, PRIMARY KEY (idx, rank))`);
+    this.sql.exec('CREATE TABLE IF NOT EXISTS assignments (idx INTEGER PRIMARY KEY, lane TEXT NOT NULL, position INTEGER NOT NULL)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS reservations (idx INTEGER PRIMARY KEY, start INTEGER NOT NULL)');
   }
 
   /** The new tasks' indexes. */
@@ -302,7 +305,39 @@ export class ArmadaJob extends DurableObject<Env> {
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => `v${String(named + index + 1)}`);
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
+    this.replan();
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
+  }
+
+  /** Reassign only queued independent tasks. Running work and gang reservations keep their owners. */
+  private replan(): void {
+    const now = Date.now();
+    const vessels = this.sql.exec<{ name: string; state: string; boot_ms: number | null }>(
+      `SELECT name, state, boot_ms FROM vessels WHERE state IN ('waiting', 'booting', 'working') ORDER BY rowid`,
+    ).toArray();
+    if (vessels.length === 0) return;
+    const samples = this.sql.exec<{ boot_ms: number }>('SELECT boot_ms FROM vessels WHERE boot_ms IS NOT NULL ORDER BY boot_ms').toArray();
+    const boot = (samples[Math.floor(samples.length / 2)]?.boot_ms ?? 0) / 1000;
+    const tasks = this.sql.exec<{ idx: number; weight: number }>(
+      `SELECT idx, weight FROM tasks WHERE state = 'queued' AND (json_extract(item, '$.item.gang') IS NULL OR json_extract(item, '$.item.gang') = 1) ORDER BY idx`,
+    ).toArray();
+    const releases = vessels.map((vessel) => {
+      const active = this.sql.exec<{ weight: number; started: number }>(`SELECT weight, started FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, vessel.name).toArray()[0];
+
+      return active === undefined ? vessel.state === 'working' ? 0 : boot : Math.max(0, active.weight - (now - active.started) / 1000);
+    });
+    const plan = schedule(tasks.map((task) => Math.max(0, task.weight)), releases);
+    plan.lanes.forEach((lane, index) => lane.forEach((task, position) => {
+      const row = tasks[task];
+      const vessel = vessels[index];
+      if (row !== undefined && vessel !== undefined) this.sql.exec('INSERT OR REPLACE INTO assignments VALUES (?, ?, ?)', row.idx, vessel.name, position);
+    }));
+    // This certifies the independent-task plan, not gangs or actual durations. A zero weight means no estimate exists.
+    this.sql.exec('CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY CHECK (id = 1), certificate TEXT NOT NULL)');
+    this.sql.exec('INSERT OR REPLACE INTO schedule VALUES (1, ?)', JSON.stringify({
+      makespan: plan.makespan, lowerBound: plan.lowerBound, ratio: plan.ratio, exact: plan.exact,
+      estimated: tasks.every((task) => task.weight > 0), model: 'independent tasks; estimated durations and releases',
+    }));
   }
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
@@ -352,7 +387,21 @@ export class ArmadaJob extends DurableObject<Env> {
     const ganged = await this.rank(spec, env, name);
 
     if (ganged !== undefined) return ganged;
-    const first = this.sql.exec<{ idx: number; item: string }>(`SELECT idx, item FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
+    // Oldest gangs reserve capacity before later arrivals. Backfill uses the task timeout, never a duration estimate.
+    const gang = this.sql.exec<{ idx: number; item: string }>(`SELECT idx, item FROM tasks WHERE state = 'queued' AND not_before <= ? AND json_extract(item, '$.item.gang') > 1 ORDER BY idx LIMIT 1`, now).toArray()[0];
+    let first: { idx: number; item: string } | undefined;
+    if (gang !== undefined) {
+      const world = gangOf(v.parse(TaskSchema, JSON.parse(gang.item)).item);
+      const busy = this.sql.exec<{ started: number; world: number }>(`SELECT started, COALESCE(json_extract(item, '$.item.gang'), 1) AS world FROM tasks WHERE state IN ('running', 'landing') ORDER BY started`).toArray()
+        .flatMap((task) => Array.from({ length: task.world }, () => task.started + spec.timeout * 1000));
+      const count = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
+      const availability = [...busy, ...Array.from({ length: Math.max(0, count - busy.length) }, () => now)].sort((a, b) => a - b);
+      this.sql.exec('INSERT OR IGNORE INTO reservations VALUES (?, ?)', gang.idx, Math.max(now, availability[world - 1] ?? now));
+      const reserved = this.sql.exec<{ start: number }>('SELECT start FROM reservations WHERE idx = ?', gang.idx).one().start;
+      // With no per-task certified bound shorter than this job's timeout, most reservations cannot safely backfill.
+      if (now + spec.timeout * 1000 <= reserved) first = this.independent(name, now);
+      first ??= gang;
+    } else first = this.independent(name, now);
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
       // A gang forms from the vessels that ask next, this one rank 0.
@@ -389,6 +438,16 @@ export class ArmadaJob extends DurableObject<Env> {
     return null;
   }
 
+  private independent(name: string, now: number): { idx: number; item: string } | undefined {
+    const own = this.sql.exec<{ idx: number; item: string }>(`SELECT t.idx, t.item FROM tasks t JOIN assignments a ON a.idx = t.idx WHERE t.state = 'queued' AND t.not_before <= ? AND a.lane = ?
+      AND (json_extract(t.item, '$.item.gang') IS NULL OR json_extract(t.item, '$.item.gang') = 1) ORDER BY a.position, t.idx LIMIT 1`, now, name).toArray()[0];
+    if (own !== undefined) return own;
+    // Steal unconditionally from the heaviest remaining lane. Restricting a steal by its estimate could force idleness.
+    return this.sql.exec<{ idx: number; item: string }>(`SELECT t.idx, t.item FROM tasks t LEFT JOIN assignments a ON a.idx = t.idx WHERE t.state = 'queued' AND t.not_before <= ?
+      AND (json_extract(t.item, '$.item.gang') IS NULL OR json_extract(t.item, '$.item.gang') = 1)
+      ORDER BY (SELECT COALESCE(SUM(p.weight), 0) FROM tasks p JOIN assignments q ON q.idx = p.idx WHERE q.lane IS a.lane AND p.state = 'queued') DESC, a.position, t.idx LIMIT 1`, now).toArray()[0];
+  }
+
   /** `name`'s rank in a gang: its claim once the gang formed, a wait while it forms, joining the one forming if it is in
    *  none; undefined when no gang is forming or holds it. */
   private async rank(spec: Kept, env: Record<string, string>, name: string): Promise<Claim | { readonly waitMs: number } | undefined> {
@@ -412,6 +471,7 @@ export class ArmadaJob extends DurableObject<Env> {
       this.sql.exec(`UPDATE tasks SET state = 'running', started = ?, attempts = attempts + 1, vessel = (SELECT vessel FROM members WHERE idx = ? AND rank = 0)
         WHERE idx = ?`, Date.now(), mine.idx, mine.idx);
       this.sql.exec(`UPDATE members SET state = 'ready' WHERE idx = ?`, mine.idx);
+      this.sql.exec('DELETE FROM reservations WHERE idx = ?', mine.idx);
       await this.ctx.storage.put(`gang:${String(mine.idx)}`, [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
     }
     const vessels = this.sql.exec<{ vessel: string }>('SELECT vessel FROM members WHERE idx = ? ORDER BY rank', mine.idx).toArray().map((row) => row.vessel);
@@ -564,6 +624,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
       await this.ctx.storage.put('replaced', replaced + 1);
       this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', next, 'waiting', Date.now());
+      this.replan();
       await this.launch(spec, generation, next);
     }
 
@@ -703,6 +764,15 @@ export class ArmadaJob extends DurableObject<Env> {
       vessels: vessels.map((row) => ({ name: row.name, state: row.state, tasks: row.tasks, bootMs: row.boot_ms, busyMs: row.busy_ms, error: row.error })),
       problems: (await this.ctx.storage.get<string[]>('problems')) ?? [],
       environment: generation === undefined ? null : { key: generation.key, sha: generation.sha, created: generation.created, seconds: generation.seconds },
+      schedule: this.scheduleStatus(),
     };
+  }
+
+  private scheduleStatus(): v.InferOutput<typeof ScheduleSchema> | undefined {
+    const table = this.sql.exec<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schedule'`).toArray()[0];
+    if (table === undefined) return undefined;
+    const row = this.sql.exec<{ certificate: string }>('SELECT certificate FROM schedule WHERE id = 1').toArray()[0];
+
+    return row === undefined ? undefined : v.parse(ScheduleSchema, JSON.parse(row.certificate));
   }
 }
