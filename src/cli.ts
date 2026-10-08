@@ -19,7 +19,7 @@ Usage:
   armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
                                        deploy armada to your Cloudflare account, logging in if needed
   armada map [options] -- <command>    run the command once per item
-  armada run <commit|worktree> [--label=<text>] [-- <plan args>]
+  armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json
   armada verdict <commit|worktree> [--json]
                                        print the verdict armada run stored for the commit
@@ -63,7 +63,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label='], words: 0 }],
-  ['run', { options: ['label='], words: 1 }],
+  ['run', { options: ['label=', 'secrets='], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
@@ -461,7 +461,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, option('label') ?? '', rest);
+      return await runCI(connect(), target, option('label') ?? '', rest, option('secrets')?.split(',').filter(Boolean));
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');

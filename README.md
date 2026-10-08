@@ -255,7 +255,9 @@ armada tests itself this way. Its `.armada.json`:
 ```
 
 The commit is uploaded from your machine, so private repos and unpushed commits work. Words after
-`armada run HEAD --` go to the plan command, to run part of the matrix. Ctrl-C cancels the job.
+`armada run HEAD --` go to the plan command, to run part of the matrix. `--secrets=A,B` gives this run's tasks those
+deployment secrets beside `task.secrets`, for a narrowed run that needs credentials the whole matrix must not see.
+Ctrl-C cancels the job.
 
 A run of the whole matrix stores its verdict under the commit. `armada verdict <commit>` prints it and exits 0 when
 every row is green, 1 when a row is red and 2 when the commit has none, so a hook or a deploy can take a commit's
@@ -302,7 +304,7 @@ once.
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
 armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--secrets=<A,B>] [--json] -- <command>
-armada run <commit|worktree> [--label=<text>] [-- <plan args>]
+armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push
 armada dev
