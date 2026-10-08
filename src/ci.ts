@@ -361,7 +361,7 @@ async function runGraded(armada: Armada, target: string, label: string, planArgs
   const pool = Math.max(Math.min(most, Math.max(...ranks)), estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most);
   // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
   // whole tier never sees them.
-  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
+  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, hedge: config.task.hedge, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
   // A matrix entry came from JSON, so it is JSON.
   const entries = plan.include as Json[];

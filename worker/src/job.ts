@@ -4,8 +4,9 @@
  * pays its boot once and then pulls task after task, so short and long tasks balance themselves. Each task's outcome
  * is appended to the job's event stream as it lands. A task a vessel lost to the infrastructure is queued again once;
  * a task that exited, red or green, never is. When the queue is empty, an idle vessel may run a straggler again only
- * if the job says its tasks are speculative; the first answer is kept. An open job takes more items until its client
- * closes it, starting vessels for them as they come.
+ * if the job says its tasks are speculative; the first answer is kept. A job that hedges also runs its heaviest tasks
+ * twice from the start, each second copy as soon as the queue reaches its weight. An open job takes more items until
+ * its client closes it, starting vessels for them as they come.
  *
  * A gang task (an item's `gang`, `gangOf`) runs on that many vessels at once. The vessels that ask for work join the
  * gang forming, in rank order, before any other task starts, and the gang starts once every rank has joined; each rank
@@ -352,7 +353,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const ganged = await this.rank(spec, env, name);
 
     if (ganged !== undefined) return ganged;
-    const first = this.sql.exec<{ idx: number; item: string }>(`SELECT idx, item FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
+    const first = this.sql.exec<{ idx: number; item: string; weight: number }>(`SELECT idx, item, weight FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
       // A gang forms from the vessels that ask next, this one rank 0.
@@ -361,6 +362,9 @@ export class ArmadaJob extends DurableObject<Env> {
 
       return { waitMs: GANG_WAIT_MS };
     }
+    const hedged = this.hedged(spec, name, first?.weight ?? 0);
+
+    if (hedged !== undefined) return await this.cached(spec, this.claimOf(spec, env, hedged.idx, hedged.item, hedged.attempts, true), hedged.item);
     const next = first === undefined ? undefined : this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET state = 'running', vessel = ?, started = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, first.idx,
     ).toArray()[0];
@@ -387,6 +391,19 @@ export class ArmadaJob extends DurableObject<Env> {
     this.beat(name, 'done');
 
     return null;
+  }
+
+  /** One of the job's `hedge` heaviest tasks, running on one vessel, that `name` runs a second copy of: the heaviest no
+   *  lighter than the task `waiting` next, so each copy starts as soon as the queue reaches its weight. A gang is not
+   *  repeated. The first answer is kept (`accept`), and the other copy stops (`still`). */
+  private hedged(spec: Kept, name: string, waiting: number): { idx: number; item: string; attempts: number } | undefined {
+    if (spec.hedge === 0) return undefined;
+
+    return this.sql.exec<{ idx: number; item: string; attempts: number }>(
+      `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND weight >= ?
+       AND idx IN (SELECT idx FROM tasks ORDER BY weight DESC, idx LIMIT ?) AND idx NOT IN (SELECT idx FROM members) ORDER BY weight DESC, idx LIMIT 1)
+       RETURNING idx, item, attempts`, name, name, waiting, spec.hedge,
+    ).toArray()[0];
   }
 
   /** `name`'s rank in a gang: its claim once the gang formed, a wait while it forms, joining the one forming if it is in

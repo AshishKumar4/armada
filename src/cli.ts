@@ -40,6 +40,7 @@ map options:
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
   --speculative        let an idle container run a straggler again
+  --hedge=N            run the N heaviest items twice from the start, first answer kept
   --secrets=<A,B>      give each task these secrets (armada secret set) in its environment
   --json               print each outcome as a JSON line
   --label=<text>       name the job
@@ -62,7 +63,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label='], words: 0 }],
   ['run', { options: ['label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
@@ -136,7 +137,7 @@ async function map(): Promise<number> {
   const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target);
   const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
   const argv = argvOf(rest, base);
-  const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
+  const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const options = { armada, pool: whole('pool'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);

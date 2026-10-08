@@ -211,6 +211,8 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string, S
   readonly timeout?: number;
   /** Lets an idle container run a straggler again, the first answer kept. Only for tasks safe to repeat. */
   readonly speculative?: boolean;
+  /** Runs this many of a job's heaviest tasks twice from the start, the first answer kept. Only for tasks safe to repeat. */
+  readonly hedge?: number;
   /** Runs a task again when it fails one of the named ways: an exit code, or an error its body threw, by name. */
   readonly retries?: Retries;
   /** The deployment's secrets the body gets in `context.secrets`, by name (`armada secret set <name>`). `.local` reads
@@ -241,6 +243,7 @@ export function task(config: TaskConfig<Json, unknown, Output | undefined, unkno
 interface TaskOptions {
   readonly timeout?: number;
   readonly speculative?: boolean;
+  readonly hedge?: number;
   readonly retries?: Retries;
   readonly secrets?: readonly string[];
   readonly cache?: { readonly days: number };
@@ -293,7 +296,7 @@ abstract class Base<I, O> {
     const { commit, ...recipe } = this.recipe;
     const spec = {
       recipe, commit, run, output, pool: options.pool, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
-      timeout: this.options.timeout, speculative: this.options.speculative, retries: this.options.retries,
+      timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };
 

@@ -74,6 +74,28 @@ describe('a task\'s claim', () => {
   });
 });
 
+describe('a hedged job', () => {
+  test('runs its heaviest tasks twice from the start, each copy once the queue reaches its weight, and keeps the first answer', async () => {
+    const items = [5, 9, 1, 7].map((weight) => ({ item: { weight }, argv: ['true'] }));
+    const { job: hedged } = await job({ recipe: {}, items, run: { kind: 'command' }, hedge: 2 });
+    const claims = [];
+
+    for (const vessel of ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7']) {
+      const claim = await hedged.claim(vessel);
+
+      claims.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
+    }
+    // The copy on v2 lands first: its answer is the one kept, and the first copy stops.
+    const landed = [await hedged.accept('v2', 1), await hedged.accept('v1', 1)];
+
+    await hedged.complete('v2', exited(1, 'v2'), 1000);
+    const { events } = await hedged.events(0);
+
+    expect({ claims, landed, still: await hedged.still('v1', 1), events: events.map((event) => [event.outcome.index, event.outcome.vessel]) })
+      .toEqual({ claims: [[1, false], [1, true], [3, false], [3, true], [0, false], [2, false], null], landed: [true, false], still: false, events: [[1, 'v2']] });
+  });
+});
+
 describe('a task\'s outcome', () => {
   test('is one per task: an answer that lands after the job cancelled it adds none', async () => {
     const { job: cancelled } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
