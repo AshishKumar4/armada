@@ -42,6 +42,7 @@
 - Kinu's deploy runs `armada run <sha> --secrets=... -- --deploy-phase=<phase>` against `connection.json`.
 - A change to the wire, the CLI flags, or the verdict file format breaks Kinu until Kinu repins.
 - Kinu asks for one feature: a CI task with a second, file output, so a row can return evidence without base64 in its verdict.
+- Kinu reports one bug: on the NOT GRADED path (a task with no verdict, such as one cut off at its timeout), `armada run` writes its report but returns before printing `report: <path>` (`src/ci.ts`), so a caller reading that line finds nothing.
 
 ## Open work
 1. **Scheduler v2, branch `sched-v2`.** It has six commits on `a0cff43`.
