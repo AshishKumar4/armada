@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** The armada CLI; `armada --help` prints its usage. */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
@@ -8,8 +8,8 @@ import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } fro
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
-import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, EnvironmentsSchema, mustDrain, SizeSchema, usageOf, type Push } from './protocol';
+import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, type Connection } from './sdk';
+import { ACCOUNT_VCPUS, BaseSchema, capOf, describeUsage, EnvironmentsSchema, mustDrain, shareOf, SizeSchema, usageOf, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -53,7 +53,8 @@ deploy options:
   --account=<id>       the account to use, if your login has more than one
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
-  --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
+  --vcpus=N            the most vCPUs its fleet runs at once (default 400 on a first deploy;
+                       a redeploy keeps the cap its connection file or Worker records)
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
                        client the deployed one serves, or its driver differs
 
@@ -282,6 +283,29 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
   }
 }
 
+/** The caps of the other deployments this machine has connection files for, each asked with its own bearer: null
+ *  where the Worker does not say a cap (older than the field) or does not answer in time. */
+async function knownCaps(mine: string): Promise<{ name: string; cap: number | null }[]> {
+  const files = existsSync(CONFIG_DIR) ? readdirSync(CONFIG_DIR).filter((each) => each.endsWith('.json')) : [];
+
+  return await Promise.all(files.flatMap(async (each) => {
+    const name = each === 'connection.json' ? 'armada' : each.slice(0, -'.json'.length);
+
+    if (name === mine) return [];
+    let connection: Connection;
+
+    try {
+      connection = v.parse(ConnectionSchema, JSON.parse(readFileSync(join(CONFIG_DIR, each), 'utf8')));
+    } catch {
+      return [];
+    }
+
+    const cap = await Promise.race([new Armada(connection).health().then((health) => health.cap ?? null, () => null), new Promise<null>((answer) => setTimeout(answer, 5_000))]);
+
+    return [{ name, cap }];
+  }));
+}
+
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
  *  version that still serves every client the deployed one does, on the same driver, takes over the running jobs;
  *  `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and a deploy that
@@ -289,7 +313,8 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
-  const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
+  const known = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))) : null;
+  const deployed = known === null ? null : new Armada(known);
   let drained = false;
   const admit = async () => {
     if (drained) await deployed?.admit();
@@ -306,9 +331,15 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     // their containers outlive the Worker's update, and each object resumes from storage (measured: six deploys in
     // two minutes over 200 one-minute tasks cut none and refused no job).
     const health = deployed === null ? null : await deployed.health().then((healthy) => healthy, () => null);
+    const { cap, from } = capOf(vcpus, known?.vcpus, health?.cap);
+    const { sum, unknown } = shareOf(cap, await knownCaps(name));
+    const where = { '--vcpus': '--vcpus', recorded: 'the connection file', deployed: 'the deployed Worker', default: 'the default' }[from];
+
+    console.log(`its fleet caps at ${String(cap)} vCPUs (${where}); the deployments this machine knows could ask for ${String(sum)} of the account's ${String(ACCOUNT_VCPUS)}${unknown.length === 0 ? '' : `; ${unknown.join(', ')} did not say a cap`}`);
+    if (sum > ACCOUNT_VCPUS) console.error(`warning: the known caps pass the account's container limit; extra containers are refused as "Account resource limit exceeded"`);
 
     if (deployed !== null && mustDrain(health, forceDrain)) await drain(deployed, () => { drained = true; });
-    await install(account, name, vcpus, file);
+    await install(account, name, cap, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
   } finally {
@@ -322,7 +353,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
 /** Where a deploy builds the dashboard the Worker serves (wrangler.jsonc's `assets`). */
 const DASHBOARD = join(ROOT, 'dist', 'dashboard');
 
-async function install(account: string, name: string, vcpus: number | undefined, file: string): Promise<void> {
+async function install(account: string, name: string, vcpus: number, file: string): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -341,7 +372,7 @@ async function install(account: string, name: string, vcpus: number | undefined,
     .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
     .replace('"directory": "../dist/dashboard"', `"directory": "${DASHBOARD}"`)
     .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
-    .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`));
+    .replace(/"FLEET_VCPUS": "\d+"/u, `"FLEET_VCPUS": "${String(vcpus)}"`));
 
   try {
     const deployed = wrangler(['deploy', '-c', config], account);
@@ -352,7 +383,7 @@ async function install(account: string, name: string, vcpus: number | undefined,
 
     wrangler(['secret', 'put', 'ARMADA_TOKEN', '-c', config], account, token);
     mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n');
+    writeFileSync(file, JSON.stringify({ url, token, account, vcpus }, null, 2) + '\n');
     chmodSync(file, 0o600);
     console.log(`${name} is deployed at ${url}\ntry it: armada map${name === 'armada' ? '' : ` --connection=${file}`} --times=3 --json -- echo hello {item}`);
   } finally {

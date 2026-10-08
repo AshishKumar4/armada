@@ -35,7 +35,7 @@
   // The dashboard (worker/dashboard), built here by `armada deploy` (src/dashboard.ts) and served under /ui/ before the
   // Worker runs; every other path runs the Worker.
   "assets": { "directory": "../dist/dashboard" },
-  "vars": { "FLEET_VCPUS": "1500" },
+  "vars": { "FLEET_VCPUS": "400" },
   "version_metadata": { "binding": "VERSION" },
   // Packs and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept, and a
   // pushed bundle while a task points to it.

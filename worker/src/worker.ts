@@ -358,7 +358,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const fleet = env.FLEET.getByName(SINGLE);
 
-  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs() } satisfies Health);
+  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs(), cap: Number(env.FLEET_VCPUS) } satisfies Health);
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
   if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });

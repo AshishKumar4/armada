@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { argvOf, extractTar, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, servedFloor, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
+import { capOf, environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, servedFloor, shareOf, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 
 describe('a task\'s command', () => {
@@ -240,6 +240,18 @@ describe('a deploy', () => {
       mustDrain(health(7, 3), false),
       mustDrain(health(6, 3, 1), false),
     ]).toEqual([true, true, true, true, false, false, false, true]);
+  });
+
+  test('a fleet cap comes from the flag, else the file, else the Worker, else the default', () => {
+    expect([
+      capOf(200, 64, 32), capOf(undefined, 64, 32), capOf(undefined, undefined, 32), capOf(undefined, undefined, undefined),
+    ]).toEqual([
+      { cap: 200, from: '--vcpus' }, { cap: 64, from: 'recorded' }, { cap: 32, from: 'deployed' }, { cap: 400, from: 'default' },
+    ]);
+  });
+
+  test('the known deployments share the account limit, naming the ones that did not say', () => {
+    expect(shareOf(400, [{ name: 'a', cap: 100 }, { name: 'b', cap: null }])).toEqual({ sum: 500, unknown: ['b'] });
   });
 });
 
