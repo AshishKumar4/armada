@@ -63,8 +63,9 @@ its work, so a task should be safe to run twice.
   more shows as `***` in logs.
 - **Outputs up to 4.995 GiB.** A task's output streams into R2 whole. Kinu builds its 336 MB devbox tools tarball as
   one armada task and gets it back as one output; one such run took 41 s from start to file.
-- **Deploys don't cut jobs.** `armada deploy` stops new jobs, waits for the open ones, then deploys. The pause is a
-  10-minute lease, so a deploy that dies leaves armada taking jobs again.
+- **Deploys don't stop work.** A deploy takes over the jobs running: their containers keep their tasks, and new jobs
+  are taken throughout. Six deploys in two minutes, over a map of 200 one-minute tasks, cut no task and turned away no
+  job. Only a deploy that changes the wire protocol waits for open jobs first.
 - **Any language.** The CLI maps any command, and `armada run` runs any CI matrix a command can print.
 
 ## Measured
@@ -312,9 +313,14 @@ armada prune [--keep=3]
 
 `armada --help` describes every option. `map` exits 1 if a task exits nonzero and 2 if a task could not run.
 
-`armada deploy` over a running armada first stops it taking new jobs and waits for its open ones to finish, so a
-deploy never cuts a job short. Until it is done, a new job is refused with a message to run again. A client and a
-Worker of different versions refuse each other's requests and say which one to update.
+`armada deploy` over a running armada takes over its jobs as they run: each task keeps running in its container, its
+answer lands as before, and new jobs are taken throughout. A deploy that changes the wire protocol, or one run with
+`--drain`, first stops new jobs and waits for the open ones to finish; a new job is then refused with a message to run
+again, and the pause lapses by itself after 10 minutes if the deploy dies. A client and a Worker of different
+versions refuse each other's requests and say which one to update.
+
+Each task gets exactly one recorded outcome. A task whose container is lost runs again, so an attempt cut off midway
+may already have done its work: a task should be safe to run twice.
 
 `armada deploy --name=<name>` deploys a second armada on the same account and prints the file that
 `--connection=<file>` takes to point any command at it. `--vcpus=N` caps only that deployment's fleet.
