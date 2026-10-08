@@ -637,11 +637,13 @@ describe('armada run', () => {
     }
   }
 
-  test('words after -- reach the plan, and a narrowed run stores no verdict but records its timings', async () => {
+  test('words after -- reach the plan, and a narrowed run stores neither the verdict nor its timings; a full one both', async () => {
+    const full = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] });
     const ran = await run(['--', '--tier', 'fast'], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] });
+    const told = (each: typeof ran) => ({ verdicts: each.seen.filter((one) => one.startsWith('PUT /verdicts')), timings: each.seen.includes('POST /timings/proj') });
 
-    expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), verdicts: ran.seen.filter((each) => each.startsWith('PUT /verdicts')), timings: ran.seen.includes('POST /timings/proj') })
-      .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], verdicts: [], timings: true });
+    expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), narrowed: told(ran), full: told(full) })
+      .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true } });
   });
 
   test('a task gets the deployment secrets its config names, and the plan gets none', async () => {
