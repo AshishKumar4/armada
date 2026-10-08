@@ -54,10 +54,14 @@ export interface TaskExit {
 
 /** A verdict file's rows under its task's exit: a task that exited nonzero failed, so every row it reported green is
  *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's.
- *  A task that exited nonzero having reported no row is a red row of its own, under its name. */
-export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string): VerdictRow[] {
+ *  A task that exited nonzero having reported no row, cut off at its timeout or killed before it wrote one, is red in
+ *  every row its plan entry names (`expected`), or in a row of its own under its name when the entry names none. */
+export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected: PlanEntry['rows'] = undefined): VerdictRow[] {
   if (rows.length === 0 && exit.exitCode !== 0) {
-    return [{ name: task, exitCode: exit.exitCode, seconds: exit.seconds ?? 0, output: `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}` }];
+    const output = `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}`;
+    const names = expected === undefined || expected.length === 0 ? [task] : expected.map((want) => (typeof want === 'string' ? want : want.name));
+
+    return names.map((name) => ({ name, exitCode: exit.exitCode, seconds: exit.seconds ?? 0, output }));
   }
 
   return rows.map((row) => {
@@ -74,8 +78,6 @@ export interface TaskAnswer {
   readonly entry: PlanEntry;
   /** The task's verdict rows, or null when it wrote no verdict file. */
   readonly rows: readonly VerdictRow[] | null;
-  /** How the task's command exited, when it ran; a lost or cancelled task has none. */
-  readonly exit?: TaskExit;
   /** The relative paths the task's artifacts directory kept, or null when it kept none. */
   readonly artifacts: ReadonlySet<string> | null;
 }
@@ -86,22 +88,35 @@ export interface Graded {
   readonly reds: readonly VerdictRow[];
 }
 
+/** Each file's seconds in a run: the sum of the timings its rows report for it, so a file a plan splits over several
+ *  rows is timed whole. A file a red row reports, or a row whose proof was reused, is left out: its other rows hold only
+ *  part of its time. */
+export function fileTimings(rows: readonly VerdictRow[]): Record<string, number> {
+  const files: Record<string, number> = {};
+  const partial = new Set<string>();
+
+  for (const row of rows) {
+    for (const [file, seconds] of Object.entries(row.timings ?? {})) {
+      if (row.exitCode !== 0 || row.cached !== undefined) partial.add(file);
+      files[file] = (files[file] ?? 0) + seconds;
+    }
+  }
+
+  return Object.fromEntries(Object.entries(files).filter(([file]) => !partial.has(file)));
+}
+
 export function grade(answers: readonly TaskAnswer[]): Graded {
   const problems: string[] = [];
   const rows: VerdictRow[] = [];
   const seen = new Map<string, string>();
 
   for (const answer of answers) {
-    // A task that failed before it wrote its verdict is red, not ungradeable: each row its entry names gets its
-    // exit. One that exited 0 while dropping rows, or never ran, has nothing to grade.
-    const reported = answer.rows ?? unreported(answer);
-
-    if (reported === null) {
+    if (answer.rows === null) {
       problems.push(`${answer.name} wrote no verdict`);
       continue;
     }
 
-    for (const row of reported) {
+    for (const row of answer.rows) {
       const name = rowName(row);
       const owner = seen.get(name);
 
@@ -115,23 +130,10 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       }
     }
 
-    if (answer.rows !== null) problems.push(...coverage(answer));
+    problems.push(...coverage(answer));
   }
 
   return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0) };
-}
-
-/** The rows a task that exited nonzero with no verdict is graded by: each row its entry names, red with the task's
- *  exit and its output's tail as `underExit` keeps it; the task itself where its entry names none. Null when it
- *  exited 0 or never ran. */
-function unreported(answer: TaskAnswer): VerdictRow[] | null {
-  const exit = answer.exit;
-
-  if (exit === undefined || exit.exitCode === 0) return null;
-  const named = answer.entry.rows ?? [];
-
-  return (named.length === 0 ? [answer.name] : named.map((row) => typeof row === 'string' ? row : row.name))
-    .flatMap((name) => underExit([], exit, name));
 }
 
 /** A task whose plan entry names its rows reported exactly those, each with exactly its declared files' timings. */

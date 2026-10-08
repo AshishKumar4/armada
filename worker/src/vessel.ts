@@ -16,7 +16,7 @@ import {
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
-import { GANG_DOWN, GANG_UP, RELAY, RELAY_HEADER, RELAY_IN, RELAY_PY } from './relay';
+import { GANG_DOWN, GANG_UP, LINK_ID, RELAY, RELAY_HEADER, RELAY_IN, RELAY_PY, Relayed } from './relay';
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -85,8 +85,10 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** Whether this object watches its container's end (`watch`). */
   private watching = false;
 
-  /** Each relay WebSocket's connection into the container, by the socket. */
-  private readonly relays = new Map<WebSocket, WritableStreamDefaultWriter<Uint8Array>>();
+  /** Each relay link into the container, by its id and by the WebSocket carrying it now. */
+  private readonly links = new Map<string, Relayed>();
+
+  private readonly relays = new Map<WebSocket, Relayed>();
 
   async begin(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.put({ spec, state: 'waiting' satisfies State, requested: Date.now() });
@@ -303,6 +305,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
       if (!(await job.still(spec.name, current.claim.index))) {
         await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+
+        if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
         await this.dropCurrent(slot);
       }
     }
@@ -388,50 +392,65 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('ganged', true);
   }
 
-  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a connection into
-   *  this container's relay, which connects `port` on this rank's address. */
+  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a link (`id`) into
+   *  this container's relay, which connects `port` on this rank's address; or, with `resume`, the next WebSocket of a
+   *  link whose last one dropped, gone (410) once the link is. */
   override async fetch(request: Request): Promise<Response> {
     const token = [...(await this.currents()).values()].map((current) => current.claim.gang?.token).find((gang) => gang !== undefined);
     const expected = new TextEncoder().encode(token ?? '');
     const supplied = new TextEncoder().encode(request.headers.get(RELAY_HEADER) ?? '');
 
     if (token === undefined || expected.length !== supplied.length || !crypto.subtle.timingSafeEqual(expected, supplied)) return new Response('forbidden', { status: 403 });
-    const port = Number(new URL(request.url).searchParams.get('port'));
+    const url = new URL(request.url);
+    const port = Number(url.searchParams.get('port'));
+    const id = url.searchParams.get('id') ?? '';
 
-    if (!Number.isInteger(port) || port < 1 || port > 65_535 || request.headers.get('upgrade') !== 'websocket') return new Response('a relay is a WebSocket to a port', { status: 400 });
+    if (!Number.isInteger(port) || port < 1 || port > 65_535 || !LINK_ID.test(id) || request.headers.get('upgrade') !== 'websocket') {
+      return new Response('a relay is a WebSocket to a port, under a link id', { status: 400 });
+    }
+    const held = this.links.get(id);
+
+    if (held === undefined && url.searchParams.has('resume')) return new Response('the link is gone', { status: 410 });
     const [client, server] = Object.values(new WebSocketPair());
 
     if (client === undefined || server === undefined) throw new Error('a WebSocketPair has two ends');
     this.ctx.acceptWebSocket(server);
-    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
-    const writer = socket.writable.getWriter();
-
-    this.relays.set(server, writer);
-    await writer.write(new TextEncoder().encode(`${String(port)}\n`));
-    void (async () => {
-      const reader = socket.readable.getReader();
-
-      for (let read = await reader.read(); !read.done; read = await reader.read()) server.send(read.value);
-      server.close(1000, 'closed');
-    })().catch(() => { server.close(1011, 'the connection failed'); });
+    this.relays.set(server, held ?? await this.link(id, port, url.pathname));
+    this.relays.get(server)?.attach(server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const writer = this.relays.get(socket);
+  /** A new link `id`: a connection into the container's relay for `port`, its bytes pumped to whichever WebSocket
+   *  carries the link. */
+  private async link(id: string, port: number, path: string): Promise<Relayed> {
+    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
+    const writer = socket.writable.getWriter();
+    const relayed = new Relayed(writer, (event, detail) => { console.log(JSON.stringify({ event, path, id, port, ...detail })); },
+      () => { this.links.delete(id); });
 
-    if (writer === undefined) return socket.close(1011, 'no connection');
-    await writer.write(typeof message === 'string' ? new TextEncoder().encode(message) : new Uint8Array(message));
+    this.links.set(id, relayed);
+    await writer.write(new TextEncoder().encode(`${String(port)}\n`));
+    void relayed.pump(socket.readable);
+
+    return relayed;
   }
 
-  override async webSocketClose(socket: WebSocket): Promise<void> {
-    await this.relays.get(socket)?.close().catch(() => undefined);
+  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const relayed = this.relays.get(socket);
+
+    if (relayed === undefined) return socket.close(1011, 'no link');
+    await relayed.message(socket, message);
+  }
+
+  override async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
+    await this.relays.get(socket)?.closed(socket, code, reason);
     this.relays.delete(socket);
   }
 
-  override async webSocketError(socket: WebSocket): Promise<void> {
-    await this.webSocketClose(socket);
+  override async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
+    await this.relays.get(socket)?.closed(socket, 1006, `failed: ${String(error)}`);
+    this.relays.delete(socket);
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
@@ -444,17 +463,18 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     await this.dropCurrent(slot);
 
+    // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
+    if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
+
     if (!(await job.accept(spec.name, index))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
-    await this.mask(current.claim.secrets, (spec.slots ?? 1) > 1 ? maskValuesOf(slot) : MASK_VALUES, `${dir}/log`);
+    if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', usageOf(group)], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
-    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${dir}/log > ${dir}/log.gz 2>/dev/null || : > ${dir}/log.gz
-if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts .; fi`], { ms: EXEC_MS });
-    await this.store(`${dir}/log.gz`, taskKey(spec.jobId, index, 'log', rank), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+    await must(container, 'packing the artifacts', ['/bin/sh', '-c', `if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts .; fi`], { ms: EXEC_MS });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
     const out = spec.output || spec.bundle !== null ? await this.store(`${dir}/out`, taskKey(spec.jobId, index, 'output', rank), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
@@ -488,6 +508,16 @@ if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then 
 
   /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
    *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
+  /** The task's log, its secrets masked, into R2 as its rank's. */
+  private async keepLog(spec: VesselSpec, slot: number, current: Current): Promise<void> {
+    const { dir } = this.dirs(spec, slot);
+
+    await this.mask(current.claim.secrets, (spec.slots ?? 1) > 1 ? maskValuesOf(slot) : MASK_VALUES, `${dir}/log`);
+    await must(this.container(), 'packing the log', ['/bin/sh', '-c', `gzip -c ${dir}/log > ${dir}/log.gz 2>/dev/null || : > ${dir}/log.gz`], { ms: EXEC_MS });
+    await this.store(`${dir}/log.gz`, taskKey(spec.jobId, current.claim.index, 'log', current.claim.gang?.rank ?? 0),
+      { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+  }
+
   private async mask(names: readonly string[] | undefined, kept: string, log: string): Promise<void> {
     if (names === undefined || names.length === 0) return;
     await must(this.container(), 'masking the secrets', ['node', '-e', MASK, log, kept], { ms: EXEC_MS });

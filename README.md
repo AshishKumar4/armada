@@ -108,8 +108,10 @@ echo '[{"gang": 2}]' | armada map --items=- -- sh -c 'python3 train.py --rank $A
 
 The gang starts once every rank has a container. A rank lost to the platform loses the whole gang, which runs again
 as one task. The task's outcome is its first failing rank's, else rank 0's. Containers have no inbound address, so
-ranks connect through the Worker: a few milliseconds a round trip and tens of MB/s. That suits tests and coordination,
-not bandwidth-bound training.
+ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a connection, at 2 to 64 ranks. That suits
+tests and coordination, not bandwidth-bound training. A connection to a port nothing listens on yet opens and then
+closes at once, so a client retries it as it would a refused one. One whose WebSocket the network drops goes on over
+another, the program seeing nothing of it, if the far end's vessel still holds it, for up to a minute.
 
 ## From TypeScript
 
@@ -299,3 +301,6 @@ armada prune [--keep=3]
 `armada --help` describes every option. `armada deploy --name=<name>` deploys a second armada on the same account and
 prints the file that `--connection=<file>` takes to point any command at it. `--vcpus=N` caps that deployment's fleet.
 A client and a Worker of different versions refuse each other's requests and say which one to update.
+`armada run --json` prints its progress to stderr and, when it ends, one JSON object to stdout: the commit, the plan and
+task jobs, the report's path, `graded` (`pass`, `fail` or `not graded`, as its exit code says), the problems, and the
+rows.

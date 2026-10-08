@@ -11,8 +11,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
-import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
+import { fileTimings, grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { ARTIFACTS_PATH, describeUsage, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -301,11 +301,15 @@ export function poolFor(estimates: readonly number[], most: number): number {
 
 /** A run's lanes and the containers that carry them: `poolFor` sizes the lanes, and each container carries `slots`
  *  of them. */
-export function lanesFor(estimates: readonly (number | undefined)[], tasks: number, containers: number, slots: number): { readonly lanes: number; readonly pool: number } {
-  const most = Math.min(containers * slots, tasks);
-  const lanes = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates.map((seconds) => seconds ?? 0), most) : most;
+export function lanesFor(estimates: readonly (number | undefined)[], weights: readonly number[], containers: number, slots: number): { readonly lanes: number; readonly pool: number } {
+  const most = Math.min(containers * slots, weights.reduce((sum, each) => sum + each, 0));
+  // A gang's every rank takes a container at once: it weighs as many lanes, and the pool holds the widest it can.
+  const widest = Math.min(most, Math.max(0, ...weights));
+  const lanes = estimates.every((seconds) => seconds !== undefined)
+    ? Math.max(widest, poolFor(estimates.flatMap((seconds, index) => Array<number>(weights[index] ?? 1).fill(seconds ?? 0)), most))
+    : most;
 
-  return { lanes, pool: Math.ceil(lanes / slots) };
+  return { lanes, pool: Math.max(widest, Math.ceil(lanes / slots)) };
 }
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
@@ -361,9 +365,16 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const plan = v.parse(PlanSchema, JSON.parse(printed));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const slots = config.task.slots;
-  const most = Math.min(config.pool * slots, plan.include.length);
+  // Each rank of a gang takes a container at once, so the ranks count toward the lanes the pool carries; a gang that
+  // is no whole number counts as one, for the Worker to refuse it by name.
+  const ranks = plan.include.map((entry) => {
+    const gang = gangOf(entry);
+
+    return Number.isInteger(gang) && gang > 0 ? gang : 1;
+  });
+  const most = Math.min(config.pool * slots, ranks.reduce((sum, each) => sum + each, 0));
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
-  const { lanes, pool } = lanesFor(estimates, plan.include.length, config.pool, slots);
+  const { lanes, pool } = lanesFor(estimates, ranks, config.pool, slots);
   // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
   // whole tier never sees them.
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
@@ -384,7 +395,9 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     const written = result.kind === 'ok' ? null : await job.output(result.index);
     const text = result.kind === 'ok' ? result.value : written === null ? null : new TextDecoder().decode(written);
     const parsed = text === null ? null : v.safeParse(VerdictFileSchema, jsonOf(text));
-    const rows = parsed?.success === true ? underExit(parsed.output.rows, result.meta, nameOf(result.index)) : null;
+    // A task that failed before it wrote a verdict reported no row; one that exited 0 without a verdict is ungradable.
+    const reported = parsed?.success === true ? parsed.output.rows : result.meta.exitCode !== 0 ? [] : null;
+    const rows = reported === null ? null : underExit(reported, result.meta, nameOf(result.index), plan.include[result.index]?.rows);
 
     verdicts.set(result.index, rows);
 
@@ -414,7 +427,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     const artifacts = kept.get(index)?.paths ?? null;
     const answer: TaskAnswer = result === undefined || result.kind === 'lost' || result.kind === 'cancelled' ? { name, entry, rows: null, artifacts }
       : !config.task.verdict ? { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }], artifacts }
-      : { name, entry, rows: verdicts.get(index) ?? null, exit: { exitCode: result.meta.exitCode, tail: result.meta.tail, seconds: result.meta.seconds }, artifacts };
+      : { name, entry, rows: verdicts.get(index) ?? null, artifacts };
     const dir = kept.get(index)?.dir;
 
     if (dir !== undefined) for (const row of answer.rows ?? []) evidence.set(row, dir);
@@ -449,7 +462,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
     // The usage of a narrowed run is not the commit's either: it would size the next full run down to a part's needs.
     await armada.post(`/timings/${config.name}`, {
-      rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
+      rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: fileTimings(graded.rows), usage,
     });
   } else {
     note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
-import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
+import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 
@@ -129,6 +129,15 @@ describe('grading a CI run', () => {
     expect({ problems: graded.problems, rows: graded.rows.length, reds: graded.reds.map((each) => each.name) }).toEqual({ problems: [], rows: 3, reds: ['two'] });
   });
 
+  test('a file is timed at what all its rows report for it, and not at all where a row of it was red or reused', () => {
+    const rows = [
+      row('a#1/2', 0, { 'a.test.ts': 2 }), row('a#2/2', 0, { 'a.test.ts': 3 }), row('b', 0, { 'b.test.ts': 4, 'c.test.ts': 1 }),
+      row('c', 1, { 'c.test.ts': 5 }), { ...row('d', 0, { 'd.test.ts': 6 }), cached: 'abc123' }, row('e'),
+    ];
+
+    expect(fileTimings(rows)).toEqual({ 'a.test.ts': 5, 'b.test.ts': 4 });
+  });
+
   test('a task that exits nonzero fails every row it reported green; one it reported red keeps its own exit', () => {
     const exited = underExit([row('one'), row('two', 1), { ...row('three', 1), output: '' }], { exitCode: 7, tail: 'Segmentation fault' }, 'a');
 
@@ -151,6 +160,17 @@ describe('grading a CI run', () => {
     expect(underExit([], { exitCode: 0, tail: '' }, 'a')).toEqual([]);
   });
 
+  test('a task cut off before it reported a row is red in every row its entry names, graded, with its exit', () => {
+    const expected = ['one', { name: 'two', files: ['two.test.ts'] }];
+    const exited = underExit([], { exitCode: 124, tail: 'still running at the timeout', seconds: 1800 }, 'a', expected);
+
+    expect(exited.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
+      ['one', 124, 'the task exited 124 and reported no row\nstill running at the timeout'],
+      ['two', 124, 'the task exited 124 and reported no row\nstill running at the timeout'],
+    ]);
+    expect(grade([{ name: 'a', entry: { rows: ['one', 'two'] }, rows: exited, artifacts: null }])).toMatchObject({ problems: [], reds: exited });
+  });
+
   test('a missing verdict, a missing or extra row, a row twice, and an untimed file are each named, and none is green', () => {
     const graded = grade([
       { name: 'a', entry: { rows: ['one', 'two', { name: 'split', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('stray'), row('split', 0, { 'x.test.ts': 1 })], artifacts: null },
@@ -167,20 +187,13 @@ describe('grading a CI run', () => {
     ]);
   });
 
-  test('a task that exited nonzero with no verdict is graded by each row its entry names, red with its exit', () => {
+  test('a task cut off before it reported is red in its named rows; one exiting 0 without a verdict is ungradable', () => {
     const graded = grade([
-      { name: 'a', entry: { rows: ['one', 'two'] }, rows: null, exit: { exitCode: 124, tail: 'the timeout killed it', seconds: 1800 }, artifacts: null },
-      { name: 'b', entry: {}, rows: null, exit: { exitCode: 7, tail: 'boom' }, artifacts: null },
-      { name: 'c', entry: { rows: ['three'] }, rows: null, exit: { exitCode: 0, tail: '' }, artifacts: null },
-      { name: 'd', entry: { rows: ['four'] }, rows: null, artifacts: null },
+      { name: 'a', entry: { rows: ['one', 'two'] }, rows: ['one', 'two'].map((name) => ({ name, exitCode: 124, seconds: 1800, output: 'the task exited 124 and reported no row\nthe timeout killed it' })), artifacts: null },
+      { name: 'c', entry: { rows: ['three'] }, rows: null, artifacts: null },
     ]);
 
-    expect({ problems: graded.problems, rows: graded.rows.map((each) => [rowName(each), each.exitCode, each.seconds]) }).toEqual({
-      problems: ['c wrote no verdict', 'd wrote no verdict'],
-      rows: [['one', 124, 1800], ['two', 124, 1800], ['b', 7, 0]],
-    });
-    expect(graded.rows[0]?.output).toBe('the task exited 124 and reported no row\nthe timeout killed it');
-    expect(graded.reds).toHaveLength(3);
+    expect({ problems: graded.problems, reds: graded.rows.map((each) => [rowName(each), each.exitCode]) }).toEqual({ problems: ['c wrote no verdict'], reds: [['one', 124], ['two', 124]] });
   });
 
   test('a row may name the task\'s kept artifacts as evidence; one it did not keep is a problem', () => {
@@ -275,11 +288,14 @@ describe('a CI run\'s pool', () => {
   });
 
   test('sizes lanes for a slotted run and rounds them up into containers', () => {
+    const ones = (count: number) => Array.from({ length: count }, () => 1);
+
     expect({
-      even: lanesFor(Array.from({ length: 60 }, () => 300), 60, 40, 4),
-      oneLong: lanesFor([500, ...Array.from({ length: 89 }, (_, index) => 20 + index % 40)], 90, 40, 4),
-      unsized: lanesFor([undefined, 5], 60, 40, 4),
-    }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 60, pool: 15 } });
+      even: lanesFor(Array.from({ length: 60 }, () => 300), ones(60), 40, 4),
+      oneLong: lanesFor([500, ...Array.from({ length: 89 }, (_, index) => 20 + index % 40)], ones(90), 40, 4),
+      unsized: lanesFor([undefined, 5], ones(2), 40, 4),
+      gang: lanesFor([5, 5], [1, 4], 4, 1),
+    }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 2, pool: 1 }, gang: { lanes: 4, pool: 4 } });
   });
 
   test('refuses a gang under more than one slot: a gang takes a whole container', () => {
@@ -707,6 +723,34 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, line: line?.replace(/^\s*\d+:\d+\s+/u, ''), told: ran.stdout.includes('AssertionError: y broke') })
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
+  });
+
+  test('a run\'s pool counts each rank of a gang, so a gang wider than the plan has entries is not refused', async () => {
+    const ran = await run([], { include: [{ name: 'test' }, { name: 'relay', gang: 4 }] }, '', 0, { command: ['plan'] }, { verdict: false });
+    // The plan job's pool, then the task job's: one container for `test` and four for the gang's ranks.
+    expect(ran.bodies.map((body) => v.parse(v.looseObject({ pool: v.optional(v.number()) }), body).pool)).toEqual([1, 5]);
+  });
+
+  test('a run it cannot grade names its report, which holds the rows that did report', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] });
+    const path = /^report: (.+)$/mu.exec(ran.stdout)?.[1];
+
+    expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), named: path?.endsWith('proj-tasks.json') }).toEqual({ exit: 2, graded: false, named: true });
+  });
+
+  test('a task cut off before it wrote a verdict is graded red, each row its entry names with its exit', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, '', 124);
+
+    expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), reds: ['x.mjs', 'y.mjs'].map((name) => ran.stdout.includes(`RED  ${name}  (exit 124`)) })
+      .toEqual({ exit: 1, graded: true, reds: [true, true] });
+  });
+
+  test('with --json, prints its progress to stderr and one result to stdout, graded as its exit says', async () => {
+    const ran = await run(['--json'], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 1, seconds: 2, output: 'broke' }] });
+    const result = v.parse(v.looseObject({ graded: v.string(), job: v.string(), report: v.string(), rows: v.array(v.looseObject({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, graded: result.graded, job: result.job, report: result.report.endsWith('proj-tasks.json'), rows: result.rows.map((row) => [row.name, row.exitCode]) })
+      .toEqual({ exit: 1, graded: 'fail', job: 'tasks', report: true, rows: [['x.mjs', 1]] });
   });
 
   test('a task that wrote its verdict and then exited nonzero is graded, its green rows red with its exit', async () => {
