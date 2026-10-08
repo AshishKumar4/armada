@@ -247,30 +247,31 @@ export interface Ran {
   readonly stderr: string;
 }
 
-/** An exec's abort signal on a `ms` deadline, disarmed by `clear`. `AbortSignal.timeout` is never disarmed: its timer
- *  aborts the exec even after the exec answered, and the platform logs that abort as an error on whatever event the
- *  object is in then. */
-export function deadline(ms: number): { readonly signal: AbortSignal; readonly clear: () => void } {
+/** `body` with an abort signal armed for `ms`, disarmed once `body` settles. `AbortSignal.timeout` is never disarmed:
+ *  its timer aborts the exec even after the exec answered, and the platform logs that abort as an error on whatever
+ *  event the object is in then. */
+export async function bounded<T>(ms: number, body: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => { controller.abort(new DOMException(`the exec did not answer in ${String(ms)} ms`, 'TimeoutError')); }, ms);
 
-  return { signal: controller.signal, clear: () => { clearTimeout(timer); } };
+  try {
+    return await body(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** `argv` in the container, as root or as the user, and its whole output. */
 export async function run(container: Container, argv: readonly string[], options: Exec): Promise<Ran> {
   const { ms, asUser = false, ...exec } = options;
-  const timer = deadline(ms);
 
-  try {
-    const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal: timer.signal });
+  return await bounded(ms, async (signal) => {
+    const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal });
     const out = await child.output();
     const decoder = new TextDecoder();
 
     return { exitCode: out.exitCode, stdout: decoder.decode(out.stdout), stderr: decoder.decode(out.stderr) };
-  } finally {
-    timer.clear();
-  }
+  });
 }
 
 /** `run`, refused on a non-zero exit with the tail of what it said, and named on any other failure. */

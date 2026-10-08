@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, deadline, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
+  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, bounded, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -404,17 +404,13 @@ if [ -n "$(find ${ARTIFACTS_PATH} -mindepth 1 -print -quit 2>/dev/null)" ]; then
     const size = Number(sized.stdout.trim());
 
     if (size <= INLINE_BYTES) {
-      const timer = deadline(EXEC_MS);
-
-      try {
-        const read = await (await container.exec(['cat', path], { signal: timer.signal })).output();
+      return await bounded(EXEC_MS, async (signal) => {
+        const read = await (await container.exec(['cat', path], { signal })).output();
 
         await this.env.ARTIFACTS.put(key, read.stdout, { httpMetadata });
 
         return { small: read.stdout };
-      } finally {
-        timer.clear();
-      }
+      });
     }
     const reading = await container.exec(['cat', path], { stdout: 'pipe', stderr: 'ignore' });
 
