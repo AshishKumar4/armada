@@ -489,6 +489,11 @@ class Link:
             self.changed.notify_all()
         if carrier is not None:
             carrier.close()
+        # Shut down before closing: close() alone neither wakes from_local's recv on it nor sends the program a FIN.
+        try:
+            self.local.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.local.close()
 
     def keepalive(self):

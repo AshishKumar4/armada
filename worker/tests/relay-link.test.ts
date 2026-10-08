@@ -6,10 +6,11 @@ import { Piped, RELAY_PY } from '../src/relay';
 /** Both ends of a link in one relay.py process, as two ranks' relays: the inbound end's server on a free port (printed
  *  first), an echo server on rank 0's address, and a program whose connection to the echo goes out through `carry`.
  *  The program sends `total` bytes of a pattern, closes its side and reads back until the far side closes, then prints
- *  how much came back and whether it was the pattern. */
+ *  how much came back and whether it was the pattern. With `hold`, it sends one byte and keeps its side open, as a
+ *  client waiting for a server's greeting does, reading for 20 s at most. */
 const RELAYS = String.raw`
 import hashlib, socket, sys, threading
-total, port, origin, source = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.stdin.read()
+total, port, origin, hold, source = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4] == "hold", sys.stdin.read()
 sys.argv = ["relay.py", "0", origin, "20261008000000-00000000", "token", "v1"]
 relay = {"__name__": "relay"}
 exec(source, relay)
@@ -30,10 +31,14 @@ target = echo.getsockname()[1] if port == "echo" else int(port)
 threading.Thread(target=carry, args=(relayed, 0, target), daemon=True).start()
 block = hashlib.sha256(b"link").digest() * 2048
 def write():
+    if hold:
+        program.sendall(b"e")
+        return
     for _ in range(total // len(block)):
         program.sendall(block)
     program.shutdown(socket.SHUT_WR)
 threading.Thread(target=write, daemon=True).start()
+program.settimeout(20)
 got, size = hashlib.sha256(), 0
 while data := program.recv(1 << 20):
     got.update(data)
@@ -44,7 +49,7 @@ print(size, got.hexdigest() == hashlib.sha256(block * (total // len(block))).hex
 /** A vessel's relay route over Bun's WebSockets and a TCP connection into the inbound end, each WebSocket piped
  *  (`Piped`) as a vessel pipes it. Each time `dropAfter` more of a link's outbound bytes arrive, its WebSocket drops
  *  without a Close frame, and every other time its connection in is cut too, as a vessel reset cuts it. */
-async function run(total: number, port: string, dropAfter: number) {
+async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' = 'all') {
   const reached = new Map<string, number>();
   const opened: string[] = [];
   let drops = 0;
@@ -99,7 +104,7 @@ async function run(total: number, port: string, dropAfter: number) {
     },
   });
 
-  const relays = Bun.spawn(['python3', '-c', RELAYS, String(total), port, `http://127.0.0.1:${String(server.port)}`],
+  const relays = Bun.spawn(['python3', '-c', RELAYS, String(total), port, `http://127.0.0.1:${String(server.port)}`, sending],
     { stdin: new TextEncoder().encode(RELAY_PY), stdout: 'pipe', stderr: 'pipe' });
 
   const [out, err] = await Promise.all([(async () => {
@@ -137,5 +142,13 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
     const result = await run(1 << 16, '1', Number.POSITIVE_INFINITY);
 
     expect({ out: result.out, said: result.err.includes('holds no such link') }).toEqual({ out: '0 False', said: true });
+  }, 60_000);
+
+  test('closes it at once while the program still holds its side open, waiting for a greeting', async () => {
+    // Nothing comes back, and the program's read ends rather than waiting out its 20 s.
+    const result = await run(0, '1', Number.POSITIVE_INFINITY, 'hold');
+
+    expect({ out: result.out, said: result.err.includes('holds no such link'), timedOut: result.err.includes('timed out') })
+      .toEqual({ out: '0 True', said: true, timedOut: false });
   }, 60_000);
 });
