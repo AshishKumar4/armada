@@ -1,5 +1,5 @@
 {
-  "//": "The CLI and the code it shares with the Worker (src/), and the tests, under Bun.",
+  "//": "The CLI and the code it shares with the Worker (src/), the tests and the examples, under Bun.",
   "compilerOptions": {
     "target": "ES2024",
     "module": "ESNext",
@@ -14,5 +14,5 @@
     "allowImportingTsExtensions": true,
     "moduleDetection": "force"
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"]
 }

@@ -1,13 +1,17 @@
 <p align="center"><img src=".github/banner.svg" alt="armada" width="100%"></p>
 
-Run a command or a TypeScript function over many inputs at once, on Cloudflare Containers.
+Run a command or a TypeScript function over many inputs at once, on Cloudflare Containers in your own account.
+
+- 100 videos re-encoded to 720p in 22 s on 100 containers. One container took 12 to 14 minutes for the same 100.
+- Kinu's CI, 90 rows, ran in 7 min 19 s on 13 containers. The same commit took 13 min 2 s on its GitHub Actions
+  matrix of 15 jobs.
+- One `true` task came back 2.5 s after it was sent, from a prepared snapshot.
 
 The CLI and `armada run` work with any language the environment installs. The typed SDK is TypeScript.
 
-For example, you can use it for CI. It takes about 7 seconds to spawn 100 containers and run a 3-second command on
-each, all in parallel.
-
 ## Install
+
+Install armada, deploy it to your Cloudflare account, then run `echo hello` over three items:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh
@@ -19,26 +23,84 @@ The script installs [Bun](https://bun.sh) if it's missing and puts armada in `~/
 Cloudflare login in your browser (or uses `CLOUDFLARE_API_TOKEN`) and deploys armada to your account. Containers need
 the Workers Paid plan.
 
-## How a job runs
+## How it works
 
-<p align="center"><img src=".github/job.svg" alt="A recipe becomes a snapshot once; a fleet of containers started from it pulls tasks from one queue, and each result streams back." width="100%"></p>
+<p align="center"><img src=".github/arch.svg" alt="You send a job from the CLI, the TypeScript SDK or armada run. A Worker in your Cloudflare account queues its items. An environment built once from your recipe is snapshotted. Containers start from the snapshot and pull tasks until the queue is empty. Results stream back, with outputs and logs in R2." width="100%"></p>
 
-Each task runs as the user `ci`, in a cgroup of its own (`$ARMADA_CGROUP`), with fresh tmpfs on `/tmp` and `/dev/shm`.
-Anything a task leaves running is stopped before the next task starts.
+A job comes from the CLI, a typed task in TypeScript, or a commit's CI through `armada run`. armada itself is a
+Worker, a few Durable Objects and an R2 bucket in your Cloudflare account, so your code and data stay there.
 
-## Architecture
+1. The environment is prepared once. armada starts a container from the recipe's base image, runs `setup` as root
+   and `install` as the user, and snapshots the result. A changed recipe, or a changed file in `environment.key`,
+   prepares a new one.
+2. Each container starts from that snapshot, with nothing left to install and fresh tmpfs on `/tmp` and `/dev/shm`.
+3. Each container pulls task after task from the job's one queue until the queue is empty. Items with a higher
+   `weight` go first; a CI plan weighs each row by its measured seconds, so its longest rows start first.
+4. Each result streams back as it lands. A small output rides in the result; a large one, and every log, goes to R2.
 
-<p align="center"><img src=".github/arch.svg" alt="Clients call the Worker's bearer API. The Worker keeps its state in Durable Objects: ArmadaJob, ArmadaVessel, ArmadaEnvironments, ArmadaPreparer, ArmadaTimings and ArmadaFleet. Vessels start containers from a snapshot, the preparer from the base image, and packs, bundles, outputs, logs and verdicts live in R2." width="100%"></p>
+Each task runs as the user `ci`, in a cgroup of its own. Anything a task leaves running is stopped before the next task
+starts; tasks that run one after another in a container share its `/tmp`. A task the platform loses runs again, up to
+three attempts in all. Each task gets exactly one recorded outcome, but an attempt cut off midway may already have done
+its work, so a task should be safe to run twice.
 
-The CLI and the SDK call one Worker. Its Durable Objects hold the state: each job's queue, one object per container,
-the fleet's vCPU count, and the prepared environments. Code, outputs, logs and verdicts go to R2.
+## Why it's fast
 
-### The preparer
+- **Snapshots, not installs.** An environment is prepared once, in minutes; the ffmpeg recipe's took 5.6 minutes on a
+  new deployment. After that, a container starts from its snapshot with nothing to install, in as little as 0.2 s.
+  Asked for 100 at once, all 100 had started within 3.7 s and 8.7 s in two runs of three-second tasks, and within
+  16 s in the video run.
+- **One queue, pulled.** A container takes its next task the moment it is free, so no container waits behind
+  another's slow task. In Kinu's CI, with rows weighed by their measured seconds, the run ended 2 s after its longest
+  row (442 s against 440 s).
+- **Sized from measurements.** `"size": "auto"` picks the smallest container that the last five runs' tasks fit, by
+  peak memory and busy cores. A CI plan weighs each row by its measured seconds, so the pool is no larger than the
+  work needs.
+- **Cached answers.** A task with `cache` keeps each green answer, keyed by the task, its item, its recipe and its
+  pushed code. A second job over 100 videos came back in 5.6 s with no container started, against 24 s computing them.
+- **Retries you name.** A task retries only on the exit codes or error names it lists, after a doubling backoff.
+  Every other failure is final.
+- **Secrets kept out.** A secret is stored once and given only to the tasks that name it. Each value of 4 bytes or
+  more shows as `***` in logs.
+- **Outputs up to 4.995 GiB.** A task's output streams into R2 whole. Kinu builds its 336 MB devbox tools tarball as
+  one armada task and gets it back as one output; one such run took 41 s from start to file.
+- **Deploys don't cut jobs.** `armada deploy` stops new jobs, waits for the open ones, then deploys. The pause is a
+  10-minute lease, so a deploy that dies leaves armada taking jobs again.
+- **Any language.** The CLI maps any command, and `armada run` runs any CI matrix a command can print.
 
-Installing the tools in every container would cost minutes per container. So armada prepares each environment once:
-it starts a container from the base image, runs the recipe's `setup` and `install` (checking out the commit first, for
-CI), and snapshots it. Every container after that starts from the snapshot in 0.2 to 2 seconds. Changing the recipe,
-or a file listed in `environment.key`, prepares a new snapshot.
+## Measured
+
+Each figure is from one command run against a deployed armada on 2026-10-07; run it again on yours.
+
+| Workload | armada | For comparison |
+|---|---|---|
+| 100 videos to 720p ([`examples/video-720p`](examples/video-720p)) | 21.5 s and 22.2 s on 100 `small` containers (`bun bench.ts 100`) | 705 s and 814 s one after another in one `small` container (`bun bench.ts 100 serial`) |
+| Kinu's CI, 90 rows, commit `0b74ff100` | 7 min 19 s on 13 `medium` containers (`armada run 0b74ff100`) | 13 min 2 s on its GitHub Actions matrix of 15 jobs ([run 37672204809](https://github.com/AshishKumar4/kinu/actions/runs/37672204809)) |
+| One task, from a prepared snapshot | 2.5 s from sending it to its answer (`armada map --times=1 --size=micro -- true`) | |
+| 100 three-second tasks | 9.1 s and 11.4 s on 100 `micro` containers (`armada map --times=100 --pool=100 --size=micro -- sleep 3`) | 300 s of work in all |
+| 100 video answers, cached | 5.6 s and 5.7 s, no container (`bun bench.ts 100 cached`) | 24.0 s and 28.3 s computing them, on 100 containers |
+
+Each video task makes a 10-second 1080p clip with ffmpeg's built-in test sources, then re-encodes it to 720p H.264 as
+the TypeScript example below does. Wall times include downloading every result.
+
+## Compared with others
+
+Each cell is from the tool's own documentation, read on 2026-10-07, except armada's start, which is measured above.
+
+| | armada | Modal | Ray | Lithops | Coiled | Trigger.dev | GitHub Actions matrix |
+|---|---|---|---|---|---|---|---|
+| Runs on | Cloudflare Containers in your account | Modal's cloud | your cluster | your cloud's functions or VMs | VMs in your AWS or GCP account | Trigger.dev's cloud, or self-hosted | GitHub's runners, or your own |
+| Tasks in | any language (CLI); TypeScript (SDK) | Python | Python | Python | Python; any command (batch CLI) | TypeScript | any language (YAML) |
+| Typed results | yes; optional schemas check items and values | Python hints | Python hints | no | Python hints | yes; optional input schemas | strings |
+| Start | one `true` task, end to end: 2.5 s (measured) | container boot about 1 s, plus imports | depends on the cluster | depends on the backend | 1 to 2 min for the first VM | not published | not published |
+| Parallel limit | 375 containers a job; 1,500 vCPUs a deployment by default, within your account's container limits | 100 (Starter) or 5,000 (Team) containers a workspace; 1,000 inputs at once per map | your cluster | provider quotas | 500 VMs (functions) and 1,000 (batch) by default | 20, 50 or 200+ runs by plan | 256 jobs per matrix; 20 to 500 standard-runner jobs at once by plan |
+| GPUs | no | yes | yes | depends on the backend | yes | no | larger runners, on Team and Enterprise plans |
+| You pay | the Workers Paid plan, plus container, Worker, Durable Object and R2 usage | per second, plus a plan | your machines | your cloud | your cloud, plus $0.05 per CPU-hour | per run and per machine-second | per minute on private repositories |
+
+Where armada loses:
+
+- No GPUs: Cloudflare Containers have none. The largest container is 4 vCPU and 12 GiB.
+- No Python SDK yet. Python code runs through the CLI and `armada run`, as any command does.
+- It runs only on Cloudflare.
 
 ## Examples
 
@@ -222,12 +284,13 @@ once.
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push
 armada dev
 armada status <job-id>
+armada secret set <NAME> | list | delete <NAME>
 armada prune [--keep=3]
 ```
 
