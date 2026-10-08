@@ -364,7 +364,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
     if (current.claim.gang !== undefined) await this.keepLog(spec, current);
 
-    if (!(await job.accept(spec.name, index))) return;
+    if (!(await job.accept(spec.name, index, exitCode))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
     if (current.claim.gang === undefined) await this.keepLog(spec, current);

@@ -31,7 +31,7 @@ async function cachedJob(id: string, items: readonly unknown[], artifacts: Retur
 async function answer(job: ArmadaJob, id: string, artifacts: ReturnType<typeof bucket>, vessel: string, exitCode: number, envelope: string): Promise<void> {
   const claim = await job.claim(vessel);
 
-  if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
+  if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
   await artifacts.put(taskKey(id, claim.index, 'output'), envelope);
   // What a vessel does with a green answer its claim says to cache (vessel.test.ts holds the vessel to it).
   if (exitCode === 0 && claim.cache !== undefined) await artifacts.put(claim.cache.key, envelope, { customMetadata: { expires: String(claim.cache.expires), answer: 'value' } });

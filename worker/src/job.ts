@@ -4,7 +4,7 @@
  * pays its boot once and then pulls task after task, so short and long tasks balance themselves. Each task's outcome
  * is appended to the job's event stream as it lands. A task a vessel lost to the infrastructure is queued again once;
  * a task that exited, red or green, never is. When the queue is empty, an idle vessel may run a straggler again only
- * if the job says its tasks are speculative; the first answer is kept. A job that hedges also runs its heaviest tasks
+ * if the job says its tasks are speculative; the first green answer is kept. A job that hedges also runs its heaviest tasks
  * twice from the start, each second copy as soon as the queue reaches its weight. An open job takes more items until
  * its client closes it, starting vessels for them as they come.
  *
@@ -475,8 +475,10 @@ export class ArmadaJob extends DurableObject<Env> {
     return spec.secrets.length === 0 ? {} : await this.env.SECRETS.getByName(SINGLE).values(spec.secrets);
   }
 
-  /** Whether `name`'s answer for `index` is the one kept: the first to land wins, a late duplicate is told no. */
-  async accept(name: string, index: number): Promise<boolean> {
+  /** Whether `name`'s answer for `index`, which exited `exitCode`, is the one kept: the first green to land, else the
+   *  last red. A red answer while the task's other copy still runs is declined and its copy struck from the task, so a
+   *  quick failure (a crash, a lost download) never beats a slower green; a late duplicate is told no. */
+  async accept(name: string, index: number, exitCode: number): Promise<boolean> {
     const task = this.sql.exec<{ state: string; vessel: string | null; dup: string | null }>('SELECT state, vessel, dup FROM tasks WHERE idx = ?', index).toArray()[0];
     const member = this.member(name, index);
 
@@ -488,6 +490,12 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     if (task === undefined || task.state !== 'running' || (task.vessel !== name && task.dup !== name)) return false;
+
+    if (exitCode !== 0 && task.dup !== null) {
+      this.sql.exec(task.vessel === name ? 'UPDATE tasks SET vessel = dup, dup = NULL WHERE idx = ?' : 'UPDATE tasks SET dup = NULL WHERE idx = ?', index);
+
+      return false;
+    }
     this.sql.exec(`UPDATE tasks SET state = 'landing', vessel = ? WHERE idx = ?`, name, index);
 
     return true;

@@ -45,7 +45,7 @@ describe('a job\'s env', () => {
       for (const vessel of ['v1', 'v2']) {
         const claim = await job.claim(vessel);
 
-        if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
+        if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index, 0))) throw new Error(`${vessel} got no task`);
         await job.complete(vessel, exited(claim.index, vessel), 1000);
       }
     },
