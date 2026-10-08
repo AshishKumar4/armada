@@ -130,17 +130,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
   /** The job ended or gave this vessel up: whatever it runs stops, and its capacity returns. */
   async stop(): Promise<void> {
-    const spec = await this.ctx.storage.get<VesselSpec>('spec');
-
-    await this.ctx.storage.put('state', 'stopped' satisfies State);
-    // A claim an earlier Worker stored kept its env: a stopped vessel takes up no task again.
-    await this.ctx.storage.delete('current');
-    await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
+    await this.end('stopped', await this.ctx.storage.get<VesselSpec>('spec'));
     await this.ctx.storage.deleteAlarm();
-    // Stopping is the job's last word: a container that will not stop ends at its inactivity timeout.
-    await Promise.allSettled([this.ctx.container?.destroy()]);
-
-    if (spec !== undefined) await this.fleet().release(this.holder(spec));
   }
 
   override async alarm(): Promise<void> {
@@ -163,19 +154,26 @@ export class ArmadaVessel extends DurableObject<Env> {
         await this.ctx.storage.put({ state: 'booting' satisfies State, requested: Date.now() });
       }
 
-      if ((await this.ctx.storage.get<State>('state')) === 'booting') await this.boot(spec);
+      if (state !== 'working') await this.boot(spec);
 
       if (await this.work(spec)) await this.ctx.storage.setAlarm(Date.now());
     } catch (cause) {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
-      await this.ctx.storage.put('state', 'failed' satisfies State);
-      await this.ctx.storage.delete('current');
-      await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
       console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said({ cause }) }));
-      await Promise.allSettled([this.ctx.container?.destroy()]);
-      await this.fleet().release(this.holder(spec));
+      await this.end('failed', spec);
       await job.vesselFailed(spec.name, said({ cause }));
     }
+  }
+
+  /** The vessel ended as `state`: it takes up no task again, its container goes, and its capacity returns. A container
+   *  that will not stop ends at its inactivity timeout. */
+  private async end(state: 'stopped' | 'failed' | 'done', spec: VesselSpec | undefined): Promise<void> {
+    await this.ctx.storage.put('state', state);
+    // A claim an earlier Worker stored under `current` kept its env.
+    await this.ctx.storage.delete(['current', ...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
+    await Promise.allSettled([this.ctx.container?.destroy()]);
+
+    if (spec !== undefined) await this.fleet().release(this.holder(spec));
   }
 
   private holder(spec: VesselSpec): string {
@@ -223,7 +221,6 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.env.JOB.getByName(spec.jobId).booted(spec.name, bootMs);
   }
 
-  /** Runs the loop for a slice; true while there is more to do, false once the vessel retired. */
   /** Keeps why the container ended, if it ends while this object runs: the runtime says so only through `monitor()`. */
   private watch(container: Container): void {
     if (this.watching) return;
@@ -360,17 +357,16 @@ export class ArmadaVessel extends DurableObject<Env> {
     return 'reslice';
   }
 
+  /** Runs every slot's loop for a slice; true while there is more to do, false once the vessel retired or every slot
+   *  waits out a backoff. */
   private async work(spec: SlotSpec): Promise<boolean> {
-    const container = this.container();
-    const slots = spec.slots;
-
-    this.watch(container);
+    this.watch(this.container());
     const until = Date.now() + SLICE_MS;
     const abort = { failed: false };
 
     // The first loop to fail sets the flag, which stops the others at their next step; once every loop has stopped,
     // that failure fails the vessel once, through the alarm's catch, with no loop still claiming for it.
-    const loops = Array.from({ length: slots }, async (_, slot) => {
+    const loops = Array.from({ length: spec.slots }, async (_, slot) => {
       try {
         return await this.slotLoop(spec, slot, until, abort);
       } catch (cause) {
@@ -388,18 +384,11 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     if (ended.every((each) => each === 'retired')) return await this.retire(spec);
 
-    if (ended.every((each) => each !== 'reslice')) {
-      const at = Math.min(...ended.filter((each) => each !== 'retired'));
+    if (ended.includes('reslice')) return true;
+    // Every slot that has not retired waits out a backoff: the next alarm is the soonest of them.
+    await this.ctx.storage.setAlarm(Date.now() + Math.min(...ended.filter((each): each is number => each !== 'retired' && each !== 'reslice')));
 
-      if (Number.isFinite(at)) {
-        await this.ctx.storage.setAlarm(Date.now() + at);
-
-        return false;
-
-      }
-    }
-
-    return true;
+    return false;
   }
 
   /** One claim launched into `slot`: the values its secrets started with kept for the log's mask, its gang's
@@ -416,7 +405,6 @@ export class ArmadaVessel extends DurableObject<Env> {
       }
     };
 
-    // A slotted launch recreates the slot's root inside its namespace, so the keeping goes last there.
     if (!layout.isolated) await keep();
     await this.network(container, claim.gang);
 
@@ -621,9 +609,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   private async retire(spec: VesselSpec): Promise<false> {
-    await this.ctx.storage.put('state', 'done' satisfies State);
-    await Promise.allSettled([this.container().destroy()]);
-    await this.fleet().release(this.holder(spec));
+    await this.end('done', spec);
     await this.env.JOB.getByName(spec.jobId).retired(spec.name);
 
     return false;
