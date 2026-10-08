@@ -62,6 +62,42 @@ describe('a drained version', () => {
     });
   });
 
+  test('counts a job admitted before it but still being made, so a deploy waits for it', async () => {
+    const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' }));
+    const jobs = new Map<string, ArmadaJob>();
+    let release = () => undefined as void;
+    let reached = () => undefined as void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const making = new Promise<void>((resolve) => { reached = resolve; });
+    const env: Env = world({
+      ARMADA_TOKEN: TOKEN, VERSION: { id: 'a', tag: '', timestamp: '' }, FLEET: namespace(() => fleet),
+      // The job's own making waits for `release`, as a slow storage write or RPC would.
+      JOB: namespace((name: string) => {
+        const job = jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name);
+
+        return { create: async (id: string, spec: never) => { reached(); await held; await job?.create(id, spec); } };
+      }),
+    });
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => await worker.fetch(new Request(input, init), env)) as typeof fetch;
+    const armada = new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' });
+    const creating = armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+
+    await making;
+    const open = await armada.drain();
+
+    release();
+
+    expect({ open, created: await creating, after: await fleet.jobs() }).toEqual({ open: 1, created: 'admitted', after: 1 });
+  });
+
+  test('gives back the place of a job refused while it is made', async () => {
+    const { armada, fleet } = deployment();
+    const refused = await armada.create({ ...spec, items: [] }).then(() => 'admitted', (error: unknown) => String(error));
+
+    expect({ refused, open: await fleet.jobs() }).toEqual({ refused: 'RequestError: POST /jobs: 400 a job that is not open needs an item', open: 0 });
+  });
+
   test('lapses by itself when the deploy that drained it stops asking, as one killed mid-deploy does', async () => {
     const { armada } = deployment();
 

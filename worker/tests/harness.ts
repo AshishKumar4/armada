@@ -128,7 +128,7 @@ export function bucket(objects = new Map<string, string>()) {
 /** The bindings an object reaches, each answered in memory: the fleet always has room. */
 export function world(bindings: Partial<Record<keyof Env, unknown>>): Env {
   const all = {
-    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true })),
+    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARTIFACTS: bucket(),
     ...bindings,

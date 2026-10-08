@@ -136,45 +136,45 @@ const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
 /** `POST /jobs` starts one; `/jobs/<id>` is its status, `/events?after=n` its outcomes, `/cancel` ends it, an open
  *  job takes `POST /items` and `POST /close`, `GET /items` lists its items, and `/tasks/<index>/{output,log}` are a
  *  task's stored output and log. */
-const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
-  if (id === undefined) {
-    if (request.method !== 'POST') return undefined;
-    const spec = v.parse(JobSpecSchema, await request.json());
-    const refused = refusal(spec.run, spec.items);
+/** `POST /jobs`: the job `created`, which the fleet has already admitted and counts open, made from the request's spec,
+ *  or why it is refused. */
+async function createJob(request: Request, env: Env, created: string): Promise<Response> {
+  const spec = v.parse(JobSpecSchema, await request.json());
+  const refused = refusal(spec.run, spec.items);
 
-    if (refused !== null) return Response.json({ error: refused }, { status: 400 });
+  if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 
-    if (!spec.open && spec.items.length === 0) return Response.json({ error: 'a job that is not open needs an item' }, { status: 400 });
+  if (!spec.open && spec.items.length === 0) return Response.json({ error: 'a job that is not open needs an item' }, { status: 400 });
 
-    if (spec.run.kind === 'task') {
-      // The bundle the client just pushed, else the one the task's id was last pushed with.
-      const bundle = spec.run.bundle ?? await env.TASKS.getByName(SINGLE).bundleOf(spec.run.id);
+  if (spec.run.kind === 'task') {
+    // The bundle the client just pushed, else the one the task's id was last pushed with.
+    const bundle = spec.run.bundle ?? await env.TASKS.getByName(SINGLE).bundleOf(spec.run.id);
 
-      if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed; run armada push in its project` }, { status: 409 });
+    if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed; run armada push in its project` }, { status: 409 });
 
-      if ((await env.ARTIFACTS.head(bundleKey(bundle))) === null) return Response.json({ error: `upload the bundle ${bundle} first` }, { status: 409 });
-      spec.run = { ...spec.run, bundle };
-    }
-
-    if (spec.cache !== undefined && spec.run.kind !== 'task') return Response.json({ error: 'a cache is for a pushed task: its bundle is part of the key' }, { status: 400 });
-    const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
-    const unset = spec.secrets.find((name) => !(name in held));
-
-    if (unset !== undefined) return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
-
-    if (spec.commit !== undefined) {
-      if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
-
-      if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base, spec.commit.packer))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
-    }
-
-    const created = jobId();
-
-    await env.JOB.getByName(created).create(created, spec);
-
-    return Response.json({ id: created });
+    if ((await env.ARTIFACTS.head(bundleKey(bundle))) === null) return Response.json({ error: `upload the bundle ${bundle} first` }, { status: 409 });
+    spec.run = { ...spec.run, bundle };
   }
 
+  if (spec.cache !== undefined && spec.run.kind !== 'task') return Response.json({ error: 'a cache is for a pushed task: its bundle is part of the key' }, { status: 400 });
+  const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
+  const unset = spec.secrets.find((name) => !(name in held));
+
+  if (unset !== undefined) return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
+
+  if (spec.commit !== undefined) {
+    if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
+
+    if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base, spec.commit.packer))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
+  }
+
+  await env.JOB.getByName(created).create(created, spec);
+
+  return Response.json({ id: created });
+}
+
+const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
+  if (id === undefined) return undefined;
   const job = env.JOB.getByName(id);
 
   if (tail === undefined) return Response.json(await job.status() ?? { error: 'no such job' });
@@ -291,8 +291,22 @@ async function route(request: Request, env: Env): Promise<Response> {
     return Response.json({ admitting: true });
   }
 
-  if (head === 'jobs' && path.length === 0 && request.method === 'POST' && !(await fleet.admits(env.VERSION.id))) {
-    return Response.json({ error: 'armada is being redeployed and takes no new job until that is done; run again in a few minutes' }, { status: 503 });
+  if (head === 'jobs' && path.length === 0 && request.method === 'POST') {
+    const created = jobId();
+
+    // Admitted and counted open in one step of the fleet's, so a drain that counts no open job has admitted none that
+    // is still being made; a job refused or failed on the way gives its place back.
+    if (!(await fleet.reserve(env.VERSION.id, created))) {
+      return Response.json({ error: 'armada is being redeployed and takes no new job until that is done; run again in a few minutes' }, { status: 503 });
+    }
+    const answer = await createJob(request, env, created).catch(async (cause: unknown) => {
+      await fleet.closed(created);
+      throw cause;
+    });
+
+    if (!answer.ok) await fleet.closed(created);
+
+    return answer;
   }
 
   return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
