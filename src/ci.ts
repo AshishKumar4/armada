@@ -390,14 +390,35 @@ function rowsOf(result: Result<Json, string | null> | undefined, name: string, v
   return verdict === undefined ? [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] : verdict;
 }
 
-/** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
- *  printed and reported but never stored as the commit's. With `json` the progress goes to stderr and the run's answer
- *  is the one JSON object on stdout: its verdict, problems, rows and report path. */
-export async function runCI(armada: Armada, target: string, { label, planArgs, secrets, json }: RunOptions): Promise<number> {
-  const began = Date.now();
-  // With --json, stdout carries the run's one JSON object and its progress alone goes to stderr.
-  const note = (line: string) => { (json ? console.error : console.log)(line); };
+/** What `armada run --json` prints when it ends: one object, whose `graded` is what its exit code says. */
+interface RunResult {
+  readonly sha: string;
+  readonly planJob: string | null;
+  readonly job: string | null;
+  readonly report: string | null;
+  readonly graded: 'pass' | 'fail' | 'not graded';
+  readonly problems: readonly string[];
+  readonly rows: readonly VerdictRow[];
+}
 
+const EXITS = { pass: 0, fail: 1, 'not graded': 2 } as const;
+
+/** `armada run`: progress as it goes, and with `json` one {@link RunResult} on stdout at the end, the progress then on
+ *  stderr. Exits 0 when every row is green, 1 when one is red, and 2 when the run cannot be graded. */
+export async function runCI(armada: Armada, target: string, options: RunOptions): Promise<number> {
+  const note = (line: string) => { (options.json ? console.error : console.log)(line); };
+
+  const result = await runGraded(armada, target, options, note);
+
+  if (options.json) console.log(JSON.stringify(result));
+
+  return EXITS[result.graded];
+}
+
+/** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
+ *  printed and reported but never stored as the commit's. */
+async function runGraded(armada: Armada, target: string, { label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
+  const began = Date.now();
   const { sha, repo, config, timings, environment, spec, upload } = await commitOf(armada, target);
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
@@ -431,9 +452,7 @@ export async function runCI(armada: Armada, target: string, { label, planArgs, s
 
       note(`\nNOT GRADED: ${problem}`);
 
-      if (json) console.log(JSON.stringify({ sha, planJob: planId, job: null, report: null, graded: 'not graded', problems: [problem], rows: [] }));
-
-      return 2;
+      return { sha, planJob: planId, job: null, report: null, graded: 'not graded', problems: [problem], rows: [] };
     }
 
     printed = planned.value;
@@ -543,9 +562,7 @@ export async function runCI(armada: Armada, target: string, { label, planArgs, s
     printReds(graded.reds, evidence, note);
     note(`report: ${report}`);
 
-    if (json) console.log(JSON.stringify({ sha, planJob: planId, job: jobId, report, graded: 'not graded', problems: [...status.problems, ...graded.problems], rows: graded.rows }));
-
-    return 2;
+    return { sha, planJob: planId, job: jobId, report, graded: 'not graded', problems: [...status.problems, ...graded.problems], rows: graded.rows };
   }
 
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
@@ -571,7 +588,5 @@ export async function runCI(armada: Armada, target: string, { label, planArgs, s
   if (usage !== null) note(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
   note(`report: ${report}`);
 
-  if (json) console.log(JSON.stringify({ sha, planJob: planId, job: jobId, report, graded: graded.reds.length === 0 ? 'pass' : 'fail', problems: status.problems, rows: graded.rows }));
-
-  return graded.reds.length === 0 ? 0 : 1;
+  return { sha, planJob: planId, job: jobId, report, graded: graded.reds.length === 0 ? 'pass' : 'fail', problems: status.problems, rows: graded.rows };
 }
