@@ -118,8 +118,8 @@ describe('a job\'s status', () => {
     const [one, two] = [v.parse(JobStatusSchema, await plain.status()), v.parse(JobStatusSchema, await gang.status())];
 
     expect({ plain: one.running, gang: two.running }).toEqual({
-      plain: [{ index: 0, vessel: 'v1', started: 1_800_000_000_000 }],
-      gang: [{ index: 0, vessel: 'v1', started: 1_800_000_000_000 }, { index: 0, vessel: 'v2', started: 1_800_000_000_000 }],
+      plain: [{ index: 0, vessel: 'v1', started: 1_800_000_000_000, slot: 0 }],
+      gang: [{ index: 0, vessel: 'v1', started: 1_800_000_000_000, slot: 0 }, { index: 0, vessel: 'v2', started: 1_800_000_000_000, slot: 0 }],
     });
   });
 });

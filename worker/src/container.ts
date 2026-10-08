@@ -62,8 +62,6 @@ const endGroup = (group: string): string => String.raw`if [ -d ${group} ]; then
   find ${group} -depth -type d -exec rmdir {} +
 fi`;
 
-const END_GROUP = endGroup(TASK_GROUP);
-
 /** git as a GitHub runner has it: Debian trixie's 2.47 prints no `path=` records for `rev-list --objects -z`. Built
  *  from kernel.org's release, pinned by digest. */
 const GIT = { version: '2.53.0', sha256: '5818bd7d80b061bbbdfec8a433d609dc8818a05991f731ffc4a561e2ca18c653' };
@@ -119,20 +117,28 @@ export function mounts(tmpfs: readonly string[]): string {
 for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); do umount -l "$masked"; done`;
 }
 
+/** The launch preamble both shapes share: refuse a container the platform is stopping, the parent cgroup and its
+ *  controllers, the task's own group emptied (`endGroup`), a runner sub-group, an even memory cap for a slot, and
+ *  the group handed to the user. The groups are set up here, at each launch, so a container an earlier Worker
+ *  started has them. */
+function groupSetup(group: string, memoryBytes?: number): string {
+  return String.raw`if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
+mkdir -p ${PARENT_GROUP}
+echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
+${endGroup(group)}
+mkdir -p ${group}/runner
+echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
+${memoryBytes === undefined ? '' : `echo ${String(memoryBytes)} > ${group}/memory.max
+`}for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done`;
+}
+
 /** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
  *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
  *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
- *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. The
- *  groups are set up here, at each launch, so a container an earlier Worker started has them. */
+ *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. */
 export function launchTask(workdir: string): string {
   return String.raw`set -eu
-if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
-mkdir -p ${PARENT_GROUP}
-echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
-${END_GROUP}
-mkdir -p ${TASK_GROUP}/runner
-echo '${CONTROLLERS}' > ${TASK_GROUP}/cgroup.subtree_control
-for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${TASK_GROUP}/$owned"; done
+${groupSetup(TASK_GROUP)}
 rm -rf ${TASK}
 mkdir -p ${TASK} ${ARTIFACTS_PATH}
 chown ci:ci ${TASK} ${ARTIFACTS_PATH}
@@ -153,14 +159,7 @@ export function launchSlot(workdir: string, slot: number, memoryBytes: number, t
   const fresh = tmpfs.map((path) => `mount -t tmpfs -o mode=1777,size=6g tmpfs ${path}`).join('\n');
 
   return String.raw`set -eu
-if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
-mkdir -p ${PARENT_GROUP}
-echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
-${endGroup(group)}
-mkdir -p ${group}/runner
-echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
-echo ${String(memoryBytes)} > ${group}/memory.max
-for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done
+${groupSetup(group, memoryBytes)}
 rm -rf ${root}
 mkdir -p ${dir} ${dir}/artifacts ${root}/upper ${root}/work ${root}/home-upper ${root}/home-work
 chown -R ci:ci ${root}

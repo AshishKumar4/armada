@@ -104,7 +104,7 @@ describe('a slotted vessel', () => {
   test('a stored `current` an earlier Worker left is finished as slot 0', async () => {
     const { completed } = await run({ spec: { slots: 1 }, ends: { 0: ['0\n'] }, put: { current: { claim: { index: 7, attempt: 1, argv: ['true'], secrets: [], duplicate: false }, startedAt: Date.now() } } });
 
-    expect(completed.map((outcome) => [outcome.index, outcome.exitCode, outcome.slot])).toEqual([[7, 0, undefined]]);
+    expect(completed.map((outcome) => [outcome.index, outcome.exitCode, outcome.slot])).toEqual([[7, 0, 0]]);
   });
 
   test('one slot\'s slow answer does not idle the others: they launch and finish beside it', async () => {

@@ -113,18 +113,31 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
 
-  /** Whether this object has made sure of the `events` table's `at` column (`stamped`). */
-  private stampedEvents = false;
-
-  async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
-    if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // The whole schema, once per object: created for a new job's, and an earlier Worker's tables get the columns
+    // they are missing (dup for copies, slot/dup_slot for slots, the events' landing time).
     this.sql.exec(`CREATE TABLE IF NOT EXISTS tasks (idx INTEGER PRIMARY KEY, item TEXT NOT NULL, weight REAL NOT NULL, state TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0, infra INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0, not_before INTEGER NOT NULL DEFAULT 0,
       vessel TEXT, started INTEGER, dup TEXT)`);
     this.sql.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT NOT NULL, at INTEGER)');
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vessels (name TEXT PRIMARY KEY, state TEXT NOT NULL, tasks INTEGER NOT NULL DEFAULT 0,
       boot_ms INTEGER, busy_ms INTEGER NOT NULL DEFAULT 0, error TEXT, beat INTEGER NOT NULL)`);
-    this.members();
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS members (idx INTEGER NOT NULL, rank INTEGER NOT NULL, vessel TEXT NOT NULL, state TEXT NOT NULL,
+      outcome TEXT, PRIMARY KEY (idx, rank))`);
+    // The vessels staying, each until a time, for a task about to become a straggler (`claim`).
+    this.sql.exec('CREATE TABLE IF NOT EXISTS standby (vessel TEXT PRIMARY KEY, until INTEGER NOT NULL)');
+    const tasks = this.sql.exec<{ name: string }>('PRAGMA table_info(tasks)').toArray().map((column) => column.name);
+
+    for (const column of ['dup', 'slot', 'dup_slot']) {
+      if (!tasks.includes(column)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column} INTEGER`);
+    }
+
+    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
+  }
+
+  async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
+    if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     const { items, env, open, ...kept } = spec;
 
     this.insert(items);
@@ -133,40 +146,8 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.env.FLEET.getByName(SINGLE).opened(id);
   }
 
-  /** The ranks of each gang task, by vessel: `joined` while the gang forms, `ready` once it formed, `running` once the
-   *  rank claimed it, `landing` while its answer lands, `done` with its outcome. Made here for a job an earlier Worker
-   *  created. */
-  private members(): void {
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS members (idx INTEGER NOT NULL, rank INTEGER NOT NULL, vessel TEXT NOT NULL, state TEXT NOT NULL,
-      outcome TEXT, PRIMARY KEY (idx, rank))`);
-    // The vessels staying, each until a time, for a task about to become a straggler (`claim`).
-    this.sql.exec('CREATE TABLE IF NOT EXISTS standby (vessel TEXT PRIMARY KEY, until INTEGER NOT NULL)');
-  }
-
-  /** The `events` table with its `at` column: added here to the table of a job an earlier Worker created. */
-  private stamped(): void {
-    if (this.stampedEvents) return;
-
-    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
-    this.stampedEvents = true;
-  }
-
-  private slottedTasks = false;
-
-  /** The `tasks` table with its `slot`/`dup_slot` columns: added here to the table of a job an earlier Worker
-   *  created. */
-  private slotted(): void {
-    if (this.slottedTasks) return;
-    const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(tasks)').toArray().map((column) => column.name);
-
-    if (!columns.includes('slot')) this.sql.exec('ALTER TABLE tasks ADD COLUMN slot INTEGER');
-    if (!columns.includes('dup_slot')) this.sql.exec('ALTER TABLE tasks ADD COLUMN dup_slot INTEGER');
-    this.slottedTasks = true;
-  }
-
   /** A task's one outcome, onto the stream with when it landed. */
   private append(outcome: Outcome): void {
-    this.stamped();
     this.sql.exec('INSERT INTO events (outcome, at) VALUES (?, ?)', JSON.stringify(outcome), Date.now());
   }
 
@@ -404,8 +385,6 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (vessel?.state === 'failed' || vessel?.state === 'done') return null;
     this.beat(name, 'working');
-    this.members();
-    this.slotted();
     // A vessel that claimed is no longer standing by for a straggler.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     const now = Date.now();
@@ -428,7 +407,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (hedged !== undefined) return await this.cached(spec, this.claimOf(spec, env, hedged.idx, hedged.item, hedged.attempts, true), hedged.item);
     const next = first === undefined ? undefined : this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, spec.slots > 1 ? slot : null, first.idx,
+      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, slot, first.idx,
     ).toArray()[0];
 
     if (next !== undefined) return await this.cached(spec, this.claimOf(spec, env, next.idx, next.item, next.attempts, false), next.item);
@@ -448,7 +427,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const due = `MAX(started + ${String(STRAGGLER_MS)}, started + weight * ${String(STRAGGLER_WEIGHTS * 1000)})`;
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE ${lone} AND ${due} <= ? ORDER BY started LIMIT 1) RETURNING idx, item, attempts`,
-      name, spec.slots > 1 ? slot : null, name, now,
+      name, slot, name, now,
     ).toArray()[0];
 
     if (straggler !== undefined) return await this.cached(spec, this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true), straggler.item);
@@ -476,7 +455,7 @@ export class ArmadaJob extends DurableObject<Env> {
     return this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND weight >= ?
        AND idx IN (SELECT idx FROM tasks ORDER BY weight DESC, idx LIMIT ?) AND idx NOT IN (SELECT idx FROM members) ORDER BY weight DESC, idx LIMIT 1)
-       RETURNING idx, item, attempts`, name, spec.slots > 1 ? slot : null, name, waiting, spec.hedge,
+       RETURNING idx, item, attempts`, name, slot, name, waiting, spec.hedge,
     ).toArray()[0];
   }
 
@@ -521,7 +500,6 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** `name`'s membership of gang task `index`, or undefined for a task that is no gang's or a vessel in none. */
   private member(name: string, index: number): { readonly rank: number; readonly state: string } | undefined {
-    this.members();
 
     return this.sql.exec<{ rank: number; state: string }>('SELECT rank, state FROM members WHERE idx = ? AND vessel = ?', index, name).toArray()[0];
   }
@@ -586,7 +564,6 @@ export class ArmadaJob extends DurableObject<Env> {
       return false;
     }
     await this.ctx.storage.delete(heldKey(index));
-    this.slotted();
     this.sql.exec('UPDATE tasks SET vessel = ?, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?', name, index);
 
     return true;
@@ -597,7 +574,6 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', index).toArray()[0];
 
     if (task?.dup !== name) return;
-    this.slotted();
     this.sql.exec('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE idx = ?', index);
     await this.release(index);
     await this.settle();
@@ -684,8 +660,6 @@ export class ArmadaJob extends DurableObject<Env> {
     if (spec === undefined) return;
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
     // A lost vessel no longer stays for a straggler, so a live one may.
-    this.members();
-    this.slotted();
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
@@ -727,7 +701,6 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A lost vessel's gangs: a forming one closes its ranks up; a running one is lost whole, queued again as one task,
    *  or failed once the infrastructure lost it INFRA_ATTEMPTS times. Its other ranks stop (`still`). */
   private lostRank(name: string, error: string): void {
-    this.members();
 
     for (const { idx, state, infra } of this.sql.exec<{ idx: number; state: string; infra: number }>(
       `SELECT t.idx, t.state, t.infra FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name,
@@ -828,7 +801,6 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** Outcomes after `after`, in order, and whether the job is done. */
   async events(after: number): Promise<{ events: { seq: number; outcome: Outcome; at?: number }[]; done: boolean }> {
-    this.stamped();
     const rows = this.sql.exec<{ seq: number; outcome: string; at: number | null }>('SELECT seq, outcome, at FROM events WHERE seq > ? ORDER BY seq LIMIT 2000', after).toArray();
     const done = (await this.ctx.storage.get<Phase>('phase')) === 'done';
     const last = rows.at(-1)?.seq ?? after;
@@ -839,15 +811,13 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** Each task running now on each container it runs on: a task on its vessel and on the vessel repeating it, a gang
    *  on each rank's. */
-  private running(): { index: number; vessel: string; started: number; slot?: number }[] {
-    this.members();
-    this.slotted();
+  private running(): { index: number; vessel: string; started: number; slot: number }[] {
 
     return this.sql.exec<{ index: number; vessel: string; started: number; slot: number | null }>(`SELECT idx AS "index", vessel, started, slot FROM tasks
       WHERE state IN ('running', 'landing') AND vessel IS NOT NULL AND idx NOT IN (SELECT idx FROM members)
       UNION ALL SELECT idx, dup, started, dup_slot FROM tasks WHERE state = 'running' AND dup IS NOT NULL
       UNION ALL SELECT m.idx, m.vessel, t.started, NULL FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('running', 'landing') AND m.state IN ('running', 'landing')
-      ORDER BY 1, 2`).toArray().map((row) => ({ index: row.index, vessel: row.vessel, started: row.started, ...row.slot === null ? {} : { slot: row.slot } }));
+      ORDER BY 1, 2`).toArray().map((row) => ({ index: row.index, vessel: row.vessel, started: row.started, slot: row.slot ?? 0 }));
   }
 
   async status(): Promise<JobStatus | null> {

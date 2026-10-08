@@ -43,6 +43,28 @@ export interface VesselSpec {
   readonly slotMemoryBytes?: number;
 }
 
+/** A stored spec with its later fields filled: an earlier Worker's lacks `slots`, `slotMemoryBytes` and `runtime`. */
+export interface SlotSpec extends VesselSpec {
+  readonly runtime: 'node' | 'python';
+  readonly slots: number;
+  readonly slotMemoryBytes: number;
+}
+
+/** The spec `begin` stored, every later field defaulted, so a use site never re-derives them. */
+export function specOf(stored: VesselSpec): SlotSpec {
+  return { ...stored, runtime: stored.runtime ?? 'node', slots: stored.slots ?? 1, slotMemoryBytes: stored.slotMemoryBytes ?? 0 };
+}
+
+/** Everything that differs between a shared container's task and one slot of a slotted container: the slot's task
+ *  dir (or the shared `TASK`), its cgroup, its mask file, and whether the launch is the isolated one. */
+export function layoutOf(spec: SlotSpec, slot: number): {
+  readonly dir: string; readonly group: string; readonly mask: string; readonly isolated: boolean;
+} {
+  if (spec.slots <= 1) return { dir: TASK, group: TASK_GROUP, mask: MASK_VALUES, isolated: false };
+
+  return { dir: slotTask(slot), group: taskGroup(slot), mask: maskValuesOf(slot), isolated: true };
+}
+
 type State = 'waiting' | 'booting' | 'working' | 'done' | 'failed' | 'stopped';
 
 /** The task running, kept without its environment, which only its launch needed: a job's env may carry a credential. */
@@ -111,10 +133,11 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
-    const spec = await this.ctx.storage.get<VesselSpec>('spec');
+    const stored = await this.ctx.storage.get<VesselSpec>('spec');
     const state = await this.ctx.storage.get<State>('state');
 
-    if (spec === undefined || (state !== 'waiting' && state !== 'booting' && state !== 'working')) return;
+    if (stored === undefined || (state !== 'waiting' && state !== 'booting' && state !== 'working')) return;
+    const spec = specOf(stored);
     const job = this.env.JOB.getByName(spec.jobId);
 
     try {
@@ -245,14 +268,16 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** Where slot `slot`'s task dir and its cgroup are: a slotted vessel's own under `slots`, else `TASK`'s. */
-  private dirs(spec: VesselSpec, slot: number): { readonly dir: string; readonly group: string } {
-    return (spec.slots ?? 1) > 1 ? { dir: slotTask(slot), group: taskGroup(slot) } : { dir: TASK, group: TASK_GROUP };
+  private dirs(spec: SlotSpec, slot: number): { readonly dir: string; readonly group: string } {
+    const { dir, group } = layoutOf(spec, slot);
+
+    return { dir, group };
   }
 
   /** One slot's slice: pull a task while free, block on `waitOn` while one runs, finish it, repeat — all slots' loops
    *  run beside each other, so one slot's store never idles another's launch. A null claim ends this loop retired; a
    *  `waitMs` parks only this slot; a fatal error fails the vessel once through `abort`. */
-  private async slotLoop(spec: VesselSpec, slot: number, until: number, abort: { failed: boolean }): Promise<'reslice' | 'retired' | number> {
+  private async slotLoop(spec: SlotSpec, slot: number, until: number, abort: { failed: boolean }): Promise<'reslice' | 'retired' | number> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
     const { dir, group } = this.dirs(spec, slot);
@@ -316,9 +341,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     return 'reslice';
   }
 
-  private async work(spec: VesselSpec): Promise<boolean> {
+  private async work(spec: SlotSpec): Promise<boolean> {
     const container = this.container();
-    const slots = spec.slots ?? 1;
+    const slots = spec.slots;
 
     this.watch(container);
     const until = Date.now() + SLICE_MS;
@@ -357,21 +382,23 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** One claim launched into `slot`: the values its secrets started with kept for the log's mask, its gang's
    *  network joined (a plain task leaves any), the launch detached. A slotted launch recreates the slot's root where
    *  the file lives, so the keeping goes last there; a plain one keeps today's order. */
-  private async launch(spec: VesselSpec, container: Container, claim: Claim, slot: number): Promise<void> {
+  private async launch(spec: SlotSpec, container: Container, claim: Claim, slot: number): Promise<void> {
+    const layout = layoutOf(spec, slot);
     const keep = async () => {
       // The values the task gets are the ones its log is masked with, kept as root in the container: a secret set
       // again or deleted while the task runs changes neither.
       if (claim.secrets.length > 0) {
-        await must(container, 'keeping the secrets to mask', ['node', '-e', KEEP_MASK, (spec.slots ?? 1) > 1 ? maskValuesOf(slot) : MASK_VALUES], { env: { ...claim.env, ARMADA_MASK: claim.secrets.join(' ') }, ms: EXEC_MS });
+        await must(container, 'keeping the secrets to mask', ['node', '-e', KEEP_MASK, layout.mask], { env: { ...claim.env, ARMADA_MASK: claim.secrets.join(' ') }, ms: EXEC_MS });
       }
     };
 
-    if ((spec.slots ?? 1) <= 1) await keep();
+    // A slotted launch recreates the slot's root inside its namespace, so the keeping goes last there.
+    if (!layout.isolated) await keep();
     await this.network(container, claim.gang);
 
-    if ((spec.slots ?? 1) > 1) {
+    if (layout.isolated) {
       // Its own cgroup too, so a task's group reads and caps reach the slot's, not the single task group.
-      await must(container, 'the launch', ['/bin/sh', '-c', launchSlot(spec.workdir, slot, spec.slotMemoryBytes ?? 0, spec.tmpfs), 'launch', ...claim.argv], { env: { ...claim.env, ARMADA_CGROUP: taskGroup(slot) }, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchSlot(spec.workdir, slot, spec.slotMemoryBytes, spec.tmpfs), 'launch', ...claim.argv], { env: { ...claim.env, ARMADA_CGROUP: layout.group }, ms: EXEC_MS });
       await keep();
     } else {
       await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
@@ -444,7 +471,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
-  private async finish(spec: VesselSpec, slot: number, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
+  private async finish(spec: SlotSpec, slot: number, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
     const container = this.container();
     const { dir, group } = this.dirs(spec, slot);
     const { index, attempt } = current.claim;
@@ -475,7 +502,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const [kind = '', error] = said.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
     const outcome: Outcome = {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, ...(spec.slots ?? 1) > 1 ? { slot } : {}, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
     };
 
     if (exitCode === 0 && out !== null && current.claim.cache !== undefined) await this.keepInCache(taskKey(spec.jobId, index, 'output'), current.claim.cache, answer);
@@ -500,10 +527,10 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
   /** The task's log, its secrets masked, into R2 as its rank's; a gang rank's ends with the relay's own, how each of its
    *  links dropped or ended. Gangs only run with one slot, so `dir` is TASK for them. */
-  private async keepLog(spec: VesselSpec, slot: number, current: Current): Promise<void> {
+  private async keepLog(spec: SlotSpec, slot: number, current: Current): Promise<void> {
     const { dir } = this.dirs(spec, slot);
 
-    await this.mask(current.claim.secrets, (spec.slots ?? 1) > 1 ? maskValuesOf(slot) : MASK_VALUES, `${dir}/log`);
+    await this.mask(current.claim.secrets, layoutOf(spec, slot).mask, `${dir}/log`);
 
     if (current.claim.gang !== undefined) {
       await must(this.container(), 'appending the relay\'s log', ['/bin/sh', '-c', `{ echo; echo '--- the relay'; tail -c 65536 ${RELAY_LOG}; } >> ${dir}/log 2>/dev/null || :`], { ms: EXEC_MS });
