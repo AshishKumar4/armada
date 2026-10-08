@@ -5,10 +5,11 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
+import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
+import { BaseSchema, describeUsage, EnvironmentsSchema, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -26,6 +27,8 @@ Usage:
   armada push                          send this project's tasks (armada.config.ts) to armada
   armada dev                           push them again on every save
   armada status <job-id>               print a job's status as JSON
+  armada dashboard [--serve=<port>]    open the deployment's dashboard in your browser, signed in;
+                                       --serve serves it from this machine instead
   armada secret set <NAME>             set a secret from stdin, for the tasks that name it
   armada secret list | delete <NAME>   list the secrets' names, or delete one
   armada prune [--keep=3]              delete the snapshots of all but the newest environments
@@ -69,6 +72,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
   ['status', { options: [], words: 1 }],
+  ['dashboard', { options: ['serve='], words: 0 }],
   ['secret', { options: [], words: 2 }],
   ['prune', { options: ['keep='], words: 0 }],
 ]);
@@ -301,7 +305,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     const speaks = deployed === null ? null : await deployed.health().then((health) => health.protocol, () => null);
 
     if (deployed !== null && (forceDrain || speaks !== PROTOCOL)) await drain(deployed, () => { drained = true; });
-    install(account, name, vcpus, file);
+    await install(account, name, vcpus, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
   } finally {
@@ -312,7 +316,10 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   return 0;
 }
 
-function install(account: string, name: string, vcpus: number | undefined, file: string): void {
+/** Where a deploy builds the dashboard the Worker serves (wrangler.jsonc's `assets`). */
+const DASHBOARD = join(ROOT, 'dist', 'dashboard');
+
+async function install(account: string, name: string, vcpus: number | undefined, file: string): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -326,8 +333,10 @@ function install(account: string, name: string, vcpus: number | undefined, file:
 
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
 
+  await buildDashboard(DASHBOARD);
   writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "${name}",\n  "account_id": "${account}",`)
     .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
+    .replace('"directory": "../dist/dashboard"', `"directory": "${DASHBOARD}"`)
     .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
     .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`));
 
@@ -348,20 +357,17 @@ function install(account: string, name: string, vcpus: number | undefined, file:
   }
 }
 
-const EntrySchema = v.object({ key: v.string(), entry: v.looseObject({ state: v.string(), lastUsed: v.optional(v.number()), generation: v.optional(v.object({ snapshot: v.object({ id: v.string() }) })) }) });
-
 /** Deletes the snapshots of all but the `keep` most recently used environments; a later job prepares one again. */
 async function prune(keep: number): Promise<number> {
   const token = process.env['ARMADA_REGISTRY_TOKEN'] ?? '';
 
   if (token === '') throw new Error('pruning deletes registry tags: export ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit');
   const armada = connect();
-  const listed = v.parse(v.array(EntrySchema), await (await armada.call('/environments')).json());
-  const ready = listed.filter((each) => each.entry.state === 'ready').sort((left, right) => (right.entry.lastUsed ?? 0) - (left.entry.lastUsed ?? 0));
+  const listed = v.parse(EnvironmentsSchema, await (await armada.call('/environments')).json());
+  const ready = listed.flatMap(({ key, entry }) => entry.state === 'ready' ? [{ key, entry }] : []).sort((left, right) => right.entry.lastUsed - left.entry.lastUsed);
 
   for (const { key, entry } of ready.slice(keep)) {
-    const id = entry.generation?.snapshot.id;
-    const deleted = id === undefined ? 'absent' : await deleteSnapshot({ account: armada.connection.account, token, id });
+    const deleted = await deleteSnapshot({ account: armada.connection.account, token, id: entry.generation.snapshot.id });
 
     await armada.call(`/environments/${key}`, { method: 'DELETE' });
     console.log(`pruned ${key.slice(0, 12)} (${deleted})`);
@@ -497,6 +503,19 @@ async function main(): Promise<number> {
 
     case 'secret':
       return await secret(connect(), target, words[1]);
+
+    case 'dashboard': {
+      const port = whole('serve');
+
+      if (port !== undefined) return await serveDashboard(connect(), port);
+      const url = dashboardUrl(connect());
+
+      // The address holds the bearer, so it is printed only when no browser took it.
+      if (openInBrowser(url)) console.log('opened the dashboard in your browser');
+      else console.log(`open this address, which signs a browser in to this deployment:\n${url}`);
+
+      return 0;
+    }
 
     case 'deploy': {
       const name = option('name') ?? 'armada';

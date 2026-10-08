@@ -4,7 +4,10 @@
  * which a gang's containers reach each other through with the gang's own token (`relay.ts`).
  */
 import * as v from 'valibot';
-import { DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha, TaskSchema, TimingsSchema } from '../../src/protocol';
+import {
+  briefOf, DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  TaskSchema, TimingsSchema,
+} from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
 
 export { ArmadaJob } from './job';
@@ -134,9 +137,6 @@ const bundles: Handler = async (request, env, [digest]) => {
 
 const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
 
-/** `POST /jobs` starts one; `/jobs/<id>` is its status, `/events?after=n` its outcomes, `/cancel` ends it, an open
- *  job takes `POST /items` and `POST /close`, `GET /items` lists its items, and `/tasks/<index>/{output,log}` are a
- *  task's stored output and log. */
 /** `POST /jobs`: the job `created`, which the fleet has already admitted and counts open, made from the request's spec,
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
@@ -174,8 +174,23 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
   return Response.json({ id: created });
 }
 
+/** The most jobs `GET /jobs` lists at once. */
+const LISTED = 100;
+
+/** `POST /jobs` starts one (`route`) and `GET /jobs` lists the recent ones; `/jobs/<id>` is its status,
+ *  `/events?after=n` its outcomes, `/cancel` ends it, an open job takes `POST /items` and `POST /close`, `GET /items`
+ *  lists its items, and `/tasks/<index>/{output,log}` are a task's stored output and log. */
 const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
-  if (id === undefined) return undefined;
+  if (id === undefined) {
+    if (request.method !== 'GET') return undefined;
+    // `?before=<id>` pages back from a job the last page ended with.
+    const limit = Math.min(LISTED, Math.max(1, Number(url.searchParams.get('limit') ?? '30') || 30));
+    const before = url.searchParams.get('before') ?? undefined;
+    const ids = await env.FLEET.getByName(SINGLE).recent(limit, before);
+    const statuses = await Promise.all(ids.map(async (each) => await env.JOB.getByName(each).status()));
+
+    return Response.json({ jobs: statuses.flatMap((status) => status === null ? [] : [briefOf(status)]) });
+  }
   const job = env.JOB.getByName(id);
 
   if (tail === undefined) return Response.json(await job.status() ?? { error: 'no such job' });
@@ -230,20 +245,73 @@ const secrets: Handler = async (request, env, [name]) => {
   return Response.json({ stored: name });
 };
 
-/** `/verdicts/<project>/<sha>`: a graded CI run's collected verdict file. */
+const VerdictFile = v.looseObject({ sha: Sha, part: v.literal('all'), rows: v.array(v.looseObject({ exitCode: v.number() })) });
+
+/** The most verdicts `GET /verdicts/<project>` lists, newest first. */
+const VERDICTS_LISTED = 50;
+
+/** `/verdicts` names the projects with a verdict; `/verdicts/<project>` lists its newest, and `/verdicts/<project>/<sha>`
+ *  is a graded CI run's collected verdict file. A verdict is stored with its row counts, so a list reads no file but
+ *  one stored before it had them. */
 const verdicts: Handler = async (request, env, [project, sha]) => {
-  if (!v.is(Project, project) || !v.is(Sha, sha)) return undefined;
+  if (project === undefined) {
+    if (request.method !== 'GET') return undefined;
+    const projects: string[] = [];
+
+    for (let cursor: string | undefined; ;) {
+      const page = await env.ARTIFACTS.list({ prefix: 'verdicts/', delimiter: '/', cursor });
+
+      projects.push(...page.delimitedPrefixes.map((prefix) => prefix.slice('verdicts/'.length, -1)));
+
+      if (!page.truncated) return Response.json({ projects: projects.filter((name) => v.is(Project, name)) });
+      cursor = page.cursor;
+    }
+  }
+
+  if (!v.is(Project, project)) return undefined;
+
+  if (sha === undefined) return request.method === 'GET' ? Response.json({ verdicts: await verdictsOf(env, project) }) : undefined;
+
+  if (!v.is(Sha, sha)) return undefined;
   const key = `verdicts/${project}/${sha}.json`;
 
   if (request.method === 'GET') return await object(env, key);
 
   if (request.method !== 'PUT') return undefined;
-  const file = v.parse(v.looseObject({ sha: v.literal(sha), part: v.literal('all'), rows: v.array(v.looseObject({ exitCode: v.number() })) }), await request.json());
+  const file = v.parse(VerdictFile, await request.json());
 
-  await env.ARTIFACTS.put(key, JSON.stringify(file), { httpMetadata: { contentType: 'application/json' } });
+  if (file.sha !== sha) return Response.json({ error: `the verdict is of ${file.sha}, not ${sha}` }, { status: 400 });
+  await env.ARTIFACTS.put(key, JSON.stringify(file), {
+    httpMetadata: { contentType: 'application/json' }, customMetadata: { rows: String(file.rows.length), reds: String(file.rows.filter((row) => row.exitCode !== 0).length) },
+  });
 
   return Response.json({ stored: key });
 };
+
+/** A project's newest verdicts with their counts. */
+async function verdictsOf(env: Env, project: string): Promise<{ sha: string; uploaded: number; rows: number; reds: number }[]> {
+  const listed: R2Object[] = [];
+
+  for (let cursor: string | undefined; ;) {
+    const page = await env.ARTIFACTS.list({ prefix: `verdicts/${project}/`, cursor, include: ['customMetadata'] });
+
+    listed.push(...page.objects);
+
+    if (!page.truncated) break;
+    cursor = page.cursor;
+  }
+  const newest = listed.sort((left, right) => right.uploaded.getTime() - left.uploaded.getTime()).slice(0, VERDICTS_LISTED);
+
+  return await Promise.all(newest.map(async (stored) => {
+    const sha = stored.key.slice(`verdicts/${project}/`.length, -'.json'.length);
+    const { rows, reds } = stored.customMetadata ?? {};
+
+    if (rows !== undefined && reds !== undefined) return { sha, uploaded: stored.uploaded.getTime(), rows: Number(rows), reds: Number(reds) };
+    const file = v.parse(VerdictFile, await (await env.ARTIFACTS.get(stored.key))?.json());
+
+    return { sha, uploaded: stored.uploaded.getTime(), rows: file.rows.length, reds: file.rows.filter((row) => row.exitCode !== 0).length };
+  }));
+}
 
 /** `/timings/<project>`: GET the medians a plan weighs rows by; POST a graded run's green rows and files. */
 const timings: Handler = async (request, env, [project]) => {
@@ -277,7 +345,12 @@ const environments: Handler = async (request, env, [key]) => {
   return Response.json({ forgotten: key });
 };
 
-const ROUTES: ReadonlyMap<string, Handler> = new Map([['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments], ['secrets', secrets]]);
+/** `/fleet`: the vCPUs each job holds now, under the deployment's cap. */
+const fleet: Handler = async (request, env) => request.method === 'GET' ? Response.json(await env.FLEET.getByName(SINGLE).shares()) : undefined;
+
+const ROUTES: ReadonlyMap<string, Handler> = new Map([
+  ['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments], ['secrets', secrets], ['fleet', fleet],
+]);
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -330,6 +403,9 @@ export default {
     const [first, ...rest] = new URL(request.url).pathname.split('/').filter((segment) => segment !== '');
 
     if (first === 'relay') return await relayed(request, env, rest);
+
+    // The dashboard is static assets under /ui/, served before the Worker runs; a browser at the root is sent there.
+    if (first === undefined && (request.method === 'GET' || request.method === 'HEAD')) return Response.redirect(new URL('/ui/', request.url).href, 302);
 
     if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
     // A request with no version is from a client older than the version was. The drain and the health are the same in

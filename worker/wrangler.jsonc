@@ -32,6 +32,9 @@
     { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] },
     { "tag": "v3", "new_sqlite_classes": ["ArmadaSecrets"] }
   ],
+  // The dashboard (worker/dashboard), built here by `armada deploy` (src/dashboard.ts) and served under /ui/ before the
+  // Worker runs; every other path runs the Worker.
+  "assets": { "directory": "../dist/dashboard" },
   "vars": { "FLEET_VCPUS": "1500" },
   "version_metadata": { "binding": "VERSION" },
   // Packs and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept, and a

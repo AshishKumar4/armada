@@ -9,25 +9,14 @@
  * old snapshot trusted for weeks.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { failureTail, workdirOf, type Recipe } from '../../src/protocol';
+import type * as v from 'valibot';
+import { failureTail, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe } from '../../src/protocol';
 import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
-/** An environment snapshot: what every container with its key starts from. */
-export interface Generation {
-  readonly key: string;
-  readonly snapshot: { readonly id: string; readonly size: number };
-  /** The commit whose checkout and install it holds, for a repository recipe. */
-  readonly sha: string | null;
-  readonly created: number;
-  /** Seconds each preparation phase took. */
-  readonly seconds: Record<string, number>;
-}
+export type Generation = v.InferOutput<typeof GenerationSchema>;
 
-type Entry =
-  | { readonly state: 'preparing'; readonly sha: string | null; readonly since: number }
-  | { readonly state: 'ready'; readonly generation: Generation; readonly lastUsed: number }
-  | { readonly state: 'failed'; readonly at: number; readonly reason: string };
+type Entry = v.InferOutput<typeof EnvironmentEntrySchema>;
 
 export type Readiness =
   | { readonly kind: 'ready'; readonly generation: Generation }

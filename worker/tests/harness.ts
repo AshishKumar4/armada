@@ -58,7 +58,13 @@ export function state(container?: Container): Stored {
       for (const [name, each] of typeof key === 'string' ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
     },
     delete: async (keys: string | readonly string[]) => typeof keys === 'string' ? entries.delete(keys) : keys.filter((key) => entries.delete(key)).length,
-    list: async ({ prefix = '' }: { prefix?: string } = {}) => new Map([...entries].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key, structuredClone(value)])),
+    // As the platform lists: in key order, `end` exclusive, `limit` keys from the end `reverse` names.
+    list: async ({ prefix = '', end, reverse = false, limit }: { prefix?: string; end?: string; reverse?: boolean; limit?: number } = {}) => {
+      const keys = [...entries.keys()].filter((key) => key.startsWith(prefix) && (end === undefined || key < end)).sort();
+      const ordered = reverse ? keys.reverse() : keys;
+
+      return new Map(ordered.slice(0, limit ?? ordered.length).map((key) => [key, structuredClone(entries.get(key))]));
+    },
     setAlarm: async () => undefined,
     deleteAlarm: async () => undefined,
     sql: {
@@ -120,7 +126,7 @@ export function bucket(objects = new Map<string, string>()) {
       if (text === undefined) return null;
       const bytes = new TextEncoder().encode(text);
 
-      return { ...object(key), size: bytes.byteLength, body: new Blob([bytes]).stream(), text: async () => text, arrayBuffer: async () => bytes.buffer };
+      return { ...object(key), size: bytes.byteLength, body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<unknown> => JSON.parse(text), arrayBuffer: async () => bytes.buffer };
     },
     put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string>; readonly httpMetadata?: R2HTTPMetadata } = {}) => {
       objects.set(key, typeof body === 'string' ? body : await new Response(body).text());
@@ -130,7 +136,16 @@ export function bucket(objects = new Map<string, string>()) {
       objects.delete(key);
       kept.delete(key);
     },
-    list: async ({ prefix = '' }: { readonly prefix?: string } = {}) => ({ objects: [...objects.keys()].filter((key) => key.startsWith(prefix)).sort().map(object), truncated: false }),
+    // A `delimiter` folds the keys under each next segment into one of `delimitedPrefixes`, as R2 does.
+    list: async ({ prefix = '', delimiter }: { readonly prefix?: string; readonly delimiter?: string } = {}) => {
+      const keys = [...objects.keys()].filter((key) => key.startsWith(prefix)).sort();
+      const folded = (key: string) => delimiter !== undefined && key.slice(prefix.length).includes(delimiter);
+
+      return {
+        objects: keys.filter((key) => !folded(key)).map(object), truncated: false,
+        delimitedPrefixes: [...new Set(keys.filter(folded).map((key) => key.slice(0, key.indexOf(delimiter ?? '', prefix.length) + 1)))],
+      };
+    },
   };
 }
 
