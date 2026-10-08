@@ -1,5 +1,5 @@
 /**
- * A task's cgroup, on a real cgroup v2 hierarchy: what `launchTask`, `WAIT` and `KILL` run in a container, run here as
+ * A task's cgroup, on a real cgroup v2 hierarchy: what `launchTask`, `WAIT` and `killOf` run in a container, run here as
  * root on a host with armada's runner layer (the `ci` user, setpriv), starting with no armada group at all, as in a
  * container an earlier Worker started. Elsewhere it is skipped, and says so; run
  * it as a recipe's setup to prove it on the platform.
@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KILL, launchTask, TASK, TASK_GROUP, WAIT } from '../src/container';
+import { killOf, launchTask, TASK, TASK_GROUP, WAIT } from '../src/container';
 
 const host = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode === 0 && readFileSync('/proc/self/mounts', 'utf8').includes(' /sys/fs/cgroup cgroup2 ');
 
@@ -57,7 +57,7 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
   test('a killed task ends with all it started', () => {
     expect(sh(launchTask(workdir), 'sh', '-c', 'setsid sleep 603 >/dev/null 2>&1 < /dev/null & sleep 604').exitCode).toBe(0);
     expect(sh(WAIT, '1').stdout.toString().trim()).toBe('');
-    expect(sh(KILL).exitCode).toBe(0);
+    expect(sh(killOf(TASK, TASK_GROUP)).exitCode).toBe(0);
     expect({ left: [alive('sleep 603'), alive('sleep 604')], group: existsSync(TASK_GROUP) }).toEqual({ left: [false, false], group: false });
   });
 });

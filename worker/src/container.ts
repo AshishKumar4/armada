@@ -200,9 +200,7 @@ setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null 
 /** `group`'s task's cgroup after it exited: its peak memory in bytes, then its CPU time in microseconds. */
 export const usageOf = (group: string): string => String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat`;
 
-export const USAGE = usageOf(TASK_GROUP);
-
-/** `USAGE`'s answer, or nothing for a group already gone. */
+/** `usageOf`'s answer, or nothing for a group already gone. */
 export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: number } {
   const [memory, cpu] = stdout.trim().split('\n').map(Number);
 
@@ -273,8 +271,6 @@ if [ -n "$pid" ]; then
   kill -KILL -- "-$pid" 2>/dev/null || true
 fi
 ${endGroup(group)}`;
-
-export const KILL = killOf(TASK, TASK_GROUP);
 
 /** A size's instance type, as a start takes it. */
 export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;

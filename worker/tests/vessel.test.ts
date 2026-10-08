@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Outcome } from '../../src/protocol';
-import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, USAGE } from '../src/container';
+import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
@@ -50,7 +50,7 @@ async function run(lost: number, { usage = { exitCode: 0, stdout: '' }, out, sto
   let waits = 0;
 
   const stored = state(container((argv) => {
-    if (argv[2] === USAGE) return usage;
+    if (argv[2] === usageOf(TASK_GROUP)) return usage;
 
     if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
 
