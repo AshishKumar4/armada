@@ -12,7 +12,7 @@ import threading
 import tomllib
 import zipfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from dataclasses import dataclass
 

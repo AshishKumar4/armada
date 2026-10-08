@@ -11,6 +11,7 @@ from armada import Context, Ok, Result, Task, task  # noqa: E402
 from armada.client import JobStatus, Summary  # noqa: E402,F401
 from armada.sh import Shell, sh  # noqa: E402
 from armada.task import Cancelled, Errored, Lost, MapError, TimedOut  # noqa: E402
+from armada.wire import Json  # noqa: E402
 
 
 # A body returning a value, no output: the Task's item and answer types are the body's.
@@ -98,7 +99,7 @@ def served(port: Port, ctx: Context) -> int:
     return 0
 
 
-assert_type(served, Task[object, int])
+assert_type(served, Task[Json, int])
 
 
 # Results narrow on `ok`: the union's discriminant gives `value` only to an ok result.

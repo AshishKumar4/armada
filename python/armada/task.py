@@ -10,15 +10,16 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import (Any, BinaryIO, Callable, Generic, Iterable, Iterator, Literal, Optional, Protocol, TypedDict,
+from typing import (BinaryIO, Callable, Generic, Iterable, Iterator, Literal, Mapping, Optional, Protocol, TypedDict,
                     TypeVar, Union, cast, overload)
 
 from .client import Armada, connect, JobStatus, Summary, summary_of
 from .recipe import Recipe, RecipeBuilder, recipe as default_recipe
 from .sh import OutFile, Shell, ShellError, execute, out_file
-from .wire import Json, remote_error
+from .wire import Json, maybe_number_of, number_of, object_of, remote_error, text_of
 
-I = TypeVar("I")
+# A job's items travel as JSON, so an item type is one JSON can carry.
+I = TypeVar("I", bound=Json)
 O = TypeVar("O")
 O_co = TypeVar("O_co", covariant=True)
 V = TypeVar("V")
@@ -52,7 +53,7 @@ class Validates(Protocol[O_co]):
 Validator = Union[Callable[[object], O_co], "type[Validates[O_co]]"]
 
 
-def _check(validator: object, value: object, what: str) -> Any:
+def _check(validator: object, value: object, what: str) -> object:
     """`value` through its validator: a model class's `model_validate`, or any callable that raises on bad input."""
     if validator is None:
         return value
@@ -157,7 +158,7 @@ class MapError(Exception, Generic[I, O]):
         super().__init__(f"{len(failed)} of {len(results)} tasks did not succeed" + ("" if first is None else f"; item {first.index}: {_describe(first)}"))
 
 
-def _describe(result: Result[Any, Any]) -> str:
+def _describe(result: Result[I, O]) -> str:
     if isinstance(result, Ok):
         return "ok"
     if isinstance(result, Errored):
@@ -184,10 +185,10 @@ class Context:
 class _Value:
     """An answer that came back ok, before it is joined with its item and meta into a Result."""
 
-    value: Any
+    value: object
 
 
-def _command_answer(output: object, exit_code: int, tail: str, read: Callable[[], Optional[bytes]], inline: object = None) -> Union[_Value, RemoteError]:
+def _command_answer(output: object, exit_code: int, tail: str, read: Callable[[], Optional[bytes]], inline: Json = None) -> Union[_Value, RemoteError]:
     """A command's answer: its `out` read as `output` says, once it exited 0 — the same shapes the TS `answer` gives."""
     if exit_code != 0:
         return RemoteError("Exit", f"the command exited {exit_code}", tail)
@@ -202,27 +203,23 @@ def _command_answer(output: object, exit_code: int, tail: str, read: Callable[[]
         return RemoteError(**remote_error(cause))
 
 
-def _envelope_answer(outcome: dict[str, Any], read: Callable[[], Optional[bytes]]) -> Union[_Value, RemoteError]:
+def _envelope_answer(outcome: Mapping[str, Json], read: Callable[[], Optional[bytes]]) -> Union[_Value, RemoteError]:
     """A pushed task's answer: the envelope its process wrote, or an Exit when it died before answering."""
     inline = outcome.get("value")
     text = inline if isinstance(inline, str) else (read() or b"").decode()
-    parsed: Any = None
     try:
-        parsed = json.loads(text)
-    except Exception:
-        pass
-    if not isinstance(parsed, dict):
-        return RemoteError("Exit", f"the task's process exited {outcome.get('exitCode', 1)}", str(outcome.get("tail", "")))
-    envelope: dict[Any, Any] = parsed
-    if not isinstance(envelope.get("ok"), bool):
-        return RemoteError("Exit", f"the task's process exited {outcome.get('exitCode', 1)}", str(outcome.get("tail", "")))
-    if envelope["ok"] is not True:
-        error_field: Any = envelope.get("error")
-        error = error_field if isinstance(error_field, dict) else {}
-        return RemoteError(str(error.get("name", "Error")), str(error.get("message", "")), str(error.get("stack", "")))
-    if isinstance(envelope.get("bytes"), str):
-        return _Value(base64.b64decode(envelope["bytes"]))
-    return _Value(envelope.get("value"))
+        parsed: Json = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    envelope = object_of(parsed)
+    ok = envelope.get("ok")
+    if not isinstance(ok, bool):
+        return RemoteError("Exit", f"the task's process exited {number_of(outcome, 'exitCode', 1):.0f}", text_of(outcome, "tail"))
+    if not ok:
+        error = object_of(envelope.get("error"))
+        return RemoteError(text_of(error, "name", "Error"), text_of(error, "message"), text_of(error, "stack"))
+    encoded = envelope.get("bytes")
+    return _Value(base64.b64decode(encoded) if isinstance(encoded, str) else envelope.get("value"))
 
 
 class Submission(Generic[I]):
@@ -247,11 +244,11 @@ class Submission(Generic[I]):
         self.known.set()
         self.done.set()
 
-    def pump(self, items: Iterable[I], make: Callable[[I, int], dict[str, Any]]) -> None:
+    def pump(self, items: Iterable[I], make: Callable[[I, int], "WireTask"]) -> None:
         """Runs in a thread: batches items into the open job, 500 to a batch or every BATCH_S, then closes it."""
         job = self.id
         assert job is not None
-        batch: list[dict[str, Any]] = []
+        batch: list[WireTask] = []
         last = time.monotonic()
         try:
             for item in items:
@@ -280,7 +277,7 @@ class Job(Generic[I, O]):
         self.armada = armada
         self._task = task
         self.submission = submission
-        self._held: Optional[list[Any]] = None
+        self._held: Optional[list[Json]] = None
 
     @property
     def id(self) -> str:
@@ -295,17 +292,17 @@ class Job(Generic[I, O]):
             return self.submission.sent[index]
         if self._held is None or index >= len(self._held):
             self._held = self.armada.items(self.id)
-        held: I = self._held[index]
-        return held
+        # The items a job holds are the ones its caller gave this task, as task.ts trusts them too.
+        return cast(I, self._held[index])
 
-    def _result(self, outcome: dict[str, Any]) -> Result[I, O]:
-        item = self._item(int(outcome["index"]))
+    def _result(self, index: int, outcome: Mapping[str, Json]) -> Result[I, O]:
+        item = self._item(index)
+        peak = maybe_number_of(outcome, "peakMemory")
         meta = Meta(
-            seconds=float(outcome.get("seconds", 0)), attempt=int(outcome.get("attempt", 1)), container=str(outcome.get("vessel", "")),
-            exit_code=int(outcome.get("exitCode", 0)), tail=str(outcome.get("tail", "")), peak_memory=outcome.get("peakMemory"),
-            cpu_seconds=outcome.get("cpuSeconds"), artifacts=outcome.get("artifacts") is True, cached=outcome.get("cached") is True,
+            seconds=number_of(outcome, "seconds", 0), attempt=int(number_of(outcome, "attempt", 1)), container=text_of(outcome, "vessel"),
+            exit_code=int(number_of(outcome, "exitCode", 0)), tail=text_of(outcome, "tail"), peak_memory=None if peak is None else int(peak),
+            cpu_seconds=maybe_number_of(outcome, "cpuSeconds"), artifacts=outcome.get("artifacts") is True, cached=outcome.get("cached") is True,
         )
-        index = int(outcome["index"])
         if outcome.get("kind") == "failed":
             if outcome.get("reason") == "cancelled":
                 return Cancelled(index, item, meta, meta.tail)
@@ -315,26 +312,30 @@ class Job(Generic[I, O]):
         answered = self._task.answer(outcome, lambda: self.armada.output(self.id, index))
         if isinstance(answered, RemoteError):
             return Errored(index, item, meta, answered)
-        return Ok(index, item, meta, answered.value)
+        # The decorator's overload typed O by this task's body and output; the wire carries what that body answered.
+        return Ok(index, item, meta, cast(O, answered.value))
 
     def __iter__(self) -> Iterator[Result[I, O]]:
         after = 0
         seen: set[int] = set()
         while True:
-            batch = self.armada.events(self.id, after)
-            for event in batch.get("events", []):
-                outcome = event["outcome"]
-                if outcome["index"] in seen:
+            page = self.armada.events(self.id, after)
+            listed = page.get("events")
+            events = listed if isinstance(listed, list) else []
+            for event in map(object_of, events):
+                outcome = object_of(event.get("outcome"))
+                index = int(number_of(outcome, "index", -1))
+                after = max(after, int(number_of(event, "seq", after)))
+                if index < 0 or index in seen:
                     continue
-                seen.add(outcome["index"])
-                after = max(after, int(event.get("seq", after)))
-                yield self._result(outcome)
-            if batch.get("done"):
+                seen.add(index)
+                yield self._result(index, outcome)
+            if page.get("done") is True:
                 self.submission.stopped = True
                 if self.submission.failure is not None:
                     raise self.submission.failure
                 return
-            if not batch.get("events"):
+            if not events:
                 time.sleep(POLL_S)
 
     def ordered(self) -> Iterator[Result[I, O]]:
@@ -389,7 +390,13 @@ class Retries(TypedDict, total=False):
     backoffSeconds: float
 
 
-def _retries(retries: Optional[Retries]) -> Optional[dict[str, Any]]:
+class WireTask(TypedDict):
+    """An item as the wire carries it."""
+
+    item: Json
+
+
+def _retries(retries: Optional[Retries]) -> Optional[dict[str, object]]:
     if retries is None:
         return None
     on = retries.get("on", [])
@@ -404,7 +411,7 @@ def _retries(retries: Optional[Retries]) -> Optional[dict[str, Any]]:
 class Task(Generic[I, O]):
     """A task: `task(...)` on a function gives it this — its id, its spec options, and the runs."""
 
-    def __init__(self, *, task_id: str, body: Callable[[I, Context], Any], recipe_: object = None, output: object = None,
+    def __init__(self, *, task_id: str, body: Callable[..., object], recipe_: object = None, output: object = None,
                  timeout: float = 3600, speculative: bool = False, retries: Optional[Retries] = None,
                  secrets: Iterable[str] = (), cache: Optional[dict[str, int]] = None, input: object = None) -> None:
         self.id = task_id
@@ -425,7 +432,7 @@ class Task(Generic[I, O]):
         return built if isinstance(built, dict) else default_recipe().spec
 
     def _spec(self, pool: Optional[int], slots: Optional[int], label: str, env: Optional[dict[str, str]],
-              files: Optional[dict[str, str]], tmpfs: Optional[list[str]], bundle: Optional[str]) -> dict[str, Any]:
+              files: Optional[dict[str, str]], tmpfs: Optional[list[str]], bundle: Optional[str]) -> dict[str, object]:
         spec = {
             "recipe": self.recipe,
             "run": {"kind": "task", "id": self.id, **({"bundle": bundle, "runtime": "python"} if bundle is not None else {})},
@@ -493,6 +500,7 @@ class Task(Generic[I, O]):
             returned = self.body(checked, context)
             if not isinstance(returned, Shell):
                 answered = returned if self.output is None or isinstance(self.output, str) else _check(self.output, returned, "the value")
+                # The decorator's overload typed O by this body's return and the output's validator.
                 return cast(O, answered)
             ran = execute(returned.script, env={"ARMADA_OUT": out, "ARMADA_ARTIFACTS": artifacts})
             if ran.exit_code != 0:
@@ -500,6 +508,7 @@ class Task(Generic[I, O]):
             answered = _command_answer(self.output, 0, ran.stderr, lambda: Path(out).read_bytes() if os.path.exists(out) else None)
             if isinstance(answered, RemoteError):
                 raise RuntimeError(answered.message)
+            # The decorator's overload typed O by this command's output.
             return cast(O, answered.value)
 
     def job(self, job_id: str, *, armada: Optional[Armada] = None) -> Job[I, O]:
@@ -510,19 +519,19 @@ class Task(Generic[I, O]):
         submission.resolve(job_id)
         return Job(client, self, submission)
 
-    def _wire(self, item: I, index: int) -> dict[str, Any]:
+    def _wire(self, item: I, index: int) -> WireTask:
         """An item as a wire task, checked first."""
         if self.input is not None:
             _check(self.input, item, f"item {index}")
         return {"item": item}
 
-    def answer(self, outcome: dict[str, Any], read: Callable[[], Optional[bytes]]) -> Union[_Value, RemoteError]:
+    def answer(self, outcome: Mapping[str, Json], read: Callable[[], Optional[bytes]]) -> Union[_Value, RemoteError]:
         """An exited task's answer."""
         if outcome.get("answer") == "command":
-            return _command_answer(self.output, int(outcome.get("exitCode", 1)), str(outcome.get("tail", "")), read, outcome.get("value"))
+            return _command_answer(self.output, int(number_of(outcome, "exitCode", 1)), text_of(outcome, "tail"), read, outcome.get("value"))
         return _envelope_answer(outcome, read)
 
-    def run_envelope(self, item: Json, context: Context) -> Union[dict[str, Any], Shell]:
+    def run_envelope(self, item: Json, context: Context) -> Union["Envelope", Shell]:
         """The body on an item: its value or its shell, the bundle's runner's contract (runner.ts's RUN)."""
         try:
             checked = _check(self.input, item, "the input")
@@ -530,9 +539,20 @@ class Task(Generic[I, O]):
             if isinstance(returned, Shell):
                 return returned
             value = returned if self.output is None or isinstance(self.output, str) else _check(self.output, returned, "the value")
-            return {"ok": True, "bytes": base64.b64encode(value).decode()} if isinstance(value, (bytes, bytearray)) else {"ok": True, "value": value}
+            body: dict[str, object] = {"ok": True, "bytes": base64.b64encode(value).decode()} if isinstance(value, (bytes, bytearray)) else {"ok": True, "value": value}
+            return Envelope(body, None)
         except Exception as cause:
-            return {"ok": False, "error": remote_error(cause)}
+            error = remote_error(cause)
+            return Envelope({"ok": False, "error": error}, error["name"])
+
+
+@dataclass(frozen=True)
+class Envelope:
+    """What a pushed task's process writes as its out: its value, its bytes, or the error its body threw, whose
+    name a retry matches."""
+
+    body: dict[str, object]
+    error: Optional[str]
 
 
 # `@task` overloads: the body's and `output`'s shapes decide the Task's item and answer types, through the
@@ -550,7 +570,7 @@ class _FromBytes(Protocol[I, V_co]):
 
 
 class _FromValidate(Protocol[I, V_co, O]):
-    def __call__(self, body: Callable[[V_co, Context], Any], /) -> Task[I, O]: ...
+    def __call__(self, body: Callable[[V_co, Context], object], /) -> Task[I, O]: ...
 
 
 class _FromDecorate(Protocol[I, V_co]):
@@ -570,7 +590,7 @@ class _Bytes(Protocol):
 
 
 class _Validate(Protocol[O]):
-    def __call__(self, body: Callable[[I, Context], Any], /) -> Task[I, O]: ...
+    def __call__(self, body: Callable[[I, Context], object], /) -> Task[I, O]: ...
 
 
 class _Decorate(Protocol):
@@ -590,7 +610,7 @@ def task(*, id: str, recipe: object = None, output: Literal["text"], timeout: fl
 @overload
 def task(*, id: str, recipe: object = None, output: Literal["text"], timeout: float = 3600, speculative: bool = False,
          retries: Optional[Retries] = None, secrets: Iterable[str] = (), cache: Optional[dict[str, int]] = None,
-         input: "type[Validates[V]]") -> _FromText[object, V]: ...
+         input: "type[Validates[V]]") -> _FromText[Json, V]: ...
 
 
 @overload
@@ -608,7 +628,7 @@ def task(*, id: str, recipe: object = None, output: Literal["bytes"], timeout: f
 @overload
 def task(*, id: str, recipe: object = None, output: Literal["bytes"], timeout: float = 3600, speculative: bool = False,
          retries: Optional[Retries] = None, secrets: Iterable[str] = (), cache: Optional[dict[str, int]] = None,
-         input: "type[Validates[V]]") -> _FromBytes[object, V]: ...
+         input: "type[Validates[V]]") -> _FromBytes[Json, V]: ...
 
 
 @overload
@@ -626,7 +646,7 @@ def task(*, id: str, recipe: object = None, output: Validator[O], timeout: float
 @overload
 def task(*, id: str, recipe: object = None, output: Validator[O], timeout: float = 3600, speculative: bool = False,
          retries: Optional[Retries] = None, secrets: Iterable[str] = (), cache: Optional[dict[str, int]] = None,
-         input: "type[Validates[V]]") -> _FromValidate[object, V, O]: ...
+         input: "type[Validates[V]]") -> _FromValidate[Json, V, O]: ...
 
 
 @overload
@@ -644,7 +664,7 @@ def task(*, id: str, recipe: object = None, output: None = None, timeout: float 
 @overload
 def task(*, id: str, recipe: object = None, output: None = None, timeout: float = 3600, speculative: bool = False,
          retries: Optional[Retries] = None, secrets: Iterable[str] = (), cache: Optional[dict[str, int]] = None,
-         input: "type[Validates[V]]") -> _FromDecorate[object, V]: ...
+         input: "type[Validates[V]]") -> _FromDecorate[Json, V]: ...
 
 
 @overload
@@ -655,12 +675,12 @@ def task(*, id: str, recipe: object = None, output: None = None, timeout: float 
 
 def task(*, id: str, recipe: object = None, output: object = None, timeout: float = 3600, speculative: bool = False,
          retries: Optional[Retries] = None, secrets: Iterable[str] = (), cache: Optional[dict[str, int]] = None,
-         input: object = None) -> Callable[[Callable[..., Any]], Task[Any, Any]]:
+         input: object = None) -> object:
     """A task, exported from a file in the project's task folder so `python -m armada push` finds it. With an
     `input` validator, callers pass its input and the body gets its output. A body's value, or a command's out,
     is checked by `output` before it counts as ok."""
 
-    def wrap(body: Callable[..., Any]) -> Task[Any, Any]:
+    def wrap(body: Callable[..., object]) -> Task[Json, object]:
         return Task(task_id=id, body=body, recipe_=recipe, output=output, timeout=timeout, speculative=speculative,
                     retries=retries, secrets=secrets, cache=cache, input=input)
 

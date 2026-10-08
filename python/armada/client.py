@@ -8,9 +8,9 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, Optional, Union
+from typing import BinaryIO, Iterator, Mapping, Optional, Sequence, Union
 
-from .wire import Json, PROTOCOL, PROTOCOL_HEADER
+from .wire import Json, JsonObject, PROTOCOL, PROTOCOL_HEADER, object_of, text_of
 
 CONFIG_DIR = Path.home() / ".config" / "armada"
 
@@ -84,8 +84,9 @@ class Response:
     headers: dict[str, str]
     stream: Optional[BinaryIO] = None
 
-    def json(self) -> Any:
-        return json.loads(self.body)
+    def json(self) -> Json:
+        parsed: Json = json.loads(self.body)
+        return parsed
 
 
 class Armada:
@@ -127,18 +128,19 @@ class Armada:
                 raise
         raise AssertionError("unreachable")
 
-    def post(self, path: str, body: object) -> Any:
+    def post(self, path: str, body: object) -> Json:
         return self.call(path, "POST", json.dumps(body).encode(), {"content-type": "application/json"}).json()
 
-    def health(self) -> dict[str, Any]:
-        answer = self.call("/health").json()
-        return dict(answer) if isinstance(answer, dict) else {}
+    def health(self) -> JsonObject:
+        return object_of(self.call("/health").json())
 
-    def create(self, spec: dict[str, Any]) -> str:
-        created = self.post("/jobs", spec)
-        return str(created["id"])
+    def create(self, spec: Mapping[str, object]) -> str:
+        job = text_of(object_of(self.post("/jobs", spec)), "id")
+        if job == "":
+            raise RequestError(200, "POST /jobs answered without a job id")
+        return job
 
-    def add(self, job: str, items: list[dict[str, Any]]) -> None:
+    def add(self, job: str, items: Sequence[Mapping[str, object]]) -> None:
         self.post(f"/jobs/{job}/items", {"items": items})
 
     def close(self, job: str) -> None:
@@ -150,13 +152,12 @@ class Armada:
     def status(self, job: str) -> "JobStatus":
         return JobStatus.of(self.call(f"/jobs/{job}").json())
 
-    def events(self, job: str, after: int) -> dict[str, Any]:
-        answer = self.call(f"/jobs/{job}/events?after={after}").json()
-        return dict(answer) if isinstance(answer, dict) else {}
+    def events(self, job: str, after: int) -> JsonObject:
+        return object_of(self.call(f"/jobs/{job}/events?after={after}").json())
 
-    def items(self, job: str) -> list[Any]:
-        answer = self.call(f"/jobs/{job}/items").json()
-        return list(answer["items"])
+    def items(self, job: str) -> list[Json]:
+        items = object_of(self.call(f"/jobs/{job}/items").json()).get("items")
+        return items if isinstance(items, list) else []
 
     def output(self, job: str, index: int) -> Optional[bytes]:
         response = self.call(f"/jobs/{job}/tasks/{index}/output")
@@ -187,14 +188,15 @@ class Armada:
         self.call(f"/secrets/{name}", "PUT", value.encode())
 
     def secrets(self) -> list[str]:
-        return list(self.call("/secrets").json()["names"])
+        names = object_of(self.call("/secrets").json()).get("names")
+        return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
 
     def delete_secret(self, name: str) -> bool:
-        return bool(self.call(f"/secrets/{name}", "DELETE").json()["deleted"])
+        return object_of(self.call(f"/secrets/{name}", "DELETE").json()).get("deleted") is True
 
-    def resolve(self, recipe: dict[str, Any]) -> dict[str, str]:
-        answer: dict[str, Any] = self.post("/environments/resolve", {"recipe": recipe})
-        return {"key": str(answer["key"]), "base": str(answer["base"])}
+    def resolve(self, recipe: Mapping[str, object]) -> dict[str, str]:
+        answer = object_of(self.post("/environments/resolve", {"recipe": recipe}))
+        return {"key": text_of(answer, "key"), "base": text_of(answer, "base")}
 
 
 @dataclass(frozen=True)

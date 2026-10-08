@@ -9,7 +9,8 @@ import signal
 import sys
 import threading
 from types import ModuleType
-from typing import Any
+from types import FrameType
+from typing import Optional
 
 from .sh import Shell, execute, out_file
 from .task import Context, Task
@@ -29,7 +30,7 @@ def run_tasks(modules: list[ModuleType]) -> "None":
         sys.exit(1)
     stopped = threading.Event()
 
-    def terminate(_signum: int, _frame: Any) -> None:
+    def terminate(_signum: int, _frame: Optional[FrameType]) -> None:
         stopped.set()
 
     signal.signal(signal.SIGTERM, terminate)
@@ -56,7 +57,7 @@ def run_tasks(modules: list[ModuleType]) -> "None":
         sys.exit(execute(answer.script).exit_code)
     # The error's name follows, for the job to decide a retry by.
     with open(marker, "w") as file:
-        file.write("value" if answer.get("ok") else "value\n" + str(answer.get("error", {}).get("name", "Error")))
+        file.write("value" if answer.error is None else f"value\n{answer.error}")
     with open(out, "w") as file:
-        file.write(json.dumps(answer, separators=(",", ":")))
-    sys.exit(0 if answer.get("ok") else 1)
+        file.write(json.dumps(answer.body, separators=(",", ":")))
+    sys.exit(0 if answer.error is None else 1)

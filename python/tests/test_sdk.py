@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task  # noqa: E402
 from armada.push import bundle_tasks, find_project  # noqa: E402
+from armada.task import Envelope  # noqa: E402
 from armada.wire import environment_key  # noqa: E402
 
 
@@ -70,23 +71,24 @@ class TestEnvelope(unittest.TestCase):
 
         envelope = square.run_envelope(7, _ctx())
         # The client reads exactly what runner.ts writes: {"ok":true,"value":...} / {"ok":false,"error":{...}}.
-        self.assertEqual(envelope, {"ok": True, "value": 49})
+        self.assertEqual(envelope, Envelope({"ok": True, "value": 49}, None))
 
         @task(id="broke")
         def broke(n: int, ctx: Context) -> int:
             raise ValueError("no")
 
         failed = broke.run_envelope(1, _ctx())
-        self.assertFalse(failed["ok"])
-        self.assertEqual(failed["error"]["name"], "ValueError")
-        self.assertEqual(failed["error"]["message"], "no")
+        assert isinstance(failed, Envelope)
+        error = failed.body["error"]
+        assert isinstance(error, dict)
+        self.assertEqual((failed.body["ok"], failed.error, error["name"], error["message"]), (False, "ValueError", "ValueError", "no"))
 
         @task(id="raw-bytes")
         def raw_bytes(n: int, ctx: Context) -> bytes:
             return b"\x00\x01"
 
         binary = raw_bytes.run_envelope(0, _ctx())
-        self.assertEqual(binary, {"ok": True, "bytes": base64.b64encode(b"\x00\x01").decode()})
+        self.assertEqual(binary, Envelope({"ok": True, "bytes": base64.b64encode(b"\x00\x01").decode()}, None))
 
     def test_answer_reads_the_envelope_like_task_ts(self) -> None:
         from armada.task import RemoteError, _Value
@@ -206,7 +208,7 @@ class TestTaskShapes(unittest.TestCase):
         def typed(n: int, ctx: Context) -> int:
             return n
 
-        self.assertEqual(typed.run_envelope("3", _ctx()), {"ok": True, "value": 3})
+        self.assertEqual(typed.run_envelope("3", _ctx()), Envelope({"ok": True, "value": 3}, None))
         with self.assertRaises(SchemaError):
             typed._wire("not-an-int", 0)
 

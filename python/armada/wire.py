@@ -3,10 +3,33 @@ protocol.ts holds, so a Python task and a TypeScript one speak the same bytes.""
 
 import hashlib
 import json
-from typing import Dict, List, Union
+from typing import Dict, List, Mapping, Optional, Union
 
 # A JSON value, as protocol.ts's `Json` — what items and envelopes carry.
 Json = Union[str, float, int, bool, None, List["Json"], Dict[str, "Json"]]
+
+JsonObject = Dict[str, Json]
+
+
+def object_of(value: Json) -> JsonObject:
+    """`value` as a JSON object, or an empty one when the wire sent something else."""
+    return value if isinstance(value, dict) else {}
+
+
+def text_of(fields: Mapping[str, Json], key: str, default: str = "") -> str:
+    value = fields.get(key)
+    return value if isinstance(value, str) else default
+
+
+def maybe_number_of(fields: Mapping[str, Json], key: str) -> Optional[float]:
+    """A JSON number's value; a boolean, which Python counts as an int, is none."""
+    value = fields.get(key)
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def number_of(fields: Mapping[str, Json], key: str, default: float) -> float:
+    value = maybe_number_of(fields, key)
+    return default if value is None else value
 
 # The wire's version, which every request names in PROTOCOL_HEADER.
 PROTOCOL = 7
