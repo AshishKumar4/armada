@@ -99,7 +99,8 @@ class Armada:
         """A request to the runner. A read that meets a gateway's 502/503/504, the Worker's own 500, or a dropped
         connection is asked again, up to READ_ATTEMPTS times a second apart more each time."""
         attempts = READ_ATTEMPTS if method in ("GET", "HEAD") else 1
-        heads = {"authorization": f"Bearer {self.connection.token}", PROTOCOL_HEADER: str(protocol), **(headers or {})}
+        # urllib's default agent is blocked by Cloudflare's bot rules; the SDK names itself instead.
+        heads = {"authorization": f"Bearer {self.connection.token}", PROTOCOL_HEADER: str(protocol), "user-agent": "armada-python/0.1", **(headers or {})}
 
         for attempt in range(1, attempts + 1):
             request = urllib.request.Request(self.connection.url.rstrip("/") + path, data=body, headers=heads, method=method)
