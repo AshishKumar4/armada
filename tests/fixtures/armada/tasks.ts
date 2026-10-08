@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { recipe, sh, task } from '../../../src/index';
 import { greeting } from '../greeting';
 
-export const square = task({ id: 'square', run: (n: number) => n * n });
+export const square = task({ id: 'square', output: v.number(), run: (n: number) => n * n });
 
 export const greet = task({
   id: 'greet',
@@ -12,7 +12,7 @@ export const greet = task({
   run: ({ name }) => ({ text: greeting(name) }),
 });
 
-export const encode = task({ id: 'encode', run: (text: string) => new TextEncoder().encode(text) });
+export const encode = task({ id: 'encode', output: 'bytes', run: (text: string) => new TextEncoder().encode(text) });
 
 export const refuse = task({
   id: 'refuse',
@@ -21,8 +21,8 @@ export const refuse = task({
   },
 });
 
-/** Answers what its output schema refuses. */
-export const lie = task({ id: 'lie', output: v.object({ n: v.number() }), run: (n: number) => ({ n: String(n) as unknown as number }) });
+/** Answers what its output schema refuses: a string its pipe reads as no finite number. */
+export const lie = task({ id: 'lie', output: v.object({ n: v.pipe(v.union([v.number(), v.string()]), v.transform(Number), v.finite()) }), run: (n: number) => ({ n: `not ${String(n)}` }) });
 
 /** A command that writes its number as JSON, and exits 3 above 2. */
 export const write = task({
@@ -39,7 +39,7 @@ export const twoBytes = task({ id: 'two-bytes', output: 'bytes', run: (_: null, 
 export const touch = task({ id: 'touch', run: (n: number) => sh`true ${n}` });
 
 /** A body that runs a command and answers with a value built from it. */
-export const shout = task({ id: 'shout', run: async (word: string) => (await sh`printf %s ${word}`.text()).toUpperCase() });
+export const shout = task({ id: 'shout', output: v.string(), run: async (word: string) => (await sh`printf %s ${word}`.text()).toUpperCase() });
 
 /** A plain value shaped like a command, which must come back as the value it is. */
 export const lookalike = task({ id: 'lookalike', run: (path: string) => ({ script: `touch ${path}`, text: 'not a command' }) });

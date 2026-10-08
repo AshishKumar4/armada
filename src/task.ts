@@ -3,18 +3,22 @@
  * returning a value, or a `sh` command whose `out` file is the answer. `armada push` sends a project's task folder, and
  * `.map`, `.stream`, `.run` and `.local` run a task by its id.
  *
- *   export const square = task({ id: 'square', run: (n: number) => n * n });
- *   const squares = await square.map([1, 2, 3]);   // number[]
+ *   export const square = task({ id: 'square', output: v.number(), run: (n: number) => n * n });
+ *   const squares = await square.map([1, 2, 3]);   // number[], each checked by the output schema
+ *
+ * A result is typed by what checks it when it lands: the `output` schema, `'text'` or `'bytes'`. Without one, a body's
+ * value is JSON and a command's answer is null.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { jsonOf, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
-import { execute, isShell, outFile, quote, ShellError, type Shell } from './sh';
+import { execute, OutFile, quote, ShellError, ShellSchema, type Shell } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
 
 export type { Context, Json, RemoteError };
@@ -59,24 +63,24 @@ export class RecipeBuilder {
 
   /** Debian packages, installed in setup as root. */
   apt(...packages: readonly string[]): RecipeBuilder {
-    return this.then('setup', `apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${packages.map(quote).join(' ')}`);
+    return this.append('setup', `apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${packages.map(quote).join(' ')}`);
   }
 
   /** More of setup, run as root once per environment. */
   setup(script: string): RecipeBuilder {
-    return this.then('setup', script);
+    return this.append('setup', script);
   }
 
   /** More of install, run as the user in the checkout once per environment. */
   install(script: string): RecipeBuilder {
-    return this.then('install', script);
+    return this.append('install', script);
   }
 
   size(size: Size): RecipeBuilder {
     return new RecipeBuilder({ ...this.spec, size });
   }
 
-  private then(script: 'setup' | 'install', step: string): RecipeBuilder {
+  private append(script: 'setup' | 'install', step: string): RecipeBuilder {
     const before = this.spec[script];
 
     return new RecipeBuilder({ ...this.spec, [script]: before === '' ? step : `${before}\n${step}` });
@@ -155,7 +159,8 @@ function describe<I, O>(result: Result<I, O>): string {
     case 'ok': return 'ok';
     case 'error': return `${result.error.name}: ${result.error.message}`;
     case 'timeout': return `timed out after ${result.meta.seconds.toFixed(0)} s`;
-    default: return `${result.kind}: ${result.reason}`;
+    case 'cancelled':
+    case 'lost': return `${result.kind}: ${result.reason}`;
   }
 }
 
@@ -169,32 +174,35 @@ export interface Task<I, O> {
   run(item: I, options?: MapOptions): Promise<O>;
   /** One item's value, on this machine, with no container. */
   local(item: I): Promise<O>;
-  /** A job this task ran, by its id. */
-  job(id: string, options?: Pick<MapOptions, 'armada'>): Job<I, O>;
+  /** A job this task ran, by its id: its items come back as the JSON the job holds. */
+  job(id: string, options?: Pick<MapOptions, 'armada'>): Job<Json, O>;
 }
 
 type InputOf<S extends StandardSchemaV1> = StandardSchemaV1.InferInput<S>;
 
 type OutputOf<S extends StandardSchemaV1> = StandardSchemaV1.InferOutput<S>;
 
-/** What a task answers with: its body's value, or, for a body that returns `sh`, its `out` file read as text, as
- *  bytes, or as JSON a schema checks. */
+/** What checks a task's answer when it lands: a command's `out` file read as text, or as bytes; a body's bytes; or JSON
+ *  a schema checks, from a body's value or a command's `out`. Without one, a body's value is JSON. */
 export type Output = 'text' | 'bytes' | StandardSchemaV1;
 
-/** A task's value: a command's `out` read as `output` says, or the body's own value, as its output schema parses it. */
-export type Answer<R, Out> = [R] extends [Shell]
-  ? Out extends 'bytes' ? Uint8Array : Out extends 'text' ? string : Out extends StandardSchemaV1 ? Arrived<OutputOf<Out>> : null
-  : Out extends StandardSchemaV1 ? Arrived<OutputOf<Out>> : Arrived<R>;
+/** A task's value, as its `output` checks it: a command's `out` as text or bytes, a body's bytes, or what an output
+ *  schema gives. Without an output, a body's value is JSON and a command's answer is null. */
+export type Answer<R, Out> = Out extends 'bytes' ? Uint8Array
+  : Out extends 'text' ? string
+  : Out extends StandardSchemaV1 ? Arrived<OutputOf<Out>>
+  : [R] extends [Shell] ? null : Json;
 
 /** A task id's type: a string when the task's types travel, else a type naming the one that cannot, which the id then
- *  fails to be, so the error stands at the task's definition. */
-type Checked<I, R, Out> = 0 extends 1 & I ? { readonly 'a task takes plain JSON, and this item type is any': I }
+ *  fails to be, so the error stands at the task's definition. Exported for the type tests. */
+export type Checked<I, R, Out> = 0 extends 1 & I ? { readonly 'a task takes plain JSON, and this item type is any': I }
   : 0 extends 1 & R ? { readonly 'a task answers plain JSON or bytes, and this body returns any': R }
   : [I] extends [Plain<I>]
   ? [R] extends [Shell] ? OutputChecked<Out>
-  : Out extends 'text' | 'bytes' ? { readonly 'output text or bytes is for a body that returns sh': Out }
+  : Out extends 'text' ? { readonly 'output text is a command\'s out file, for a body that returns sh': Out }
+  : Out extends 'bytes' ? [R] extends [Uint8Array] ? string : { readonly 'output bytes is for a body that returns bytes or sh': R }
   : Out extends StandardSchemaV1 ? [R] extends [InputOf<Out>] ? OutputChecked<Out> : { readonly 'the body returns what its output schema does not take': R }
-  : [R] extends [Value<R>] ? string : { readonly 'a task answers plain JSON or bytes, and this body returns neither': R }
+  : [R] extends [Plain<R>] ? string : { readonly 'a task answers plain JSON without an output, and this body returns something else': R }
   : { readonly 'a task takes plain JSON, and this item type is not': I };
 
 /** A string when an output schema gives plain JSON or bytes, nothing as loose as `any` or `unknown`. */
@@ -230,17 +238,23 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string, S
 
 /**
  * A task. Export it from a file in the project's task folder (`armada.config.ts`), so `armada push` finds it. With an
- * `input` schema, callers pass its input and the body gets its output. A body's value, or a command's JSON, is checked
- * by the `output` schema before it counts as ok.
+ * `input` schema, callers pass its input and the body gets its output. A body's value, or a command's `out`, is checked
+ * by the `output` before it counts as ok.
  */
 // TypeScript first infers without a body whose parameters it must type itself, and checks the id then too: the
 // defaults of I and R pass that check, so the body's own types decide it.
 export function task<SI extends StandardSchemaV1, R = Shell, const Out extends Output | undefined = undefined, const S extends string = never>(config: TaskConfig<OutputOf<SI>, R, Out, NoInfer<Checked<InputOf<SI>, R, Out>>, S> & { readonly input: SI }): Task<InputOf<SI>, Answer<R, Out>>;
 export function task<I = null, R = Shell, const Out extends Output | undefined = undefined, const S extends string = never>(config: TaskConfig<I, R, Out, NoInfer<Checked<I, R, Out>>, S> & { readonly input?: undefined }): Task<I, Answer<R, Out>>;
-// The overloads check the config's types; past them its body takes and returns JSON, or returns a Shell.
-export function task(config: TaskConfig<Json, unknown, Output | undefined, unknown> & { readonly input?: StandardSchemaV1 }): Task<Json, unknown> {
-  // The overloads' id is a string once its checks pass.
-  return new PushedTask({ ...config, id: String(config.id) });
+// Past the overloads' checks, the answer's checker is picked by the output: what the overloads type the answer as.
+export function task(config: Config): Task<Json, Answer<unknown, Output | undefined>> {
+  const settled = { ...config, id: String(config.id) };
+  const { output } = config;
+
+  if (output === undefined) return new PushedTask(settled, asJson);
+
+  if (output === 'text') return new PushedTask(settled, asText);
+
+  return output === 'bytes' ? new PushedTask(settled, asBytes) : new PushedTask(settled, bySchema(output));
 }
 
 /** A job's options of the task itself. */
@@ -253,22 +267,98 @@ interface TaskOptions {
   readonly cache?: { readonly days: number };
 }
 
+/** A body's own answer, as its envelope brings it back or `.local` has it: JSON, or bytes. */
+type Delivered = { readonly value: Json } | { readonly bytes: Uint8Array };
+
+/** How a task's answer is checked into its type: a body's delivered value, and a command's `out` file, read only when
+ *  the answer needs it, or the text a small one came inline as. Each throws when the answer does not fit. */
+interface Answering<O> {
+  value(delivered: Delivered): Promise<O>;
+  out(read: () => Promise<Uint8Array | null>, inline: string | undefined): Promise<O>;
+}
+
+const text = async (read: () => Promise<Uint8Array | null>, inline: string | undefined): Promise<string> => inline ?? new TextDecoder().decode(await read() ?? new Uint8Array());
+
+/** No output: a body's JSON value; a command answers null. */
+const asJson: Answering<Json> = {
+  value: async (delivered) => {
+    if ('bytes' in delivered) throw new Error('the body answered bytes: give its task output \'bytes\'');
+
+    return delivered.value;
+  },
+  out: async () => null,
+};
+
+/** A command run by the CLI without an output: it answers null. */
+const asNull: Answering<null> = {
+  value: async () => { throw new Error('a command answers no value'); },
+  out: async () => null,
+};
+
+const asText: Answering<string> = {
+  value: async () => { throw new Error('output text is a command\'s out file, for a body that returns sh'); },
+  out: text,
+};
+
+const asBytes: Answering<Uint8Array> = {
+  value: async (delivered) => {
+    if (!('bytes' in delivered)) throw new Error('the body answered JSON, and its task\'s output is bytes');
+
+    return delivered.bytes;
+  },
+  out: async (read) => await read() ?? new Uint8Array(),
+};
+
+/** An output schema's: a body's value, or a command's `out` as JSON, through it. */
+function bySchema<S extends StandardSchemaV1>(schema: S): Answering<OutputOf<S>> {
+  return {
+    value: async (delivered) => await check(schema, 'bytes' in delivered ? delivered.bytes : delivered.value, 'the value'),
+    out: async (read, inline) => await check(schema, v.parse(JsonValueSchema, JSON.parse(await text(read, inline))), 'the output'),
+  };
+}
+
+/** What an exited task answered: its value, or the error that says why it has none. */
+type Answered<O> = { readonly kind: 'ok'; readonly value: O } | { readonly kind: 'error'; readonly error: RemoteError };
+
+/** An exited task's answer, checked by `answering`: a pushed body's envelope, or a command's `out` once it exited 0. */
+async function answerOf<O>(answering: Answering<O>, outcome: Outcome, read: () => Promise<Uint8Array | null>): Promise<Answered<O>> {
+  try {
+    if (outcome.answer !== 'value') {
+      if (outcome.exitCode !== 0) return { kind: 'error', error: { name: 'Exit', message: `the command exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
+
+      return { kind: 'ok', value: await answering.out(read, outcome.value) };
+    }
+
+    const bytes = outcome.value === undefined && outcome.output ? await read() : null;
+    const said = outcome.value ?? (bytes === null ? null : new TextDecoder().decode(bytes));
+    // A process that died before it answered left no envelope.
+    const envelope = said === null ? null : v.safeParse(EnvelopeSchema, jsonOf(said));
+
+    if (envelope?.success !== true) return { kind: 'error', error: { name: 'Exit', message: `the task's process exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
+
+    if (!envelope.output.ok) return { kind: 'error', error: envelope.output.error };
+    const answered = envelope.output;
+
+    return { kind: 'ok', value: await answering.value('bytes' in answered ? { bytes: new Uint8Array(Buffer.from(answered.bytes, 'base64')) } : { value: answered.value }) };
+  } catch (cause) {
+    // An answer too large for a string, or not what its output takes, is this item's error, not the job's.
+    return { kind: 'error', error: remoteError(errorOf({ cause })) };
+  }
+}
+
 /** How a job is created and its outcomes read, for one kind of task. */
-abstract class Base<I, O> {
-  constructor(private readonly recipeOf: () => Recipe, protected readonly options: TaskOptions) {}
+abstract class Base<I extends Json, O> {
+  constructor(private readonly recipeOf: () => Recipe, protected readonly options: TaskOptions, protected readonly answering: Answering<O>) {}
 
   protected get recipe(): Recipe {
     return this.recipeOf();
   }
 
   /** The job's `run` and whether it keeps each task's output. */
-  protected abstract runOf(armada: Armada): Promise<{ readonly run: { readonly kind: 'command' } | { readonly kind: 'task'; readonly id: string; readonly bundle?: string }; readonly output: boolean }>;
+  protected abstract runOf(armada: Armada): Promise<{ readonly run: { readonly kind: 'command' } | { readonly kind: 'task'; readonly id: string; readonly bundle?: string | undefined }; readonly output: boolean }>;
 
   /** An item as a task, checked first. */
-  protected abstract task(item: I, index: number): Promise<WireTask>;
-
-  /** An exited task's answer. */
-  abstract answer(outcome: Outcome, read: () => Promise<Uint8Array | null>): Promise<{ readonly kind: 'ok'; readonly value: O } | { readonly kind: 'error'; readonly error: RemoteError }>;
+  protected abstract wire(item: I, index: number): Promise<WireTask>;
 
   async map(items: Iterable<I> | AsyncIterable<I>, options: MapOptions = {}): Promise<O[]> {
     return await this.stream(items, options).values();
@@ -276,8 +366,9 @@ abstract class Base<I, O> {
 
   stream(items: Iterable<I> | AsyncIterable<I>, options: MapOptions = {}): Job<I, O> {
     const armada = options.armada ?? connect();
+    const submission = new Submission<I>(armada, async (submitting) => await this.submit(armada, items, submitting, options));
 
-    return new Job(armada, this, new Submission(armada, (submission) => this.submit(armada, items, submission, options)));
+    return new Job(armada, this.answering, submission, async (_id, index) => await Promise.resolve(submission.item(index)));
   }
 
   async run(item: I, options?: MapOptions): Promise<O> {
@@ -288,19 +379,25 @@ abstract class Base<I, O> {
     return result.value;
   }
 
-  job(id: string, options: Pick<MapOptions, 'armada'> = {}): Job<I, O> {
+  job(id: string, options: Pick<MapOptions, 'armada'> = {}): Job<Json, O> {
     const armada = options.armada ?? connect();
+    let held: readonly Json[] = [];
 
-    return new Job(armada, this, new Submission(armada, async () => await Promise.resolve(id), null));
+    // The job's items as it holds them, read again when it grew past what was read.
+    return new Job(armada, this.answering, new Submission<Json>(armada, async () => await Promise.resolve(id)), async (known, index) => {
+      if (index >= held.length) held = await armada.items(known);
+
+      return held[index] ?? null;
+    });
   }
 
   /** Creates the job, all at once for an array and open for an iterable, whose items then follow in batches. */
   private async submit(armada: Armada, items: Iterable<I> | AsyncIterable<I>, submission: Submission<I>, options: MapOptions): Promise<string> {
     const { run, output } = await this.runOf(armada);
-    const { commit, ...recipe } = this.recipe;
+    const { commit, ...environment } = this.recipe;
 
     const spec = {
-      recipe, commit, run, output, pool: options.pool, slots: options.slots, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };
@@ -309,18 +406,17 @@ abstract class Base<I, O> {
       const all: readonly I[] = items;
 
       if (all.length > MAX_TASKS) throw new Error(`a job takes at most ${String(MAX_TASKS)} items, not ${String(all.length)}`);
-      const tasks = await Promise.all(all.map(async (item, index) => await this.task(item, index)));
+      const tasks = await Promise.all(all.map(async (item, index) => await this.wire(item, index)));
       const id = await armada.create({ ...spec, items: tasks });
 
-      submission.sent?.push(...all);
-      submission.finish();
+      submission.sent.push(...all);
 
       return id;
     }
 
     const id = await armada.create({ ...spec, items: [], open: true });
 
-    submission.pump(id, items, async (item, index) => await this.task(item, index));
+    submission.pump(id, items, async (item, index) => await this.wire(item, index));
 
     return id;
   }
@@ -332,74 +428,62 @@ abstract class Base<I, O> {
  * failure there.
  */
 class Submission<I> {
-  /** The items sent so far, in order, or null for a job this client did not submit. */
-  readonly sent: I[] | null;
+  /** The items sent so far, in order. */
+  readonly sent: I[] = [];
 
   readonly id: Promise<string>;
-
-  /** Settles once every item is sent, or with why one could not be. */
-  readonly done: Promise<void>;
 
   failure: Error | null = null;
 
   private stopped = false;
 
-  private finish_: () => void = () => undefined;
-
-  private fail_: (cause: Error) => void = () => undefined;
-
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly armada: Armada, create: (submission: Submission<I>) => Promise<string>, sent: I[] | null = []) {
-    this.sent = sent;
-    this.done = new Promise<void>((resolve, reject) => {
-      this.finish_ = resolve;
-      this.fail_ = reject;
-    });
-    // A failure reaches whoever reads the job, through its id or its end; this keeps it from also being unhandled.
-    this.done.catch(() => undefined);
+  /** Work started in the background, each step's failure recorded: the job's creation watched, an open job's items
+   *  sent, the timer's latest flush. */
+  private readonly created: Promise<void>;
+
+  private sending: Promise<void> | null = null;
+
+  private ticked: Promise<void> | null = null;
+
+  constructor(private readonly armada: Armada, create: (submission: Submission<I>) => Promise<string>) {
     this.id = create(this);
-    this.id.then(() => { if (sent === null) this.finish_(); }, (cause: unknown) => { this.fail(cause); });
+    // A failure reaches whoever reads the job, through its id or its end; this keeps it from also being unhandled.
+    this.created = this.watch(this.id);
   }
 
-  finish(): void {
-    this.finish_();
+  /** The item sent at `index`. */
+  item(index: number): I {
+    const item = this.sent[index];
+
+    if (item === undefined) throw new Error(`the job answered item ${String(index)} before this client sent it`);
+
+    return item;
   }
 
   /** Sends `items` into open job `id` as they come. */
-  pump(id: string, items: Iterable<I> | AsyncIterable<I>, task: (item: I, index: number) => Promise<WireTask>): void {
+  pump(id: string, items: Iterable<I> | AsyncIterable<I>, wire: (item: I, index: number) => Promise<WireTask>): void {
     let batch: WireTask[] = [];
     let flushing = Promise.resolve();
 
-    const flush = (): Promise<void> => {
+    const flush = async (): Promise<void> => {
       const sending = batch;
 
       batch = [];
       flushing = flushing.then(async () => { if (sending.length > 0) await this.armada.add(id, sending); });
-
-      return flushing;
+      await flushing;
     };
 
-    this.timer = setInterval(() => { flush().catch(() => undefined); }, BATCH_MS);
-    void (async () => {
-      for await (const item of items) {
-        if (this.stopped) return;
-        const sent = this.sent ?? [];
+    const enqueue = async (item: I): Promise<void> => {
+      batch.push(await wire(item, this.sent.length));
+      this.sent.push(item);
 
-        batch.push(await task(item, sent.length));
-        sent.push(item);
+      if (batch.length >= BATCH) await flush();
+    };
 
-        if (batch.length >= BATCH) await flush();
-      }
-
-      await flush();
-      await this.armada.close(id);
-      this.stop();
-      this.finish_();
-    })().catch(async (cause: unknown) => {
-      this.fail(cause);
-      await this.armada.cancel(id).catch(() => undefined);
-    });
+    this.timer = setInterval(() => { this.ticked = this.watch(flush()); }, BATCH_MS);
+    this.sending = this.send(id, items, enqueue, flush);
   }
 
   /** Stops taking items: the job was cancelled, or a failure ended it. */
@@ -409,10 +493,45 @@ class Submission<I> {
     if (this.timer !== null) clearInterval(this.timer);
   }
 
-  private fail(cause: unknown): void {
-    this.failure = cause instanceof Error ? cause : new Error(String(cause));
+  private async send(id: string, items: Iterable<I> | AsyncIterable<I>, enqueue: (item: I) => Promise<void>, flush: () => Promise<void>): Promise<void> {
+    try {
+      for await (const item of items) {
+        if (this.stopped) return;
+        await enqueue(item);
+      }
+
+      await flush();
+      await this.armada.close(id);
+      this.stop();
+    } catch (cause) {
+      this.fail(errorOf({ cause }));
+      await this.cancelAfter(id);
+    }
+  }
+
+  /** Records a background step's failure instead of leaving it unhandled. */
+  private async watch(step: Promise<unknown>): Promise<void> {
+    try {
+      await step;
+    } catch (cause) {
+      this.fail(errorOf({ cause }));
+    }
+  }
+
+  /** Cancels the job a failure ended; a cancel that fails too is said in the failure. */
+  private async cancelAfter(id: string): Promise<void> {
+    try {
+      await this.armada.cancel(id);
+    } catch (cause) {
+      const failed = this.failure ?? new Error('the job\'s items stopped');
+
+      this.failure = new Error(`${failed.message}; cancelling job ${id} failed too: ${errorOf({ cause }).message}`, { cause: failed });
+    }
+  }
+
+  private fail(failure: Error): void {
+    this.failure ??= failure;
     this.stop();
-    this.fail_(this.failure);
   }
 }
 
@@ -427,54 +546,37 @@ const EnvelopeSchema = v.union([
   v.object({ ok: v.literal(false), error: v.object({ name: v.string(), message: v.string(), stack: v.string() }) }),
 ]);
 
-/** A task's config, past the overloads' checks. */
-type Config = TaskConfig<Json, unknown, Output | undefined> & { readonly input?: StandardSchemaV1 };
+/** A task's config, past the overloads' checks: its body takes JSON, or what its input schema gives. */
+type Config = TaskConfig<unknown, unknown, Output | undefined, unknown> & { readonly input?: StandardSchemaV1 };
 
-class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
+class PushedTask<O> extends Base<Json, O> implements Task<Json, O>, Runnable {
   readonly id: string;
 
   readonly secrets: readonly string[];
 
-  constructor(private readonly config: Config) {
+  constructor(private readonly config: Config & { readonly id: string }, answering: Answering<O>) {
     super(() => {
-      const given = typeof config.recipe === 'function' ? config.recipe() : config.recipe;
+      const option = config.recipe;
+      const given = v.is(v.function(), option) ? option() : option;
 
       return given instanceof RecipeBuilder ? given.spec : given ?? recipe().spec;
-    }, config);
+    }, config, answering);
     this.id = config.id;
     this.secrets = config.secrets ?? [];
   }
 
   protected async runOf(armada: Armada) {
-    const bundle = await pushed(armada);
-
-    return { run: { kind: 'task' as const, id: this.id, ...bundle === null ? {} : { bundle } }, output: true };
+    return { run: { kind: 'task' as const, id: this.id, bundle: await pushed(armada) ?? undefined }, output: true };
   }
 
-  protected async task(item: I, index: number): Promise<WireTask> {
+  protected async wire(item: Json, index: number): Promise<WireTask> {
     if (this.config.input !== undefined) await check(this.config.input, item, `item ${String(index)}`);
 
-    // `Checked` let only plain JSON be an item.
-    return { item: item as Json };
-  }
-
-  async answer(outcome: Outcome, read: () => Promise<Uint8Array | null>) {
-    if (outcome.answer === 'command') return await commandAnswer<O>(this.config.output, outcome, read);
-    const bytes = outcome.value === undefined && outcome.output ? await read() : null;
-    const text = outcome.value ?? (bytes === null ? null : new TextDecoder().decode(bytes));
-    // A process that died before it answered left no envelope.
-    const envelope = outcome.answer === 'value' && text !== null ? v.safeParse(EnvelopeSchema, jsonOf(text)) : null;
-
-    if (envelope?.success !== true) return { kind: 'error' as const, error: { name: 'Exit', message: `the task's process exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
-
-    if (!envelope.output.ok) return { kind: 'error' as const, error: envelope.output.error };
-    const answered = envelope.output;
-
-    return { kind: 'ok' as const, value: ('bytes' in answered ? new Uint8Array(Buffer.from(answered.bytes, 'base64')) : answered.value) as O };
+    return { item };
   }
 
   /** On this machine: the same checks and body, a command run under this machine's `/bin/sh`. */
-  async local(item: I): Promise<O> {
+  async local(item: Json): Promise<O> {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-local-'));
 
     try {
@@ -484,118 +586,102 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
 
       if ('missing' in given) throw new Error(`.local reads the secret ${given.missing} from this machine's environment, which lacks it`);
       mkdirSync(artifacts);
-      const context: Context = { index: 0, attempt: 1, signal: new AbortController().signal, out: outFile(out), files: scratch, secrets: given.secrets, artifacts };
-      const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
-      const returned = await this.config.run(input as Json, context);
+      const answer = await this.invoke(item, { index: 0, attempt: 1, signal: new AbortController().signal, out: new OutFile(out), files: scratch, secrets: given.secrets, artifacts });
 
-      if (!isShell(returned)) {
-        const value = this.config.output === undefined || typeof this.config.output === 'string' ? returned : await check(this.config.output, returned, 'the value');
+      if (!v.is(ShellSchema, answer)) return await this.answering.value(answer);
+      const ran = await execute(answer.script, { env: { ARMADA_OUT: out, ARMADA_ARTIFACTS: artifacts } });
 
-        return (value instanceof Uint8Array ? new Uint8Array(value) : value) as O;
-      }
+      if (ran.exitCode !== 0) throw new ShellError(answer.script, ran.exitCode, ran.stderr);
 
-      const ran = await execute(returned.script, { env: { ARMADA_OUT: out, ARMADA_ARTIFACTS: artifacts } });
-
-      if (ran.exitCode !== 0) throw new ShellError(returned.script, ran.exitCode, ran.stderr);
-
-      const answered = await commandAnswer<O>(this.config.output, { exitCode: 0, tail: ran.stderr }, async () => {
-        try {
-          return new Uint8Array(readFileSync(out));
-        } catch {
-          return null;
-        }
-      });
-
-      if (answered.kind === 'error') throw Object.assign(new Error(answered.error.message), { name: answered.error.name });
-
-      return answered.value;
+      return await this.answering.out(async () => await readOut(out), undefined);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
   }
 
-  /** In the container: the item through the input schema and the body, then its value through the output schema, or
-   *  the command it returned. */
+  /** In the container: the body's answer, its value checked by the output as the client will check it, or the command
+   *  it returned. */
   readonly [RUN] = async (item: Json, context: Context): Promise<Envelope | Shell> => {
     try {
-      const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
-      const returned = await this.config.run(input as Json, context);
+      const answer = await this.invoke(item, context);
 
-      if (isShell(returned)) return returned;
-      const value = this.config.output === undefined || typeof this.config.output === 'string' ? returned : await check(this.config.output, returned, 'the value');
+      if (v.is(ShellSchema, answer)) return answer;
+      await this.answering.value(answer);
 
-      return value instanceof Uint8Array ? { ok: true, bytes: Buffer.from(value).toString('base64') } : { ok: true, value: value as Json };
+      return 'bytes' in answer ? { ok: true, bytes: Buffer.from(answer.bytes).toString('base64') } : { ok: true, value: answer.value };
     } catch (cause) {
-      return { ok: false, error: remoteError(cause) };
+      return { ok: false, error: remoteError(errorOf({ cause })) };
     }
   };
-}
 
-/** A command's answer: its `out` read as `output` says, once it exited 0. */
-async function commandAnswer<O>(output: Output | undefined, outcome: Pick<Outcome, 'exitCode' | 'tail'> & { readonly value?: string }, read: () => Promise<Uint8Array | null>): Promise<{ readonly kind: 'ok'; readonly value: O } | { readonly kind: 'error'; readonly error: RemoteError }> {
-  if (outcome.exitCode !== 0) return { kind: 'error', error: { name: 'Exit', message: `the command exited ${String(outcome.exitCode)}`, stack: outcome.tail } };
+  /** The item through the input schema and the body: the command it returned, or its value as JSON or bytes. */
+  private async invoke(item: Json, context: Context): Promise<Delivered | Shell> {
+    const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
+    const returned = await this.config.run(input, context);
 
-  if (output === undefined) return { kind: 'ok', value: null as O };
+    if (v.is(ShellSchema, returned)) return returned;
 
-  if (output === 'bytes') return { kind: 'ok', value: (await read() ?? new Uint8Array()) as O };
+    if (returned instanceof Uint8Array) return { bytes: new Uint8Array(returned) };
+    const value = v.safeParse(JsonValueSchema, returned);
 
-  // An output too large for a string, or not the JSON its schema wants, is this item's error, not the job's.
-  try {
-    const text = outcome.value ?? new TextDecoder().decode(await read() ?? new Uint8Array());
+    if (!value.success) throw new Error(`the body's value is not JSON: ${v.summarize(value.issues)}`);
 
-    return { kind: 'ok', value: (output === 'text' ? text : await check(output, JSON.parse(text), 'the output')) as O };
-  } catch (cause) {
-    return { kind: 'error', error: remoteError(cause) };
+    return { value: value.output };
   }
 }
 
-/** What a command run by the CLI writes to `$ARMADA_OUT` and answers with: its text, its bytes, or JSON a schema checks.
- *  Without it, the answer is null. */
-interface CommandOptions extends TaskOptions {
-  readonly output?: 'text' | 'bytes' | StandardSchemaV1;
+/** A finished command's `out` file, or null when it wrote none. */
+async function readOut(path: string): Promise<Uint8Array | null> {
+  try {
+    return new Uint8Array(await readFile(path));
+  } catch (cause) {
+    if (cause instanceof Error && 'code' in cause && cause.code === 'ENOENT') return null;
+
+    throw cause;
+  }
 }
 
 /** An item's argv. */
 type Argv<I> = (item: I, at: { readonly index: number }) => readonly string[];
 
 /** The CLI's and `armada run`'s commands: each item's argv built here, from a command line with placeholders. */
-class CommandTask<I, O> extends Base<I, O> {
-  constructor(recipe: Recipe, private readonly argv: Argv<I>, private readonly cmdOptions: CommandOptions) {
-    super(() => recipe, cmdOptions);
+class CommandTask<I extends Json, O> extends Base<I, O> {
+  constructor(environment: Recipe, private readonly argv: Argv<I>, options: TaskOptions, answering: Answering<O>) {
+    super(() => environment, options, answering);
   }
 
+  /** A command keeps its `out` file only when its answer reads it: one without an output answers null. */
   protected async runOf() {
-    return { run: { kind: 'command' as const }, output: this.cmdOptions.output !== undefined };
+    return await Promise.resolve({ run: { kind: 'command' as const }, output: this.answering !== asNull });
   }
 
-  protected async task(item: I, index: number): Promise<WireTask> {
+  protected async wire(item: I, index: number): Promise<WireTask> {
     const argv = this.argv(item, { index });
 
     if (argv.length === 0) throw new Error(`item ${String(index)}'s argv is empty`);
 
-    return { item: item as Json, argv: [...argv] };
-  }
-
-  async answer(outcome: Outcome, read: () => Promise<Uint8Array | null>) {
-    return await commandAnswer<O>(this.cmdOptions.output, outcome, read);
+    return await Promise.resolve({ item, argv: [...argv] });
   }
 }
 
 /** A command over items for the CLI and `armada run`, its value its out file's text, or null. */
-export function commandTask<I extends Json>(recipe: Recipe, argv: Argv<I>, options: TaskOptions & { readonly output: 'text' }): CommandTask<I, string>;
-export function commandTask<I extends Json>(recipe: Recipe, argv: Argv<I>, options?: TaskOptions): CommandTask<I, null>;
-export function commandTask<I extends Json>(recipe: Recipe, argv: Argv<I>, options: CommandOptions = {}): CommandTask<I, string | null> {
-  return new CommandTask(recipe, argv, options);
+export function commandTask<I extends Json>(environment: Recipe, argv: Argv<I>, options: TaskOptions & { readonly output: 'text' }): CommandTask<I, string>;
+export function commandTask<I extends Json>(environment: Recipe, argv: Argv<I>, options?: TaskOptions): CommandTask<I, null>;
+export function commandTask<I extends Json>(environment: Recipe, argv: Argv<I>, options: TaskOptions & { readonly output?: 'text' } = {}): CommandTask<I, string> | CommandTask<I, null> {
+  return options.output === 'text' ? new CommandTask(environment, argv, options, asText) : new CommandTask(environment, argv, options, asNull);
 }
+
+/** A property key: what a schema issue's path segment is, when it is not an object naming one. */
+const KeySchema = v.union([v.string(), v.number(), v.symbol()]);
 
 export class SchemaError extends Error {
   constructor(what: string, issues: readonly StandardSchemaV1.Issue[]) {
-    super(`${what} does not fit its schema: ${issues.map((issue) => `${issue.path?.map((segment) => String(typeof segment === 'object' ? segment.key : segment)).join('.') ?? ''}${issue.path === undefined ? '' : ': '}${issue.message}`).join('; ')}`);
+    super(`${what} does not fit its schema: ${issues.map((issue) => `${issue.path?.map((segment) => String(v.is(KeySchema, segment) ? segment : segment.key)).join('.') ?? ''}${issue.path === undefined ? '' : ': '}${issue.message}`).join('; ')}`);
     this.name = 'SchemaError';
   }
 }
 
-async function check<S extends StandardSchemaV1>(schema: S, value: unknown, what: string): Promise<OutputOf<S>> {
+async function check<S extends StandardSchemaV1>(schema: S, value: Json | Uint8Array, what: string): Promise<OutputOf<S>> {
   const result = await schema['~standard'].validate(value);
 
   if (result.issues !== undefined) throw new SchemaError(what, result.issues);
@@ -607,12 +693,11 @@ async function check<S extends StandardSchemaV1>(schema: S, value: unknown, what
 export class Job<I, O> implements AsyncIterable<Result<I, O>> {
   private readonly answers = new Map<number, Promise<Result<I, O>>>();
 
-  /** What the job holds, for a job this client did not submit: read again when it grew past what was read. */
-  private held: readonly I[] = [];
-
   readonly id: Promise<string>;
 
-  constructor(private readonly armada: Armada, private readonly task: Base<I, O>, private readonly submission: Submission<I>) {
+  /** `itemOf` gives an outcome's item: one this client sent, or one read from the job, which held it before it ran. */
+  constructor(private readonly armada: Armada, private readonly answering: Answering<O>, private readonly submission: Submission<I>,
+    private readonly itemOf: (id: string, index: number) => Promise<I>) {
     this.id = submission.id;
   }
 
@@ -730,24 +815,12 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     return answered;
   }
 
-  /** An outcome's item: sent before it by this client, or read from the job, which held it before it ran. */
-  private async item(id: string, index: number): Promise<I> {
-    const sent = this.submission.sent;
-
-    if (sent !== null) return sent[index] as I;
-
-    // The job's items came from this task's map, so they are its items.
-    if (index >= this.held.length) this.held = await this.armada.items(id) as I[];
-
-    return this.held[index] as I;
-  }
-
   private async resultOf(id: string, outcome: Outcome): Promise<Result<I, O>> {
-    const item = await this.item(id, outcome.index);
+    const item = await this.itemOf(id, outcome.index);
 
     const meta: Meta = {
       seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true,
-      ...outcome.peakMemory === undefined ? {} : { peakMemory: outcome.peakMemory }, ...outcome.cpuSeconds === undefined ? {} : { cpuSeconds: outcome.cpuSeconds },
+      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds,
     };
 
     const base = { index: outcome.index, item, meta };
@@ -755,7 +828,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     if (outcome.kind === 'failed') return { ...base, ok: false, kind: outcome.reason === 'cancelled' ? 'cancelled' : 'lost', reason: outcome.tail };
 
     if (outcome.reason === 'timeout') return { ...base, ok: false, kind: 'timeout' };
-    const answered = await this.task.answer(outcome, async () => await this.armada.output(id, outcome.index));
+    const answered = await answerOf(this.answering, outcome, async () => await this.armada.output(id, outcome.index));
 
     return answered.kind === 'ok' ? { ...base, ok: true, ...answered } : { ...base, ok: false, ...answered };
   }

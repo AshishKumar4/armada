@@ -4,8 +4,9 @@
  * which runs here and writes `ARMADA_OUT` itself. `ARMADA_ANSWER` says which, for the client to read it by.
  */
 import { writeFileSync } from 'node:fs';
-import { ANSWER_PATH, ARTIFACTS_PATH, FILES_DIR, OUT_PATH, type Json } from './protocol';
-import { execute, isShell, outFile, type OutFile, type Shell } from './sh';
+import * as v from 'valibot';
+import { ANSWER_PATH, ARTIFACTS_PATH, FILES_DIR, JsonSchema, OUT_PATH, type Json } from './protocol';
+import { execute, OutFile, ShellSchema, type Shell } from './sh';
 
 /** The method a task answers a container's call by. A registered symbol, so a bundle holding a second copy of this
  *  module still finds it. */
@@ -47,8 +48,8 @@ export interface Runnable {
   readonly [RUN]: (item: Json, context: Context) => Promise<Envelope | Shell>;
 }
 
-export function remoteError(cause: unknown): RemoteError {
-  return cause instanceof Error ? { name: cause.name, message: cause.message, stack: cause.stack ?? '' } : { name: 'Error', message: String(cause), stack: '' };
+export function remoteError(error: Error): RemoteError {
+  return { name: error.name, message: error.message, stack: error.stack ?? '' };
 }
 
 /** The secrets `names` from `env`, or the first name it lacks. */
@@ -65,16 +66,15 @@ export function secretsFrom(names: readonly string[], env: NodeJS.ProcessEnv): {
   return { secrets };
 }
 
-/** Whether `value` is a task: a pushed module's exports are read for them. */
-export function isRunnable(value: unknown): value is Runnable {
-  return typeof value === 'object' && value !== null && RUN in value && 'id' in value && typeof value.id === 'string';
-}
+/** A module's export that is a task, made by this module or another copy of it: a push reads task files for them. */
+export const RunnableSchema = v.custom<Runnable>((value) => v.is(v.looseObject({ id: v.string(), secrets: v.array(v.string()) }), value) && RUN in value);
 
-/** Runs the task `ARMADA_TASK` names among `modules`' exports, and exits: 1 when its body threw, a command's own exit
- *  code, so the job counts each red. A body's leftover timers or sockets do not hold the task open. */
-export async function runTasks(modules: readonly Record<string, unknown>[]): Promise<never> {
+/** Runs the task `ARMADA_TASK` names among `tasks`, the ones the bundle's files export, and exits: 1 when its body
+ *  threw, a command's own exit code, so the job counts each red. A body's leftover timers or sockets do not hold the
+ *  task open. */
+export async function runTasks(tasks: readonly Runnable[]): Promise<never> {
   const id = process.env['ARMADA_TASK'] ?? '';
-  const task = modules.flatMap((module) => Object.values(module)).find((value): value is Runnable => isRunnable(value) && value.id === id);
+  const task = tasks.find((each) => each.id === id);
 
   if (task === undefined) {
     console.error(`armada: no task ${id} in this bundle`);
@@ -94,14 +94,14 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
   }
 
   const context: Context = {
-    index: Number(process.env['ARMADA_INDEX'] ?? '0'), attempt: Number(process.env['ARMADA_ATTEMPT'] ?? '1'), signal: controller.signal, out: outFile(out), files: FILES_DIR,
+    index: Number(process.env['ARMADA_INDEX'] ?? '0'), attempt: Number(process.env['ARMADA_ATTEMPT'] ?? '1'), signal: controller.signal, out: new OutFile(out), files: FILES_DIR,
     artifacts: process.env['ARMADA_ARTIFACTS'] ?? ARTIFACTS_PATH, secrets: given.secrets,
   };
 
-  const answer = await task[RUN](JSON.parse(process.env['ARMADA_ITEM'] ?? 'null') as Json, context);
+  const answer = await task[RUN](v.parse(JsonSchema, JSON.parse(process.env['ARMADA_ITEM'] ?? 'null')), context);
   const marker = process.env['ARMADA_ANSWER'] ?? ANSWER_PATH;
 
-  if (isShell(answer)) {
+  if (v.is(ShellSchema, answer)) {
     writeFileSync(marker, 'command');
     process.exit((await execute(answer.script, { signal: controller.signal, inherit: true })).exitCode);
   }

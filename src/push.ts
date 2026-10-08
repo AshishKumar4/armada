@@ -10,7 +10,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as v from 'valibot';
 import { Project, type Push } from './protocol';
-import { isRunnable } from './runner';
+import { RunnableSchema } from './runner';
 import type { Armada } from './sdk';
 
 export const CONFIG_FILE = 'armada.config.ts';
@@ -43,10 +43,11 @@ export async function findProject(from: string): Promise<{ readonly root: string
   }
 }
 
-/** Every task the project's folders export, each by the file it is in, refusing an id two of them share. A file is read
- *  as this process imported it, so a push after an edit runs in a new process, as `armada dev` does. */
-async function tasksOf(root: string, folders: readonly string[]): Promise<{ readonly files: string[]; readonly ids: string[] }> {
-  const files: string[] = [];
+/** Every task the project's folders export, by the file and the export name it is under, refusing an id two of them
+ *  share. A file is read as this process imported it, so a push after an edit runs in a new process, as `armada dev`
+ *  does. */
+async function tasksOf(root: string, folders: readonly string[]): Promise<{ readonly exports: { readonly file: string; readonly name: string }[]; readonly ids: string[] }> {
+  const exports: { readonly file: string; readonly name: string }[] = [];
   const owners = new Map<string, string>();
 
   for (const folder of folders) {
@@ -54,24 +55,23 @@ async function tasksOf(root: string, folders: readonly string[]): Promise<{ read
 
     for (const path of [...glob.scanSync({ cwd: join(root, folder), absolute: true })].sort()) {
       if (/\.(test|spec)\.[cm]?[jt]sx?$/u.test(path)) continue;
-      // A task file is imported to find its tasks; its module is the user's, known only here.
-      const module: Record<string, unknown> = await import(pathToFileURL(path).href);
-      const tasks = Object.values(module).filter(isRunnable);
+      // A task file is imported to find its tasks: its exports are the user's, each read through the task schema.
+      const module = await import(pathToFileURL(path).href);
 
-      for (const task of tasks) {
-        const owner = owners.get(task.id);
+      for (const [name, value] of Object.entries(module)) {
+        if (!v.is(RunnableSchema, value)) continue;
+        const owner = owners.get(value.id);
 
-        if (owner !== undefined) throw new Error(`two tasks have the id ${task.id}: in ${relative(root, owner)} and ${relative(root, path)}`);
-        owners.set(task.id, path);
+        if (owner !== undefined) throw new Error(`two tasks have the id ${value.id}: in ${relative(root, owner)} and ${relative(root, path)}`);
+        owners.set(value.id, path);
+        exports.push({ file: path, name });
       }
-
-      if (tasks.length > 0) files.push(path);
     }
   }
 
   if (owners.size === 0) throw new Error(`no task is exported from ${folders.join(', ')} under ${root}`);
 
-  return { files, ids: [...owners.keys()].sort() };
+  return { exports, ids: [...owners.keys()].sort() };
 }
 
 /** A line holding only the comment Bun puts above each module it bundles: the module's path. */
@@ -79,7 +79,7 @@ const MODULE_PATH = /^\/\/ [^\s]+\.(?:[cm]?[jt]sx?|json)\n/gmu;
 
 /** The project's task files bundled for node, with the runner as the entry. */
 export async function bundleTasks(root: string, folders: readonly string[]): Promise<{ readonly bytes: Uint8Array<ArrayBuffer>; readonly ids: string[] }> {
-  const { files, ids } = await tasksOf(root, folders);
+  const { exports, ids } = await tasksOf(root, folders);
   const scratch = mkdtempSync(join(tmpdir(), 'armada-push-'));
 
   try {
@@ -87,9 +87,9 @@ export async function bundleTasks(root: string, folders: readonly string[]): Pro
     const runner = fileURLToPath(new URL('runner.ts', import.meta.url));
 
     writeFileSync(entry, [
-      ...files.map((file, at) => `import * as m${String(at)} from ${JSON.stringify(file)};`),
+      ...exports.map(({ file, name }, at) => `import { ${name} as t${String(at)} } from ${JSON.stringify(file)};`),
       `import { runTasks } from ${JSON.stringify(runner)};`,
-      `await runTasks([${files.map((_, at) => `m${String(at)}`).join(', ')}]);`,
+      `await runTasks([${exports.map((_, at) => `t${String(at)}`).join(', ')}]);`,
     ].join('\n') + '\n');
     const built = await Bun.build({ entrypoints: [entry], target: 'node', format: 'esm' });
     const [output] = built.outputs;

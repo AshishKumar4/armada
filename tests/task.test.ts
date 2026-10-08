@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
-import { MapError, push, recipe, sh, task, type Result } from '../src/index';
+import { MapError, push, recipe, sh, task, type Json, type Result } from '../src/index';
 import { bundleTasks } from '../src/push';
 import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, remembered, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
@@ -415,7 +415,7 @@ describe('a job\'s items', () => {
 
     const streamed = echo.stream(items(), { armada });
     const attached = echo.job(await streamed.id, { armada });
-    const seen: [number, string][] = [];
+    const seen: [number, Json][] = [];
 
     for await (const result of attached) {
       seen.push([result.index, result.item]);

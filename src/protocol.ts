@@ -130,13 +130,25 @@ export type Json = string | number | boolean | null | readonly Json[] | { readon
 /** Any value a request's JSON parsed to, which is JSON by construction. */
 export const JsonSchema = v.custom<Json>(() => true);
 
+/** A value a body returned, checked to be JSON all the way down: what an envelope can carry and bring back the same. */
+export const JsonValueSchema: v.GenericSchema<Json> = v.lazy(() => v.union([
+  v.string(), v.pipe(v.number(), v.finite()), v.boolean(), v.null(), v.array(JsonValueSchema), v.record(v.string(), JsonValueSchema),
+]));
+
 /** `text` as JSON, or null when it is not JSON: a task's output file, which the task may have left half written. */
 export function jsonOf(text: string): Json {
   try {
     return v.parse(JsonSchema, JSON.parse(text));
-  } catch {
-    return null;
+  } catch (cause) {
+    if (cause instanceof SyntaxError) return null;
+
+    throw cause;
   }
+}
+
+/** A caught value as an Error: `catch` and a rejection hand over whatever was thrown, which need not be one. */
+export function errorOf({ cause }: { readonly cause: unknown }): Error {
+  return cause instanceof Error ? cause : new Error('a value that is not an Error was thrown', { cause });
 }
 
 /** One task: its item, which `ARMADA_ITEM` carries as JSON, whose numeric `weight` queues it and whose `gang` runs it on
