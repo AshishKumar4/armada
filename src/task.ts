@@ -99,6 +99,8 @@ export const recipe: RecipeOf = Object.assign((options: RecipeOptions = {}) => n
 export interface MapOptions {
   /** The most containers at once. Default 50. */
   readonly pool?: number;
+  /** Relative weight for non-preemptive admission under the deployment's vCPU cap. Default 1. */
+  readonly fairWeight?: number;
   readonly label?: string;
   readonly env?: Readonly<Record<string, string>>;
   /** Small files every container gets under `context.files`. */
@@ -292,7 +294,7 @@ abstract class Base<I, O> {
     const { run, output } = await this.runOf(armada);
     const { commit, ...recipe } = this.recipe;
     const spec = {
-      recipe, commit, run, output, pool: options.pool, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      recipe, commit, run, output, pool: options.pool, fairWeight: options.fairWeight, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       timeout: this.options.timeout, speculative: this.options.speculative, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };

@@ -165,3 +165,23 @@ describe('a drained version', () => {
     expect(await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error))).toBe('admitted');
   });
 });
+
+test('admission serves the least normalized allocation at release points without preempting running containers', async () => {
+  const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }));
+  await fleet.opened('a', 2);
+  await fleet.opened('b', 1);
+  expect(await fleet.acquire('a/v1', 2)).toBe(true);
+  expect(await fleet.acquire('a/v2', 2)).toBe(true);
+  expect(await fleet.acquire('a/v3', 2)).toBe(false);
+  expect(await fleet.acquire('b/v1', 2)).toBe(false);
+  await fleet.release('a/v2');
+  expect(await fleet.acquire('a/v3', 2)).toBe(false);
+  expect(await fleet.acquire('b/v1', 2)).toBe(true);
+  expect(await fleet.used()).toBe(4);
+  await fleet.release('a/v1');
+  expect(await fleet.acquire('a/v3', 2)).toBe(true);
+  expect(await fleet.used()).toBe(4);
+  await fleet.closed('b');
+  await fleet.release('b/v1');
+  expect(await fleet.used()).toBe(2);
+});

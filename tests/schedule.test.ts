@@ -12,7 +12,7 @@ test('plans a skewed queue, improves the known LPT worst case, and accounts for 
   expect(plan.exact).toBe(true);
   expect(plan.lanes.flat().sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6]);
   const released = schedule(work, [0, 3, 20]);
-  expect(released.makespan).toBe(20);
+  expect(released.makespan).toBe(15);
   expect(poolFor([100, 40, 40, 40, 40], 5, 3)).toBe(3);
 });
 

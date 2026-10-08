@@ -33,7 +33,7 @@ function result(weights: readonly number[], releases: readonly number[], lanes: 
     water = next;
   }
   const lowerBound = weights.length === 0 ? 0 : Math.max(water, earliest + Math.max(...weights));
-  const makespan = weights.length === 0 ? 0 : Math.max(...loads);
+  const makespan = weights.length === 0 ? 0 : Math.max(...loads.filter((_, index) => (lanes[index]?.length ?? 0) > 0));
 
   return { lanes, loads, makespan, lowerBound, ratio: lowerBound === 0 ? 1 : makespan / lowerBound, exact };
 }
@@ -68,7 +68,7 @@ function improve(weights: readonly number[], releases: readonly number[], initia
   let best = initial;
   for (;;) {
     let next = best;
-    const critical = best.loads.indexOf(best.makespan);
+    const critical = best.loads.findIndex((load, index) => load === best.makespan && (best.lanes[index]?.length ?? 0) > 0);
     for (const task of best.lanes[critical] ?? []) {
       for (let to = 0; to < best.lanes.length; to += 1) {
         if (to === critical) continue;
