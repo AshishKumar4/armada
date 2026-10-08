@@ -16,7 +16,7 @@ import {
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
-import { GANG_DOWN, GANG_UP, LINK_ID, RELAY, RELAY_HEADER, RELAY_IN, RELAY_PY, Relayed } from './relay';
+import { GANG_DOWN, GANG_UP, LINK_ID, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY, Relayed } from './relay';
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -403,9 +403,14 @@ export class ArmadaVessel extends DurableObject<Env> {
 
   /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
    *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
-  /** The task's log, its secrets masked, into R2 as its rank's. */
+  /** The task's log, its secrets masked, into R2 as its rank's; a gang rank's ends with the relay's own, how each of its
+   *  links dropped or ended. */
   private async keepLog(spec: VesselSpec, current: Current): Promise<void> {
     await this.mask(current.claim.secrets);
+
+    if (current.claim.gang !== undefined) {
+      await must(this.container(), 'appending the relay\'s log', ['/bin/sh', '-c', `{ echo; echo '--- the relay'; tail -c 65536 ${RELAY_LOG}; } >> ${TASK}/log 2>/dev/null || :`], { ms: EXEC_MS });
+    }
     await must(this.container(), 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz`], { ms: EXEC_MS });
     await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, current.claim.index, 'log', current.claim.gang?.rank ?? 0),
       { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });

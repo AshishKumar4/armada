@@ -17,8 +17,10 @@ export const RELAY_OUT = 7911;
 
 export const RELAY_IN = 7912;
 
-/** The relay's script in a container. */
+/** The relay's script in a container, and its log: how each of its links dropped or ended. */
 export const RELAY = `${STATE}/relay.py`;
+
+export const RELAY_LOG = `${STATE}/relay.log`;
 
 /** The header a relay's WebSocket presents the gang's token in. */
 export const RELAY_HEADER = 'armada-relay';
@@ -240,12 +242,12 @@ while [ "$r" -lt "$world" ]; do
 done
 mount --bind ${STATE}/hosts /etc/hosts
 touch ${STATE}/hosts.mounted
-setsid python3 ${RELAY} "$rank" "$@" > ${STATE}/relay.log 2>&1 < /dev/null &
+setsid python3 ${RELAY} "$rank" "$@" > ${RELAY_LOG} 2>&1 < /dev/null &
 echo $! > ${STATE}/relay.pid
 n=0
 until ss -ltn | grep -q ':${String(RELAY_OUT)} ' && ss -ltn | grep -q ':${String(RELAY_IN)} '; do
   n=$((n + 1))
-  [ "$n" -lt 200 ] || { cat ${STATE}/relay.log >&2; exit 1; }
+  [ "$n" -lt 200 ] || { cat ${RELAY_LOG} >&2; exit 1; }
   sleep 0.05
 done`;
 
