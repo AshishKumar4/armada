@@ -11,6 +11,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
 import { failureTail, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe } from '../../src/protocol';
+import { deleteSnapshotWith } from '../../src/registry';
 import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, USER_HOME, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
@@ -70,8 +71,43 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     return { kind: 'preparing', since: now };
   }
 
+  /** With `armada deploy --keep=N`, a new environment prunes the ones past it (`prune`). */
   async prepared(generation: Generation): Promise<void> {
     await this.ctx.storage.put(`env:${generation.key}`, { state: 'ready', generation, lastUsed: Date.now() } satisfies Entry);
+    const keep = Number(this.env.KEEP_ENVIRONMENTS ?? 0);
+
+    if (keep > 0 && this.env.REGISTRY_CREDENTIALS !== undefined) {
+      await this.prune(keep, this.env.REGISTRY_CREDENTIALS).catch((cause: unknown) => { console.error(JSON.stringify({ prune: said(cause) })); });
+    }
+  }
+
+  /** Deletes the snapshots of the ready environments past every one an open job uses and the `keep` most recently
+   *  used of the rest, with the registry `credentials`: the account's snapshots are limited, and each change to a
+   *  project's install makes another environment. Each record goes first, so a job asking for it after prepares it
+   *  again rather than start from a snapshot being deleted; a snapshot whose deletion fails is logged and left. The keys
+   *  pruned. */
+  async prune(keep: number, credentials: string): Promise<string[]> {
+    const open = await this.env.FLEET.getByName(SINGLE).open();
+    const used = new Set(await Promise.all(open.map(async (job) => await this.env.JOB.getByName(job).environment())));
+    const pruned: string[] = [];
+
+    for (const { key, snapshot, lastUsed } of superseded(await this.list(), keep, used)) {
+      // A job that asked for it since the listing, while a call above let other requests in, keeps it: the read and the
+      // delete are storage alone, with nothing between them that lets one in.
+      const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+
+      if (entry?.state !== 'ready' || entry.lastUsed !== lastUsed) continue;
+      await this.forget(key);
+      pruned.push(key);
+
+      try {
+        console.log(JSON.stringify({ pruned: key, snapshot: await deleteSnapshotWith(credentials, snapshot) }));
+      } catch (cause) {
+        console.error(JSON.stringify({ pruned: key, snapshot, left: said(cause) }));
+      }
+    }
+
+    return pruned;
   }
 
   /** A failure ends the key's preparation only if it is the attempt begun `since`, not one a later attempt replaced. */
@@ -92,6 +128,13 @@ export class ArmadaEnvironments extends DurableObject<Env> {
   async forget(key: string): Promise<void> {
     await this.ctx.storage.delete(`env:${key}`);
   }
+}
+
+/** The ready environments that no open job `used` and that are past the `keep` most recently used of those, oldest
+ *  last: an open job's vessels, a replacement's included, start from its environment until it ends. */
+export function superseded(entries: readonly { readonly key: string; readonly entry: Entry }[], keep: number, used: ReadonlySet<string>): { key: string; snapshot: string; lastUsed: number }[] {
+  return entries.flatMap(({ key, entry }) => entry.state === 'ready' && !used.has(key) ? [{ key, snapshot: entry.generation.snapshot.id, lastUsed: entry.lastUsed }] : [])
+    .sort((left, right) => right.lastUsed - left.lastUsed).slice(keep);
 }
 
 type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot';

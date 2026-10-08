@@ -27,6 +27,12 @@ export interface Env {
   readonly ARMADA_SHA?: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
+  /** How many of the most recently used environments keep their snapshots (`armada deploy --keep`); unset keeps all. */
+  readonly KEEP_ENVIRONMENTS?: string;
+  /** `user:password` for the account's registry, which deletes the snapshots past them. */
+  readonly REGISTRY_CREDENTIALS?: string;
+  /** When those credentials expire, an ISO date, which `/health` reports so a deploy can warn ahead of it. */
+  readonly REGISTRY_CREDENTIALS_EXPIRE?: string;
 }
 
 /** The R2 key of a commit's pack: from the root, or what it adds to an environment's commit, under its packer

@@ -103,6 +103,11 @@ export class ArmadaFleet extends DurableObject<Env> {
     await this.ctx.storage.delete(`job:${job}`);
   }
 
+  /** The jobs not yet done, by id. */
+  async open(): Promise<string[]> {
+    return [...(await this.ctx.storage.list({ prefix: 'job:' })).keys()].map((name) => name.slice('job:'.length));
+  }
+
   async jobs(): Promise<number> {
     return (await this.ctx.storage.list({ prefix: 'job:' })).size;
   }

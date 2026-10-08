@@ -370,6 +370,8 @@ export const HealthSchema = v.object({
   ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number(),
   /** The commit the deployed Worker was built from, `armada deploy`'s ARMADA_SHA var — absent on a Worker before it. */
   sha: v.optional(v.string()),
+  /** When the registry credentials a `--keep` deploy gave the Worker expire, an ISO date; absent without them. */
+  keepUntil: v.optional(v.string()),
 });
 
 export type Health = v.InferOutput<typeof HealthSchema>;
