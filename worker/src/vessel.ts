@@ -267,20 +267,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     return slots;
   }
 
-  /** Where slot `slot`'s task dir and its cgroup are: a slotted vessel's own under `slots`, else `TASK`'s. */
-  private dirs(spec: SlotSpec, slot: number): { readonly dir: string; readonly group: string } {
-    const { dir, group } = layoutOf(spec, slot);
-
-    return { dir, group };
-  }
-
   /** One slot's slice: pull a task while free, block on `waitOn` while one runs, finish it, repeat — all slots' loops
    *  run beside each other, so one slot's store never idles another's launch. A null claim ends this loop retired; a
    *  `waitMs` parks only this slot; a fatal error fails the vessel once through `abort`. */
   private async slotLoop(spec: SlotSpec, slot: number, until: number, abort: { failed: boolean }): Promise<'reslice' | 'retired' | number> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
-    const { dir, group } = this.dirs(spec, slot);
+    const { dir, group } = layoutOf(spec, slot);
     let lost = 0;
 
     while (Date.now() < until && !abort.failed) {
@@ -473,7 +466,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
   private async finish(spec: SlotSpec, slot: number, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
     const container = this.container();
-    const { dir, group } = this.dirs(spec, slot);
+    const { dir, group } = layoutOf(spec, slot);
     const { index, attempt } = current.claim;
     const rank = current.claim.gang?.rank ?? 0;
     const job = this.env.JOB.getByName(spec.jobId);
@@ -523,14 +516,12 @@ export class ArmadaVessel extends DurableObject<Env> {
     }
   }
 
-  /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
-   *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
   /** The task's log, its secrets masked, into R2 as its rank's; a gang rank's ends with the relay's own, how each of its
    *  links dropped or ended. Gangs only run with one slot, so `dir` is TASK for them. */
   private async keepLog(spec: SlotSpec, slot: number, current: Current): Promise<void> {
-    const { dir } = this.dirs(spec, slot);
+    const { dir, mask } = layoutOf(spec, slot);
 
-    await this.mask(current.claim.secrets, layoutOf(spec, slot).mask, `${dir}/log`);
+    await this.mask(current.claim.secrets, mask, `${dir}/log`);
 
     if (current.claim.gang !== undefined) {
       await must(this.container(), 'appending the relay\'s log', ['/bin/sh', '-c', `{ echo; echo '--- the relay'; tail -c 65536 ${RELAY_LOG}; } >> ${dir}/log 2>/dev/null || :`], { ms: EXEC_MS });
@@ -540,6 +531,8 @@ export class ArmadaVessel extends DurableObject<Env> {
       { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
   }
 
+  /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
+   *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
   private async mask(names: readonly string[] | undefined, kept: string, log: string): Promise<void> {
     if (names === undefined || names.length === 0) return;
     await must(this.container(), 'masking the secrets', ['node', '-e', MASK, log, kept], { ms: EXEC_MS });
