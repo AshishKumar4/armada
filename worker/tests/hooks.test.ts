@@ -2,7 +2,7 @@
  *  exercised through `webhooked` with the DO's own methods on in-memory storage. */
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import worker from '../src/worker';
-import { JobSpecSchema, PROTOCOL } from '../../src/protocol';
+import { JobSpecSchema, WebhooksSchema } from '../../src/protocol';
 import { ArmadaWebhooks, driverSpec, eventOf, type HookConfig } from '../src/hooks';
 import { webhooked, signed } from '../src/worker';
 import * as v from 'valibot';
@@ -13,6 +13,9 @@ const TOKEN = 't'.repeat(32);
 const SECRET = 's'.repeat(48);
 
 const SHA = 'a'.repeat(40);
+
+/** What the webhook endpoint answers a delivery. */
+const Said = v.object({ started: v.optional(v.string()), note: v.optional(v.string()) });
 
 const CONFIG: HookConfig = { repo: 'owner/armada', pullRequests: true, tokenSecret: 'GITHUB_TOKEN', secret: SECRET };
 
@@ -85,7 +88,7 @@ describe('the github webhook', () => {
     const denied = await deliver(new Map(), object, {}, pushed('refs/heads/main'), { 'X-Hub-Signature-256': 'sha256=bad', 'X-GitHub-Delivery': 'del-2' });
 
     expect(denied.status).toBe(401);
-    expect((await answer.json())).toEqual({ started: expect.any(String) });
+    expect(v.parse(Said, await answer.json())).toEqual({ started: expect.any(String) });
   });
 
   test('reads the push events: built branch, filtered branch, deletion, tag, ping, and other events', async () => {
@@ -126,20 +129,20 @@ describe('the github webhook', () => {
     const push = pushed('refs/heads/main');
 
     const first = await deliver(objects, object, {}, push, { 'X-GitHub-Delivery': 'del-1' });
-    expect((await first.json())).toEqual({ started: expect.any(String) });
+    expect(v.parse(Said, await first.json())).toEqual({ started: expect.any(String) });
 
     const again = await deliver(objects, object, {}, push, { 'X-GitHub-Delivery': 'del-1' });
-    expect((await again.json())).toEqual({ note: 'duplicate' });
+    expect(v.parse(Said, await again.json())).toEqual({ note: 'duplicate' });
 
     const judged = await deliver(new Map([['verdicts/armada/' + SHA + '.json', '{}']]), object, {}, push, { 'X-GitHub-Delivery': 'del-2' });
-    expect((await judged.json())).toEqual({ note: 'already' });
+    expect(v.parse(Said, await judged.json())).toEqual({ note: 'already' });
 
     await object.drove('armada', SHA, 'job-1');
     const running = await deliver(objects, object, { 'job-1': { phase: 'running' } }, push, { 'X-GitHub-Delivery': 'del-3' });
-    expect((await running.json())).toEqual({ note: 'already' });
+    expect(v.parse(Said, await running.json())).toEqual({ note: 'already' });
 
     const done = await deliver(objects, object, { 'job-1': { phase: 'done' } }, push, { 'X-GitHub-Delivery': 'del-4' });
-    expect((await done.json())).toEqual({ started: expect.any(String) });
+    expect(v.parse(Said, await done.json())).toEqual({ started: expect.any(String) });
   });
 
   test('forgets a delivery after a day and a commit\'s driver after a week', async () => {
@@ -194,13 +197,13 @@ describe('the webhooks route', () => {
     }), env);
 
     expect((await ask('POST', '/webhooks/armada', { ...CONFIG, hook: 77 })).status).toBe(200);
-    const listed = (await (await ask('GET', '/webhooks')).json()) as { webhooks: { repo: string; hook?: number }[] };
+    const listed = v.parse(WebhooksSchema, await (await ask('GET', '/webhooks')).json());
 
     expect(listed.webhooks[0]?.repo).toBe('owner/armada');
     expect(listed.webhooks[0]?.hook).toBe(77);
     expect((await ask('DELETE', '/webhooks/armada')).status).toBe(200);
     expect((await ask('GET', '/webhooks')).status).toBe(200);
-    expect(((await (await ask('GET', '/webhooks')).json())).webhooks).toHaveLength(0);
+    expect(v.parse(WebhooksSchema, await (await ask('GET', '/webhooks')).json()).webhooks).toHaveLength(0);
   });
 });
 

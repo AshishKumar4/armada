@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
+import * as v from 'valibot';
 import { Armada } from '../../src/sdk';
 import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
@@ -35,7 +36,7 @@ describe('a client and a Worker', () => {
     const asked = async (version?: string) => {
       const answer = await worker.fetch(new Request('https://armada.test/jobs/none', { headers: { authorization: `Bearer ${TOKEN}`, ...version === undefined ? {} : { 'armada-protocol': version } } }), env);
 
-      return [answer.status, (await answer.json()).error];
+      return [answer.status, v.parse(v.object({ error: v.optional(v.string()) }), await answer.json()).error];
     };
 
     expect({ older: await asked('2'), served: await asked('3'), newer: await asked('8'), same: (await armada.health()).protocol }).toEqual({
