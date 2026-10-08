@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Outcome } from '../../src/protocol';
 import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, USAGE } from '../src/container';
-import { ArmadaVessel, type VesselSpec } from '../src/vessel';
+import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
 
 const spec: VesselSpec = {
@@ -176,5 +179,21 @@ describe('a task that names secrets', () => {
     for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
     expect({ cachedAtReport, expires: artifacts.kept.get('cache/square-2')?.customMetadata['expires'] }).toEqual({ cachedAtReport: '{"ok":true,"value":4}', expires: '1234' });
+  });
+});
+
+describe('a task\'s log tail', () => {
+  test('is read from the log\'s end alone, however long a line it ends in', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'armada-tail-'));
+
+    try {
+      // 32 MiB on one line, then two short ones.
+      writeFileSync(join(dir, 'log'), `${'x'.repeat(32 * 1024 * 1024)}\nsecond\nthird\n`);
+      const read = Bun.spawnSync(['/bin/sh', '-c', tailOf(dir)], { stdout: 'pipe' }).stdout;
+
+      expect({ bytes: read.byteLength <= TAIL_BYTES, end: new TextDecoder().decode(read).endsWith('x\nsecond\nthird\n') }).toEqual({ bytes: true, end: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
