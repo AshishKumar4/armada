@@ -4,7 +4,6 @@ discovery, the client against a fake Worker, the MapError/Result shapes and the 
 import base64
 import http.server
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -13,10 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task  # noqa: E402
-from armada.push import bundle_tasks, find_project  # noqa: E402
-from armada.task import Envelope  # noqa: E402
-from armada.wire import environment_key  # noqa: E402
+from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task
+from armada.push import bundle_tasks, find_project
+from armada.task import Envelope
+from armada.wire import environment_key
 
 
 class TestSh(unittest.TestCase):
@@ -63,8 +62,6 @@ def _ctx() -> Context:
 
 class TestEnvelope(unittest.TestCase):
     def test_value_and_error_round_trip_through_the_wire_shapes(self) -> None:
-        from armada.runner import run_tasks  # noqa: F401 — the in-container side
-
         @task(id="square")
         def square(n: int, ctx: Context) -> int:
             return n * n
@@ -141,7 +138,7 @@ class TestClient(unittest.TestCase):
             def log_message(self, *_args: object) -> None:
                 pass
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 seen["protocol"] = self.headers.get("armada-protocol")
                 seen["auth"] = self.headers.get("authorization")
                 if self.path.startswith("/jobs/j/events"):
@@ -155,7 +152,7 @@ class TestClient(unittest.TestCase):
                 else:
                     self.send_error(404)
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 if self.path == "/jobs":
                     self._json({"id": "j"})
                 else:
@@ -201,7 +198,8 @@ class TestTaskShapes(unittest.TestCase):
     def test_retries_split_codes_from_names(self) -> None:
         from armada.task import _retries
 
-        self.assertEqual(_retries({"attempts": 3, "on": [137, "TimeoutError"]}), {"attempts": 3, "exitCodes": [137], "errors": ["TimeoutError"]})
+        expected = {"attempts": 3, "exitCodes": [137], "errors": ["TimeoutError"]}
+        self.assertEqual(_retries({"attempts": 3, "on": [137, "TimeoutError"]}), expected)
 
     def test_a_task_validates_its_input_and_output(self) -> None:
         @task(id="typed", input=lambda v: int(v))

@@ -6,11 +6,12 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterator, Mapping, Optional, Sequence, Union
+from typing import BinaryIO
 
-from .wire import Json, JsonObject, PROTOCOL, PROTOCOL_HEADER, object_of, text_of
+from .wire import PROTOCOL, PROTOCOL_HEADER, Json, JsonObject, list_of, maybe_text_of, maybe_whole_of, number_of, object_of, text_of
 
 CONFIG_DIR = Path.home() / ".config" / "armada"
 
@@ -82,7 +83,7 @@ class Response:
     status: int
     body: bytes
     headers: dict[str, str]
-    stream: Optional[BinaryIO] = None
+    stream: BinaryIO | None = None
 
     def json(self) -> Json:
         parsed: Json = json.loads(self.body)
@@ -95,13 +96,16 @@ class Armada:
     def __init__(self, connection: Connection) -> None:
         self.connection = connection
 
-    def call(self, path: str, method: str = "GET", body: Optional[Union[bytes, BinaryIO]] = None,
-             headers: Optional[dict[str, str]] = None, stream: bool = False, protocol: int = PROTOCOL) -> Response:
+    def call(self, path: str, method: str = "GET", body: bytes | BinaryIO | None = None,
+             headers: dict[str, str] | None = None, stream: bool = False, protocol: int = PROTOCOL) -> Response:
         """A request to the runner. A read that meets a gateway's 502/503/504, the Worker's own 500, or a dropped
         connection is asked again, up to READ_ATTEMPTS times a second apart more each time."""
         attempts = READ_ATTEMPTS if method in ("GET", "HEAD") else 1
         # urllib's default agent is blocked by Cloudflare's bot rules; the SDK names itself instead.
-        heads = {"authorization": f"Bearer {self.connection.token}", PROTOCOL_HEADER: str(protocol), "user-agent": "armada-python/0.1", **(headers or {})}
+        heads = {
+            "authorization": f"Bearer {self.connection.token}", PROTOCOL_HEADER: str(protocol), "user-agent": "armada-python/0.1",
+            **(headers or {}),
+        }
 
         for attempt in range(1, attempts + 1):
             request = urllib.request.Request(self.connection.url.rstrip("/") + path, data=body, headers=heads, method=method)
@@ -159,19 +163,19 @@ class Armada:
         items = object_of(self.call(f"/jobs/{job}/items").json()).get("items")
         return items if isinstance(items, list) else []
 
-    def output(self, job: str, index: int) -> Optional[bytes]:
+    def output(self, job: str, index: int) -> bytes | None:
         response = self.call(f"/jobs/{job}/tasks/{index}/output")
         return None if response.status == 404 else response.body
 
-    def output_stream(self, job: str, index: int) -> Optional[BinaryIO]:
+    def output_stream(self, job: str, index: int) -> BinaryIO | None:
         response = self.call(f"/jobs/{job}/tasks/{index}/output", stream=True)
         return response.stream
 
-    def log(self, job: str, index: int) -> Optional[str]:
+    def log(self, job: str, index: int) -> str | None:
         response = self.call(f"/jobs/{job}/tasks/{index}/log")
         return None if response.status == 404 else response.body.decode()
 
-    def artifacts(self, job: str, index: int) -> Optional[bytes]:
+    def artifacts(self, job: str, index: int) -> bytes | None:
         response = self.call(f"/jobs/{job}/tasks/{index}/artifacts")
         return None if response.status == 404 else response.body
 
@@ -216,15 +220,15 @@ class Vessel:
     name: str
     state: str
     tasks: int
-    boot_ms: Optional[int]
+    boot_ms: int | None
     busy_ms: float
-    error: Optional[str]
+    error: str | None
 
 
 @dataclass(frozen=True)
 class Environment:
     key: str
-    sha: Optional[str]
+    sha: str | None
     created: int
     seconds: dict[str, float]
 
@@ -234,7 +238,7 @@ class Running:
     index: int
     vessel: str
     started: int
-    slot: Optional[int]
+    slot: int | None
 
 
 @dataclass(frozen=True)
@@ -246,27 +250,49 @@ class JobStatus:
     phase: str
     key: str
     created_at: int
-    started_at: Optional[int]
-    finished_at: Optional[int]
+    started_at: int | None
+    finished_at: int | None
     tasks: TaskCounts
     vessels: list[Vessel]
     problems: list[str]
-    environment: Optional[Environment]
-    running: Optional[list[Running]]
+    environment: Environment | None
+    running: list[Running] | None
 
     @staticmethod
-    def of(raw: object) -> "JobStatus":
-        assert isinstance(raw, dict)
-        environment = raw.get("environment")
+    def of(raw: Json) -> "JobStatus":
+        fields = object_of(raw)
+        counts = object_of(fields.get("tasks"))
+        environment = fields.get("environment")
         return JobStatus(
-            id=str(raw.get("id", "")), label=str(raw.get("label", "")), phase=str(raw.get("phase", "")), key=str(raw.get("key", "")),
-            created_at=int(raw.get("createdAt", 0)), started_at=raw.get("startedAt"), finished_at=raw.get("finishedAt"),
-            tasks=TaskCounts(**{key: int(raw.get("tasks", {}).get(key, 0)) for key in ("total", "queued", "running", "exited", "red", "failed")}),
-            vessels=[Vessel(str(each.get("name", "")), str(each.get("state", "")), int(each.get("tasks", 0)), each.get("bootMs"), float(each.get("busyMs", 0)), each.get("error")) for each in raw.get("vessels", [])],
-            problems=[str(each) for each in raw.get("problems", [])],
-            environment=None if not isinstance(environment, dict) else Environment(str(environment.get("key", "")), environment.get("sha"), int(environment.get("created", 0)), {str(k): float(v) for k, v in environment.get("seconds", {}).items()}),
-            running=None if raw.get("running") is None else [Running(int(each.get("index", 0)), str(each.get("vessel", "")), int(each.get("started", 0)), each.get("slot")) for each in raw.get("running", [])],
+            id=text_of(fields, "id"), label=text_of(fields, "label"), phase=text_of(fields, "phase"), key=text_of(fields, "key"),
+            created_at=int(number_of(fields, "createdAt", 0)), started_at=maybe_whole_of(fields, "startedAt"),
+            finished_at=maybe_whole_of(fields, "finishedAt"),
+            tasks=TaskCounts(**{key: int(number_of(counts, key, 0)) for key in ("total", "queued", "running", "exited", "red", "failed")}),
+            vessels=[_vessel(object_of(each)) for each in list_of(fields.get("vessels"))],
+            problems=[each for each in list_of(fields.get("problems")) if isinstance(each, str)],
+            environment=None if not isinstance(environment, dict) else _environment(environment),
+            running=None if fields.get("running") is None else [_running(object_of(each)) for each in list_of(fields.get("running"))],
         )
+
+
+def _vessel(fields: JsonObject) -> Vessel:
+    return Vessel(
+        text_of(fields, "name"), text_of(fields, "state"), int(number_of(fields, "tasks", 0)), maybe_whole_of(fields, "bootMs"),
+        number_of(fields, "busyMs", 0), maybe_text_of(fields, "error"),
+    )
+
+
+def _environment(fields: JsonObject) -> Environment:
+    seconds = object_of(fields.get("seconds"))
+    return Environment(
+        text_of(fields, "key"), maybe_text_of(fields, "sha"), int(number_of(fields, "created", 0)),
+        {key: number_of(seconds, key, 0) for key in seconds},
+    )
+
+
+def _running(fields: JsonObject) -> Running:
+    started = int(number_of(fields, "started", 0))
+    return Running(int(number_of(fields, "index", 0)), text_of(fields, "vessel"), started, maybe_whole_of(fields, "slot"))
 
 
 @dataclass(frozen=True)

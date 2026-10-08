@@ -17,7 +17,7 @@
     "test": "bun test tests/ worker/tests/",
     "relay": "python3 ci/relay.py",
     "proofs": "sh ci/proofs.sh && bun test tests/dispatch.test.ts",
-    "python": "cd python && python3 -m unittest discover -s tests -v && /opt/armada-python/bin/mypy --strict armada tests/typing_check.py"
+    "python": "cd python && /opt/armada-python/bin/ruff check --config pyproject.toml . ../examples && python3 -m unittest discover -s tests -v && /opt/armada-python/bin/mypy --strict armada tests/typing_check.py"
   },
   "dependencies": {
     "valibot": "1.4.1"

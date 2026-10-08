@@ -14,3 +14,26 @@ packages = ["armada"]
 
 [tool.setuptools.package-data]
 armada = ["py.typed"]
+
+# Dew's lint, adapted: its rules and complexity limits, at the width this package is written to (p99 140 columns).
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W", "I", "UP", "B", "C4", "PERF", "PIE", "RET", "SIM", "PGH",
+    "ERA", "ANN401", "FBT003", "PLW0120", "RUF", "C901", "PLR0912", "PLR0915",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.pylint]
+max-branches = 25
+max-statements = 75
+
+[tool.ruff.lint.isort]
+known-first-party = ["armada"]
+combine-as-imports = true
+split-on-trailing-comma = false

@@ -10,10 +10,10 @@ unzip -q /tmp/bun.zip -d /tmp
 install -m 755 /tmp/bun-linux-x64/bun /usr/local/bin/bun
 rm -rf /tmp/bun.zip /tmp/bun-linux-x64
 
-# Python for the python row: the SDK's unit tests and a pinned mypy in a venv.
+# Python for the python row: the SDK's unit tests, and a pinned ruff and mypy in a venv.
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-venv
 python3 -m venv /opt/armada-python
-/opt/armada-python/bin/pip install -q 'mypy==1.18.1'
+/opt/armada-python/bin/pip install -q 'mypy==1.18.1' 'ruff==0.14.3'
 
 # elan + the pinned Lean toolchain for the proofs row (ci/proofs.sh), installed
 # under the task user's ~/.elan so the shims resolve without PATH or env work.

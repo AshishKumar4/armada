@@ -3,12 +3,13 @@ protocol.ts holds, so a Python task and a TypeScript one speak the same bytes.""
 
 import hashlib
 import json
-from typing import Dict, List, Mapping, Optional, Union
+from collections.abc import Mapping
+from typing import TypeAlias
 
 # A JSON value, as protocol.ts's `Json` — what items and envelopes carry.
-Json = Union[str, float, int, bool, None, List["Json"], Dict[str, "Json"]]
+Json: TypeAlias = str | float | int | bool | None | list["Json"] | dict[str, "Json"]
 
-JsonObject = Dict[str, Json]
+JsonObject = dict[str, Json]
 
 
 def object_of(value: Json) -> JsonObject:
@@ -16,12 +17,17 @@ def object_of(value: Json) -> JsonObject:
     return value if isinstance(value, dict) else {}
 
 
+def list_of(value: Json) -> list[Json]:
+    """`value` as a JSON array, or an empty one when the wire sent something else."""
+    return value if isinstance(value, list) else []
+
+
 def text_of(fields: Mapping[str, Json], key: str, default: str = "") -> str:
     value = fields.get(key)
     return value if isinstance(value, str) else default
 
 
-def maybe_number_of(fields: Mapping[str, Json], key: str) -> Optional[float]:
+def maybe_number_of(fields: Mapping[str, Json], key: str) -> float | None:
     """A JSON number's value; a boolean, which Python counts as an int, is none."""
     value = fields.get(key)
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
@@ -30,6 +36,17 @@ def maybe_number_of(fields: Mapping[str, Json], key: str) -> Optional[float]:
 def number_of(fields: Mapping[str, Json], key: str, default: float) -> float:
     value = maybe_number_of(fields, key)
     return default if value is None else value
+
+
+def maybe_whole_of(fields: Mapping[str, Json], key: str) -> int | None:
+    """A JSON number's value as a whole number, or none when the field is absent or no number."""
+    value = maybe_number_of(fields, key)
+    return None if value is None else int(value)
+
+
+def maybe_text_of(fields: Mapping[str, Json], key: str) -> str | None:
+    value = fields.get(key)
+    return value if isinstance(value, str) else None
 
 # The wire's version, which every request names in PROTOCOL_HEADER.
 PROTOCOL = 7

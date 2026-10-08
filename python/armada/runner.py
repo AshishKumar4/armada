@@ -8,13 +8,11 @@ import os
 import signal
 import sys
 import threading
-from types import ModuleType
-from types import FrameType
-from typing import Optional
+from types import FrameType, ModuleType
 
 from .sh import Shell, execute, out_file
 from .task import Context, Task
-from .wire import ARTIFACTS_PATH, FILES_DIR, OUT_PATH, ANSWER_PATH
+from .wire import ANSWER_PATH, ARTIFACTS_PATH, FILES_DIR, OUT_PATH
 
 
 def run_tasks(modules: list[ModuleType]) -> "None":
@@ -30,7 +28,7 @@ def run_tasks(modules: list[ModuleType]) -> "None":
         sys.exit(1)
     stopped = threading.Event()
 
-    def terminate(_signum: int, _frame: Optional[FrameType]) -> None:
+    def terminate(_signum: int, _frame: FrameType | None) -> None:
         stopped.set()
 
     signal.signal(signal.SIGTERM, terminate)

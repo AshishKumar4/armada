@@ -11,12 +11,10 @@ import sys
 import threading
 import tomllib
 import zipfile
-from pathlib import Path
-from typing import Optional
-
 from dataclasses import dataclass
+from pathlib import Path
 
-from .client import Armada, connect
+from .client import Armada
 
 CONFIG_FILE = "pyproject.toml"
 
@@ -44,7 +42,7 @@ class Pushed:
     runtime: str
 
 
-def find_project(here: Optional[str] = None) -> Optional[Project]:
+def find_project(here: str | None = None) -> Project | None:
     """The project above `here`: its root and [tool.armada] config (`project`, `tasks`), or None outside one."""
     directory = Path(here or os.getcwd()).resolve()
     while True:
@@ -75,7 +73,9 @@ def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str]]:
                 continue
             tree = ast.parse(path.read_text())
             top = [node.targets[0].id for node in tree.body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)]
-            decorated = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list]
+            decorated = [
+                node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list
+            ]
             if not top and not decorated:
                 continue
             sys.path.insert(0, str(root))
@@ -87,7 +87,7 @@ def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str]]:
                     continue
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-                for name, value in vars(module).items():
+                for value in vars(module).values():
                     if _is_task(value):
                         if value.id in owners:
                             raise PushError(f"two tasks have the id {value.id}: in {owners[value.id]} and {path}")
@@ -134,7 +134,6 @@ def _module_paths(root: Path, files: list[Path]) -> dict[str, Path]:
                     package_init = root.joinpath(*prefix) / "__init__.py"
                     hit = candidate if candidate.exists() else (package_init if package_init.exists() else None)
                     if hit is not None and hit.resolve().is_relative_to(root):
-                        module_name = ".".join(prefix) if hit == candidate else ".".join(prefix)
                         resolved = hit.resolve()
                         if str(resolved.relative_to(root)).removesuffix(".py").replace(os.sep, ".") not in found:
                             queue.append(resolved)
@@ -166,7 +165,7 @@ def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
         if marker.exists():
             add("armada/py.typed", marker.read_bytes())
         packaged: set[str] = set()
-        for name, path in sorted(modules.items()):
+        for _name, path in sorted(modules.items()):
             inside = str(path.relative_to(root))
             # zipimport needs each directory a regular package: an empty __init__.py where the project has none.
             for depth in range(1, inside.count("/") + 1):
@@ -187,7 +186,7 @@ def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
     return archive.getvalue(), ids
 
 
-def push(armada: Armada, here: Optional[str] = None) -> Optional[Pushed]:
+def push(armada: Armada, here: str | None = None) -> Pushed | None:
     """Pushes the project above `here`: its bundle, then its ids against it. None outside a project."""
     found = find_project(here)
     if found is None:
@@ -200,11 +199,11 @@ def push(armada: Armada, here: Optional[str] = None) -> Optional[Pushed]:
 
 
 # Each push from this process, by the deployment's URL and the directory whose project it pushed.
-_pushes: dict[str, Optional[str]] = {}
+_pushes: dict[str, str | None] = {}
 _lock = threading.Lock()
 
 
-def pushed(armada: Armada) -> Optional[str]:
+def pushed(armada: Armada) -> str | None:
     """The bundle this process pushed for the project it runs in, or None outside a project."""
     key = f"{armada.connection.url} {os.getcwd()}"
     with _lock:

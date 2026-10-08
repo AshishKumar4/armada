@@ -7,11 +7,11 @@ from typing import assert_type
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from armada import Context, Ok, Result, Task, task  # noqa: E402
-from armada.client import JobStatus, Summary  # noqa: E402,F401
-from armada.sh import Shell, sh  # noqa: E402
-from armada.task import Cancelled, Errored, Lost, MapError, TimedOut  # noqa: E402
-from armada.wire import Json  # noqa: E402
+from armada import Context, Ok, Result, Task, task
+from armada.client import JobStatus, Summary
+from armada.sh import Shell, sh
+from armada.task import Cancelled, Errored, Job, Lost, MapError, TimedOut
+from armada.wire import Json
 
 
 # A body returning a value, no output: the Task's item and answer types are the body's.
@@ -114,3 +114,9 @@ def read(result: Result[int, str]) -> None:
 # A MapError holds every result, in input order.
 def held(error: MapError[int, str]) -> list[Result[int, str]]:
     return error.results
+
+
+# A job's status and summary are the client's typed records.
+def followed(job: Job[int, str]) -> None:
+    assert_type(job.status(), JobStatus)
+    assert_type(job.summary(), Summary)

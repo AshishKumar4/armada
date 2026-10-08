@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "python"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tasks.jobs import even, flake, keeper, png, seen, shout, square, whoami  # noqa: E402
+from tasks.jobs import even, flake, keeper, png, seen, shout, square, whoami
 
 print("map:", square.map([1, 2, 3]))
 print("run:", square.run(9))

@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
-from typing import IO, Optional, Union
+from typing import IO, Union
 
 _SAFE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
 
@@ -47,13 +47,13 @@ class Shell:
 
     script: str
 
-    def run(self, env: Optional[dict[str, str]] = None) -> "Completed":
+    def run(self, env: dict[str, str] | None = None) -> "Completed":
         ran = execute(self.script, env=env)
         if ran.exit_code != 0:
             raise ShellError(self.script, ran.exit_code, ran.stderr)
         return ran
 
-    def text(self, env: Optional[dict[str, str]] = None) -> str:
+    def text(self, env: dict[str, str] | None = None) -> str:
         return self.run(env).stdout
 
 
@@ -64,12 +64,15 @@ class Completed:
     stderr: str
 
 
-def execute(script: str, env: Optional[dict[str, str]] = None, stdout: Optional[IO[bytes]] = None) -> Completed:
+def execute(script: str, env: dict[str, str] | None = None, stdout: IO[bytes] | None = None) -> Completed:
     """Runs `script` under /bin/sh, with stdout and stderr read whole unless `stdout` streams it."""
-    child = subprocess.Popen(["/bin/sh", "-c", script], env={**os.environ, **(env or {})}, stdout=stdout or subprocess.PIPE, stderr=subprocess.PIPE)
+    child = subprocess.Popen(
+        ["/bin/sh", "-c", script], env={**os.environ, **(env or {})}, stdout=stdout or subprocess.PIPE, stderr=subprocess.PIPE,
+    )
     out, err = child.communicate()
 
-    return Completed(child.returncode if child.returncode >= 0 else 128, (out or b"").decode(errors="replace"), err.decode(errors="replace"))
+    code = child.returncode if child.returncode >= 0 else 128
+    return Completed(code, (out or b"").decode(errors="replace"), err.decode(errors="replace"))
 
 
 def _is_shell(value: object) -> bool:
@@ -105,7 +108,7 @@ def _quoted_prefix(script: str) -> bool:
     return mark != ""
 
 
-def _template(template: str, words: tuple[object, ...], escape: bool) -> Shell:
+def _template(template: str, words: tuple[object, ...], *, escape: bool) -> Shell:
     parts = template.replace("{{", "\x00").replace("}}", "\x01").split("{}")
     if len(parts) - 1 != len(words):
         raise ValueError(f"the template has {len(parts) - 1} placeholders for {len(words)} words")
@@ -121,9 +124,9 @@ def _template(template: str, words: tuple[object, ...], escape: bool) -> Shell:
 
 def sh(template: str, *words: object) -> Shell:
     """A command, each `{}` filled with one word quoted for the shell; the template's own text is raw."""
-    return _template(template, words, True)
+    return _template(template, words, escape=True)
 
 
 def raw(template: str, *words: object) -> Shell:
     """Interpolates as written, unescaped: for a script that is itself shell."""
-    return _template(template, words, False)
+    return _template(template, words, escape=False)
