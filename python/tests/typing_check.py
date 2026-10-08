@@ -23,6 +23,15 @@ def square(n: int, ctx: Context) -> int:
 assert_type(square, Task[int, int])
 
 
+# Without an output, any JSON a body answers keeps its type: a list or a dict of numbers fits.
+@task(id="spread")
+def spread(n: int, ctx: Context) -> list[int]:
+    return [n, n + 1]
+
+
+assert_type(spread, Task[int, list[int]])
+
+
 # A body returning a Shell with output="text" answers str; "bytes" answers bytes; none answers None.
 @task(id="shout", output="text")
 def shout(word: str, ctx: Context) -> Shell:

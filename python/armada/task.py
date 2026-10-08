@@ -16,7 +16,7 @@ from typing import BinaryIO, Generic, Literal, Protocol, TypedDict, TypeVar, Uni
 from .client import Armada, JobStatus, Summary, connect, summary_of
 from .recipe import Recipe, RecipeBuilder, recipe as default_recipe
 from .sh import OutFile, Shell, ShellError, execute, out_file
-from .wire import Json, maybe_number_of, number_of, object_of, remote_error, text_of
+from .wire import Answerable, Json, maybe_number_of, number_of, object_of, remote_error, text_of
 
 # A job's items travel as JSON, so an item type is one JSON can carry.
 In = TypeVar("In", bound=Json)
@@ -24,6 +24,8 @@ Out = TypeVar("Out")
 O_co = TypeVar("O_co", covariant=True)
 V = TypeVar("V")
 V_co = TypeVar("V_co", covariant=True)
+# A body's answer without an output, which crosses the wire as JSON or bytes and so must be one of them.
+A = TypeVar("A", bound=Answerable)
 
 # An open job's items go in batches of this many, or what came in this long.
 BATCH = 500
@@ -531,11 +533,18 @@ class Task(Generic[In, Out]):
         return {"item": item}
 
     def answer(self, outcome: Mapping[str, Json], read: Callable[[], bytes | None]) -> _Value | RemoteError:
-        """An exited task's answer."""
+        """An exited task's answer. A body's value crosses as JSON, and a validator output checks it here, so the
+        result holds what the validator gives; one that refuses it is this item's error."""
         if outcome.get("answer") == "command":
             exit_code = int(number_of(outcome, "exitCode", 1))
             return _command_answer(self.output, exit_code, text_of(outcome, "tail"), read, outcome.get("value"))
-        return _envelope_answer(outcome, read)
+        answered = _envelope_answer(outcome, read)
+        if isinstance(answered, RemoteError) or self.output is None or isinstance(self.output, str):
+            return answered
+        try:
+            return _Value(_check(self.output, answered.value, "the value"))
+        except Exception as cause:
+            return RemoteError(**remote_error(cause))
 
     def run_envelope(self, item: Json, context: Context) -> Union["Envelope", Shell]:
         """The body on an item: its value or its shell, the bundle's runner's contract (runner.ts's RUN)."""
@@ -544,10 +553,10 @@ class Task(Generic[In, Out]):
             returned = self.body(checked, context)
             if isinstance(returned, Shell):
                 return returned
-            value = returned if self.output is None or isinstance(self.output, str) else _check(self.output, returned, "the value")
-            if isinstance(value, (bytes, bytearray)):
-                return Envelope({"ok": True, "bytes": base64.b64encode(value).decode()}, None)
-            return Envelope({"ok": True, "value": value}, None)
+            # The body's own value: the client that reads it checks it with the output.
+            if isinstance(returned, (bytes, bytearray)):
+                return Envelope({"ok": True, "bytes": base64.b64encode(returned).decode()}, None)
+            return Envelope({"ok": True, "value": returned}, None)
         except Exception as cause:
             error = remote_error(cause)
             return Envelope({"ok": False, "error": error}, error["name"])
@@ -585,7 +594,7 @@ class _FromDecorate(Protocol[In, V_co]):
     def __call__(self, body: Callable[[V_co, Context], Shell], /) -> Task[In, None]: ...
 
     @overload
-    def __call__(self, body: Callable[[V_co, Context], Out], /) -> Task[In, Out]: ...
+    def __call__(self, body: Callable[[V_co, Context], A], /) -> Task[In, A]: ...
 
 
 class _Text(Protocol):
@@ -605,7 +614,7 @@ class _Decorate(Protocol):
     def __call__(self, body: Callable[[In, Context], Shell], /) -> Task[In, None]: ...
 
     @overload
-    def __call__(self, body: Callable[[In, Context], Out], /) -> Task[In, Out]: ...
+    def __call__(self, body: Callable[[In, Context], A], /) -> Task[In, A]: ...
 
 
 @overload

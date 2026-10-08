@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task
 from armada.push import bundle_tasks, find_project
-from armada.task import Envelope
+from armada.task import Envelope, RemoteError, _Value
 from armada.wire import environment_key
 
 
@@ -209,6 +209,31 @@ class TestTaskShapes(unittest.TestCase):
         self.assertEqual(typed.run_envelope("3", _ctx()), Envelope({"ok": True, "value": 3}, None))
         with self.assertRaises(SchemaError):
             typed._wire("not-an-int", 0)
+
+    def test_an_output_model_checks_the_answer_where_it_lands(self) -> None:
+        class Point:
+            def __init__(self, x: float) -> None:
+                self.x = x
+
+            @classmethod
+            def model_validate(cls, value: object) -> "Point":
+                if not isinstance(value, dict) or not isinstance(value.get("x"), float):
+                    raise ValueError("no x")
+                return cls(value["x"])
+
+        @task(id="point", output=Point)
+        def point(n: int, ctx: Context) -> dict[str, float]:
+            return {"x": float(n)}
+
+        # The container sends the body's own JSON, which a model instance would not be.
+        sent = point.run_envelope(3, _ctx())
+        assert isinstance(sent, Envelope)
+        self.assertEqual(json.loads(json.dumps(sent.body)), {"ok": True, "value": {"x": 3.0}})
+        landed = point.answer({"answer": "value", "value": json.dumps(sent.body), "exitCode": 0}, lambda: None)
+        refused = point.answer({"answer": "value", "value": json.dumps({"ok": True, "value": {"y": 1}}), "exitCode": 0}, lambda: None)
+        assert isinstance(landed, _Value)
+        assert isinstance(landed.value, Point)
+        self.assertEqual((landed.value.x, isinstance(refused, RemoteError)), (3.0, True))
 
 
 if __name__ == "__main__":

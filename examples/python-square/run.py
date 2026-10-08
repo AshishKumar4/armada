@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "python"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tasks.jobs import even, flake, keeper, png, seen, shout, square, whoami
+from tasks.jobs import even, flake, halves, keeper, png, seen, shout, square, whoami
 
 print("map:", square.map([1, 2, 3]))
 print("run:", square.run(9))
@@ -22,6 +22,8 @@ try:
 except Exception as failed:
     print("validator:", failed)
 
+landed = halves.run(7)
+print("output model:", type(landed).__name__, landed.whole, landed.half)
 print("secret:", whoami.run(0))
 made = keeper.run(1)
 print("artifacts:", made)

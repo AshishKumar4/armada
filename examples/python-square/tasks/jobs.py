@@ -1,4 +1,4 @@
-"""The example's tasks: a value, bytes, a command, a validator, a secret, artifacts and a retry."""
+"""The example's tasks: a value, bytes, a command, validators, a secret, artifacts, a retry and a cache."""
 
 from armada import Context, sh, task
 
@@ -21,6 +21,25 @@ def shout(word: str, ctx: Context):
 @task(id="even", input=lambda n: n if n % 2 == 0 else (_ for _ in ()).throw(ValueError("odd")))
 def even(n: int, ctx: Context) -> int:
     return n // 2
+
+
+class Halves:
+    """An output model: what `halves` answers, checked where the result lands."""
+
+    def __init__(self, whole: int, half: float) -> None:
+        self.whole = whole
+        self.half = half
+
+    @classmethod
+    def model_validate(cls, value: object) -> "Halves":
+        if not isinstance(value, dict) or not isinstance(value.get("whole"), int) or not isinstance(value.get("half"), float):
+            raise ValueError(f"not halves: {value!r}")
+        return cls(value["whole"], value["half"])
+
+
+@task(id="halves", output=Halves)
+def halves(n: int, ctx: Context) -> dict[str, float]:
+    return {"whole": n, "half": n / 2}
 
 
 @task(id="whoami", secrets=["ARMADA_EXAMPLE_WORD"])

@@ -3,13 +3,17 @@ protocol.ts holds, so a Python task and a TypeScript one speak the same bytes.""
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TypeAlias
 
 # A JSON value, as protocol.ts's `Json` — what items and envelopes carry.
 Json: TypeAlias = str | float | int | bool | None | list["Json"] | dict[str, "Json"]
 
 JsonObject = dict[str, Json]
+
+# What a body answers without an output: JSON, read covariantly so a `list[int]` or a `dict[str, float]` fits, and
+# bytes, which an envelope carries as base64.
+Answerable: TypeAlias = str | float | int | bool | None | bytes | Sequence["Answerable"] | Mapping[str, "Answerable"]
 
 
 def object_of(value: Json) -> JsonObject:
