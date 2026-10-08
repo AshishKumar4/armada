@@ -98,7 +98,7 @@ export function namespace<T>(named: (name: string) => T): DurableObjectNamespace
 /** An R2 bucket in memory: what a test reads back of what was put, by key. */
 export function bucket(objects = new Map<string, string>()) {
   const kept = new Map<string, { readonly uploaded: Date; readonly customMetadata: Record<string, string> }>();
-  const object = (key: string) => ({ key, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {} });
+  const object = (key: string) => ({ key, size: new TextEncoder().encode(objects.get(key) ?? '').byteLength, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {} });
 
   return {
     objects,

@@ -57,10 +57,10 @@ describe('a cached task', () => {
     const third = await cachedJob('j3', [{ a: 1, b: 2 }], artifacts);
 
     expect({
-      first: first.begun, second: second.begun, events, copied: artifacts.objects.get(taskKey('j2', 1, 'output')),
+      first: first.begun, second: second.begun, events, output: artifacts.objects.get((await second.job.cachedFrom(1)) ?? ''),
       key: artifacts.objects.has(await cacheKey(bundle, 'square', await environmentKey(v.parse(RecipeSchema, {})), { b: 2, a: 1 })), third: third.begun,
     }).toEqual({
-      first: ['j1/v1', 'j1/v2'], second: ['j2/v1'], events: [{ index: 1, cached: true, value: '{"ok":true,"value":3}' }], copied: '{"ok":true,"value":3}',
+      first: ['j1/v1', 'j1/v2'], second: ['j2/v1'], events: [{ index: 1, cached: true, value: '{"ok":true,"value":3}' }], output: '{"ok":true,"value":3}',
       key: true, third: ['j3/v1'],
     });
   });
@@ -113,7 +113,7 @@ describe('a cached task', () => {
     release();
     await adding;
 
-    expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.objects.get(taskKey('w2', 0, 'output')) }).toEqual({
+    expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.objects.get((await open.job.cachedFrom(0)) ?? '') }).toEqual({
       claimed: null, events: [{ index: 0, cached: true, value: '{"ok":true,"value":25}' }], output: '{"ok":true,"value":25}',
     });
   });

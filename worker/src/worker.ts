@@ -202,7 +202,11 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
     return Response.json({ closed: id });
   }
 
-  return tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && (leaf === 'output' || leaf === 'log') ? await object(env, taskKey(id, Number(index), leaf)) : undefined;
+  if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log')) return undefined;
+  // A task answered from the cache ran nothing: its output is the cached object itself.
+  const cached = leaf === 'output' ? await job.cachedFrom(Number(index)) : undefined;
+
+  return await object(env, cached ?? taskKey(id, Number(index), leaf));
 };
 
 /** `/secrets` lists the names set; `PUT /secrets/<name>` sets one from the body, `DELETE` removes it. No route answers

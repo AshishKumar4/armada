@@ -19,7 +19,7 @@ import {
   ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
-import { copyInto, said, SINGLE, taskKey, textOf, type Env } from './env';
+import { said, SINGLE, textOf, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { instanceOf, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
@@ -198,7 +198,7 @@ export class ArmadaJob extends DurableObject<Env> {
     for (let from = 0; from < reserved.length; from += CACHE_READS) {
       await Promise.all(reserved.slice(from, from + CACHE_READS).map(async (row) => {
         const index = row.idx;
-        const answered = await this.cachedAnswer(bundle, task, environment, id, index, v.parse(TaskSchema, JSON.parse(row.item)).item).catch((cause: unknown) => {
+        const answered = await this.cachedAnswer(bundle, task, environment, index, v.parse(TaskSchema, JSON.parse(row.item)).item).catch((cause: unknown) => {
           console.error(JSON.stringify({ job: id, index, cache: said(cause) }));
 
           return null;
@@ -213,26 +213,35 @@ export class ArmadaJob extends DurableObject<Env> {
         }
         const landed = this.sql.exec<{ idx: number }>(`UPDATE tasks SET state = 'exited' WHERE idx = ? AND state = 'checking' RETURNING idx`, index).toArray();
 
-        if (landed.length > 0) this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(answered));
+        if (landed.length === 0) return;
+        // Where its output is read from is kept before the outcome a client can read lands.
+        await this.ctx.storage.put(`cached:${String(index)}`, answered.key);
+        this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(answered.outcome));
       }));
     }
   }
 
-  /** The cached answer of `item`, copied to task `index`'s output, as its outcome; or null when the cache holds none. */
-  private async cachedAnswer(bundle: string, task: string, environment: string, id: string, index: number, item: Json): Promise<Outcome | null> {
-    const cached = await this.env.ARTIFACTS.get(await cacheKey(bundle, task, environment, item));
+  /** The cached answer of `item` as task `index`'s outcome, with the key its output is read from; or null when the cache
+   *  holds none. Nothing is copied: a small answer rides in the outcome, and a large one is read where it is cached. */
+  private async cachedAnswer(bundle: string, task: string, environment: string, index: number, item: Json): Promise<{ readonly outcome: Outcome; readonly key: string } | null> {
+    const key = await cacheKey(bundle, task, environment, item);
+    const cached = await this.env.ARTIFACTS.head(key);
 
     if (cached === null || Number(cached.customMetadata?.['expires'] ?? 0) < Date.now()) return null;
-    const small = cached.size <= INLINE_BYTES ? await cached.arrayBuffer() : null;
-
-    await copyInto(this.env.ARTIFACTS, taskKey(id, index, 'output'), cached, small);
+    const small = cached.size <= INLINE_BYTES ? await (await this.env.ARTIFACTS.get(key))?.arrayBuffer() : undefined;
     const answer = cached.customMetadata?.['answer'];
-    const value = small === null ? undefined : textOf(small);
-
-    return {
+    const value = small === undefined ? undefined : textOf(small);
+    const outcome: Outcome = {
       index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true,
       ...value === undefined ? {} : { value }, ...answer === 'value' || answer === 'command' ? { answer } : {},
     };
+
+    return { outcome, key };
+  }
+
+  /** Where task `index`'s output is cached, for a task answered from the cache; else undefined. */
+  async cachedFrom(index: number): Promise<string | undefined> {
+    return await this.ctx.storage.get<string>(`cached:${String(index)}`);
   }
 
   /** Tasks reserved for a cache read this object is not making: one an earlier start of it was, cut off. They go back
