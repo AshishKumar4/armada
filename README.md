@@ -71,23 +71,6 @@ Asked for 100 containers at once, armada had all 100 started within 3.7 s and 8.
 The CI suite ended 2 s after its longest row (442 s against 440 s), because its plan weighs each row by its measured
 seconds.
 
-## Compared with others
-
-Each cell comes from the tool's own documentation, read on 2026-10-07, except armada's start time, measured above.
-
-| | armada | Modal | Ray | Lithops | Coiled | Trigger.dev | GitHub Actions matrix |
-|---|---|---|---|---|---|---|---|
-| Runs on | Cloudflare Containers in your account | Modal's cloud | your cluster | your cloud's functions or VMs | VMs in your AWS or GCP account | Trigger.dev's cloud, or self-hosted | GitHub's runners, or your own |
-| Tasks in | any language (CLI); TypeScript (SDK) | Python | Python | Python | Python; any command (batch CLI) | TypeScript | any language (YAML) |
-| Typed results | yes; optional schemas check items and values | Python hints | Python hints | no | Python hints | yes; optional input schemas | strings |
-| Start | one `true` task, end to end: 2.5 s (measured) | container boot about 1 s, plus imports | depends on the cluster | depends on the backend | 1 to 2 min for the first VM | not published | not published |
-| Parallel limit | 375 containers a job; 1,500 vCPUs a deployment by default, within your account's container limits | 100 (Starter) or 5,000 (Team) containers a workspace; 1,000 inputs at once per map | your cluster | provider quotas | 500 VMs (functions) and 1,000 (batch) by default | 20, 50 or 200+ runs by plan | 256 jobs per matrix; 20 to 500 standard-runner jobs at once by plan |
-| GPUs | no | yes | yes | depends on the backend | yes | no | larger runners, on Team and Enterprise plans |
-| You pay | the Workers Paid plan, plus container, Worker, Durable Object and R2 usage | per second, plus a plan | your machines | your cloud | your cloud, plus $0.05 per CPU-hour | per run and per machine-second | per minute on private repositories |
-
-armada has no GPUs, because Cloudflare Containers have none, and its largest container is 4 vCPU and 12 GiB. It has
-no Python SDK yet; Python runs through the CLI and `armada run`, like any command. It runs only on Cloudflare.
-
 ## From the command line
 
 ```sh
