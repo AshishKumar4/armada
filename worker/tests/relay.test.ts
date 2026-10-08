@@ -1,145 +1,70 @@
-import { describe, expect, test, vi } from 'bun:test';
-import { RELAY_ACK, RELAY_GRACE_MS, RELAY_WINDOW, Relayed } from '../src/relay';
+import { describe, expect, test } from 'bun:test';
+import { Piped } from '../src/relay';
 
-/** A WebSocket's vessel end that records what it carried: each binary message as [offset, length], each text as is. */
-function socket() {
-  const carried: (string | [number, number])[] = [];
-  const closes: [number, string][] = [];
-  const ws = {
-    send: (data: string | Uint8Array) => {
-      carried.push(typeof data === 'string' ? data : [Number(new DataView(data.buffer).getBigUint64(0)), data.byteLength - 8]);
-    },
-    close: (code: number, reason: string) => { closes.push([code, reason]); },
-  } as unknown as WebSocket;
+/** A record as the container's relay writes one: a kind byte, the length in 4 bytes, big endian, and the bytes. */
+function record(kind: 't' | 'b', bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5 + bytes.byteLength);
 
-  return { ws, carried, closes };
+  out[0] = kind.charCodeAt(0);
+  new DataView(out.buffer).setUint32(1, bytes.byteLength);
+  out.set(bytes, 5);
+
+  return out;
 }
 
-/** A link over a container connection the test drives: the bytes written into the container, what the link logged,
- *  and whether the vessel was told to forget it. */
-function link() {
-  const written: number[] = [];
+/** A pipe between a WebSocket and a container connection the test drives: what went each way, and how it closed. */
+function pipe() {
+  const messages: (string | number[])[] = [];
+  const closes: [number, string][] = [];
+  const written: number[][] = [];
   const logged: string[] = [];
-  let forgotten = false;
   let inputClosed = false;
+  const socket = {
+    send: (data: string | Uint8Array) => { messages.push(typeof data === 'string' ? data : [...data]); },
+    close: (code: number, reason: string) => { closes.push([code, reason]); },
+  } as unknown as WebSocket;
   const writer = {
-    write: async (bytes: Uint8Array) => { written.push(...bytes); },
+    write: async (bytes: Uint8Array) => { written.push([...bytes]); },
     close: async () => { inputClosed = true; },
   } as unknown as WritableStreamDefaultWriter<Uint8Array>;
   let push: ReadableStreamDefaultController<Uint8Array> | undefined;
   const container = new ReadableStream<Uint8Array>({ start: (controller) => { push = controller; } });
-  const relayed = new Relayed(writer, (event) => { logged.push(event); }, () => { forgotten = true; });
+  const piped = new Piped(socket, writer, 'abcd 9000 1', (event) => { logged.push(event); });
 
-  return { relayed, container, push: () => push, written, logged, forgotten: () => forgotten, inputClosed: () => inputClosed };
+  return { piped, container, push: () => push, messages, closes, written, logged, inputClosed: () => inputClosed };
 }
 
-/** The peer's bytes from `offset`, as a binary message. */
-function bytes(offset: number, values: number[]): ArrayBuffer {
-  const message = new Uint8Array(8 + values.length);
+describe('a relay WebSocket at its vessel', () => {
+  test('names the link to the container first, then writes each message as a record, in order', async () => {
+    const { piped, written } = pipe();
 
-  new DataView(message.buffer).setBigUint64(0, BigInt(offset));
-  message.set(values, 8);
+    await Promise.all([piped.message('a5'), piped.message(new Uint8Array([1, 2, 3]).buffer)]);
 
-  return message.buffer;
-}
+    expect(written).toEqual([[...new TextEncoder().encode('abcd 9000 1\n')], [...record('t', new TextEncoder().encode('a5'))],
+      [...record('b', new Uint8Array([1, 2, 3]))]]);
+  });
 
-const settled = async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); };
+  test('sends each record from the container as a message once it is whole, however the reads split it', async () => {
+    const { piped, container, push, messages, closes } = pipe();
+    const stream = new Uint8Array([...record('b', new Uint8Array([7, 8, 9])), ...record('t', new TextEncoder().encode('e3'))]);
+    const pumped = piped.pump(container);
 
-describe('a relay link at its vessel', () => {
-  test('stops reading the container past the window until the peer counts its bytes, then sends the rest', async () => {
-    const { relayed, container, push } = link();
-    const first = socket();
-    const chunk = new Uint8Array(RELAY_WINDOW / 4);
-
-    relayed.attach(first.ws);
-    const pumped = relayed.pump(container);
-
-    for (let index = 0; index < 8; index += 1) push()?.enqueue(chunk);
-    await settled();
-    const before = first.carried.length;
-
-    await relayed.message(first.ws, `a${String(RELAY_WINDOW)}`);
-    await settled();
+    for (const at of [0, 2, 6, 9]) push()?.enqueue(stream.slice(at, [2, 6, 9, stream.byteLength][[0, 2, 6, 9].indexOf(at)]));
     push()?.close();
     await pumped;
 
-    // The attach counts nothing yet ('a0'); then five chunks, the window's worth and one, and after the count the rest.
-    expect({ before, after: first.carried.length }).toEqual({ before: 6, after: 10 });
+    expect({ messages, closes }).toEqual({ messages: [[7, 8, 9], 'e3'], closes: [[1000, 'the container closed it']] });
   });
 
-  test('sends what the peer has not counted again on the WebSocket that replaces a dropped one, in order', async () => {
-    const { relayed, container, push, logged } = link();
-    const first = socket();
-    const second = socket();
+  test('closes the container\'s connection after what was written when its WebSocket closes, and says why if not cleanly', async () => {
+    const clean = pipe();
+    const dropped = pipe();
 
-    relayed.attach(first.ws);
-    void relayed.pump(container);
-    push()?.enqueue(new Uint8Array(3));
-    push()?.enqueue(new Uint8Array(4));
-    await settled();
-    await relayed.message(first.ws, 'a3');
-    await relayed.closed(first.ws, 1006, 'WebSocket disconnected without sending Close frame.');
-    push()?.enqueue(new Uint8Array(5));
-    await settled();
-    relayed.attach(second.ws);
+    await clean.piped.message('a1');
+    await clean.piped.closed(1000, '');
+    await dropped.piped.closed(1006, 'WebSocket disconnected without sending Close frame.');
 
-    expect({ logged, first: first.carried, second: second.carried })
-      .toEqual({ logged: ['relay link dropped'], first: ['a0', [0, 3], [3, 4]], second: [[3, 4], [7, 5], 'a0'] });
-  });
-
-  test('writes each of the peer\'s bytes once though a replacing WebSocket sends some again, and counts them back', async () => {
-    const { relayed, written } = link();
-    const first = socket();
-    const second = socket();
-    const half = RELAY_ACK / 2;
-
-    relayed.attach(first.ws);
-    await relayed.message(first.ws, bytes(0, [1, 2, 3]));
-    relayed.attach(second.ws);
-    // A late message on the replaced WebSocket is dropped, and the replayed bytes overlap those written.
-    await relayed.message(first.ws, bytes(3, [4]));
-    await relayed.message(second.ws, bytes(1, [2, 3, 4, 5]));
-    await relayed.message(second.ws, bytes(5, new Array<number>(half).fill(6)));
-    await relayed.message(second.ws, bytes(5 + half, new Array<number>(half).fill(7)));
-
-    expect({ head: written.slice(0, 5), length: written.length, second: second.carried, first: first.closes })
-      .toEqual({ head: [1, 2, 3, 4, 5], length: 5 + RELAY_ACK, second: ['a3', `a${String(5 + RELAY_ACK)}`], first: [[1000, 'replaced']] });
-  });
-
-  test('ends once both streams ended and each was counted, closing the container\'s input after the peer\'s last byte', async () => {
-    const { relayed, container, push, inputClosed, forgotten } = link();
-    const ws = socket();
-
-    relayed.attach(ws.ws);
-    void relayed.pump(container);
-    push()?.enqueue(new Uint8Array(2));
-    push()?.close();
-    await settled();
-    await relayed.message(ws.ws, 'e1');
-    const early = inputClosed();
-
-    await relayed.message(ws.ws, bytes(0, [9]));
-    const input = inputClosed();
-    const before = forgotten();
-
-    await relayed.message(ws.ws, 'a2');
-
-    expect({ early, input, before, after: forgotten(), closes: ws.closes }).toEqual({ early: false, input: true, before: false, after: true, closes: [[1000, 'done']] });
-  });
-
-  test('gives a dropped link RELAY_GRACE_MS to come back, then closes it and says so', async () => {
-    const { relayed, logged, forgotten } = link();
-    const ws = socket();
-
-    vi.useFakeTimers();
-    relayed.attach(ws.ws);
-    await relayed.closed(ws.ws, 1006, '');
-    vi.advanceTimersByTime(RELAY_GRACE_MS - 1);
-    const waiting = forgotten();
-
-    vi.advanceTimersByTime(1);
-    vi.useRealTimers();
-
-    expect({ waiting, logged, forgotten: forgotten() }).toEqual({ waiting: false, logged: ['relay link dropped', 'relay link ended'], forgotten: true });
+    expect([clean.inputClosed(), clean.written.length, clean.logged, dropped.inputClosed(), dropped.logged])
+      .toEqual([true, 2, [], true, ['relay WebSocket closed by its relay']]);
   });
 });

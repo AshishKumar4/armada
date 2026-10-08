@@ -6,8 +6,8 @@
  * storage, so a restarted object takes the same task up again. A task it was told to drop (another vessel's answer
  * landed first, or the job ended) is killed with its whole session.
  *
- * A rank of a gang task waits for its gang to form, joins the gang's network (`relay.ts`) before it launches, and takes
- * the WebSockets the other ranks' relays open to it (`fetch`), each a connection into its container's relay.
+ * A rank of a gang task waits for its gang to form, joins the gang's network (`relay.ts`) before it launches, and pipes
+ * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
@@ -16,7 +16,7 @@ import {
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
-import { GANG_DOWN, GANG_UP, LINK_ID, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY, Relayed } from './relay';
+import { GANG_DOWN, GANG_UP, LINK_ID, Piped, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY } from './relay';
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -80,10 +80,8 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** Whether this object watches its container's end (`watch`). */
   private watching = false;
 
-  /** Each relay link into the container, by its id and by the WebSocket carrying it now. */
-  private readonly links = new Map<string, Relayed>();
-
-  private readonly relays = new Map<WebSocket, Relayed>();
+  /** Each relay WebSocket's pipe into the container, which holds nothing of its link (`Piped`). */
+  private readonly pipes = new Map<WebSocket, Piped>();
 
   async begin(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.put({ spec, state: 'waiting' satisfies State, requested: Date.now() });
@@ -291,9 +289,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('ganged', true);
   }
 
-  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a link (`id`) into
-   *  this container's relay, which connects `port` on this rank's address; or, with `resume`, the next WebSocket of a
-   *  link whose last one dropped, gone (410) once the link is. */
+  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token, piped to a new
+   *  connection into this container's relay under the link's id (`id`), which connects `port` on this rank's address
+   *  or, with `resume`, carries on the link it holds. */
   override async fetch(request: Request): Promise<Response> {
     const token = (await this.ctx.storage.get<Current>('current'))?.claim.gang?.token;
     const expected = new TextEncoder().encode(token ?? '');
@@ -307,49 +305,36 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (!Number.isInteger(port) || port < 1 || port > 65_535 || !LINK_ID.test(id) || request.headers.get('upgrade') !== 'websocket') {
       return new Response('a relay is a WebSocket to a port, under a link id', { status: 400 });
     }
-    const held = this.links.get(id);
-
-    if (held === undefined && url.searchParams.has('resume')) return new Response('the link is gone', { status: 410 });
     const [client, server] = Object.values(new WebSocketPair());
 
     if (client === undefined || server === undefined) throw new Error('a WebSocketPair has two ends');
     this.ctx.acceptWebSocket(server);
-    this.relays.set(server, held ?? await this.link(id, port, url.pathname));
-    this.relays.get(server)?.attach(server);
+    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
+    const piped = new Piped(server, socket.writable.getWriter(), `${id} ${String(port)} ${url.searchParams.has('resume') ? '1' : '0'}`,
+      (event, detail) => { console.log(JSON.stringify({ event, path: url.pathname, id, port, ...detail })); });
+
+    this.pipes.set(server, piped);
+    void piped.pump(socket.readable);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** A new link `id`: a connection into the container's relay for `port`, its bytes pumped to whichever WebSocket
-   *  carries the link. */
-  private async link(id: string, port: number, path: string): Promise<Relayed> {
-    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
-    const writer = socket.writable.getWriter();
-    const relayed = new Relayed(writer, (event, detail) => { console.log(JSON.stringify({ event, path, id, port, ...detail })); },
-      () => { this.links.delete(id); });
-
-    this.links.set(id, relayed);
-    await writer.write(new TextEncoder().encode(`${String(port)}\n`));
-    void relayed.pump(socket.readable);
-
-    return relayed;
-  }
-
   override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const relayed = this.relays.get(socket);
+    const piped = this.pipes.get(socket);
 
-    if (relayed === undefined) return socket.close(1011, 'no link');
-    await relayed.message(socket, message);
+    // A WebSocket this object no longer pipes (it was reset): its relay opens another.
+    if (piped === undefined) return socket.close(1011, 'no pipe');
+    await piped.message(message);
   }
 
   override async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
-    await this.relays.get(socket)?.closed(socket, code, reason);
-    this.relays.delete(socket);
+    await this.pipes.get(socket)?.closed(code, reason);
+    this.pipes.delete(socket);
   }
 
   override async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
-    await this.relays.get(socket)?.closed(socket, 1006, `failed: ${String(error)}`);
-    this.relays.delete(socket);
+    await this.pipes.get(socket)?.closed(1006, `failed: ${String(error)}`);
+    this.pipes.delete(socket);
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */

@@ -107,8 +107,9 @@ The gang starts once every rank has a container. A rank lost to the platform los
 as one task. The task's outcome is its first failing rank's, else rank 0's. Containers have no inbound address, so
 ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a connection, at 2 to 64 ranks. That suits
 tests and coordination, not bandwidth-bound training. A connection to a port nothing listens on yet opens and then
-closes at once, so a client retries it as it would a refused one. One whose WebSocket the network drops goes on over
-another, the program seeing nothing of it, if the far end's vessel still holds it, for up to a minute.
+closes at once, so a client retries it as it would a refused one. A connection outlives its WebSocket being dropped,
+or the vessel between the two ranks being reset or redeployed, the program seeing nothing of it, if both come back
+within a minute: the two ranks' relays hold its bytes, not the vessel.
 
 ## From TypeScript
 
