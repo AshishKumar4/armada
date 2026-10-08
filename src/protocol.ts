@@ -336,9 +336,9 @@ export const ProjectsSchema = v.object({ projects: v.array(Project) });
 export const VerdictsSchema = v.object({ verdicts: v.array(v.object({ sha: Sha, uploaded: v.number(), rows: v.number(), reds: v.number() })) });
 
 /** A deployment's state: its runner layer, its wire, the oldest wire it still serves (absent from a Worker that
- *  predates the field), the vCPUs its fleet holds, the jobs not yet done (those waiting for an environment or for a
- *  container included), and its fleet's cap (absent from a Worker that predates the field). */
-export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number(), cap: v.optional(v.number()) });
+ *  predates the field), the vCPUs its fleet holds, and the jobs not yet done, those waiting for an environment or
+ *  for a container included. */
+export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number() });
 
 export type Health = v.InferOutput<typeof HealthSchema>;
 
@@ -353,31 +353,6 @@ export function servedFloor(health: Health): number {
  *  one's, or its floor older than this one's — or when its containers run under another driver. */
 export function mustDrain(health: Health | null, force: boolean): boolean {
   return force || health === null || health.protocol > PROTOCOL || servedFloor(health) < OLDEST_CLIENT || health.driver !== DRIVER;
-}
-
-/** A new deployment's fleet cap: a share of the account rather than all of it. */
-export const DEFAULT_VCPUS = 400;
-
-/** The account's container vCPU limit, shared by every container app on it (Cloudflare's per-account limit, read
- *  from GET /accounts/<id>/containers/me's limits.total_vcpu on 2026-10-08). */
-export const ACCOUNT_VCPUS = 1500;
-
-/** The cap a deploy gives the fleet: the flag, else the cap the connection file recorded, else the cap the deployed
- *  Worker still serves, else the default — and which it came from. */
-export function capOf(flag: number | undefined, recorded: number | undefined, served: number | undefined): { cap: number; from: '--vcpus' | 'recorded' | 'deployed' | 'default' } {
-  if (flag !== undefined) return { cap: flag, from: '--vcpus' };
-  if (recorded !== undefined) return { cap: recorded, from: 'recorded' };
-  if (served !== undefined) return { cap: served, from: 'deployed' };
-  return { cap: DEFAULT_VCPUS, from: 'default' };
-}
-
-/** The vCPUs this and the other known deployments could ask for together, and which deployments did not say a cap
- *  (a Worker older than the field, or one that did not answer). */
-export function shareOf(cap: number, others: readonly { name: string; cap: number | null }[]): { sum: number; unknown: string[] } {
-  return {
-    sum: others.reduce((whole, other) => whole + (other.cap ?? 0), cap),
-    unknown: others.filter((other) => other.cap === null).map((other) => other.name),
-  };
 }
 
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });

@@ -41,16 +41,6 @@ for the open jobs first only with `--drain`, when the deployed version answers n
 would refuse a client it serves (its wire newer than this one's, or its floor older than this one's), or when its
 driver differs. That pause lapses after 10 minutes if the deploy dies.
 
-## Sharing an account
-
-A fleet's `--vcpus` is a cap this deployment places on itself; it knows nothing of the others. Cloudflare gives the
-account one container vCPU limit (1500 today), shared by every container app on it, so deployments must split it:
-a first deploy defaults to 400, a redeploy keeps the cap it had unless `--vcpus` overrides it, and the cap lands in
-the deployment's connection file. `deploy` prints this cap beside the sum of the caps its other connection files
-report, and warns when the known caps pass the account's limit — containers asked for past it are refused as
-"Account resource limit exceeded". Deployments on other machines, or other container apps on the account, are not
-counted; give each its share.
-
 ## Measured
 
 Each figure is from one run on 2026-10-07. The command is in the table, so you can run it on your own deployment.

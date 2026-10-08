@@ -16,8 +16,7 @@ export const READ_ATTEMPTS = 5;
 /** The largest pack, in bytes, sent in one request; a Worker takes 100 MB, and R2 wants every part but the last alike. */
 export const PACK_PART = 64 * 1024 * 1024;
 
-/** How to reach a deployment: its URL, bearer and account, and the fleet cap its last deploy gave it. */
-export const ConnectionSchema = v.object({ url: v.string(), token: v.string(), account: v.string(), vcpus: v.optional(v.number()) });
+export const ConnectionSchema = v.object({ url: v.string(), token: v.string(), account: v.string() });
 
 export type Connection = v.InferOutput<typeof ConnectionSchema>;
 
