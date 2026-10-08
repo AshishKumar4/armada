@@ -1,5 +1,6 @@
 #!/bin/sh
-# The scheduler's Lean proofs (ci row `proofs`): `lake build`, then `#print
+# The scheduler's Lean proofs (ci row `proofs`): `lake build --wfail` — so a
+# theorem left on `sorry` fails the build, not just the axiom list — then `#print
 # axioms` of every named theorem and refuse anything outside the three axioms
 # Lean itself uses — a hidden `sorry` would surface here as `sorryAx`.
 set -eu
@@ -11,7 +12,7 @@ if [ ! -x "$LAKE" ]; then
   exit 1
 fi
 
-"$LAKE" build
+"$LAKE" build --wfail
 
 LEAN=${LEAN:-$(command -v lean || echo "$HOME/.elan/bin/lean")}
 out=$("$LAKE" env "$LEAN" Axioms.lean)
