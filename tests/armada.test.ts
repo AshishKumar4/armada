@@ -632,6 +632,12 @@ describe('armada run', () => {
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
   });
 
+  test('a run\'s pool counts each rank of a gang, so a gang wider than the plan has entries is not refused', async () => {
+    const ran = await run([], { include: [{ name: 'test' }, { name: 'relay', gang: 4 }] }, '', 0, { command: ['plan'] }, { verdict: false });
+    // The plan job's pool, then the task job's: one container for `test` and four for the gang's ranks.
+    expect(ran.bodies.map((body) => v.parse(v.looseObject({ pool: v.optional(v.number()) }), body).pool)).toEqual([1, 5]);
+  });
+
   test('a run it cannot grade names its report, which holds the rows that did report', async () => {
     const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] });
     const path = /^report: (.+)$/mu.exec(ran.stdout)?.[1];

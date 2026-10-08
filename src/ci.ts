@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { fileTimings, grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
+import { describeUsage, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -349,9 +349,16 @@ async function runGraded(armada: Armada, target: string, label: string, planArgs
 
   const plan = v.parse(PlanSchema, JSON.parse(printed));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
-  const most = Math.min(config.pool, plan.include.length);
+  // Each rank of a gang takes a container at once, so the ranks count toward the pool, which holds the widest gang. A
+  // gang that is no whole number counts as one, for the Worker to refuse it by name.
+  const ranks = plan.include.map((entry) => {
+    const gang = gangOf(entry);
+
+    return Number.isInteger(gang) && gang > 0 ? gang : 1;
+  });
+  const most = Math.min(config.pool, ranks.reduce((sum, each) => sum + each, 0));
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
-  const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
+  const pool = Math.max(Math.min(most, Math.max(...ranks)), estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most);
   // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
   // whole tier never sees them.
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
