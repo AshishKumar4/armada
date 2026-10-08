@@ -323,7 +323,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const most = Math.min(config.pool, plan.include.length);
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
   const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
-  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative };
+  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: config.task.secrets };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
   // A matrix entry came from JSON, so it is JSON.
   const entries = plan.include as Json[];

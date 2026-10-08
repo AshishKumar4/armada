@@ -15,7 +15,7 @@
  *                code is its one row.
  */
 import * as v from 'valibot';
-import { BaseSchema, DEFAULT_BASE, Project, SizeSchema } from './protocol';
+import { BaseSchema, DEFAULT_BASE, Project, SecretName, SizeSchema } from './protocol';
 
 const Path = v.pipe(v.string(), v.minLength(1), v.check((path) => !path.startsWith('/') && !path.split('/').includes('..'), 'a path inside the commit'));
 
@@ -48,6 +48,8 @@ const ConfigSchema = v.object({
     /** Whether a straggling task may be run again by an idle container, first answer kept. */
     speculative: v.optional(v.boolean(), false),
     timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
+    /** The deployment's secrets (`armada secret set <name>`) each task gets in its environment, by name. */
+    secrets: v.optional(v.array(SecretName), []),
   }),
 });
 

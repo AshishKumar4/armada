@@ -266,6 +266,7 @@ proof without running it again.
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
+| `task.secrets` | `[]` | The deployment's secrets each task gets in its environment, by name (`armada secret set <name>`). |
 
 A matrix entry may list the `rows` its task must report.
 

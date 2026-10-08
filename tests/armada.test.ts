@@ -524,11 +524,12 @@ describe('armada verdict', () => {
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0, planConfig: unknown = { command: ['plan'] }) {
+  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0, planConfig: unknown = { command: ['plan'] }, taskConfig: Record<string, unknown> = {}) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const git = (...words: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo }).exitCode).toBe(0);
     const commands: string[][] = [];
+    const bodies: unknown[] = [];
     const seen: string[] = [];
     const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
     const status = (id: string) => ({
@@ -544,7 +545,10 @@ describe('armada run', () => {
         if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json({ rows: {}, files: {} });
         if (pathname === '/jobs') {
-          commands.push(v.parse(v.object({ items: v.array(v.object({ argv: v.array(v.string()) })) }), await request.json()).items[0]?.argv ?? []);
+          const body: unknown = await request.json();
+
+          bodies.push(body);
+          commands.push(v.parse(v.object({ items: v.array(v.object({ argv: v.array(v.string()) })) }), body).items[0]?.argv ?? []);
 
           return Response.json({ id: commands.at(-1)?.includes('task') === true ? 'tasks' : 'plan' });
         }
@@ -560,14 +564,14 @@ describe('armada run', () => {
     try {
       mkdirSync(repo);
       git('init', '-q');
-      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: planConfig, task: { command: ['task', '{out}'] } }));
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig } }));
       git('add', '.');
       git('commit', '-qm', 'one');
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
-      return { exit: await cli.exited, stdout: await new Response(cli.stdout).text(), commands, seen };
+      return { exit: await cli.exited, stdout: await new Response(cli.stdout).text(), commands, bodies, seen };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -579,6 +583,13 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), verdicts: ran.seen.filter((each) => each.startsWith('PUT /verdicts')), timings: ran.seen.includes('POST /timings/proj') })
       .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], verdicts: [], timings: true });
+  });
+
+  test('a task gets the deployment secrets its config names, and the plan gets none', async () => {
+    const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, 0, undefined, { secrets: ['CACHE_TOKEN'] });
+    const secrets = ran.bodies.map((body) => v.parse(v.object({ secrets: v.optional(v.array(v.string())) }), body).secrets ?? []);
+
+    expect({ exit: ran.exit, secrets }).toEqual({ exit: 0, secrets: [[], ['CACHE_TOKEN']] });
   });
 
   test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job', async () => {
