@@ -67,6 +67,12 @@ const INACTIVITY_MS = 6 * 60 * 60_000;
 /** Lines of a task's log kept with its outcome; the whole log is in R2. */
 const TAIL_LINES = 40;
 
+/** The most of a log's end the tail is read from, so a log of one huge line costs its outcome only this. */
+export const TAIL_BYTES = 16 * 1024;
+
+/** The last `TAIL_LINES` lines of the log in `dir`, read from its last `TAIL_BYTES` bytes at most. */
+export const tailOf = (dir: string): string => `tail -c ${String(TAIL_BYTES)} ${dir}/log 2>/dev/null | tail -n ${String(TAIL_LINES)} || true`;
+
 export class ArmadaVessel extends DurableObject<Env> {
   /** When this object started: one started after its task launched was restarted under it. */
   private readonly born = Date.now();
@@ -340,7 +346,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const seconds = (Date.now() - current.startedAt) / 1000;
 
     await this.mask(current.claim.secrets);
-    const tail = await run(container, ['/bin/sh', '-c', `tail -n ${String(TAIL_LINES)} ${TASK}/log 2>/dev/null || true`], { ms: EXEC_MS });
+    const tail = await run(container, ['/bin/sh', '-c', tailOf(TASK)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
@@ -350,7 +356,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output', rank), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
-    const said = spec.bundle === null ? '' : (await run(container, ['cat', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
+    const said = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
     const [kind = '', error] = said.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
     const outcome: Outcome = {

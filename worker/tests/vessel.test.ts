@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Outcome } from '../../src/protocol';
 import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, USAGE } from '../src/container';
 import type { Claim } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER } from '../src/relay';
-import { ArmadaVessel, type VesselSpec } from '../src/vessel';
+import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
 
 const spec: VesselSpec = {
@@ -217,5 +220,21 @@ describe('a gang rank', () => {
     await stored.ctx.storage.put('current', { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false, gang: { rank: 0, job: 'job', vessels: ['v1', 'v2'], origin: '', token: 't'.repeat(48) } }, startedAt: 0 });
 
     expect([none, await relay('u'.repeat(48), '8476'), await relay('t'.repeat(48), '0')]).toEqual([403, 403, 400]);
+  });
+});
+
+describe('a task\'s log tail', () => {
+  test('is read from the log\'s end alone, however long a line it ends in', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'armada-tail-'));
+
+    try {
+      // 32 MiB on one line, then two short ones.
+      writeFileSync(join(dir, 'log'), `${'x'.repeat(32 * 1024 * 1024)}\nsecond\nthird\n`);
+      const read = Bun.spawnSync(['/bin/sh', '-c', tailOf(dir)], { stdout: 'pipe' }).stdout;
+
+      expect({ bytes: read.byteLength <= TAIL_BYTES, end: new TextDecoder().decode(read).endsWith('x\nsecond\nthird\n') }).toEqual({ bytes: true, end: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
