@@ -163,7 +163,7 @@ async function follow<O extends string | null>(job: Job<Json, O>, began: number,
     void job.status().then((status) => {
       if (status.phase === phase) return;
       phase = status.phase;
-      console.log(`${clock(Date.now() - began).padStart(6)}  ${phase === 'preparing' ? `preparing environment ${status.key.slice(0, 12)}` : phase}`);
+      print(`${clock(Date.now() - began).padStart(6)}  ${phase === 'preparing' ? `preparing environment ${status.key.slice(0, 12)}` : phase}`);
     }, () => undefined);
   }, 3_000);
 
@@ -171,7 +171,7 @@ async function follow<O extends string | null>(job: Job<Json, O>, began: number,
     return await cancelOnInterrupt(job, id, async () => {
       for await (const result of job) {
         results.push(result);
-        console.log(`${clock(Date.now() - began).padStart(6)}  ${name(result.index).padEnd(14)} ${await say(result)} in ${clock(result.meta.seconds * 1000)} on ${result.meta.container}`);
+        print(`${clock(Date.now() - began).padStart(6)}  ${name(result.index).padEnd(14)} ${await say(result)} in ${clock(result.meta.seconds * 1000)} on ${result.meta.container}`);
       }
 
       return results;
@@ -183,8 +183,8 @@ async function follow<O extends string | null>(job: Job<Json, O>, began: number,
 
 function printReds(reds: readonly VerdictRow[]): void {
   for (const row of reds) {
-    console.log(`\nRED  ${rowName(row)}  (exit ${String(row.exitCode)}, ${seconds(row.seconds * 1000)})`);
-    console.log(row.output.split('\n').slice(-TAIL_LINES).map((line) => `  | ${line}`).join('\n'));
+    print(`\nRED  ${rowName(row)}  (exit ${String(row.exitCode)}, ${seconds(row.seconds * 1000)})`);
+    print(row.output.split('\n').slice(-TAIL_LINES).map((line) => `  | ${line}`).join('\n'));
   }
 }
 
@@ -277,18 +277,45 @@ export function poolFor(estimates: readonly number[], most: number): number {
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
-export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = [], secrets: readonly string[] = []): Promise<number> {
+/** Where `armada run` prints its progress: stdout, or stderr when `--json` keeps stdout for its one result. */
+let print = (line: string): void => {
+  console.log(line);
+};
+
+/** What `armada run --json` prints when it ends: one object, whose `graded` is what its exit code says. */
+interface RunResult {
+  readonly sha: string;
+  readonly planJob: string | null;
+  readonly job: string | null;
+  readonly report: string | null;
+  readonly graded: 'pass' | 'fail' | 'not graded';
+  readonly problems: readonly string[];
+  readonly rows: readonly VerdictRow[];
+}
+
+/** `armada run`: progress as it goes, and with `json` one {@link RunResult} on stdout at the end. Exits 0 when every
+ *  row is green, 1 when one is red, and 2 when the run cannot be graded. */
+export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = [], secrets: readonly string[] = [], json = false): Promise<number> {
+  if (json) print = (line) => { console.error(line); };
+  const result = await runGraded(armada, target, label, planArgs, secrets);
+
+  if (json) console.log(JSON.stringify(result));
+
+  return result.graded === 'pass' ? 0 : result.graded === 'fail' ? 1 : 2;
+}
+
+async function runGraded(armada: Armada, target: string, label: string, planArgs: readonly string[], secrets: readonly string[]): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, environment, spec, upload } = await commitOf(armada, target);
 
-  console.log(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
+  print(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 
   if (config.size === 'auto') {
-    console.log(`size ${spec.recipe.size}${timings.usage === null || timings.usage === undefined ? ', until a run has measured its tasks' : `: the last runs' tasks used at most ${describeUsage(timings.usage)}`}`);
+    print(`size ${spec.recipe.size}${timings.usage === null || timings.usage === undefined ? ', until a run has measured its tasks' : `: the last runs' tasks used at most ${describeUsage(timings.usage)}`}`);
   }
   const uploaded = await upload();
 
-  if (uploaded !== null) console.log(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
+  if (uploaded !== null) print(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada };
   const here = config.plan.local ? localPlan(repo, sha, [...config.plan.command, ...planArgs], config.target, timings, config.env) : undefined;
@@ -303,18 +330,20 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     const planJob = planTask.stream([{}], { ...options, pool: 1 });
 
     planId = await planJob.id;
-    console.log(`plan job ${planId}`);
+    print(`plan job ${planId}`);
     const [planned] = await follow(planJob, began, () => 'plan');
 
     if (planned?.kind !== 'ok') {
-      console.log(`\nNOT GRADED: the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`);
+      const problem = `the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`;
 
-      return 2;
+      print(`\nNOT GRADED: ${problem}`);
+
+      return { sha, planJob: planId, job: null, report: null, graded: 'not graded', problems: [problem], rows: [] };
     }
     printed = planned.value;
     planRun.push(planned);
   } else {
-    console.log(`plan run here, on this checkout of ${sha.slice(0, 12)}`);
+    print(`plan run here, on this checkout of ${sha.slice(0, 12)}`);
     printed = here;
   }
 
@@ -332,7 +361,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
   const jobId = await job.id;
 
-  console.log(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);
+  print(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);
   const nameOf = (index: number) => names[index] ?? String(index);
   // Each task's rows, read from its verdict file as its result lands, and graded as read: a task that reports many rows
   // exits 0 with red ones among them, so its exit alone would say green. Null for a file missing or malformed.
@@ -374,18 +403,18 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   mkdirSync(REPORTS, { recursive: true });
   writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, status, summary, problems: graded.problems, verdicts: file }, null, 2));
 
-  for (const problem of status.problems) console.log(`problem: ${problem}`);
+  for (const problem of status.problems) print(`problem: ${problem}`);
 
   if (graded.problems.length > 0) {
-    console.log(`\nNOT GRADED:\n${graded.problems.map((problem) => `  ${problem}`).join('\n')}`);
+    print(`\nNOT GRADED:\n${graded.problems.map((problem) => `  ${problem}`).join('\n')}`);
     printReds(graded.reds);
-    console.log(`report: ${report}`);
+    print(`report: ${report}`);
 
-    return 2;
+    return { sha, planJob: planId, job: jobId, report, graded: 'not graded', problems: graded.problems, rows: graded.rows };
   }
 
   if (planArgs.length === 0) await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
-  else console.log(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
+  else print(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
   const usage = usageOf([...planRun, ...results].map((result) => result.meta));
@@ -396,11 +425,11 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   printReds(graded.reds);
   const boots = summary.bootMs;
 
-  console.log(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(graded.rows.length - graded.reds.length)} of ${String(graded.rows.length)} rows green, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
-  console.log(`${String(summary.vessels)} containers; first answers ${seconds(boots[0] ?? 0)} to ${seconds(boots.at(-1) ?? 0)} (median ${seconds(boots[Math.floor(boots.length / 2)] ?? 0)})`);
+  print(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(graded.rows.length - graded.reds.length)} of ${String(graded.rows.length)} rows green, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
+  print(`${String(summary.vessels)} containers; first answers ${seconds(boots[0] ?? 0)} to ${seconds(boots.at(-1) ?? 0)} (median ${seconds(boots[Math.floor(boots.length / 2)] ?? 0)})`);
 
-  if (usage !== null) console.log(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
-  console.log(`report: ${report}`);
+  if (usage !== null) print(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
+  print(`report: ${report}`);
 
-  return graded.reds.length === 0 ? 0 : 1;
+  return { sha, planJob: planId, job: jobId, report, graded: graded.reds.length === 0 ? 'pass' : 'fail', problems: [], rows: graded.rows };
 }
