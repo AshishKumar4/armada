@@ -140,7 +140,7 @@ describe('a drained version', () => {
       const old = new Armada({ url: server.url.href, token: TOKEN, account: 'a' });
 
       expect({ jobs: await old.drain(), after: (await old.health()).jobs, admitted: await old.admit(), asked })
-        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
+        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 7', 'POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
     } finally {
       await server.stop(true);
     }

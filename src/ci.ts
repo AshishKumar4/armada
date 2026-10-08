@@ -188,17 +188,17 @@ export function extractTar(archive: Uint8Array, dir: string): string[] {
   const listed = Bun.spawnSync(['tar', '-tzf', '-'], { stdin: archive, stdout: 'pipe', stderr: 'pipe' });
 
   if (listed.exitCode !== 0) throw new Error(`listing the artifacts: ${listed.stderr.toString().trim()}`);
-  const members = listed.stdout.toString().split('\n').filter((line) => line !== '').map((member) => member.startsWith('./') ? member.slice(2) : member);
+  const members = listed.stdout.toString().split('\n').map((member) => member.startsWith('./') ? member.slice(2) : member).filter((member) => member !== '');
 
   for (const member of members) {
-    if (member === '' || member.startsWith('/') || member.split('/').includes('..')) throw new Error(`the artifacts hold ${member}, which escapes ${dir}`);
+    if (member.startsWith('/') || member.split('/').includes('..')) throw new Error(`the artifacts hold ${member}, which escapes ${dir}`);
   }
   mkdirSync(dir, { recursive: true });
   const ran = Bun.spawnSync(['tar', '-xzf', '-', '-C', dir], { stdin: archive, stdout: 'pipe', stderr: 'pipe' });
 
   if (ran.exitCode !== 0) throw new Error(`extracting the artifacts: ${ran.stderr.toString().trim()}`);
 
-  return members.filter((member) => member !== '' && !member.endsWith('/'));
+  return members.filter((member) => !member.endsWith('/'));
 }
 
 function printReds(reds: readonly VerdictRow[], evidence: ReadonlyMap<VerdictRow, string>): void {

@@ -15,8 +15,10 @@ describe('a task\'s artifacts', () => {
     const kept = await ask('/jobs/j1/tasks/0/artifacts');
     const none = await ask('/jobs/j1/tasks/1/artifacts');
     const leaf = await ask('/jobs/j1/tasks/0/nothing');
+    await env.ARTIFACTS.put('jobs/j1/tasks/2/artifacts.tar.gz', 'typed', { httpMetadata: { contentType: 'application/gzip' } });
+    const typed = await ask('/jobs/j1/tasks/2/artifacts');
 
-    expect({ kept: kept.status, body: await kept.text(), none: none.status, leaf: leaf.status })
-      .toEqual({ kept: 200, body: 'packed', none: 404, leaf: 404 });
+    expect({ kept: kept.status, body: await kept.text(), none: none.status, leaf: leaf.status, typed: typed.headers.get('content-type') })
+      .toEqual({ kept: 200, body: 'packed', none: 404, leaf: 404, typed: 'application/gzip' });
   });
 });
