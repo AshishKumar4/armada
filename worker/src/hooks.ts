@@ -1,30 +1,27 @@
 /**
  * ArmadaWebhooks: the projects whose pushes and same-repository pull requests start a CI driver. One object,
- * `SINGLE`, holds each project's config — its repo, branches and webhook secret — the delivery ids seen, and the
- * driver job each commit started. The endpoint itself is `webhooked` in worker.ts; the pieces it checks are pure
- * so the tests exercise them without a request.
+ * `SINGLE`, holds each project's config (its repo, branches and webhook secret), the delivery ids seen in the last
+ * day, and the driver job each commit started in the last week. The endpoint itself is `webhooked` in worker.ts;
+ * `eventOf` and `driverSpec` are pure, so the tests exercise them without a request.
  */
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
-import { JobSpecSchema } from '../../src/protocol';
+import type { JobSpecSchema, Json, Webhook } from '../../src/protocol';
 import type { Env } from './env';
 
-/** A project's webhook: its GitHub repo, the branches that build, whether same-repo pull requests do, the
- *  deployment secret holding a GitHub token, and the secret GitHub signs deliveries with — kept only here, never
- *  answered back after it is set. */
+/** A project's webhook: its GitHub repo, the branches that build (absent: the repo's default branch), whether
+ *  same-repo pull requests do, the deployment secret holding a GitHub token, the secret GitHub signs deliveries with
+ *  (kept only here, never answered back), and the GitHub hook's id when the CLI made it, so `remove` deletes it too. */
 export const HookConfigSchema = v.object({
   repo: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u, 'a repo is owner/name')),
   branches: v.optional(v.array(v.pipe(v.string(), v.minLength(1)))),
   pullRequests: v.optional(v.boolean(), false),
   tokenSecret: v.optional(v.pipe(v.string(), v.regex(/^[A-Z_][A-Z0-9_]{0,63}$/u)), 'GITHUB_TOKEN'),
   secret: v.pipe(v.string(), v.minLength(16)),
-  /** The GitHub hook's id, when the CLI created it, so `remove` can delete it too. */
   hook: v.optional(v.number()),
 });
 
 export type HookConfig = v.InferOutput<typeof HookConfigSchema>;
-
-export type PublicConfig = Omit<HookConfig, 'secret' | 'hook'>;
 
 /** What a delivery asks for, once the event and the config decide it. */
 export type Ask =
@@ -34,160 +31,190 @@ export type Ask =
   | { readonly kind: 'fork' }
   | { readonly kind: 'ignore' };
 
-/** The event a GitHub delivery is, against the project's config: only a push to a built branch and a same-repo
- *  pull request that opened, synchronized or reopened start a driver. A fork's code must never get the
- *  deployment's secrets, so it is refused even when pull requests build. */
-export function eventOf(event: string, payload: unknown, config: Pick<HookConfig, 'repo' | 'branches' | 'pullRequests'>): Ask {
-  if (!v.is(v.looseObject({}), payload)) return { kind: 'ignore' };
-  const body = payload as Record<string, unknown>;
+const Commit = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
+/** The parts of GitHub's `push` payload a driver needs. */
+const PushEvent = v.object({ ref: v.string(), after: Commit, deleted: v.optional(v.boolean(), false), repository: v.object({ default_branch: v.string() }) });
+
+/** The parts of GitHub's `pull_request` payload a driver needs: a deleted fork's head has no repo at all. */
+const PullRequestEvent = v.object({
+  action: v.string(),
+  pull_request: v.object({ head: v.object({ sha: Commit, repo: v.nullable(v.object({ full_name: v.string() })) }) }),
+});
+
+/** The pull request actions that bring new code. */
+const BUILT_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
+
+const IGNORE: Ask = { kind: 'ignore' };
+
+/** The event a GitHub delivery is, against the project's config: only a push to a built branch and a same-repo pull
+ *  request that opened, synchronized or reopened start a driver. A fork's code must never get the deployment's
+ *  secrets, so it is refused even when pull requests build. */
+export function eventOf(event: string, payload: Json, config: Pick<HookConfig, 'repo' | 'branches' | 'pullRequests'>): Ask {
   if (event === 'ping') return { kind: 'ping' };
+
   if (event === 'push') {
-    const ref = typeof body['ref'] === 'string' ? body['ref'] : '';
-    const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : undefined;
-    const after = typeof body['after'] === 'string' ? body['after'] : '';
+    const push = v.safeParse(PushEvent, payload);
 
-    // A deletion has an all-zero `after`; a tag's ref is not refs/heads/.
-    if (branch === undefined || !/^[0-9a-f]{40}$/u.test(after) || /^0{40}$/u.test(after)) return { kind: 'ignore' };
-    if (config.branches !== undefined && !config.branches.includes(branch)) return { kind: 'ignore' };
+    if (!push.success) return IGNORE;
+    const { ref, after, deleted, repository } = push.output;
 
-    return { kind: 'push', sha: after, branch };
-  }
-  if (event === 'pull_request' && config.pullRequests === true) {
-    const action = typeof body['action'] === 'string' ? body['action'] : '';
-    const pr: { head: { sha: string; repo: { full_name: string } } } | undefined =
-      v.is(v.looseObject({ head: v.looseObject({ sha: v.string(), repo: v.looseObject({ full_name: v.string() }) }) }), body['pull_request'])
-        ? body['pull_request'] as { head: { sha: string; repo: { full_name: string } } }
-        : undefined;
+    // A tag's ref is not under refs/heads/, and a deleted branch has nothing to build.
+    if (!ref.startsWith('refs/heads/') || deleted || /^0{40}$/u.test(after)) return IGNORE;
+    const branch = ref.slice('refs/heads/'.length);
 
-    if (!['opened', 'synchronize', 'reopened'].includes(action) || pr === undefined) return { kind: 'ignore' };
-    if (pr.head.repo.full_name !== config.repo) return { kind: 'fork' };
-
-    return { kind: 'pr', sha: pr.head.sha };
+    return (config.branches ?? [repository.default_branch]).includes(branch) ? { kind: 'push', sha: after, branch } : IGNORE;
   }
 
-  return { kind: 'ignore' };
+  if (event !== 'pull_request' || !config.pullRequests) return IGNORE;
+  const pr = v.safeParse(PullRequestEvent, payload);
+
+  if (!pr.success || !BUILT_ACTIONS.has(pr.output.action)) return IGNORE;
+  const { head } = pr.output.pull_request;
+
+  return head.repo?.full_name === config.repo ? { kind: 'pr', sha: head.sha } : { kind: 'fork' };
 }
 
+/** How long a delivery id is kept against GitHub's redeliveries, and a commit's driver against a second run. */
+const DELIVERY_MS = 24 * 60 * 60_000;
+
+const DRIVER_MS = 7 * 24 * 60 * 60_000;
+
 export class ArmadaWebhooks extends DurableObject<Env> {
-  /** Stores or replaces a project's config (the GitHub hook id included), or merges just its hook id. */
-  async configure(project: string, config: HookConfig): Promise<PublicConfig> {
-    const { secret: _secret, hook: _hook, ...publicConfig } = config;
-
+  /** Stores or replaces a project's config. */
+  async configure(project: string, config: HookConfig): Promise<void> {
     await this.ctx.storage.put(`config:${project}`, config);
-
-    return publicConfig;
-  }
-
-  /** Records just the GitHub hook id the CLI created, beside the stored config. */
-  async hooked(project: string, hook: number): Promise<void> {
-    const config = await this.ctx.storage.get<HookConfig>(`config:${project}`);
-
-    if (config !== undefined) await this.ctx.storage.put(`config:${project}`, { ...config, hook });
   }
 
   async configOf(project: string): Promise<HookConfig | undefined> {
     return await this.ctx.storage.get<HookConfig>(`config:${project}`);
   }
 
-  /** Every project's config, secrets out. */
-  async list(): Promise<{ project: string; repo: string; branches?: string[]; pullRequests: boolean; tokenSecret: string; hook?: number }[]> {
+  /** Every project's config, its signing secret left out. */
+  async list(): Promise<Webhook[]> {
     const all = await this.ctx.storage.list<HookConfig>({ prefix: 'config:' });
 
     return [...all].map(([key, config]) => ({
-      project: key.slice('config:'.length), repo: config.repo, ...config.branches === undefined ? {} : { branches: config.branches },
-      pullRequests: config.pullRequests ?? false, tokenSecret: config.tokenSecret ?? 'GITHUB_TOKEN', ...config.hook === undefined ? {} : { hook: config.hook },
+      project: key.slice('config:'.length), repo: config.repo, branches: config.branches, pullRequests: config.pullRequests, tokenSecret: config.tokenSecret, hook: config.hook,
     }));
   }
 
-  /** Removes a project's config, returning what the GitHub side needs to delete the hook: repo and hook id. */
-  async remove(project: string): Promise<{ repo: string; hook?: number } | null> {
-    const config = await this.ctx.storage.get<HookConfig>(`config:${project}`);
+  /** Removes a project's config, answering what the GitHub side needs to delete the hook: its repo and hook id. */
+  async remove(project: string): Promise<Pick<HookConfig, 'repo' | 'hook'> | null> {
+    const config = await this.configOf(project);
 
     if (config === undefined) return null;
     await this.ctx.storage.delete(`config:${project}`);
 
-    return { repo: config.repo, ...(config.hook === undefined ? {} : { hook: config.hook }) };
+    return { repo: config.repo, hook: config.hook };
   }
 
-  /** Whether this delivery was answered before — and records it when it was not. */
+  /** Whether this delivery was answered in the last day, recording it when it was not. */
   async seen(delivery: string): Promise<boolean> {
-    if (await this.ctx.storage.get(`del:${delivery}`) !== undefined) return true;
-    await this.ctx.storage.put(`del:${delivery}`, true);
+    if ((await this.ctx.storage.get<number>(`del:${delivery}`)) !== undefined) return true;
+    await this.ctx.storage.put(`del:${delivery}`, Date.now());
+    await this.prunes();
 
     return false;
   }
 
-  /** The driver job a commit already has, if any. */
+  /** The driver job a commit got in the last week, if any. */
   async driving(project: string, sha: string): Promise<string | undefined> {
-    return await this.ctx.storage.get<string>(`driver:${project}/${sha}`);
+    return (await this.ctx.storage.get<{ readonly job: string }>(`driver:${project}/${sha}`))?.job;
   }
 
-  /** Records the driver job a commit got. */
   async drove(project: string, sha: string, job: string): Promise<void> {
-    await this.ctx.storage.put(`driver:${project}/${sha}`, job);
+    await this.ctx.storage.put(`driver:${project}/${sha}`, { job, at: Date.now() });
+    await this.prunes();
+  }
+
+  /** Forgets deliveries and drivers past their windows, then sleeps until the next one is due. */
+  override async alarm(): Promise<void> {
+    const now = Date.now();
+    const deliveries = await this.ctx.storage.list<number>({ prefix: 'del:' });
+    const drivers = await this.ctx.storage.list<{ readonly at: number }>({ prefix: 'driver:' });
+
+    await this.ctx.storage.delete([
+      ...[...deliveries].flatMap(([key, at]) => now - at > DELIVERY_MS ? [key] : []),
+      ...[...drivers].flatMap(([key, { at }]) => now - at > DRIVER_MS ? [key] : []),
+    ]);
+
+    if (deliveries.size + drivers.size > 0) await this.ctx.storage.setAlarm(now + DELIVERY_MS);
+  }
+
+  /** The pruning alarm, set once something is kept. */
+  private async prunes(): Promise<void> {
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + DELIVERY_MS);
   }
 }
 
-/** The driver task's recipe: micro, Debian plus git and curl — Bun and the repo's own dependencies arrive in the
- *  script below, the way a local `armada run` needs them. */
-const DRIVER_RECIPE = {
-  base: 'cloudflare/debian-trixie',
-  setup: 'apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates',
-  install: '',
-  size: 'micro' as const,
-};
+/** The bun the driver runs armada under, pinned to its release's digest, the version armada's own CI runs. */
+const BUN = { version: '1.4.0', sha256: '2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452' };
 
-/** The driver script: posts a pending status, clones the commit, installs armada at the deployment's own commit,
- *  runs `armada run <sha> --json` against the deployment, and posts the verdict's count as the status. The two
- *  credentials (GITHUB_TOKEN in the named secret, ARMADA_TOKEN added at claim) are only read from the environment,
- *  so the job's log keeps them masked. */
-const DRIVER = `set -eu
-mkdir -p "$HOME/.config/armada" "$HOME/repo" "$HOME/.bun/bin"
-printf '{"url":"%s","token":"%s","account":""}\\n' "$ARMADA_URL" "$ARMADA_TOKEN" > "$HOME/.config/armada/connection.json"
+const ARMADA_REPO = 'https://github.com/AshishKumar4/armada.git';
+
+/** The driver task's environment: bun and the armada CLI at the deployment's own commit, installed once when the
+ *  environment is prepared. The commit is in the recipe, so a new deployment prepares a new one. */
+function driverRecipe(deploySha: string): v.InferInput<typeof JobSpecSchema>['recipe'] {
+  return {
+    base: 'cloudflare/debian-trixie',
+    setup: String.raw`set -eu
+curl -fsSL -o /tmp/bun.zip https://github.com/oven-sh/bun/releases/download/bun-v${BUN.version}/bun-linux-x64.zip
+echo "${BUN.sha256}  /tmp/bun.zip" | sha256sum -c -
+unzip -q /tmp/bun.zip -d /tmp
+install -m 755 /tmp/bun-linux-x64/bun /usr/local/bin/bun
+rm -rf /tmp/bun.zip /tmp/bun-linux-x64
+git init -q /opt/armada
+git -C /opt/armada fetch -q --depth 1 ${ARMADA_REPO} ${deploySha} || { echo "the deployment's commit ${deploySha} is not on GitHub: deploy from a pushed commit for webhook CI" >&2; exit 1; }
+git -C /opt/armada checkout -q FETCH_HEAD
+cd /opt/armada
+bun install --frozen-lockfile
+ln -sf /opt/armada/src/cli.ts /usr/local/bin/armada`,
+    size: 'micro',
+  };
+}
+
+/** The driver script: posts a pending status, clones the commit, runs `armada run <sha> --json` against the
+ *  deployment, and posts the verdict's count as the status. The two credentials (the GitHub token, in the secret
+ *  `ARMADA_GITHUB_SECRET` names, and ARMADA_TOKEN, added at claim) are read only from the environment, so the job's
+ *  log keeps them masked. */
+const DRIVER = String.raw`set -eu
+github=$(printenv "$ARMADA_GITHUB_SECRET")
+mkdir -p "$HOME/.config/armada" "$HOME/repo"
+printf '{"url":"%s","token":"%s","account":""}\n' "$ARMADA_URL" "$ARMADA_TOKEN" > "$HOME/.config/armada/connection.json"
 status() {
-  curl -fsS -o /dev/null -X POST -H "authorization: Bearer $GITHUB_TOKEN" -H 'accept: application/vnd.github+json' \\
-    -d "{\\"state\\":\\"$1\\",\\"target_url\\":\\"$TARGET_URL\\",\\"description\\":\\"$2\\",\\"context\\":\\"armada\\"}" \\
-    "https://api.github.com/repos/$ARMADA_REPO/statuses/$ARMADA_COMMIT" || true
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
+    -d "{\"state\":\"$1\",\"target_url\":\"$TARGET_URL\",\"description\":\"$2\",\"context\":\"armada\"}" \
+    "https://api.github.com/repos/$ARMADA_REPO/statuses/$ARMADA_COMMIT") || code=000
+  case "$code" in 2*) ;; *) echo "armada: posting the $1 status failed: HTTP $code" >&2 ;; esac
 }
 status pending 'armada is running'
-git -C "$HOME/repo" init -q 2>/dev/null || true
+git -C "$HOME/repo" init -q
 git -C "$HOME/repo" fetch -q --depth 1 "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
-  || git -C "$HOME/repo" fetch -q --depth 1 "https://x-access-token:$GITHUB_TOKEN@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
+  || git -C "$HOME/repo" fetch -q --depth 1 "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
 git -C "$HOME/repo" checkout -q FETCH_HEAD
-command -v bun >/dev/null 2>&1 || curl -fsSL https://bun.sh/install | bash
-export PATH="$HOME/.bun/bin:$PATH"
-if [ ! -d "$HOME/.armada/.git" ]; then git clone -q --depth 1 https://github.com/AshishKumar4/armada.git "$HOME/.armada"; fi
-git -C "$HOME/.armada" fetch -q --depth 1 origin "$ARMADA_DEPLOY_SHA" && git -C "$HOME/.armada" checkout -q FETCH_HEAD
-cd "$HOME/.armada" && bun install --frozen-lockfile && ln -sf "$HOME/.armada/src/cli.ts" "$HOME/.bun/bin/armada"
 cd "$HOME/repo"
 set +e
 armada run "$ARMADA_COMMIT" --json > verdict.json
 code=$?
 set -e
 count=$(bun -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rows; console.log(r.filter((x) => x.exitCode === 0).length + " of " + r.length + " rows green"); } catch { console.log("the run did not grade"); }' verdict.json)
-if [ "$code" -eq 0 ]; then status success "$count"; elif [ "$code" -eq 1 ]; then status failure "$count"; else status error "armada's run failed"; fi
+case "$code" in 0) status success "$count" ;; 1) status failure "$count" ;; *) status error "armada's run failed" ;; esac
 exit "$code"
 `;
 
-/** The job the webhook starts for a commit: one micro command task labelled `ci <project> <sha12>`, whose spec
- *  names the GitHub token's secret and asks for the deployment's bearer at claim — never in stored env. */
+/** The job the webhook starts for a commit: one micro command task labelled `ci <project> <sha12>`, whose spec names
+ *  the GitHub token's secret and asks for the deployment's bearer at claim, never in its stored env. */
 export function driverSpec(project: string, sha: string, origin: string, deploySha: string, config: HookConfig): v.InferInput<typeof JobSpecSchema> {
   return {
-    recipe: DRIVER_RECIPE,
+    recipe: driverRecipe(deploySha),
     run: { kind: 'command' },
     items: [{ item: sha, argv: ['/bin/sh', '-c', DRIVER] }],
     output: false,
     pool: 1,
     label: `ci ${project} ${sha.slice(0, 12)}`,
-    env: {
-      ARMADA_URL: origin,
-      ARMADA_REPO: config.repo,
-      ARMADA_COMMIT: sha,
-      TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}`,
-      ARMADA_DEPLOY_SHA: deploySha,
-    },
-    secrets: [config.tokenSecret ?? 'GITHUB_TOKEN'],
+    env: { ARMADA_URL: origin, ARMADA_REPO: config.repo, ARMADA_COMMIT: sha, ARMADA_GITHUB_SECRET: config.tokenSecret, TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}` },
+    secrets: [config.tokenSecret],
     deployToken: true,
     timeout: 3600,
   };

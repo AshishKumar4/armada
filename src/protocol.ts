@@ -352,6 +352,17 @@ export const ProjectsSchema = v.object({ projects: v.array(Project) });
 
 export const VerdictsSchema = v.object({ verdicts: v.array(v.object({ sha: Sha, uploaded: v.number(), rows: v.number(), reds: v.number() })) });
 
+/** A project's GitHub webhook as the deployment answers it, never with its signing secret: the repo, the branches that
+ *  build (absent: the repo's default branch), whether same-repo pull requests do, the secret holding the GitHub
+ *  token, and the GitHub hook's id when the CLI made it. */
+export const WebhookSchema = v.object({
+  project: Project, repo: v.string(), branches: v.optional(v.array(v.string())), pullRequests: v.boolean(), tokenSecret: v.string(), hook: v.optional(v.number()),
+});
+
+export type Webhook = v.InferOutput<typeof WebhookSchema>;
+
+export const WebhooksSchema = v.object({ webhooks: v.array(WebhookSchema) });
+
 /** A deployment's state: its runner layer, its wire, the oldest wire it still serves (absent from a Worker that
  *  predates the field), the vCPUs its fleet holds, and the jobs not yet done, those waiting for an environment or
  *  for a container included. */

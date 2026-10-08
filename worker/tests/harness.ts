@@ -50,6 +50,7 @@ export interface Stored {
 /** An in-memory Durable Object state, with `container` as its container. */
 export function state(container?: Container): Stored {
   const entries = new Map<string, unknown>();
+  let alarm: number | null = null;
   const db = new Database(':memory:');
   const storage = {
     get: async (key: string | readonly string[]) => typeof key === 'string' ? structuredClone(entries.get(key))
@@ -65,8 +66,10 @@ export function state(container?: Container): Stored {
 
       return new Map(ordered.slice(0, limit ?? ordered.length).map((key) => [key, structuredClone(entries.get(key))]));
     },
-    setAlarm: async () => undefined,
-    deleteAlarm: async () => undefined,
+    // One alarm an object, as the platform keeps it: set replaces it, delete clears it.
+    getAlarm: async () => alarm,
+    setAlarm: async (at: number | Date) => { alarm = typeof at === 'number' ? at : at.getTime(); },
+    deleteAlarm: async () => { alarm = null; },
     sql: {
       exec: (query: string, ...bindings: SQLQueryBindings[]) => {
         const rows = db.query(query).all(...bindings);

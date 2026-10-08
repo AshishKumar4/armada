@@ -9,7 +9,7 @@ import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './d
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, EnvironmentsSchema, mustDrain, SizeSchema, usageOf, type Push } from './protocol';
+import { BaseSchema, describeUsage, EnvironmentsSchema, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -469,17 +469,16 @@ async function secret(armada: Armada, verb: string | undefined, name: string | u
   return 0;
 }
 
-/** `webhook add` configures a project on the deployment and — when `gh` is signed in for the repo — creates the
- *  GitHub hook to it; otherwise it prints the hook's settings to add by hand. The signing secret is generated here
- *  and shown once, at creation. `webhook remove` deletes both. */
+/** `webhook add` makes the project's GitHub hook with `gh` (signed in for the repo), or updates the one the CLI made
+ *  before, and then stores the same signing secret on the deployment, so the two never differ. Without gh, a new
+ *  project's config is stored and the hook's settings printed, the secret once, to add by hand. `webhook remove`
+ *  deletes both. */
 async function webhook(armada: Armada, verb: string | undefined, project: string | undefined): Promise<number> {
-  const origin = new URL(armada.connection.url).origin;
+  const listed = async () => v.parse(WebhooksSchema, await (await armada.call('/webhooks')).json()).webhooks;
 
   if (verb === 'list') {
-    const { webhooks } = v.parse(v.object({ webhooks: v.array(v.looseObject({})) }), await (await armada.call('/webhooks')).json());
-
-    for (const each of webhooks as { project: string; repo: string; branches?: string[]; pullRequests: boolean; tokenSecret: string; hook?: number }[]) {
-      console.log(`${each.project}  ${each.repo}  ${each.branches?.join(',') ?? 'default branch'}  ${each.pullRequests ? 'push + pull requests' : 'push'}  token: ${each.tokenSecret}${each.hook === undefined ? '' : `  hook ${each.hook}`}`);
+    for (const each of await listed()) {
+      console.log(`${each.project}  ${each.repo}  ${each.branches?.join(',') ?? 'default branch'}  ${each.pullRequests ? 'push + pull requests' : 'push'}  token: ${each.tokenSecret}${each.hook === undefined ? '' : `  hook ${String(each.hook)}`}`);
     }
 
     return 0;
@@ -490,7 +489,7 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   if (verb === 'remove') {
     const removed = v.parse(v.object({ removed: v.string(), repo: v.optional(v.string()), hook: v.optional(v.number()) }), await (await armada.call(`/webhooks/${project}`, { method: 'DELETE' })).json());
 
-    if (removed.hook !== undefined && removed.repo !== undefined && gh(['api', `repos/${removed.repo}/hooks/${String(removed.hook)}`, '-X', 'DELETE']) === 0) console.log(`deleted GitHub hook ${removed.hook} on ${removed.repo}`);
+    if (removed.hook !== undefined && removed.repo !== undefined && ghOut(['api', `repos/${removed.repo}/hooks/${String(removed.hook)}`, '-X', 'DELETE']) !== null) console.log(`deleted GitHub hook ${String(removed.hook)} on ${removed.repo}`);
     console.log(`removed ${project}`);
 
     return 0;
@@ -499,41 +498,32 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
   if (repo === undefined || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repo)) throw new Error('webhook add needs --repo=<owner/name>');
   const secret = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  const config = {
-    repo,
-    ...(option('branches') === undefined ? {} : { branches: option('branches')!.split(',').filter(Boolean) }),
-    pullRequests: flag('pull-requests'),
-    ...(option('token-secret') === undefined ? {} : { tokenSecret: option('token-secret') }),
-    secret,
-  };
-  const payload = `${origin}/webhooks/github/${project}`;
+  const url = `${new URL(armada.connection.url).origin}/webhooks/github/${project}`;
+  const pullRequests = flag('pull-requests');
+  const events = pullRequests ? ['push', 'pull_request'] : ['push'];
+  const settings = ['-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${url}`, '-F', `config[secret]=${secret}`, ...events.flatMap((event) => ['-f', `events[]=${event}`])];
+  const known = (await listed()).find((each) => each.project === project && each.repo === repo)?.hook;
+  const signedIn = ghOut(['auth', 'status']) !== null;
+
+  // A hook GitHub already signs with another secret is updated first, or the deployment would refuse its deliveries.
+  if (known !== undefined && !signedIn) throw new Error(`${project} has GitHub hook ${String(known)} on ${repo}: updating its secret needs gh signed in for ${repo} (gh auth login)`);
+  const answered = !signedIn ? null
+    : known === undefined ? ghOut(['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'])
+      : ghOut(['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id']);
+  const hook = answered === null || !/^\d+$/u.test(answered) ? undefined : Number(answered);
+  // JSON leaves the options not given out, so the deployment's defaults apply.
+  const config = { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret, hook };
 
   await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config) });
-  console.log(`configured ${project}: ${repo} builds ${config.pullRequests ? 'pushes and pull requests' : 'pushes'} at ${payload}`);
+  console.log(`configured ${project}: ${repo} builds ${pullRequests ? 'pushes and pull requests' : 'pushes'} at ${url}`);
 
-  const events = config.pullRequests ? ['push', 'pull_request'] : ['push'];
-  const hookArgs = ['api', `repos/${repo}/hooks`, '-F', 'name=web', '-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${payload}`, '-F', `config[secret]=${secret}`, ...events.flatMap((event) => ['-f', `events[]=${event}`]), '--jq', '.id'];
+  if (hook !== undefined) {
+    console.log(`${known === undefined ? 'created' : 'updated'} GitHub hook ${String(hook)} on ${repo}`);
 
-  if (gh(['auth', 'status']) === 0) {
-    const created = Bun.spawnSync(['gh', ...hookArgs], { stdout: 'pipe', stderr: 'pipe' });
-
-    if (created.exitCode === 0) {
-      const id = Number(created.stdout.toString().trim());
-
-      if (Number.isInteger(id)) {
-        await armada.call(`/webhooks/${project}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hook: id }) });
-        console.log(`created GitHub hook ${id} on ${repo}`);
-
-        return 0;
-      }
-      console.error(`gh answered ${created.stdout.toString().trim()}`);
-    } else {
-      console.error(`gh api failed: ${created.stderr.toString().trim()}`);
-    }
+    return 0;
   }
-
   console.log(`add the hook by hand: ${repo} → Settings → Webhooks → Add webhook
-  payload URL: ${payload}
+  payload URL: ${url}
   content type: application/json
   secret: ${secret}
   events: ${events.join(', ')}`);
@@ -541,9 +531,15 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   return 0;
 }
 
-/** `gh <args>` quietly, its exit code — nonzero also when gh is not installed. */
-function gh(argv: readonly string[]): number {
-  return Bun.spawnSync(['gh', ...argv], { stdout: 'pipe', stderr: 'pipe' }).exitCode ?? 1;
+/** What `gh <args>` printed, trimmed, or null when it failed (its error said) or is not installed. */
+function ghOut(argv: readonly string[]): string | null {
+  const ran = Bun.spawnSync(['gh', ...argv], { stdout: 'pipe', stderr: 'pipe' });
+
+  if (ran.exitCode === 0) return ran.stdout.toString().trim();
+
+  if (argv[0] !== 'auth') console.error(`gh ${argv.slice(0, 2).join(' ')} failed: ${ran.stderr.toString().trim()}`);
+
+  return null;
 }
 
 async function main(): Promise<number> {

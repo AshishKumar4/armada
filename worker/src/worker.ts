@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   TaskSchema, TimingsSchema,
 } from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
@@ -358,24 +358,14 @@ const webhooks: Handler = async (request, env, [project]) => {
   if (!v.is(Project, project)) return undefined;
 
   if (request.method === 'POST') {
-    const config = v.parse(HookConfigSchema, await request.json());
-    const answer = await hooks.configure(project, config);
+    await hooks.configure(project, v.parse(HookConfigSchema, await request.json()));
 
-    return Response.json({ configured: answer });
-  }
-
-  if (request.method === 'PATCH') {
-    const { hook } = v.parse(v.object({ hook: v.number() }), await request.json());
-
-    await hooks.hooked(project, hook);
-
-    return Response.json({ hooked: hook });
+    return Response.json({ configured: project });
   }
 
   if (request.method !== 'DELETE') return undefined;
-  const config = await hooks.remove(project);
 
-  return Response.json({ removed: project, ...(config === null ? {} : config) });
+  return Response.json({ removed: project, ...await hooks.remove(project) });
 };
 
 /** `/fleet`: the vCPUs each job holds now, under the deployment's cap. */
@@ -452,14 +442,7 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
 
   if (delivery !== '' && await hooks.seen(delivery)) return ignored('duplicate');
 
-  let payload: unknown = null;
-
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    return ignored('ignored');
-  }
-  const asked = eventOf(request.headers.get('X-GitHub-Event') ?? '', payload, config);
+  const asked = eventOf(request.headers.get('X-GitHub-Event') ?? '', jsonOf(body), config);
 
   if (asked.kind === 'ping') return ignored('pong');
   if (asked.kind === 'fork') return ignored('fork pull requests are not built');
@@ -480,7 +463,9 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
   const fleet = env.FLEET.getByName(SINGLE);
 
   if (!(await fleet.reserve(env.VERSION.id, created))) return Response.json({ error: 'armada is being redeployed and takes no new job until that is done' }, { status: 503 });
-  const spec = v.parse(JobSpecSchema, driverSpec(project, sha, new URL(request.url).origin, env.ARMADA_SHA ?? 'main', config));
+  // The driver installs armada at the commit this Worker was deployed from, which `armada deploy` records.
+  if (env.ARMADA_SHA === undefined || env.ARMADA_SHA === '') return Response.json({ error: 'this Worker does not know its commit; deploy it with armada deploy' }, { status: 503 });
+  const spec = v.parse(JobSpecSchema, driverSpec(project, sha, new URL(request.url).origin, env.ARMADA_SHA, config));
   const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
   const unset = spec.secrets.find((name) => !(name in held));
 
@@ -514,7 +499,9 @@ export default {
     if (first === 'relay') return await relayed(request, env, rest);
 
     // The webhook endpoint is outside the bearer: the project's own GitHub-signing secret is the only check.
-    if (first === 'webhooks' && rest[0] === 'github' && rest.length === 2 && request.method === 'POST') return await webhooked(request, env, rest[1]!);
+    const [service, hooked, ...extra] = rest;
+
+    if (first === 'webhooks' && service === 'github' && hooked !== undefined && extra.length === 0 && request.method === 'POST') return await webhooked(request, env, hooked);
 
     // The dashboard is static assets under /ui/, served before the Worker runs; a browser at the root is sent there.
     if (first === undefined && (request.method === 'GET' || request.method === 'HEAD')) return Response.redirect(new URL('/ui/', request.url).href, 302);

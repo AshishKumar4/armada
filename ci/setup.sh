@@ -3,7 +3,9 @@
 # bun its scripts run under, pinned, on the runner layer's path.
 set -eu
 BUN_VERSION=1.4.0
+BUN_SHA256=2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452
 curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip"
+echo "${BUN_SHA256}  /tmp/bun.zip" | sha256sum -c
 unzip -q /tmp/bun.zip -d /tmp
 install -m 755 /tmp/bun-linux-x64/bun /usr/local/bin/bun
 rm -rf /tmp/bun.zip /tmp/bun-linux-x64

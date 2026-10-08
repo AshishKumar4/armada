@@ -805,18 +805,25 @@ describe('asking the runner', () => {
 });
 
 describe('the webhook command', () => {
-  test('add configures the deployment, gh creates the hook and its id is recorded; list shows no secret; remove deletes both', async () => {
+  test('add creates the GitHub hook, then stores its secret; add again updates that hook; list shows no secret; remove deletes both', async () => {
     const calls: { method: string; path: string; body: unknown }[] = [];
+    // The deployment's configs, as its route keeps them: the list answers what the last POST stored, secret out.
+    let stored: { repo: string; pullRequests: boolean; hook?: number } | null = null;
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
         const { pathname } = new URL(request.url);
-        const body = request.method === 'GET' || request.method === 'DELETE' ? undefined : await request.json();
+        const body: unknown = request.method === 'GET' || request.method === 'DELETE' ? undefined : await request.json();
 
         calls.push({ method: request.method, path: pathname, body });
-        if (request.method === 'POST' && pathname === '/webhooks/armada') return Response.json({ configured: body });
-        if (request.method === 'PATCH' && pathname === '/webhooks/armada') return Response.json({ hooked: (body as { hook: number }).hook });
-        if (request.method === 'GET' && pathname === '/webhooks') return Response.json({ webhooks: [{ project: 'armada', repo: 'owner/armada', pullRequests: true, tokenSecret: 'GITHUB_TOKEN', hook: 77 }] });
+        if (request.method === 'POST' && pathname === '/webhooks/armada') {
+          stored = v.parse(v.object({ repo: v.string(), pullRequests: v.boolean(), hook: v.optional(v.number()) }), body);
+
+          return Response.json({ configured: 'armada' });
+        }
+        if (request.method === 'GET' && pathname === '/webhooks') {
+          return Response.json({ webhooks: stored === null ? [] : [{ project: 'armada', repo: stored.repo, pullRequests: stored.pullRequests, tokenSecret: 'GITHUB_TOKEN', hook: stored.hook }] });
+        }
         if (request.method === 'DELETE' && pathname === '/webhooks/armada') return Response.json({ removed: 'armada', repo: 'owner/armada', hook: 77 });
 
         return Response.json({ error: 'no route' }, { status: 404 });
@@ -824,7 +831,7 @@ describe('the webhook command', () => {
     });
     const scratch = mkdtempSync(join(tmpdir(), 'armada-hook-'));
 
-    // A stub `gh`: signed in, and the hook create answers id 77 while remembering every call.
+    // A stub `gh`: signed in, and a hook create or update answers id 77 while remembering every call.
     const bin = join(scratch, 'bin');
     mkdirSync(bin);
     writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "$@" >> ${scratch}/gh-calls\nif [ "$1" = "api" ]; then echo 77; fi\nexit 0\n`);
@@ -839,26 +846,23 @@ describe('the webhook command', () => {
       };
 
       const added = await cli('webhook', 'add', 'armada', '--repo=owner/armada', '--pull-requests');
+      const again = await cli('webhook', 'add', 'armada', '--repo=owner/armada', '--pull-requests');
       const listed = await cli('webhook', 'list');
       const removed = await cli('webhook', 'remove', 'armada');
       const ghCalls = existsSync(join(scratch, 'gh-calls')) ? readFileSync(join(scratch, 'gh-calls'), 'utf8') : '';
+      const posted = calls.filter(({ method, path }) => method === 'POST' && path === '/webhooks/armada').map(({ body }) => v.parse(v.object({ secret: v.string(), hook: v.number() }), body));
 
-      expect(added.exit).toBe(0);
-      expect(added.said).toContain('configured armada');
+      expect({ added: added.exit, again: again.exit }).toEqual({ added: 0, again: 0 });
       expect(added.said).toContain('created GitHub hook 77');
+      expect(again.said).toContain('updated GitHub hook 77');
+      // Each add stored the secret it gave GitHub, with the hook's id, so the two never differ.
+      expect(posted.map(({ hook }) => hook)).toEqual([77, 77]);
+      expect(posted.every(({ secret }) => /^[0-9a-f]{48}$/u.test(secret) && ghCalls.includes(`config[secret]=${secret}`))).toBe(true);
+      expect(ghCalls).toContain('repos/owner/armada/hooks/77 -X PATCH');
       expect(listed.said).toContain('armada  owner/armada');
       expect(listed.said).not.toContain('secret');
       expect(removed.said).toContain('removed armada');
       expect(removed.said).toContain('deleted GitHub hook 77');
-
-      const posted = calls.find(({ method, path }) => method === 'POST' && path === '/webhooks/armada');
-
-      expect(posted?.body).toMatchObject({ repo: 'owner/armada', pullRequests: true });
-      expect((posted?.body as { secret: string }).secret).toMatch(/^[0-9a-f]{48}$/u);
-      expect(calls).toContainEqual({ method: 'PATCH', path: '/webhooks/armada', body: { hook: 77 } });
-      expect(calls).toContainEqual({ method: 'DELETE', path: '/webhooks/armada', body: undefined });
-      expect(ghCalls).toContain('auth status');
-      expect(ghCalls).toContain('repos/owner/armada/hooks');
       expect(ghCalls).toContain('repos/owner/armada/hooks/77 -X DELETE');
     } finally {
       await server.stop(true);
@@ -866,15 +870,19 @@ describe('the webhook command', () => {
     }
   });
 
-  test('add without gh signed in prints the hook to add by hand', async () => {
-    const calls: unknown[] = [];
+  test('add without gh refuses to change a hook GitHub already signs for, and prints a new one to add by hand', async () => {
+    const posted: string[] = [];
+    let hooked = false;
     const server = Bun.serve({
       port: 0,
-      async fetch(request) {
+      fetch(request) {
         const { pathname } = new URL(request.url);
 
-        calls.push({ method: request.method, path: pathname });
-        if (request.method === 'POST' && pathname === '/webhooks/armada') return Response.json({ configured: {} });
+        if (request.method === 'POST' && pathname === '/webhooks/armada') posted.push(pathname);
+        if (request.method === 'POST' && pathname === '/webhooks/armada') return Response.json({ configured: 'armada' });
+        if (request.method === 'GET' && pathname === '/webhooks') {
+          return Response.json({ webhooks: hooked ? [{ project: 'armada', repo: 'owner/armada', pullRequests: false, tokenSecret: 'GITHUB_TOKEN', hook: 77 }] : [] });
+        }
 
         return Response.json({ error: 'no route' }, { status: 404 });
       },
@@ -887,10 +895,19 @@ describe('the webhook command', () => {
 
     try {
       const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
-      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'webhook', 'add', 'armada', '--repo=owner/armada'], { env, stdout: 'pipe', stderr: 'pipe' });
-      const said = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
+      const add = async () => {
+        const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'webhook', 'add', 'armada', '--repo=owner/armada'], { env, stdout: 'pipe', stderr: 'pipe' });
 
-      expect({ exit: await ran.exited, hasUrl: said.includes('/webhooks/github/armada'), hasSecret: /secret: [0-9a-f]{48}/u.test(said), steps: said.includes('add the hook by hand') }).toEqual({ exit: 0, hasUrl: true, hasSecret: true, steps: true });
+        return { exit: await ran.exited, said: await new Response(ran.stdout).text() + await new Response(ran.stderr).text() };
+      };
+      const fresh = await add();
+
+      hooked = true;
+      const refused = await add();
+
+      expect({ exit: fresh.exit, hasUrl: fresh.said.includes('/webhooks/github/armada'), hasSecret: /secret: [0-9a-f]{48}/u.test(fresh.said), steps: fresh.said.includes('add the hook by hand') })
+        .toEqual({ exit: 0, hasUrl: true, hasSecret: true, steps: true });
+      expect({ exit: refused.exit, said: refused.said.includes('updating its secret needs gh signed in'), posts: posted.length }).toEqual({ exit: 2, said: true, posts: 1 });
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
