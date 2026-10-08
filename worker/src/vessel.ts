@@ -16,7 +16,7 @@ import {
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
-import { GANG_DOWN, GANG_UP, RELAY, RELAY_HEADER, RELAY_IN, RELAY_PY } from './relay';
+import { GANG_DOWN, GANG_UP, LINK_ID, RELAY, RELAY_HEADER, RELAY_IN, RELAY_PY, Relayed } from './relay';
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -80,8 +80,10 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** Whether this object watches its container's end (`watch`). */
   private watching = false;
 
-  /** Each relay WebSocket's connection into the container, by the socket. */
-  private readonly relays = new Map<WebSocket, WritableStreamDefaultWriter<Uint8Array>>();
+  /** Each relay link into the container, by its id and by the WebSocket carrying it now. */
+  private readonly links = new Map<string, Relayed>();
+
+  private readonly relays = new Map<WebSocket, Relayed>();
 
   async begin(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.put({ spec, state: 'waiting' satisfies State, requested: Date.now() });
@@ -289,50 +291,65 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('ganged', true);
   }
 
-  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a connection into
-   *  this container's relay, which connects `port` on this rank's address. */
+  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a link (`id`) into
+   *  this container's relay, which connects `port` on this rank's address; or, with `resume`, the next WebSocket of a
+   *  link whose last one dropped, gone (410) once the link is. */
   override async fetch(request: Request): Promise<Response> {
     const token = (await this.ctx.storage.get<Current>('current'))?.claim.gang?.token;
     const expected = new TextEncoder().encode(token ?? '');
     const supplied = new TextEncoder().encode(request.headers.get(RELAY_HEADER) ?? '');
 
     if (token === undefined || expected.length !== supplied.length || !crypto.subtle.timingSafeEqual(expected, supplied)) return new Response('forbidden', { status: 403 });
-    const port = Number(new URL(request.url).searchParams.get('port'));
+    const url = new URL(request.url);
+    const port = Number(url.searchParams.get('port'));
+    const id = url.searchParams.get('id') ?? '';
 
-    if (!Number.isInteger(port) || port < 1 || port > 65_535 || request.headers.get('upgrade') !== 'websocket') return new Response('a relay is a WebSocket to a port', { status: 400 });
+    if (!Number.isInteger(port) || port < 1 || port > 65_535 || !LINK_ID.test(id) || request.headers.get('upgrade') !== 'websocket') {
+      return new Response('a relay is a WebSocket to a port, under a link id', { status: 400 });
+    }
+    const held = this.links.get(id);
+
+    if (held === undefined && url.searchParams.has('resume')) return new Response('the link is gone', { status: 410 });
     const [client, server] = Object.values(new WebSocketPair());
 
     if (client === undefined || server === undefined) throw new Error('a WebSocketPair has two ends');
     this.ctx.acceptWebSocket(server);
-    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
-    const writer = socket.writable.getWriter();
-
-    this.relays.set(server, writer);
-    await writer.write(new TextEncoder().encode(`${String(port)}\n`));
-    void (async () => {
-      const reader = socket.readable.getReader();
-
-      for (let read = await reader.read(); !read.done; read = await reader.read()) server.send(read.value);
-      server.close(1000, 'closed');
-    })().catch(() => { server.close(1011, 'the connection failed'); });
+    this.relays.set(server, held ?? await this.link(id, port, url.pathname));
+    this.relays.get(server)?.attach(server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const writer = this.relays.get(socket);
+  /** A new link `id`: a connection into the container's relay for `port`, its bytes pumped to whichever WebSocket
+   *  carries the link. */
+  private async link(id: string, port: number, path: string): Promise<Relayed> {
+    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
+    const writer = socket.writable.getWriter();
+    const relayed = new Relayed(writer, (event, detail) => { console.log(JSON.stringify({ event, path, id, port, ...detail })); },
+      () => { this.links.delete(id); });
 
-    if (writer === undefined) return socket.close(1011, 'no connection');
-    await writer.write(typeof message === 'string' ? new TextEncoder().encode(message) : new Uint8Array(message));
+    this.links.set(id, relayed);
+    await writer.write(new TextEncoder().encode(`${String(port)}\n`));
+    void relayed.pump(socket.readable);
+
+    return relayed;
   }
 
-  override async webSocketClose(socket: WebSocket): Promise<void> {
-    await this.relays.get(socket)?.close().catch(() => undefined);
+  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const relayed = this.relays.get(socket);
+
+    if (relayed === undefined) return socket.close(1011, 'no link');
+    await relayed.message(socket, message);
+  }
+
+  override async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
+    await this.relays.get(socket)?.closed(socket, code, reason);
     this.relays.delete(socket);
   }
 
-  override async webSocketError(socket: WebSocket): Promise<void> {
-    await this.webSocketClose(socket);
+  override async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
+    await this.relays.get(socket)?.closed(socket, 1006, `failed: ${String(error)}`);
+    this.relays.delete(socket);
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
