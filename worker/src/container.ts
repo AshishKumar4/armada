@@ -3,7 +3,7 @@
  * scheduling policy, so each start names what it starts from (the recipe's base image while preparing, an environment
  * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
-import { ARTIFACTS_PATH, failureTail, SIZES, type Size } from '../../src/protocol';
+import { ARTIFACTS_PATH, detach, failureTail, SIZES, type Size } from '../../src/protocol';
 import { said } from './env';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
@@ -392,19 +392,9 @@ export async function startAndAnswer(container: Container, options: ContainerSta
   // Why a start ended, when it did: the runtime says so only through `monitor()`.
   let ended = '';
 
-  // Each start's watch, kept while it runs: `ended` is what it found.
-  const watches: Promise<void>[] = [];
-
-  const monitor = async (): Promise<void> => {
-    try {
-      await container.monitor();
-      ended = 'the container exited';
-    } catch (cause) {
-      ended = said({ cause });
-    }
+  const watch = (): void => {
+    detach(container.monitor().then(() => { ended = 'the container exited'; }), (error) => { ended = said({ cause: error }); });
   };
-
-  const watch = () => { watches.push(monitor()); };
 
   await startFresh(container, options);
   watch();

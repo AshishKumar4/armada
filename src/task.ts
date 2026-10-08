@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { detach, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -439,18 +439,10 @@ class Submission<I> {
 
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  /** Work started in the background, each step's failure recorded: the job's creation watched, an open job's items
-   *  sent, the timer's latest flush. */
-  private readonly created: Promise<void>;
-
-  private sending: Promise<void> | null = null;
-
-  private ticked: Promise<void> | null = null;
-
   constructor(private readonly armada: Armada, create: (submission: Submission<I>) => Promise<string>) {
     this.id = create(this);
     // A failure reaches whoever reads the job, through its id or its end; this keeps it from also being unhandled.
-    this.created = this.watch(this.id);
+    detach(this.id, (failure) => { this.fail(failure); });
   }
 
   /** The item sent at `index`. */
@@ -482,8 +474,8 @@ class Submission<I> {
       if (batch.length >= BATCH) await flush();
     };
 
-    this.timer = setInterval(() => { this.ticked = this.watch(flush()); }, BATCH_MS);
-    this.sending = this.send(id, items, enqueue, flush);
+    this.timer = setInterval(() => { detach(flush(), (failure) => { this.fail(failure); }); }, BATCH_MS);
+    detach(this.send(id, items, enqueue, flush), (failure) => { this.fail(failure); });
   }
 
   /** Stops taking items: the job was cancelled, or a failure ended it. */
@@ -506,15 +498,6 @@ class Submission<I> {
     } catch (cause) {
       this.fail(errorOf({ cause }));
       await this.cancelAfter(id);
-    }
-  }
-
-  /** Records a background step's failure instead of leaving it unhandled. */
-  private async watch(step: Promise<unknown>): Promise<void> {
-    try {
-      await step;
-    } catch (cause) {
-      this.fail(errorOf({ cause }));
     }
   }
 

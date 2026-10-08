@@ -3,11 +3,11 @@
  * orange, what is free a dim dot), and the jobs made last, newest first.
  */
 import * as v from 'valibot';
-import { FleetSchema, HealthSchema, JobsSchema, type Fleet, type JobBrief } from '../../src/protocol';
+import { detach, FleetSchema, HealthSchema, JobsSchema, type Fleet, type JobBrief } from '../../src/protocol';
 import { get } from './api';
 import { ago, count, duration, h, replace } from './dom';
 import { jobPill, nameOf, progress, tookOf } from './status';
-import { detach, empty, failed, poll, type View } from './view';
+import { empty, failed, poll, type View } from './view';
 
 /** The fleet's picture: this many cells, each a share of its cap. */
 const CELLS = 120;

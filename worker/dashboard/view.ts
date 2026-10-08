@@ -1,5 +1,5 @@
 /** A page of the dashboard, and how it stays current: it polls while it is shown and stops when it is left. */
-import { errorOf } from '../../src/protocol';
+import { detach, errorOf } from '../../src/protocol';
 import { RequestError, SignedOut } from './api';
 import { h, icon, replace } from './dom';
 
@@ -19,11 +19,6 @@ export function whenSignedOut(handler: () => void): void {
 export interface Poller {
   stop(): void;
   now(): void;
-}
-
-/** Runs `work` to its end with nothing awaiting it: a failure goes to `failed`, never unhandled. */
-export function detach(work: Promise<void>, onFailure: (error: Error) => void): void {
-  work.then(undefined, (...rejected: [unknown]) => { onFailure(errorOf({ cause: rejected[0] })); });
 }
 
 /** Runs `refresh` now and then every `ms` after each run ends, while the page is visible, until `stop`. A failure is

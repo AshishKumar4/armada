@@ -156,6 +156,11 @@ export function errorOf({ cause }: { readonly cause: unknown }): Error {
   return cause instanceof Error ? cause : new Error('a value that is not an Error was thrown', { cause });
 }
 
+/** Runs `work` to its end with nothing awaiting it: its failure goes to `onFailure`, never unhandled. */
+export function detach(work: Promise<unknown>, onFailure: (error: Error) => void): void {
+  work.then(undefined, (...rejected: [unknown]) => { onFailure(errorOf({ cause: rejected[0] })); });
+}
+
 /** One task: its item, which `ARMADA_ITEM` carries as JSON, whose numeric `weight` queues it and whose `gang` runs it on
  *  that many containers at once (`gangOf`), and a command's argv. */
 export const TaskSchema = v.object({ item: JsonSchema, argv: v.optional(v.pipe(v.array(v.string()), v.minLength(1))) });

@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { BUNDLE_PATH, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
+import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, bounded, killOf, launchSlot, launchTask, maskValuesOf, mounts, must, pipeIn, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
@@ -118,8 +118,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   private readonly born = Date.now();
 
   /** Whether this object watches its container's end (`watch`). */
-  /** Why the container ended, watched once this object runs it. */
-  private watching: Promise<void> | null = null;
+  private watching = false;
 
   /** Each relay WebSocket's pipe into the container, which holds nothing of its link (`Piped`). */
   private readonly pipes = new Map<WebSocket, Piped>();
@@ -227,7 +226,9 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** Runs the loop for a slice; true while there is more to do, false once the vessel retired. */
   /** Keeps why the container ended, if it ends while this object runs: the runtime says so only through `monitor()`. */
   private watch(container: Container): void {
-    this.watching ??= this.monitor(container);
+    if (this.watching) return;
+    this.watching = true;
+    detach(this.monitor(container), (error) => { console.error(JSON.stringify({ watching: said({ cause: error }) })); });
   }
 
   private async monitor(container: Container): Promise<void> {

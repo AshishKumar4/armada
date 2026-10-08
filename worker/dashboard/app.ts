@@ -2,14 +2,14 @@
  * armada's dashboard: the deployment's fleet and recent jobs, a job followed live, its environments, and its CI
  * verdicts. The Worker serves it as static files under /ui/; `armada dashboard` opens it signed in.
  */
-import { errorOf, type Health } from '../../src/protocol';
+import { detach, errorOf, type Health } from '../../src/protocol';
 import { deployment, signIn, signOut, SignedOut, takeToken, token } from './api';
 import { ci } from './ci';
 import { environments } from './environments';
 import { h, icon, replace } from './dom';
 import { jobView } from './job';
 import { overview } from './overview';
-import { describe, detach, whenSignedOut, type View } from './view';
+import { describe, whenSignedOut, type View } from './view';
 
 type Route =
   | { readonly page: 'overview' }

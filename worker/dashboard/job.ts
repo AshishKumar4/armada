@@ -4,12 +4,12 @@
  * so a job of 100 000 tasks costs a poll only what landed since the last.
  */
 import * as v from 'valibot';
-import { EventsSchema, JobStatusSchema, JsonSchema, type JobStatus, type Json, type Outcome } from '../../src/protocol';
+import { detach, EventsSchema, JobStatusSchema, JsonSchema, type JobStatus, type Json, type Outcome } from '../../src/protocol';
 import { blob, get } from './api';
 import { TaskGrid, Timeline, type Lane, type Segment, type TaskState } from './charts';
 import { ago, bytes, count, duration, h, icon, pill, replace, save, when, type Tone } from './dom';
 import { counts, jobPill, nameOf, progress, STATE_WORDS, stateOf, tookOf } from './status';
-import { describe, detach, empty, poll, type View } from './view';
+import { describe, empty, poll, type View } from './view';
 
 interface Landed {
   readonly outcome: Outcome;

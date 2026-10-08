@@ -19,10 +19,14 @@ function pipe() {
   const written: number[][] = [];
   const logged: string[] = [];
   let inputClosed = false;
+  const shut = Promise.withResolvers<void>();
 
   const socket = {
     send: (data: string | Uint8Array) => { messages.push(data instanceof Uint8Array ? [...data] : data); },
-    close: (code?: number, reason?: string) => { closes.push([code ?? 1005, reason ?? '']); },
+    close: (code?: number, reason?: string) => {
+      closes.push([code ?? 1005, reason ?? '']);
+      shut.resolve();
+    },
   };
 
   const writer = {
@@ -34,7 +38,7 @@ function pipe() {
   const container = new ReadableStream<Uint8Array>({ start: (controller) => { push = controller; } });
   const piped = new Piped(socket, writer, 'abcd 9000 1', (event) => { logged.push(event); });
 
-  return { piped, container, push: () => push, messages, closes, written, logged, inputClosed: () => inputClosed };
+  return { piped, container, push: () => push, messages, closes, written, logged, inputClosed: () => inputClosed, shut: shut.promise };
 }
 
 describe('a relay WebSocket at its vessel', () => {
@@ -48,13 +52,13 @@ describe('a relay WebSocket at its vessel', () => {
   });
 
   test('sends each record from the container as a message once it is whole, however the reads split it', async () => {
-    const { piped, container, push, messages, closes } = pipe();
+    const { piped, container, push, messages, closes, shut } = pipe();
     const stream = new Uint8Array([...record('b', new Uint8Array([7, 8, 9])), ...record('t', new TextEncoder().encode('e3'))]);
     piped.start(container);
 
     for (const at of [0, 2, 6, 9]) push()?.enqueue(stream.slice(at, [2, 6, 9, stream.byteLength][[0, 2, 6, 9].indexOf(at)]));
     push()?.close();
-    await piped.pumped;
+    await shut;
 
     expect({ messages, closes }).toEqual({ messages: [[7, 8, 9], 'e3'], closes: [[1000, 'the container closed it']] });
   });

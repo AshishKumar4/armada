@@ -14,6 +14,7 @@
  * the program seeing nothing of it.
  */
 import { STATE } from './container';
+import { detach } from '../../src/protocol';
 import { said } from './env';
 
 /** Where a rank's peers' connections arrive (loopback, DNAT'd to) and where its vessel connects in (every address). */
@@ -62,24 +63,14 @@ export class Piped {
 
   private over = false;
 
-  /** The container's records being pumped to the WebSocket, and the container's side closing. */
-  private pumping: Promise<void> | null = null;
-
-  private closing: Promise<void> | null = null;
-
   constructor(private readonly socket: RelaySocket, private readonly writer: Pick<WritableStreamDefaultWriter<Uint8Array>, 'write' | 'close'>,
     link: string, private readonly log: (event: string, detail: Readonly<Record<string, string | number>>) => void) {
     this.queue = this.write(Promise.resolve(), new TextEncoder().encode(`${link}\n`));
   }
 
-  /** Starts pumping the container's records to the WebSocket. */
+  /** Starts pumping the container's records to the WebSocket, until either side ends. */
   start(readable: ReadableStream<Uint8Array>): void {
-    this.pumping ??= this.pump(readable);
-  }
-
-  /** Settles once the pump `start` began ends. */
-  get pumped(): Promise<void> {
-    return this.pumping ?? Promise.resolve();
+    detach(this.pump(readable), (error) => { this.log('relay pump failed', { reason: error.message }); });
   }
 
   /** A message to the container, as a record, written after those before it though the runtime hands over the next
@@ -130,9 +121,9 @@ export class Piped {
         held = joined.slice(at);
       }
 
-      this.end(1000, 'the container closed it');
+      await this.end(1000, 'the container closed it');
     } catch (cause) {
-      this.end(1011, `the container's side failed: ${said({ cause })}`);
+      await this.end(1011, `the container's side failed: ${said({ cause })}`);
     }
   }
 
@@ -143,7 +134,7 @@ export class Piped {
     try {
       await this.writer.write(record);
     } catch (cause) {
-      this.end(1011, `the container's side failed: ${said({ cause })}`);
+      await this.end(1011, `the container's side failed: ${said({ cause })}`);
     }
   }
 
@@ -158,13 +149,13 @@ export class Piped {
     }
   }
 
-  private end(code: number, reason: string): void {
+  private async end(code: number, reason: string): Promise<void> {
     if (this.over) return;
     this.over = true;
 
     if (code !== 1000) this.log('relay WebSocket closed by its vessel', { code, reason });
     this.socket.close(code, reason.slice(0, 120));
-    this.closing ??= this.close(Promise.resolve());
+    await this.close(Promise.resolve());
   }
 }
 
