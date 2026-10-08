@@ -289,24 +289,22 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 async function knownCaps(mine: string): Promise<{ name: string; cap: number | null }[]> {
   const files = existsSync(CONFIG_DIR) ? readdirSync(CONFIG_DIR).filter((each) => each.endsWith('.json')) : [];
 
-  const asked = await Promise.all(files.map(async (each): Promise<{ name: string; cap: number | null } | null> => {
+  return await Promise.all(files.flatMap(async (each) => {
     const name = each === 'connection.json' ? 'armada' : each.slice(0, -'.json'.length);
 
-    if (name === mine) return null;
+    if (name === mine) return [];
     let connection: Connection;
 
     try {
       connection = v.parse(ConnectionSchema, JSON.parse(readFileSync(join(CONFIG_DIR, each), 'utf8')));
     } catch {
-      return null;
+      return [];
     }
 
     const cap = await Promise.race([new Armada(connection).health().then((health) => health.cap ?? null, () => null), new Promise<null>((answer) => setTimeout(answer, 5_000))]);
 
-    return { name, cap };
+    return [{ name, cap }];
   }));
-
-  return asked.filter((each) => each !== null);
 }
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
