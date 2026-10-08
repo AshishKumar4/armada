@@ -102,7 +102,12 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     const used = new Set(await Promise.all(open.map(async (job) => await this.env.JOB.getByName(job).environment())));
     const pruned: string[] = [];
 
-    for (const { key, snapshot } of superseded(await this.list(), keep, used)) {
+    for (const { key, snapshot, lastUsed } of superseded(await this.list(), keep, used)) {
+      // A job that asked for it since the listing, while a call above let other requests in, keeps it: the read and the
+      // delete are storage alone, with nothing between them that lets one in.
+      const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+
+      if (entry?.state !== 'ready' || entry.lastUsed !== lastUsed) continue;
       await this.forget(key);
       pruned.push(key);
 
@@ -138,9 +143,9 @@ export class ArmadaEnvironments extends DurableObject<Env> {
 
 /** The ready environments that no open job `used` and that are past the `keep` most recently used of those, oldest
  *  last: an open job's vessels, a replacement's included, start from its environment until it ends. */
-export function superseded(entries: readonly { readonly key: string; readonly entry: Entry }[], keep: number, used: ReadonlySet<string>): { key: string; snapshot: string }[] {
-  return entries.flatMap(({ key, entry }) => entry.state === 'ready' && !used.has(key) ? [{ key, lastUsed: entry.lastUsed, snapshot: entry.generation.snapshot.id }] : [])
-    .sort((left, right) => right.lastUsed - left.lastUsed).slice(keep).map(({ key, snapshot }) => ({ key, snapshot }));
+export function superseded(entries: readonly { readonly key: string; readonly entry: Entry }[], keep: number, used: ReadonlySet<string>): { key: string; snapshot: string; lastUsed: number }[] {
+  return entries.flatMap(({ key, entry }) => entry.state === 'ready' && !used.has(key) ? [{ key, snapshot: entry.generation.snapshot.id, lastUsed: entry.lastUsed }] : [])
+    .sort((left, right) => right.lastUsed - left.lastUsed).slice(keep);
 }
 
 type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot';

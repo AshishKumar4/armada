@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import type { Recipe } from '../../src/protocol';
 import { ArmadaEnvironments, superseded, type Generation } from '../src/environments';
 import { namespace, state, world } from './harness';
 
@@ -18,7 +19,7 @@ describe('the environments past those an armada keeps', () => {
     ];
 
     // 'running' is the oldest, but an open job's containers start from it.
-    expect(superseded(entries, 2, new Set(['running']))).toEqual([{ key: 'third', snapshot: 'snapshot-third' }, { key: 'fourth', snapshot: 'snapshot-fourth' }]);
+    expect(superseded(entries, 2, new Set(['running'])).map(({ key, snapshot }) => [key, snapshot])).toEqual([['third', 'snapshot-third'], ['fourth', 'snapshot-fourth']]);
   });
 });
 
@@ -29,7 +30,7 @@ describe('a deployment that keeps one environment', () => {
     globalThis.fetch = realFetch;
   });
 
-  test('prunes the older ones once a new one is prepared, forgetting each before its snapshot goes, and spares the one an older job still runs on', async () => {
+  const pruning = async (startsOnB: boolean) => {
     const stored = state();
     // Each snapshot deleted, and whether its environment's record was already gone.
     const deleted: [string, boolean][] = [];
@@ -47,6 +48,8 @@ describe('a deployment that keeps one environment', () => {
       const key = tags.get(url.split('/').at(-1) ?? '') ?? '';
 
       deleted.push([key, (await stored.ctx.storage.get(`env:${key}`)) === undefined]);
+      // While c's snapshot is being deleted, a job starts on b, an environment the prune listed to go next.
+      if (key === 'c' && startsOnB) await environments.ensure('b', {} as Recipe, null);
 
       return new Response(null, { status: 202 });
     }) as typeof fetch;
@@ -61,7 +64,14 @@ describe('a deployment that keeps one environment', () => {
     }
     await environments.prepared(generation('new'));
 
-    expect({ deleted, kept: (await environments.list()).map((each) => each.key).sort() })
-      .toEqual({ deleted: [['c', true], ['b', true]], kept: ['new', 'old'] });
+    return { deleted, kept: (await environments.list()).map((each) => each.key).sort() };
+  };
+
+  test('prunes the older ones once a new one is prepared, forgetting each before its snapshot goes, and spares the one an older job still runs on', async () => {
+    expect(await pruning(false)).toEqual({ deleted: [['c', true], ['b', true]], kept: ['new', 'old'] });
+  });
+
+  test('keeps one a job asked for while the prune was under way', async () => {
+    expect(await pruning(true)).toEqual({ deleted: [['c', true]], kept: ['b', 'new', 'old'] });
   });
 });

@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
-import { registryCredentials } from './registry';
+import { expiryWarning, registryCredentials } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
 import { BaseSchema, describeUsage, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
@@ -288,7 +288,11 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     // A version of the same wire takes over the running jobs: their containers outlive the Worker's update, and each
     // object resumes from storage (measured: six deploys in two minutes over 200 one-minute tasks cut none and refused
     // no job). Only a version of another wire, or a deploy told to, is drained first.
-    const speaks = deployed === null ? null : await deployed.health().then((health) => health.protocol, () => null);
+    const health = deployed === null ? null : await deployed.health().catch(() => null);
+    const speaks = health?.protocol ?? null;
+    const warning = keep === undefined ? expiryWarning(name, health) : null;
+
+    if (warning !== null) console.warn(warning);
 
     if (deployed !== null && (forceDrain || speaks !== PROTOCOL)) await drain(deployed, () => { drained = true; });
     install(account, name, vcpus, file);
@@ -313,10 +317,12 @@ const KEEP_CREDENTIALS_DAYS = 365;
 async function keepEnvironments(account: string, name: string, keep: number): Promise<void> {
   const token = wrangler(['auth', 'token'], account).trim().split('\n').at(-1)?.trim() ?? '';
   const credentials = await registryCredentials(account, token, KEEP_CREDENTIALS_DAYS * 24 * 60);
+  const until = new Date(Date.now() + KEEP_CREDENTIALS_DAYS * 24 * 60 * 60_000).toISOString();
 
   wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS', '--name', name], account, credentials);
+  wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS_EXPIRE', '--name', name], account, until);
   wrangler(['secret', 'put', 'KEEP_ENVIRONMENTS', '--name', name], account, String(keep));
-  console.log(`${name} keeps the snapshots of its ${String(keep)} most recently used environments; its registry credentials last ${String(KEEP_CREDENTIALS_DAYS)} days`);
+  console.log(`${name} keeps the snapshots of the environments open jobs use and of its ${String(keep)} most recently used others; its registry credentials last until ${until}`);
 }
 
 function install(account: string, name: string, vcpus: number | undefined, file: string): void {

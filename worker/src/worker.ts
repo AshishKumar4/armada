@@ -292,7 +292,11 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const fleet = env.FLEET.getByName(SINGLE);
 
-  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, vcpus: await fleet.used(), jobs: await fleet.jobs() } satisfies Health);
+  if (head === 'health') {
+    const keepUntil = env.REGISTRY_CREDENTIALS_EXPIRE;
+
+    return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, vcpus: await fleet.used(), jobs: await fleet.jobs(), ...keepUntil === undefined ? {} : { keepUntil } } satisfies Health);
+  }
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
   if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });

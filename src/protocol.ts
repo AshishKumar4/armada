@@ -267,7 +267,11 @@ export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
 
 /** A deployment's state: its runner layer, its wire, the vCPUs its fleet holds, and the jobs not yet done, those
  *  waiting for an environment or for a container included. */
-export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), vcpus: v.number(), jobs: v.number() });
+export const HealthSchema = v.object({
+  ok: v.boolean(), driver: v.number(), protocol: v.number(), vcpus: v.number(), jobs: v.number(),
+  /** When the registry credentials a `--keep` deploy gave the Worker expire, an ISO date; absent without them. */
+  keepUntil: v.optional(v.string()),
+});
 
 export type Health = v.InferOutput<typeof HealthSchema>;
 

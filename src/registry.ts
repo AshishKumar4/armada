@@ -4,6 +4,7 @@
  * delete through the registry, the Worker with credentials the deploy minted.
  */
 import * as v from 'valibot';
+import type { Health } from './protocol';
 
 const Minted = v.object({
   success: v.boolean(),
@@ -58,4 +59,19 @@ export async function deleteSnapshotWith(credentials: string, id: string): Promi
   }
 
   return 'deleted';
+}
+
+/** How long before the credentials a `--keep` deploy gave a Worker expire a later deploy warns of it. */
+const KEEP_WARN_DAYS = 30;
+
+const DAY_MS = 24 * 60 * 60_000;
+
+/** The warning a deploy prints when the credentials an earlier `--keep` deploy gave the Worker run out within
+ *  KEEP_WARN_DAYS, after which its pruning fails into its log alone; null otherwise. */
+export function expiryWarning(name: string, health: Health | null, now = Date.now()): string | null {
+  const until = health?.keepUntil === undefined ? NaN : Date.parse(health.keepUntil);
+
+  if (!(until - now < KEEP_WARN_DAYS * DAY_MS)) return null;
+
+  return `${name}'s registry credentials ${until < now ? 'expired' : 'expire'} at ${new Date(until).toISOString()}, and its environments are no longer pruned after that: deploy with --keep=N to renew them`;
 }
