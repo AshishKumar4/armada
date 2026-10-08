@@ -152,7 +152,8 @@ status() {
 }
 status pending 'armada is running'
 git -C "$HOME/repo" init -q 2>/dev/null || true
-git -C "$HOME/repo" fetch -q --depth 1 "https://x-access-token:$GITHUB_TOKEN@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
+git -C "$HOME/repo" fetch -q --depth 1 "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
+  || git -C "$HOME/repo" fetch -q --depth 1 "https://x-access-token:$GITHUB_TOKEN@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
 git -C "$HOME/repo" checkout -q FETCH_HEAD
 command -v bun >/dev/null 2>&1 || curl -fsSL https://bun.sh/install | bash
 export PATH="$HOME/.bun/bin:$PATH"
