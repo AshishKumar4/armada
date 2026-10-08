@@ -24,7 +24,7 @@ async function job(spec: v.InferInput<typeof JobSpecSchema>) {
 }
 
 const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
-  index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: false, ...error === undefined ? {} : { error },
+  index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: false, error,
 });
 
 /** `vessel` claims, runs and lands its next task, which exits `exitCode`, having thrown `error`. */
@@ -423,15 +423,15 @@ async function formed(open: ArmadaJob, vessels: readonly string[]): Promise<Reco
   return held;
 }
 
-/** `vessel` lands its rank's answer, exiting `exitCode`, with `extra` on its outcome. */
-async function land(open: ArmadaJob, vessel: string, index: number, exitCode: number, extra?: Partial<Outcome>): Promise<void> {
-  if (!(await open.accept(vessel, index, exitCode))) throw new Error(`${vessel}'s answer was refused`);
-  await open.complete(vessel, { ...exited(index, vessel), exitCode, tail: `${vessel} said this`, ...extra }, 1000);
+/** `vessel` lands its rank's answer, with `landed`'s exit code and the rest on its outcome. */
+async function land(open: ArmadaJob, vessel: string, index: number, landed: Partial<Outcome> & { readonly exitCode: number }): Promise<void> {
+  if (!(await open.accept(vessel, index, landed.exitCode))) throw new Error(`${vessel}'s answer was refused`);
+  await open.complete(vessel, { ...exited(index, vessel), tail: `${vessel} said this`, ...landed }, 1000);
 }
 
 describe('a gang task', () => {
   test('is refused unless it is a whole number of containers the pool holds', () => {
-    const items = (gang: number) => [{ item: { gang }, argv: ['true'] }];
+    const items = (size: number) => [{ item: { gang: size }, argv: ['true'] }];
 
     expect([refusal({ kind: 'command' }, items(2), 2), refusal({ kind: 'command' }, items(3), 2), refusal({ kind: 'command' }, items(1.5), 4)])
       .toEqual([null, 'item 0\'s gang is a whole number of containers from 1 to 2, the job\'s pool', 'item 0\'s gang is a whole number of containers from 1 to 4, the job\'s pool']);
@@ -451,14 +451,14 @@ describe('a gang task', () => {
     const { job: green } = await job(gang(2));
     await formed(green, ['v1', 'v2']);
 
-    await land(green, 'v2', 0, 0);
+    await land(green, 'v2', 0, { exitCode: 0 });
     const early = (await green.events(0)).events.length;
 
-    await land(green, 'v1', 0, 0, { artifacts: true });
+    await land(green, 'v1', 0, { exitCode: 0, artifacts: true });
     const { job: red } = await job(gang(2));
 
     await formed(red, ['v1', 'v2']);
-    await land(red, 'v2', 0, 3, { artifacts: true });
+    await land(red, 'v2', 0, { exitCode: 3, artifacts: true });
     const outcomes = [...(await green.events(0)).events, ...(await red.events(0)).events].map((event) => [event.outcome.vessel, event.outcome.exitCode, event.outcome.tail, event.outcome.artifacts ?? false]);
 
     expect({ early, outcomes, stillRank0: await red.still('v1', 0) })

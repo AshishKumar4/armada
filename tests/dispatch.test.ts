@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
+import * as v from 'valibot';
 import { listSchedule } from '../src/dispatch';
+
+/** The Lean model's answer for one instance, as `listSchedule` gives its own. */
+const ScheduleSchema = v.object({ lanes: v.array(v.array(v.number())), loads: v.array(v.number()), makespan: v.number() });
 
 /** The Lean executable `lake exe sched` leaves, printing `listSchedule`'s answer for one JSON instance. */
 const EXE = new URL('../lean/.lake/build/bin/sched', import.meta.url).pathname;
@@ -23,11 +27,11 @@ function mulberry32(seed: number): () => number {
 }
 
 const leanSchedule = (durations: readonly number[], releases: readonly number[]) => {
-  const child = Bun.spawnSync([EXE], { stdin: new TextEncoder().encode(JSON.stringify({ durations, releases })) });
+  const child = Bun.spawnSync([EXE], { env: process.env, stdin: new TextEncoder().encode(JSON.stringify({ durations, releases })) });
 
   if (child.exitCode !== 0) throw new Error(`sched failed: ${new TextDecoder().decode(child.stderr)}`);
 
-  return JSON.parse(new TextDecoder().decode(child.stdout)) as { lanes: number[][]; loads: number[]; makespan: number };
+  return v.parse(ScheduleSchema, JSON.parse(new TextDecoder().decode(child.stdout)));
 };
 
 (have ? describe : describe.skip)('listSchedule agrees with the Lean model', () => {

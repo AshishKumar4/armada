@@ -41,7 +41,7 @@ describe('a job\'s env', () => {
     expect(claim === null || 'waitMs' in claim ? null : claim.env['TOKEN']).toBe(SECRET);
   });
 
-  const ends: Record<string, (setup: Running) => Promise<void>> = {
+  const ends = {
     'every task done': async ({ job }) => {
       for (const vessel of ['v1', 'v2']) {
         const claim = await job.claim(vessel);
@@ -70,7 +70,7 @@ describe('a job\'s env', () => {
       stored.ctx.storage.sql.exec('UPDATE vessels SET beat = 0');
       await job.alarm();
     },
-  };
+  } satisfies Record<string, (setup: Running) => Promise<void>>;
 
   for (const [end, conclude] of Object.entries(ends)) {
     test(`is gone from the job's storage once it ends: ${end}`, async () => {
@@ -101,7 +101,7 @@ describe('a job\'s env', () => {
     const claimed = claim === null || 'waitMs' in claim ? undefined : claim.env['TOKEN'];
 
     await job.cancel('cancelled by its client', 'cancelled');
-    const running = stored.dump().includes(SECRET);
+    const keptAfterCancel = stored.dump().includes(SECRET);
     const done = state();
     const finished = new ArmadaJob(done.ctx, world({}));
 
@@ -109,7 +109,7 @@ describe('a job\'s env', () => {
     await done.ctx.storage.put({ spec: { ...kept, env }, phase: 'done' });
     await finished.status();
 
-    expect({ claimed, keptAfterCancel: running, keptWhenDone: done.dump().includes(SECRET) }).toEqual({ claimed: SECRET, keptAfterCancel: false, keptWhenDone: false });
+    expect({ claimed, keptAfterCancel, keptWhenDone: done.dump().includes(SECRET) }).toEqual({ claimed: SECRET, keptAfterCancel: false, keptWhenDone: false });
   });
 
   test('an earlier Worker left inside a job\'s spec, or a vessel\'s claim, is gone at the end with nothing read before', async () => {
@@ -122,14 +122,14 @@ describe('a job\'s env', () => {
     await job.cancel('cancelled by its client', 'cancelled');
     const claim = { index: 0, attempt: 1, argv: ['true'], env: { TOKEN: SECRET }, duplicate: false };
 
-    const ends: Record<string, (vessel: ArmadaVessel) => Promise<void>> = {
-      stopped: async (vessel) => { await vessel.stop(); },
-      lost: async (vessel) => { await vessel.alarm(); },
+    const endings = {
+      stopped: async (vessel: ArmadaVessel) => { await vessel.stop(); },
+      lost: async (vessel: ArmadaVessel) => { await vessel.alarm(); },
     };
 
     const vessels: Record<string, boolean> = {};
 
-    for (const [end, conclude] of Object.entries(ends)) {
+    for (const [end, conclude] of Object.entries(endings)) {
       const stored = state(container(() => new Error('Network connection lost.')));
       const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => ({ vesselFailed: async () => undefined })) }));
 

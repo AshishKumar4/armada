@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import type { Recipe } from '../../src/protocol';
+import * as v from 'valibot';
+import { RecipeSchema } from '../../src/protocol';
+import { fakeFetch } from '../../tests/fakes';
 import { ArmadaEnvironments, superseded, type Generation } from '../src/environments';
 import { namespace, state, world } from './harness';
 
@@ -40,23 +42,23 @@ describe('a deployment that keeps one environment', () => {
     const tags = new Map<string, string>();
 
     for (const key of ['old', 'b', 'c']) tags.set(`rootfs-snapshot-${await hex(`snapshot-${key}`)}`, key);
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
+    globalThis.fetch = fakeFetch(async (request) => {
+      const { url } = request;
 
-      if (new Headers(init?.headers).get('authorization') !== `Basic ${btoa('user:secret')}`) return new Response(null, { status: 401 });
+      if (request.headers.get('authorization') !== `Basic ${btoa('user:secret')}`) return new Response(null, { status: 401 });
 
       if (url.endsWith('/_catalog?tags=true')) return Response.json({ repositories: { 'cloudchamber-snapshots/x': [...tags.keys()] } });
 
-      if (init?.method !== 'DELETE') return Response.json({ annotations: {} });
+      if (request.method !== 'DELETE') return Response.json({ annotations: {} });
       const key = tags.get(url.split('/').at(-1) ?? '') ?? '';
 
       deleted.push([key, (await stored.ctx.storage.get(`env:${key}`)) === undefined]);
 
       // While c's snapshot is being deleted, a job starts on b, an environment the prune listed to go next.
-      if (key === 'c' && startsOnB) await environments.ensure('b', {} as Recipe, null);
+      if (key === 'c' && startsOnB) await environments.ensure('b', v.parse(RecipeSchema, {}), null);
 
       return new Response(null, { status: 202 });
-    }) as typeof fetch;
+    });
 
     const environments = new ArmadaEnvironments(stored.ctx, world({
       KEEP_ENVIRONMENTS: '1', REGISTRY_CREDENTIALS: 'user:secret',

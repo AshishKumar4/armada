@@ -5,6 +5,7 @@ import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
+import { fakeFetch, settled } from '../../tests/fakes';
 import { namespace, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
@@ -22,7 +23,7 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
     JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name)),
   });
 
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => await worker.fetch(new Request(input, init), env)) as typeof fetch;
+  globalThis.fetch = fakeFetch(async (request) => await worker.fetch(request, env));
 
   return { armada: new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' }), fleet, env };
 }
@@ -34,7 +35,10 @@ describe('a client and a Worker', () => {
     const { env, armada } = deployment();
 
     const asked = async (version?: string) => {
-      const answer = await worker.fetch(new Request('https://armada.test/jobs/none', { headers: { authorization: `Bearer ${TOKEN}`, ...version === undefined ? {} : { 'armada-protocol': version } } }), env);
+      const headers = new Headers({ authorization: `Bearer ${TOKEN}` });
+
+      if (version !== undefined) headers.set('armada-protocol', version);
+      const answer = await worker.fetch(new Request('https://armada.test/jobs/none', { headers }), env);
 
       return [answer.status, v.parse(v.object({ error: v.optional(v.string()) }), await answer.json()).error];
     };
@@ -53,12 +57,12 @@ describe('a drained version', () => {
     const { armada, fleet } = deployment();
     const first = await armada.create(spec);
     const open = await armada.drain();
-    const refused = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+    const refused = await settled(armada.create(spec), 'admitted');
 
     await armada.cancel(first);
     const after = (await armada.health()).jobs;
     const next = deployment(fleet, 'b');
-    const admitted = await next.armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+    const admitted = await settled(next.armada.create(spec), 'admitted');
 
     expect({ open, refused, after, admitted }).toEqual({
       open: 1, refused: 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes', after: 0, admitted: 'admitted',
@@ -68,36 +72,34 @@ describe('a drained version', () => {
   test('counts a job admitted before it but still being made, so a deploy waits for it', async () => {
     const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' }));
     const jobs = new Map<string, ArmadaJob>();
-    let release = () => undefined as void;
-    let reached = () => undefined as void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    const making = new Promise<void>((resolve) => { reached = resolve; });
+    const held = Promise.withResolvers<void>();
+    const making = Promise.withResolvers<void>();
 
     const env: Env = world({
       ARMADA_TOKEN: TOKEN, VERSION: { id: 'a', tag: '', timestamp: '' }, FLEET: namespace(() => fleet),
-      // The job's own making waits for `release`, as a slow storage write or RPC would.
+      // The job's own making waits for `held`, as a slow storage write or RPC would.
       JOB: namespace((name: string) => {
         const job = jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name);
 
-        return { create: async (id: string, spec: never) => { reached(); await held; await job?.create(id, spec); } };
+        return { create: async (id: string, given: Parameters<ArmadaJob['create']>[1]) => { making.resolve(); await held.promise; await job?.create(id, given); } };
       }),
     });
 
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => await worker.fetch(new Request(input, init), env)) as typeof fetch;
+    globalThis.fetch = fakeFetch(async (request) => await worker.fetch(request, env));
     const armada = new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' });
-    const creating = armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+    const creating = settled(armada.create(spec), 'admitted');
 
-    await making;
+    await making.promise;
     const open = await armada.drain();
 
-    release();
+    held.resolve();
 
     expect({ open, created: await creating, after: await fleet.jobs() }).toEqual({ open: 1, created: 'admitted', after: 1 });
   });
 
   test('gives back the place of a job refused while it is made', async () => {
     const { armada, fleet } = deployment();
-    const refused = await armada.create({ ...spec, items: [] }).then(() => 'admitted', (error: unknown) => String(error));
+    const refused = await settled(armada.create({ ...spec, items: [] }), 'admitted');
 
     expect({ refused, open: await fleet.jobs() }).toEqual({ refused: 'RequestError: POST /jobs: 400 a job that is not open needs an item', open: 0 });
   });
@@ -106,12 +108,12 @@ describe('a drained version', () => {
     const { armada } = deployment();
 
     await armada.drain();
-    const refused = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+    const refused = await settled(armada.create(spec), 'admitted');
 
     setSystemTime(new Date(Date.now() + DRAIN_MS + 1000));
 
     try {
-      const admitted = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
+      const admitted = await settled(armada.create(spec), 'admitted');
 
       expect({ refused, admitted }).toEqual({ refused: 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes', admitted: 'admitted' });
     } finally {
@@ -168,6 +170,6 @@ describe('a drained version', () => {
     await armada.drain();
     await armada.admit();
 
-    expect(await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error))).toBe('admitted');
+    expect(await settled(armada.create(spec), 'admitted')).toBe('admitted');
   });
 });

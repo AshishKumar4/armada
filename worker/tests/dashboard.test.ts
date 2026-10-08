@@ -28,9 +28,13 @@ function deployment() {
     ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
   });
 
-  const ask = async (path: string, init: RequestInit = {}) => await worker.fetch(new Request(`https://armada.test${path}`, {
-    ...init, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json', ...init.headers },
-  }), env);
+  const ask = async (path: string, init: RequestInit = {}) => {
+    const headers = new Headers({ authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json' });
+
+    for (const [name, value] of new Headers(init.headers)) headers.set(name, value);
+
+    return await worker.fetch(new Request(`https://armada.test${path}`, { ...init, headers }), env);
+  };
 
   const json = async <S extends v.GenericSchema>(path: string, schema: S) => v.parse(schema, await (await ask(path)).json());
 

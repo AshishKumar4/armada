@@ -21,20 +21,13 @@ describe('run', () => {
   });
 
   test('an exec that never answers rejects on its deadline', async () => {
-    const hanging = {
-      exec: async (_argv: string[], options?: ContainerExecOptions) => {
-        const given = options?.signal;
-        signal = given;
+    const hanging = container((_argv, options) => {
+      const given = options?.signal;
 
-        return {
-          stdin: new WritableStream(), stdout: new ReadableStream(), exitCode: new Promise<number>(() => undefined),
-          output: () => new Promise((_resolve, reject) => {
-            if (given === undefined) return;
-            given.addEventListener('abort', () => { reject(given.reason); });
-          }),
-        };
-      },
-    } as unknown as Container;
+      signal = given;
+
+      return new Promise((_resolve, reject) => { given?.addEventListener('abort', () => { reject(given.reason); }); });
+    });
 
     const started = Date.now();
     await expect(run(hanging, ['sleep', '600'], { ms: 30 })).rejects.toBeInstanceOf(DOMException);

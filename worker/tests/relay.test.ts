@@ -21,14 +21,14 @@ function pipe() {
   let inputClosed = false;
 
   const socket = {
-    send: (data: string | Uint8Array) => { messages.push(typeof data === 'string' ? data : [...data]); },
-    close: (code: number, reason: string) => { closes.push([code, reason]); },
-  } as unknown as WebSocket;
+    send: (data: string | Uint8Array) => { messages.push(data instanceof Uint8Array ? [...data] : data); },
+    close: (code?: number, reason?: string) => { closes.push([code ?? 1005, reason ?? '']); },
+  };
 
   const writer = {
-    write: async (bytes: Uint8Array) => { written.push([...bytes]); },
+    write: async (bytes?: Uint8Array) => { written.push([...bytes ?? []]); },
     close: async () => { inputClosed = true; },
-  } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+  };
 
   let push: ReadableStreamDefaultController<Uint8Array> | undefined;
   const container = new ReadableStream<Uint8Array>({ start: (controller) => { push = controller; } });

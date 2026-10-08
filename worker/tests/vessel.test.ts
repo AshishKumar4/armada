@@ -15,13 +15,38 @@ const spec: VesselSpec = {
   tmpfs: [], files: {}, bundle: null, output: false, timeout: 600,
 };
 
-/** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read, whose cgroup
- *  reads `usage`, whose output file holds `out` when the job keeps outputs, whose artifacts directory packed to a
- *  tar.gz when `packed`, and whose claim is rank `gang`'s when given. */
-async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }, out?: string, stopping = '', launched?: number, packed = false, gang?: Gang) {
+/** A job with one task to hand out: the first claim gets `claim`, and each after gets none. */
+function once(claim: Claim) {
+  const given = { done: false };
+
+  return {
+    given,
+    next: async () => {
+      if (given.done) return null;
+      given.done = true;
+
+      return claim;
+    },
+  };
+}
+
+/** How a test's one task meets its vessel: what its cgroup reads, what its output file holds when the job keeps
+ *  outputs, when the platform says it stops the container, how long before the object started the task was launched
+ *  when the runtime restarted it, whether its artifacts packed, and its claim's gang rank. */
+interface Run {
+  readonly usage?: { readonly exitCode: number; readonly stdout: string } | Error;
+  readonly out?: string;
+  readonly stopping?: string;
+  readonly launched?: number;
+  readonly packed?: boolean;
+  readonly gang?: Gang;
+}
+
+/** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
+async function run(lost: number, { usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
-  let claimed = false;
+  const task = once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang });
   let waits = 0;
 
   const stored = state(container((argv) => {
@@ -31,9 +56,11 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
 
     if (argv[0] === 'stat' && argv[3] === '/armada/task/artifacts.tar.gz') return packed ? { exitCode: 0, stdout: '6' } : { exitCode: 1, stdout: '' };
 
-    if (argv[0] === 'stat') return argv[3] === '/armada/task/out' && out === undefined ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: String(argv[3] === '/armada/task/out' ? new TextEncoder().encode(out).byteLength : 0) };
+    if (argv[0] === 'stat' && argv[3] === '/armada/task/out') return out === undefined ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: String(new TextEncoder().encode(out).byteLength) };
 
-    if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? out ?? '' : argv[1] === '/armada/task/artifacts.tar.gz' ? 'packed' : '' };
+    if (argv[0] === 'stat') return { exitCode: 0, stdout: '0' };
+
+    if (argv[0] === 'cat') return { exitCode: 0, stdout: { '/armada/task/out': out ?? '', '/armada/task/artifacts.tar.gz': 'packed' }[argv[1] ?? ''] ?? '' };
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     waits += 1;
@@ -44,12 +71,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
   const job = {
     booted: async () => undefined,
     waiting: async () => undefined,
-    claim: async () => {
-      if (claimed) return null;
-      claimed = true;
-
-      return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, ...gang === undefined ? {} : { gang } };
-    },
+    claim: task.next,
     still: async () => true,
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
@@ -65,13 +87,13 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
   // storage.
   if (launched !== undefined) {
-    claimed = true;
+    task.given.done = true;
     await stored.ctx.storage.put({ state: 'working', current: { claim: { index: 0, attempt: 1, argv: ['true'], secrets: [], duplicate: false }, startedAt: Date.now() - launched } });
   }
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed, stored: artifacts.objects };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects };
 }
 
 describe('a vessel waiting on its task', () => {
@@ -81,21 +103,21 @@ describe('a vessel waiting on its task', () => {
   });
 
   test('says, when it loses the container, whether its object was restarted under the task', async () => {
-    expect((await run(3, undefined, undefined, '', 60_000)).failed).toEqual(['the wait failed to run (the container ended unseen by this object; this object restarted 60 s into the task): Network connection lost.']);
+    expect((await run(3, { launched: 60_000 })).failed).toEqual(['the wait failed to run (the container ended unseen by this object; this object restarted 60 s into the task): Network connection lost.']);
   });
 });
 
 describe('a container the platform is stopping', () => {
   test('takes no task: its vessel fails before claiming one, so the job replaces it', async () => {
-    expect(await run(0, undefined, undefined, '2026-10-07T18:21:00Z\n'))
+    expect(await run(0, { stopping: '2026-10-07T18:21:00Z\n' }))
       .toMatchObject({ exits: [], claimed: false, failed: ['the platform asked the container to stop at 2026-10-07T18:21:00Z'] });
   });
 });
 
 describe('a finished task', () => {
   test('reports its cgroup\'s peak memory and CPU seconds, and lands without them when they cannot be read', async () => {
-    const [measured] = (await run(0, { exitCode: 0, stdout: '734003200\n2500000\n' })).completed;
-    const [lost] = (await run(0, new Error('Network connection lost.'))).completed;
+    const [measured] = (await run(0, { usage: { exitCode: 0, stdout: '734003200\n2500000\n' } })).completed;
+    const [lost] = (await run(0, { usage: new Error('Network connection lost.') })).completed;
 
     expect([measured, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds])).toEqual([[0, 734003200, 2.5], [0, undefined, undefined]]);
   });
@@ -103,7 +125,7 @@ describe('a finished task', () => {
 
 describe('a task\'s artifacts', () => {
   test('are stored as a tar.gz when its directory kept a file, and named on its outcome; an empty one stores none', async () => {
-    const kept = await run(0, undefined, undefined, '', undefined, true);
+    const kept = await run(0, { packed: true });
     const empty = await run(0);
 
     expect([kept.completed[0]?.artifacts, kept.stored.get('jobs/job/tasks/0/artifacts.tar.gz'), empty.completed[0]?.artifacts, empty.stored.has('jobs/job/tasks/0/artifacts.tar.gz')])
@@ -111,7 +133,7 @@ describe('a task\'s artifacts', () => {
   });
 
   test('of a gang are its rank 0\'s only: rank 1 stores nothing and says none', async () => {
-    const second = await run(0, undefined, undefined, '', undefined, true, { rank: 1, job: 'job', vessels: ['v1', 'v2'], origin: 'https://origin', token: 't' });
+    const second = await run(0, { packed: true, gang: { rank: 1, job: 'job', vessels: ['v1', 'v2'], origin: 'https://origin', token: 't' } });
 
     expect([second.completed[0]?.artifacts, second.stored.has('jobs/job/tasks/0/artifacts.tar.gz')]).toEqual([undefined, false]);
   });
@@ -119,8 +141,8 @@ describe('a task\'s artifacts', () => {
 
 describe('a task\'s output', () => {
   test('rides in its outcome as text up to 32 KiB, and beyond that streams into R2 whole', async () => {
-    const small = await run(0, undefined, '{"n": 1}');
-    const large = await run(0, undefined, 'x'.repeat(32 * 1024 + 1));
+    const small = await run(0, { out: '{"n": 1}' });
+    const large = await run(0, { out: 'x'.repeat(32 * 1024 + 1) });
 
     expect([small.completed[0]?.value, large.completed[0]?.output, large.completed[0]?.value, large.stored.get('jobs/job/tasks/0/output')?.length])
       .toEqual(['{"n": 1}', true, undefined, 32 * 1024 + 1]);
@@ -130,7 +152,6 @@ describe('a task\'s output', () => {
 describe('a task that names secrets', () => {
   test('has the values it started with masked in its log before its tail is read or the log is stored, the deployment\'s secrets unread', async () => {
     const seen: { readonly argv: readonly string[]; readonly env: unknown }[] = [];
-    let claimed = false;
 
     const stored = state(container((argv, options) => {
       seen.push({ argv, env: options?.env });
@@ -143,12 +164,7 @@ describe('a task that names secrets', () => {
     const job = {
       booted: async () => undefined,
       waiting: async () => undefined,
-      claim: async () => {
-        if (claimed) return null;
-        claimed = true;
-
-        return { index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-launched' }, secrets: ['API_KEY'], duplicate: false };
-      },
+      claim: once({ index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-launched' }, secrets: ['API_KEY'], duplicate: false }).next,
       still: async () => true,
       accept: async () => true,
       complete: async () => undefined,
@@ -158,9 +174,11 @@ describe('a task that names secrets', () => {
 
     // Set anew while the task runs: the mask must not read it.
     let read = 0;
+
     const secrets = { values: async (names: readonly string[]) => { read += 1;
 
  return Object.fromEntries(names.map((name) => [name, 'sk-rotated'])); } };
+
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), SECRETS: namespace(() => secrets), ARTIFACTS: bucket() }));
 
     await vessel.begin(spec);
@@ -176,7 +194,6 @@ describe('a task that names secrets', () => {
   });
 
   test('a green answer its claim says to cache is written there before its outcome is reported', async () => {
-    let claimed = false;
     let cachedAtReport: string | undefined;
     const artifacts = bucket();
 
@@ -193,12 +210,7 @@ describe('a task that names secrets', () => {
     const job = {
       booted: async () => undefined,
       waiting: async () => undefined,
-      claim: async () => {
-        if (claimed) return null;
-        claimed = true;
-
-        return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], cache: { key: 'cache/square-2', expires: 1234 }, duplicate: false };
-      },
+      claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], cache: { key: 'cache/square-2', expires: 1234 }, duplicate: false }).next,
       still: async () => true,
       accept: async () => true,
       complete: async () => { cachedAtReport = artifacts.objects.get('cache/square-2'); },
@@ -242,8 +254,15 @@ describe('a gang rank', () => {
     await vessel.alarm();
     await vessel.alarm();
 
-    const steps = ran.filter((argv) => argv[2] === GANG_UP || argv[2] === GANG_DOWN || argv[3] === 'launch' || argv[4] === '/armada/relay.py')
-      .map((argv) => argv[2] === GANG_UP ? ['up', ...argv.slice(3)] : argv[2] === GANG_DOWN ? ['down'] : argv[3] === 'launch' ? ['launch'] : ['relay written']);
+    const steps = ran.flatMap((argv) => {
+      if (argv[2] === GANG_UP) return [['up', ...argv.slice(3)]];
+
+      if (argv[2] === GANG_DOWN) return [['down']];
+
+      if (argv[3] === 'launch') return [['launch']];
+
+      return argv[4] === '/armada/relay.py' ? [['relay written']] : [];
+    });
 
     expect(steps).toEqual([['relay written'], ['up', 'gang', '1', '2', 'https://armada.example', 'job', 't'.repeat(48), 'v2', 'v1'], ['launch'], ['down'], ['launch']]);
   });
@@ -252,7 +271,6 @@ describe('a gang rank', () => {
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: '', token: 't'.repeat(48) };
 
     const kept = async (accepted: boolean, exits: boolean) => {
-      let claimed = false;
       const completed: Outcome[] = [];
       let relayLogs = 0;
       let stops = 0;
@@ -265,12 +283,7 @@ describe('a gang rank', () => {
 
       const job = {
         booted: async () => undefined, waiting: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
-        claim: async () => {
-          if (claimed) return null;
-          claimed = true;
-
-          return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang };
-        },
+        claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }).next,
         still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
         complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
       };

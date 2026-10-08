@@ -2,7 +2,7 @@
  *  exercised through `webhooked` with the DO's own methods on in-memory storage. */
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import worker from '../src/worker';
-import { JobSpecSchema, WebhooksSchema } from '../../src/protocol';
+import { JobSpecSchema, WebhooksSchema, type Json } from '../../src/protocol';
 import { ArmadaWebhooks, driverSpec, eventOf, type HookConfig } from '../src/hooks';
 import { webhooked, signed } from '../src/worker';
 import * as v from 'valibot';
@@ -23,7 +23,7 @@ const CONFIG: HookConfig = { repo: 'owner/armada', pullRequests: true, tokenSecr
 const pushed = (ref: string, after = SHA) => ({ ref, after, repository: { default_branch: 'main' } });
 
 function hooks(state_ = state()): ArmadaWebhooks {
-  return new (ArmadaWebhooks as unknown as new (ctx: unknown, env: unknown) => ArmadaWebhooks)(state_.ctx, world({}));
+  return new ArmadaWebhooks(state_.ctx, world({}));
 }
 
 async function configured(): Promise<ArmadaWebhooks> {
@@ -40,7 +40,14 @@ async function sign(secret: string, body: string): Promise<string> {
   return `sha256=${[...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)))].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
-async function deliver(objects: Map<string, string>, hooksStub: ArmadaWebhooks, jobs: Record<string, { phase: string }>, payload: object, headers: Record<string, string> = {}): Promise<Response> {
+/** Beyond the webhooks object and the payload, what a delivery meets: its own headers, what R2 holds, and each job's phase. */
+interface Delivery {
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly objects?: Map<string, string>;
+  readonly jobs?: Readonly<Record<string, { readonly phase: string }>>;
+}
+
+async function deliver(hooksStub: ArmadaWebhooks, payload: Json, { headers = {}, objects = new Map(), jobs = {} }: Delivery = {}): Promise<Response> {
   const body = JSON.stringify(payload);
 
   const env = world({
@@ -84,8 +91,8 @@ describe('the github webhook', () => {
     expect(await signed('other' + 'o'.repeat(43), await sign(SECRET, body), body)).toBe(false);
 
     const object = await configured();
-    const answer = await deliver(new Map(), object, {}, pushed('refs/heads/main'));
-    const denied = await deliver(new Map(), object, {}, pushed('refs/heads/main'), { 'X-Hub-Signature-256': 'sha256=bad', 'X-GitHub-Delivery': 'del-2' });
+    const answer = await deliver(object, pushed('refs/heads/main'));
+    const denied = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-Hub-Signature-256': 'sha256=bad', 'X-GitHub-Delivery': 'del-2' } });
 
     expect(denied.status).toBe(401);
     expect(v.parse(Said, await answer.json())).toEqual({ started: expect.any(String) });
@@ -128,20 +135,20 @@ describe('the github webhook', () => {
     const objects = new Map<string, string>();
     const push = pushed('refs/heads/main');
 
-    const first = await deliver(objects, object, {}, push, { 'X-GitHub-Delivery': 'del-1' });
+    const first = await deliver(object, push, { headers: { 'X-GitHub-Delivery': 'del-1' }, objects });
     expect(v.parse(Said, await first.json())).toEqual({ started: expect.any(String) });
 
-    const again = await deliver(objects, object, {}, push, { 'X-GitHub-Delivery': 'del-1' });
+    const again = await deliver(object, push, { headers: { 'X-GitHub-Delivery': 'del-1' }, objects });
     expect(v.parse(Said, await again.json())).toEqual({ note: 'duplicate' });
 
-    const judged = await deliver(new Map([['verdicts/armada/' + SHA + '.json', '{}']]), object, {}, push, { 'X-GitHub-Delivery': 'del-2' });
+    const judged = await deliver(object, push, { headers: { 'X-GitHub-Delivery': 'del-2' }, objects: new Map([['verdicts/armada/' + SHA + '.json', '{}']]) });
     expect(v.parse(Said, await judged.json())).toEqual({ note: 'already' });
 
     await object.drove('armada', SHA, 'job-1');
-    const running = await deliver(objects, object, { 'job-1': { phase: 'running' } }, push, { 'X-GitHub-Delivery': 'del-3' });
+    const running = await deliver(object, push, { headers: { 'X-GitHub-Delivery': 'del-3' }, objects, jobs: { 'job-1': { phase: 'running' } } });
     expect(v.parse(Said, await running.json())).toEqual({ note: 'already' });
 
-    const done = await deliver(objects, object, { 'job-1': { phase: 'done' } }, push, { 'X-GitHub-Delivery': 'del-4' });
+    const done = await deliver(object, push, { headers: { 'X-GitHub-Delivery': 'del-4' }, objects, jobs: { 'job-1': { phase: 'done' } } });
     expect(v.parse(Said, await done.json())).toEqual({ started: expect.any(String) });
   });
 
@@ -192,8 +199,8 @@ describe('the webhooks route', () => {
     const object = hooks();
     const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, WEBHOOKS: namespace(() => object), ARTIFACTS: bucket() });
 
-    const ask = async (method: string, path: string, body?: object) => await worker.fetch(new Request(`https://armada.test${path}`, {
-      method, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    const ask = async (method: string, path: string, body?: Json) => await worker.fetch(new Request(`https://armada.test${path}`, {
+      method, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
     }), env);
 
     expect((await ask('POST', '/webhooks/armada', { ...CONFIG, hook: 77 })).status).toBe(200);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { Outcome } from '../../src/protocol';
+import type { Json, Outcome } from '../../src/protocol';
 import { launchSlot, launchTask, slotTask, taskGroup, waitOn } from '../src/container';
 import type { Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
@@ -17,19 +17,22 @@ function slotOf(script: string): number {
   return match === null ? 0 : Number(match[1]);
 }
 
+/** Slot or task numbers in ascending order, any a slot never claimed last. */
+const ascending = (numbers: readonly (number | undefined)[]) => numbers.toSorted((left, right) => (left ?? Infinity) - (right ?? Infinity));
+
 /** A vessel of `spec.slots` slots, every slot loop running at once: its job hands it `claims`, then generated ones
  *  until `tasks` are given out, then none; each slot's waits answer `ends[slot]` in turn (then exits 0); storage gets
  *  `put` after `begin`. */
-async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still = () => true, execs = {} }: { claims?: readonly (Claim | null)[]; tasks?: number; ends?: Readonly<Record<number, string[]>>; put?: Record<string, unknown>; spec?: Partial<VesselSpec>; still?: (index: number) => boolean; execs?: Readonly<Record<string, number>> } = {}) {
+async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still = () => true, execs = {} }: { claims?: readonly (Claim | null)[]; tasks?: number; ends?: Readonly<Record<number, string[]>>; put?: Readonly<Record<string, Json>>; spec?: Partial<VesselSpec>; still?: (index: number) => boolean; execs?: Readonly<Record<string, number>> } = {}) {
   const claimed: (number | undefined)[] = [];
   const completed: Outcome[] = [];
-  const launched: { readonly script: string; readonly group: unknown }[] = [];
+  const launched: { readonly script: string; readonly group: string }[] = [];
   const killed: string[] = [];
   const queue = [...claims];
   let given = 0;
 
   const stored = state(container(async (argv, options) => {
-    if (argv[3] === 'launch') launched.push({ script: argv[2] ?? '', group: options?.env?.['ARMADA_CGROUP'] });
+    if (argv[3] === 'launch') launched.push({ script: argv[2] ?? '', group: options?.env?.['ARMADA_CGROUP'] ?? '' });
 
     if ((argv[2] ?? '').startsWith('set -eu\npid=')) killed.push(argv[2] ?? '');
 
@@ -83,19 +86,19 @@ describe('a slotted vessel', () => {
     const { claimed, completed, launched } = await run({ tasks: 3 });
 
     expect({
-      slots: [...claimed].sort(),
+      slots: ascending(claimed),
       own: completed.map((outcome) => outcome.slot === claimed[outcome.index]),
       isolated: launched.every((each) => each.script.includes('unshare --mount')),
       overlay: launched.every((each) => each.script.includes('lowerdir=/home/ci/work')),
-      groups: launched.map((each) => each.group).sort(),
-    }).toEqual({ slots: [0, 1, 2], own: [true, true, true], isolated: true, overlay: true, groups: [taskGroup(0), taskGroup(1), taskGroup(2)].sort() });
+      groups: launched.map((each) => each.group).toSorted(),
+    }).toEqual({ slots: [0, 1, 2], own: [true, true, true], isolated: true, overlay: true, groups: [taskGroup(0), taskGroup(1), taskGroup(2)].toSorted() });
   });
 
   test('a slot the job drops is killed alone: the others run on to their answers', async () => {
     const { claimed, completed, killed } = await run({ tasks: 3, ends: { 0: [''], 1: [''], 2: [''] }, still: (index) => index !== 1 });
     const of = claimed[1];
 
-    expect({ done: completed.map((outcome) => outcome.index).sort(), kills: killed.length, at: killed.every((argv) => argv.includes(slotTask(of ?? -1))) }).toEqual({ done: [0, 2], kills: 1, at: true });
+    expect({ done: ascending(completed.map((outcome) => outcome.index)), kills: killed.length, at: killed.every((argv) => argv.includes(slotTask(of ?? -1))) }).toEqual({ done: [0, 2], kills: 1, at: true });
   });
 
   test('a task past its bound is killed alone: it ends 124 timeout, the others their answers', async () => {
@@ -117,7 +120,7 @@ describe('a slotted vessel', () => {
     const { claimed, completed } = await run({ tasks: 6, execs: { [waitOn(slotTask(0))]: 150 } });
     const first = completed.findIndex((outcome) => outcome.slot === 0);
 
-    expect({ completed: completed.length, before: completed.slice(0, first).length, slots: [...new Set(claimed)].sort() }).toEqual({ completed: 6, before: 5, slots: [0, 1, 2] });
+    expect({ completed: completed.length, before: completed.slice(0, first).length, slots: ascending([...new Set(claimed)]) }).toEqual({ completed: 6, before: 5, slots: [0, 1, 2] });
   });
 
   test('a slot that dies fails the vessel once; the others stop', async () => {

@@ -45,6 +45,12 @@ const TEXT = 0x74;
 
 const BINARY = 0x62;
 
+/** What a pipe asks of its WebSocket: to send a record's text or bytes, and to close. */
+export interface RelaySocket {
+  send(message: string | Uint8Array): void;
+  close(code?: number, reason?: string): void;
+}
+
 /**
  * A relay WebSocket at its vessel, piped to a connection into the container's relay: first a line naming the link
  * (`<id> <port> <resume>`), then each message as a record (a kind byte, `t` or `b`, the length in 4 bytes, big
@@ -61,7 +67,7 @@ export class Piped {
 
   private closing: Promise<void> | null = null;
 
-  constructor(private readonly socket: WebSocket, private readonly writer: WritableStreamDefaultWriter<Uint8Array>,
+  constructor(private readonly socket: RelaySocket, private readonly writer: Pick<WritableStreamDefaultWriter<Uint8Array>, 'write' | 'close'>,
     link: string, private readonly log: (event: string, detail: Readonly<Record<string, string | number>>) => void) {
     this.queue = this.write(Promise.resolve(), new TextEncoder().encode(`${link}\n`));
   }

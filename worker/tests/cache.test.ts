@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { cacheKey, environmentKey, JobSpecSchema, RecipeSchema, type Outcome } from '../../src/protocol';
+import { cacheKey, environmentKey, JobSpecSchema, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
 import { taskKey } from '../src/env';
 import { ArmadaJob } from '../src/job';
@@ -12,7 +12,7 @@ const bundle = 'b'.repeat(64);
 
 /** A job of the cached pushed task `task` over `items`, on a ready environment, beside the other jobs of `artifacts`;
  *  its vessels only record that they began. An `open` job takes more items. */
-async function cachedJob(id: string, items: readonly unknown[], artifacts: ReturnType<typeof bucket>, task = 'square', open = false) {
+async function cachedJob(id: string, items: readonly Json[], artifacts: ReturnType<typeof bucket>, { task = 'square', open = false }: { readonly task?: string; readonly open?: boolean } = {}) {
   const begun: string[] = [];
   const stored = state();
 
@@ -25,11 +25,11 @@ async function cachedJob(id: string, items: readonly unknown[], artifacts: Retur
   await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: task, bundle }, cache: { days: 7 }, open }));
   await job.alarm();
 
-  return { job, begun, pending: stored.pending };
+  return { job, id, artifacts, begun, pending: stored.pending };
 }
 
 /** `vessel` runs its next task: its envelope lands in R2, and its outcome exits `exitCode`. */
-async function answer(job: ArmadaJob, id: string, artifacts: ReturnType<typeof bucket>, vessel: string, exitCode: number, envelope: string): Promise<void> {
+async function answer({ job, id, artifacts }: Awaited<ReturnType<typeof cachedJob>>, vessel: string, exitCode: number, envelope: string): Promise<void> {
   const claim = await job.claim(vessel);
 
   if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
@@ -49,8 +49,8 @@ describe('a cached task', () => {
     const artifacts = bucket();
     const first = await cachedJob('j1', [{ a: 1, b: 2 }, { a: 3 }], artifacts);
 
-    await answer(first.job, 'j1', artifacts, 'v1', 0, '{"ok":true,"value":3}');
-    await answer(first.job, 'j1', artifacts, 'v1', 1, '{"ok":false,"error":{"name":"Error","message":"red","stack":""}}');
+    await answer(first, 'v1', 0, '{"ok":true,"value":3}');
+    await answer(first, 'v1', 1, '{"ok":false,"error":{"name":"Error","message":"red","stack":""}}');
     await Promise.all(first.pending);
     const second = await cachedJob('j2', [{ a: 3 }, { b: 2, a: 1 }], artifacts);
     const events = (await second.job.events(0)).events.map((event) => brief(event.outcome));
@@ -69,15 +69,15 @@ describe('a cached task', () => {
 
   test('is its own: two tasks of one push, with one recipe and one item, each get their own answer', async () => {
     const artifacts = bucket();
-    const square = await cachedJob('s1', [3], artifacts, 'square');
+    const square = await cachedJob('s1', [3], artifacts, { task: 'square' });
 
-    await answer(square.job, 's1', artifacts, 'v1', 0, '{"ok":true,"value":9}');
+    await answer(square, 'v1', 0, '{"ok":true,"value":9}');
     await Promise.all(square.pending);
-    const cube = await cachedJob('c1', [3], artifacts, 'cube');
+    const cube = await cachedJob('c1', [3], artifacts, { task: 'cube' });
 
-    await answer(cube.job, 'c1', artifacts, 'v1', 0, '{"ok":true,"value":27}');
+    await answer(cube, 'v1', 0, '{"ok":true,"value":27}');
     await Promise.all(cube.pending);
-    const [squareAgain, cubeAgain] = [await cachedJob('s2', [3], artifacts, 'square'), await cachedJob('c2', [3], artifacts, 'cube')];
+    const [squareAgain, cubeAgain] = [await cachedJob('s2', [3], artifacts, { task: 'square' }), await cachedJob('c2', [3], artifacts, { task: 'cube' })];
     const answered = async (job: ArmadaJob) => (await job.events(0)).events.map((event) => brief(event.outcome));
 
     expect({ cubeRan: cube.begun, square: await answered(squareAgain.job), cube: await answered(cubeAgain.job) }).toEqual({
@@ -89,31 +89,29 @@ describe('a cached task', () => {
     const artifacts = bucket();
     const first = await cachedJob('w1', [5], artifacts);
 
-    await answer(first.job, 'w1', artifacts, 'v1', 0, '{"ok":true,"value":25}');
+    await answer(first, 'v1', 0, '{"ok":true,"value":25}');
     await Promise.all(first.pending);
-    // The next job's cache reads wait for `release`; `reached` says one is waiting.
-    let release = () => undefined as void;
-    let reached = () => undefined as void;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    // The next job's cache reads wait for `held`; `waiting` says one is waiting.
+    const held = Promise.withResolvers<void>();
+    const waiting = Promise.withResolvers<void>();
     const read = artifacts.get;
 
     artifacts.get = async (key: string) => {
       if (key.startsWith('cache/')) {
-        reached();
-        await held;
+        waiting.resolve();
+        await held.promise;
       }
 
       return await read(key);
     };
 
-    const open = await cachedJob('w2', [], artifacts, 'square', true);
+    const open = await cachedJob('w2', [], artifacts, { task: 'square', open: true });
     const adding = open.job.add([{ item: 5 }]);
 
-    await waiting;
+    await waiting.promise;
     const claimed = await open.job.claim('v1');
 
-    release();
+    held.resolve();
     await adding;
 
     expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.objects.get((await open.job.cachedFrom(0)) ?? '') }).toEqual({
@@ -125,7 +123,7 @@ describe('a cached task', () => {
     const artifacts = bucket();
     const first = await cachedJob('f1', [6], artifacts);
 
-    await answer(first.job, 'f1', artifacts, 'v1', 0, '{"ok":true,"value":36}');
+    await answer(first, 'v1', 0, '{"ok":true,"value":36}');
     await Promise.all(first.pending);
     const read = artifacts.get;
 

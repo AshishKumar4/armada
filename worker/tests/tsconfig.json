@@ -2,5 +2,5 @@
   "//": "The Worker's tests: its own code against workers-types, run by Bun with the platform mocked (harness.ts).",
   "extends": "../tsconfig.json",
   "compilerOptions": { "types": ["@cloudflare/workers-types", "bun"] },
-  "include": ["**/*.ts", "../src/**/*.ts", "../../src/protocol.ts"]
+  "include": ["**/*.ts", "../src/**/*.ts", "../../src/protocol.ts", "../../tests/fakes.ts"]
 }

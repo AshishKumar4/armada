@@ -23,7 +23,7 @@ afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 const sh = (script: string, ...args: string[]) => Bun.spawnSync(['/bin/sh', '-c', script, 'armada', ...args], { cwd: workdir, env: { PATH: process.env['PATH'] ?? '', ARMADA_CGROUP: TASK_GROUP }, stdout: 'pipe', stderr: 'pipe' });
 
 /** One task, launched and waited for: its exit code and its log. */
-function task(...argv: string[]): { readonly exit: string; readonly log: string } {
+function task(...argv: string[]) {
   expect(sh(launchTask(workdir), ...argv).exitCode).toBe(0);
   const exit = sh(WAIT, '20').stdout.toString().trim();
 

@@ -6,9 +6,10 @@ import * as v from 'valibot';
 import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
+import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { expiryWarning } from '../src/registry';
 import { Armada, PACK_PART } from '../src/sdk';
+import { fakeFetch, git, gitEnv } from './fakes';
 
 describe('a task\'s command', () => {
   test('fills from the item: a string as itself, an object\'s scalar keys, its JSON as {item}', () => {
@@ -91,6 +92,7 @@ describe('a project\'s CI config', () => {
     expect(() => parseConfig(JSON.stringify({ ...base, environment: { base: 'ubuntu:26.04' } }))).toThrow('Cloudflare-managed image');
     const scratch = mkdtempSync(join(tmpdir(), 'armada-base-'));
     const requests: string[] = [];
+
     const server = Bun.serve({ port: 0, fetch: (request) => { requests.push(new URL(request.url).pathname);
 
  return Response.json({ id: 'j1' }); } });
@@ -118,7 +120,7 @@ describe('a project\'s CI config', () => {
 });
 
 describe('grading a CI run', () => {
-  const row = (name: string, exitCode = 0, timings?: Record<string, number>) => ({ name, exitCode, seconds: 1, output: `${name} said this`, ...timings === undefined ? {} : { timings } });
+  const row = (name: string, exitCode = 0, timings?: Record<string, number>) => ({ name, exitCode, seconds: 1, output: `${name} said this`, timings });
 
   test('a task is named by its configured key, else `name`, else its first string value, else its position', () => {
     expect([taskName({ row: 'a b', name: 'x' }, 'name', 0), taskName({ part: 'source-1' }, undefined, 1), taskName({ weight: 2 }, undefined, 2)]).toEqual(['x', 'source-1', 'task-3']);
@@ -242,7 +244,7 @@ describe('a task\'s stored artifacts', () => {
 });
 
 describe('a deploy', () => {
-  const health = (protocol: number, oldest?: number, driver = 2): Health => ({ ok: true, driver, protocol, ...oldest === undefined ? {} : { oldest }, vcpus: 0, jobs: 0 });
+  const health = (protocol: number, oldest?: number, driver = 2): Health => ({ ok: true, driver, protocol, oldest, vcpus: 0, jobs: 0 });
 
   test('reads the oldest wire a Worker serves: said, else 3 since protocol 4, else only its own', () => {
     expect([servedFloor(health(7, 5)), servedFloor(health(6)), servedFloor(health(4)), servedFloor(health(2))]).toEqual([5, 3, 3, 2]);
@@ -274,7 +276,7 @@ describe('a size', () => {
 
   test('reads what tasks used from the outcomes that measured it', () => {
     const outcome = (seconds: number, peakMemory?: number, cpuSeconds?: number): Outcome => ({
-      index: 0, kind: 'exited', exitCode: 0, seconds, vessel: 'v1', attempt: 1, tail: '', output: false, ...peakMemory === undefined ? {} : { peakMemory, cpuSeconds },
+      index: 0, kind: 'exited', exitCode: 0, seconds, vessel: 'v1', attempt: 1, tail: '', output: false, peakMemory, cpuSeconds,
     });
 
     expect([usageOf([outcome(10, GiB, 5), outcome(4, 2 * GiB, 1), outcome(3)]), usageOf([outcome(3)])]).toEqual([{ memory: 2 * GiB, cores: 0.5 }, null]);
@@ -318,13 +320,13 @@ describe('uploading a pack', () => {
     const sent: number[] = [];
     const original = globalThis.fetch;
 
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(String(input));
-      const method = init?.method ?? 'GET';
+    globalThis.fetch = fakeFetch(async (request) => {
+      const url = new URL(request.url);
+      const { method } = request;
 
       seen.push(`${method} ${url.pathname.split('/').slice(-1)[0] ?? ''}${url.search}`);
 
-      if (init?.body instanceof Uint8Array) sent.push(init.body.length);
+      if (url.searchParams.has('part')) sent.push((await request.arrayBuffer()).byteLength);
 
       if (method === 'HEAD') return new Response(null, { status: 404 });
 
@@ -333,7 +335,7 @@ describe('uploading a pack', () => {
       if (url.searchParams.has('part')) return Response.json({ partNumber: Number(url.searchParams.get('part')), etag: `e${url.searchParams.get('part') ?? ''}` });
 
       return Response.json({ stored: 'key' });
-    }) as typeof fetch;
+    });
 
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
@@ -374,7 +376,14 @@ describe('a failed request', () => {
 
     try {
       const armada = new Armada({ url: server.url.href, token: 't', account: 'a' });
-      const failed = async (path: string, method = 'POST') => await armada.call(path, { method }).then((answer) => `answered ${String(answer.status)}`, (cause: unknown) => String(cause));
+
+      const failed = async (path: string, method = 'POST') => {
+        try {
+          return `answered ${String((await armada.call(path, { method })).status)}`;
+        } catch (cause) {
+          return String(errorOf({ cause }));
+        }
+      };
 
       expect([await failed('/jobs'), await failed('/environments/resolve'), await failed('/health', 'GET'), await failed('/jobs/j1', 'GET')]).toEqual([
         'RequestError: POST /jobs: 409 upload the pack first',
@@ -392,13 +401,6 @@ describe('packing a commit', () => {
   test('a clone without the environment\'s commit packs from the root, and that pack checks out where the environment is', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
 
-    const git = (cwd: string, ...args: string[]): string => {
-      const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
-
-      if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString()}`);
-
-      return ran.stdout.toString().trim();
-    };
 
     try {
       const origin = join(scratch, 'origin');
@@ -427,7 +429,7 @@ describe('packing a commit', () => {
       for (const { sha, from, base } of [{ sha: environment, from: origin, base: 'root' }, { sha: head, from: shallow, base: packBase(shallow, environment) }]) {
         const pack = new Uint8Array(await packOf(from, sha, base, 'commit').arrayBuffer());
 
-        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
+        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: gitEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
         appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
         git(checkout, 'checkout', '-q', '-f', '-B', 'armada', sha);
       }
@@ -445,13 +447,6 @@ describe('a commit checkout', () => {
     const origin = join(scratch, 'origin');
     const checkout = join(scratch, 'checkout');
 
-    const git = (cwd: string, ...args: string[]): string => {
-      const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' });
-
-      if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString()}`);
-
-      return ran.stdout.toString().trim();
-    };
 
     const commit = (message: string, files: Record<string, string>) => {
       for (const [path, text] of Object.entries(files)) {
@@ -479,7 +474,7 @@ describe('a commit checkout', () => {
       for (const [sha, base] of [[environment, 'root'], [environment, environment], [head, environment]] as const) {
         const pack = new Uint8Array(await packOf(origin, sha, base, 'commit').arrayBuffer());
 
-        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
+        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: gitEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
         appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
         git(checkout, 'checkout', '-q', '-f', '-B', 'armada', sha);
       }
@@ -494,7 +489,7 @@ describe('a commit checkout', () => {
 describe('the CLI\'s arguments', () => {
   test('with no command, or with --help, are answered with the usage; a wrong option says what to give instead', async () => {
     const cli = async (...words: string[]) => {
-      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { stdout: 'pipe', stderr: 'pipe' });
+      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: process.env, stdout: 'pipe', stderr: 'pipe' });
 
       return { exit: await ran.exited, said: await new Response(ran.stdout).text() + await new Response(ran.stderr).text() };
     };
@@ -606,7 +601,6 @@ describe('armada verdict', () => {
   test('prints the verdict armada run stored for the commit, and exits 0 green, 1 red and 2 with none', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-verdict-'));
     const repo = join(scratch, 'repo');
-    const git = (...words: string[]) => Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo, stdout: 'pipe' });
     const stored = new Map<string, unknown>();
 
     const server = Bun.serve({
@@ -628,11 +622,11 @@ describe('armada verdict', () => {
 
     try {
       mkdirSync(repo);
-      git('init', '-q');
+      git(repo, 'init', '-q');
       writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task'] } }));
-      git('add', '.');
-      git('commit', '-qm', 'one');
-      const sha = git('rev-parse', 'HEAD').stdout.toString().trim();
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'one');
+      const sha = git(repo, 'rev-parse', 'HEAD');
       const none = await verdict();
       const noneJson = await verdict('--json');
       const rows = [{ run: 'unit', exitCode: 0, seconds: 1, output: '' }, { run: 'e2e', exitCode: 1, seconds: 2, output: 'a real failure' }];
@@ -657,13 +651,21 @@ describe('armada verdict', () => {
   });
 });
 
+/** How a test's runner answers `armada run` beyond its plan and verdict: the task's exit, the plan and task
+ *  configuration, and the timings it holds. */
+interface Runner {
+  readonly taskExit?: number;
+  readonly planConfig?: Json;
+  readonly taskConfig?: Readonly<Record<string, Json>>;
+  readonly timings?: Json;
+}
+
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0, planConfig: unknown = { command: ['plan'] }, taskConfig: Record<string, unknown> = {}, timings: unknown = { rows: {}, files: {} }) {
+  async function run(args: readonly string[], plan: Json, verdict: Json, { taskExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} } }: Runner = {}) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
-    const git = (...words: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo }).exitCode).toBe(0);
     const commands: string[][] = [];
     const bodies: unknown[] = [];
     const seen: string[] = [];
@@ -708,10 +710,10 @@ describe('armada run', () => {
 
     try {
       mkdirSync(repo);
-      git('init', '-q');
+      git(repo, 'init', '-q');
       writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig } }));
-      git('add', '.');
-      git('commit', '-qm', 'one');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'one');
 
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
@@ -734,7 +736,7 @@ describe('armada run', () => {
   });
 
   test('a task gets the deployment secrets its config names, and the plan gets none', async () => {
-    const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, 0, undefined, { secrets: ['CACHE_TOKEN'] });
+    const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { taskConfig: { secrets: ['CACHE_TOKEN'] } });
     const secrets = ran.bodies.map((body) => v.parse(v.object({ secrets: v.optional(v.array(v.string())) }), body).secrets ?? []);
 
     expect({ exit: ran.exit, secrets }).toEqual({ exit: 0, secrets: [[], ['CACHE_TOKEN']] });
@@ -744,7 +746,7 @@ describe('armada run', () => {
     const printed = JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] });
     // The plan checks what it was given: the timings file the runner answered, and the default target.
     const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
-    const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, 0, { command, local: true });
+    const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planConfig: { command, local: true } });
 
     expect({ exit: ran.exit, jobs: ran.commands.length, task: ran.commands[0]?.slice(-2), here: ran.stdout.includes('plan run here') })
       .toEqual({ exit: 0, jobs: 1, task: ['task', '/armada/task/out'], here: true });
@@ -762,14 +764,14 @@ describe('armada run', () => {
   });
 
   test('an entry with no weight of its own dispatches by its estimate; its own weight wins', async () => {
-    const ran = await run([], { include: [{ name: 'a' }, { name: 'b' }, { name: 'c', weight: 7 }] }, '', 0, { command: ['plan'] }, { verdict: false }, { rows: { a: 42, b: 10 }, files: {} });
+    const ran = await run([], { include: [{ name: 'a' }, { name: 'b' }, { name: 'c', weight: 7 }] }, '', { taskConfig: { verdict: false }, timings: { rows: { a: 42, b: 10 }, files: {} } });
     const items = v.parse(v.object({ items: v.array(v.looseObject({ item: v.looseObject({ name: v.optional(v.string()), weight: v.optional(v.number()) }) })) }), ran.bodies[1]).items;
 
     expect(items.map((task) => [task.item.name, task.item.weight])).toEqual([['a', 42], ['b', 10], ['c', 7]]);
   });
 
   test('a run\'s pool counts each rank of a gang, so a gang wider than the plan has entries is not refused', async () => {
-    const ran = await run([], { include: [{ name: 'test' }, { name: 'relay', gang: 4 }] }, '', 0, { command: ['plan'] }, { verdict: false });
+    const ran = await run([], { include: [{ name: 'test' }, { name: 'relay', gang: 4 }] }, '', { taskConfig: { verdict: false } });
     // The plan job's pool, then the task job's: one container for `test` and four for the gang's ranks.
     expect(ran.bodies.map((body) => v.parse(v.looseObject({ pool: v.optional(v.number()) }), body).pool)).toEqual([1, 5]);
   });
@@ -782,7 +784,7 @@ describe('armada run', () => {
   });
 
   test('a task cut off before it wrote a verdict is graded red, each row its entry names with its exit', async () => {
-    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, '', 124);
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, '', { taskExit: 124 });
 
     expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), reds: ['x.mjs', 'y.mjs'].map((name) => ran.stdout.includes(`RED  ${name}  (exit 124`)) })
       .toEqual({ exit: 1, graded: true, reds: [true, true] });
@@ -797,7 +799,7 @@ describe('armada run', () => {
   });
 
   test('a task that wrote its verdict and then exited nonzero is graded, its green rows red with its exit', async () => {
-    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] }, 7);
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] }, { taskExit: 7 });
 
     expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), red: ran.stdout.includes('RED  x.mjs  (exit 7') }).toEqual({ exit: 1, graded: true, red: true });
   });
@@ -811,8 +813,8 @@ describe('asking the runner', () => {
     let failures = 2;
 
     Bun.sleep = (async () => undefined);
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      seen.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+    globalThis.fetch = fakeFetch((request) => {
+      seen.push(`${request.method} ${new URL(request.url).pathname}`);
 
       if (failures > 0) {
         failures -= 1;
@@ -823,7 +825,7 @@ describe('asking the runner', () => {
       }
 
       return Response.json({ ok: true });
-    }) as typeof fetch;
+    });
 
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
@@ -967,7 +969,7 @@ describe('the webhook command', () => {
 describe('a deploy without --keep', () => {
   test('warns once the registry credentials an earlier --keep deploy gave the Worker are within 30 days of expiring', () => {
     const now = Date.parse('2026-10-08T00:00:00Z');
-    const health = (keepUntil?: string) => ({ ok: true, driver: 2, protocol: 6, vcpus: 0, jobs: 0, ...keepUntil === undefined ? {} : { keepUntil } });
+    const health = (keepUntil?: string) => ({ ok: true, driver: 2, protocol: 6, vcpus: 0, jobs: 0, keepUntil });
     const said = (until: string) => `armada-dew's registry credentials ${until}, and its environments are no longer pruned after that: deploy with --keep=N to renew them`;
 
     expect([

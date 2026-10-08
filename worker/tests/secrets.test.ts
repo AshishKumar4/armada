@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as v from 'valibot';
 import { PROTOCOL } from '../../src/protocol';
 import { KEEP_MASK, MASK } from '../src/container';
 import type { Generation } from '../src/environments';
@@ -63,7 +64,7 @@ describe('a secret', () => {
 
     await job.alarm();
     const claim = await job.claim('v1');
-    const shown = JSON.stringify(await ask(`/jobs/${(created as { id: string }).id}`, 'GET'));
+    const shown = JSON.stringify(await ask(`/jobs/${v.parse(v.object({ id: v.string() }), created).id}`, 'GET'));
 
     expect({ refused, status, value: claim !== null && !('waitMs' in claim) ? [claim.env['API_KEY'], claim.secrets] : claim, stored: kept.dump().includes(VALUE), shown: shown.includes(VALUE) }).toEqual({
       refused: [409, { error: 'no secret API_KEY is set; run armada secret set API_KEY' }], status: 200, value: [VALUE, ['API_KEY']], stored: false, shown: false,

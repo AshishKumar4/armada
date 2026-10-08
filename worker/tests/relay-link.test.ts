@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { connect } from 'node:net';
-import { Readable, Writable } from 'node:stream';
+import { Writable } from 'node:stream';
 import { Piped, RELAY_PY } from '../src/relay';
 
 /** Both ends of a link in one relay.py process, as two ranks' relays: the inbound end's server on a free port (printed
@@ -67,18 +67,24 @@ async function run(total: number, port: string, dropAfter: number) {
       open(ws) {
         const tcp = connect(inPort, '127.0.0.1');
 
-        ws.data.piped = new Piped(ws as unknown as WebSocket, Writable.toWeb(tcp).getWriter() as WritableStreamDefaultWriter<Uint8Array>,
-          ws.data.link, () => undefined);
+        ws.data.piped = new Piped(ws, Writable.toWeb(tcp).getWriter(), ws.data.link, () => undefined);
         ws.data.cut = () => { tcp.destroy(); };
 
-        ws.data.piped.start(Readable.toWeb(tcp) as unknown as ReadableStream<Uint8Array>);
+        ws.data.piped.start(new ReadableStream<Uint8Array>({
+          start: (controller) => {
+            tcp.on('data', (chunk: Buffer) => { controller.enqueue(new Uint8Array(chunk)); });
+            tcp.on('end', () => { controller.close(); });
+            tcp.on('error', (error) => { controller.error(error); });
+          },
+        }));
       },
       async message(ws, message) {
         const before = reached.get(ws.data.id) ?? 0;
-        const end = typeof message === 'string' ? before : Number(new DataView(message.buffer, message.byteOffset).getBigUint64(0)) + message.byteLength - 8;
+        const bytes = message instanceof Uint8Array ? message : null;
+        const end = bytes === null ? before : Number(new DataView(bytes.buffer, bytes.byteOffset).getBigUint64(0)) + bytes.byteLength - 8;
 
         reached.set(ws.data.id, Math.max(before, end));
-        await ws.data.piped?.message(typeof message === 'string' ? message : message.buffer.slice(message.byteOffset, message.byteOffset + message.byteLength));
+        await ws.data.piped?.message(bytes === null ? String(message) : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
 
         if (Math.floor(Math.max(before, end) / dropAfter) > Math.floor(before / dropAfter)) {
           drops += 1;
@@ -124,7 +130,7 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
     const result = await run(16 << 20, 'echo', 3 << 20);
 
     expect({ out: result.out, first: result.opened[0], resumed: result.opened.slice(1), drops: result.drops > 3 })
-      .toEqual({ out: `${String(16 << 20)} True`, first: 'open', resumed: new Array<string>(result.opened.length - 1).fill('resume'), drops: true });
+      .toEqual({ out: `${String(16 << 20)} True`, first: 'open', resumed: Array.from({ length: result.opened.length - 1 }, () => 'resume'), drops: true });
   }, 60_000);
 
   test('closes a program\'s connection to a port nothing listens on, as a refused one', async () => {

@@ -58,16 +58,18 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
       if (waits <= lost) return new Error('Network connection lost.');
     }
 
-    return { exitCode: 0, stdout: argv[3] === 'wait' ? '0\n' : (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+    if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
+
+    return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
   }, { launched, paths });
 }
 
 describe('preparing an environment', () => {
   test('runs the recipe\'s setup as root with root\'s PATH, where locale-gen and its kin are', async () => {
-    const container = answering('setup', 0);
-    const prepared = await prepare(container);
+    const machine = answering('setup', 0);
+    const prepared = await prepare(machine);
 
-    expect({ failures: prepared.failures, path: container.paths[container.launched.indexOf('setup')]?.split(':') })
+    expect({ failures: prepared.failures, path: machine.paths[machine.launched.indexOf('setup')]?.split(':') })
       .toEqual({ failures: [], path: expect.arrayContaining(['/usr/sbin', '/sbin', '/usr/bin']) });
   });
 
@@ -83,32 +85,37 @@ describe('preparing an environment', () => {
 
   // A snapshot that does not start fails the job's vessels instead, which the job says once (worker/tests/job.test.ts).
   test('ends at the snapshot, starting nothing from it', async () => {
-    const container = answering('setup', 0);
-    const prepared = await prepare(container);
+    const machine = answering('setup', 0);
+    const prepared = await prepare(machine);
 
-    expect({ phases: Object.keys(prepared.generations[0]?.seconds ?? {}), launched: container.launched }).toEqual({ phases: ['base', 'setup', 'receive', 'install', 'snapshot'], launched: ['base', 'setup'] });
+    expect({ phases: Object.keys(prepared.generations[0]?.seconds ?? {}), launched: machine.launched }).toEqual({ phases: ['base', 'setup', 'receive', 'install', 'snapshot'], launched: ['base', 'setup'] });
   });
 });
 
 /** A container that is this host: every exec runs here. */
 function here(): Container {
-  const host = {
+  const host: Partial<Container> = {};
+
+  Object.assign(host, {
     running: true,
     start: () => undefined,
     destroy: async () => undefined,
-    monitor: () => new Promise<void>(() => undefined),
+    monitor: async () => await new Promise<void>(() => undefined),
     setInactivityTimeout: async () => undefined,
     exec: async (argv: string[], options?: ContainerExecOptions) => {
-      const child = Bun.spawn(argv, { cwd: options?.cwd, env: options?.env ?? process.env, stdin: options?.stdin === 'pipe' ? 'pipe' : 'ignore', stdout: 'pipe', stderr: 'pipe' });
+      const child = Bun.spawn(argv, { cwd: options?.cwd, env: options?.env ?? process.env, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
       const sink = child.stdin;
-      const stdin = sink === undefined || typeof sink === 'number' ? null : new WritableStream<Uint8Array>({ write: (chunk) => { sink.write(chunk); }, close: async () => { await sink.end(); } });
+
+      // An exec that takes no stdin sees it closed, as the platform's does.
+      if (options?.stdin !== 'pipe') await sink.end();
+      const stdin = options?.stdin === 'pipe' ? new WritableStream<Uint8Array>({ write: async (chunk) => { await sink.write(chunk); }, close: async () => { await sink.end(); } }) : null;
 
       return { stdin, output: async () => ({ exitCode: await child.exited, stdout: await new Response(child.stdout).arrayBuffer(), stderr: await new Response(child.stderr).arrayBuffer() }) };
     },
-  };
+  });
 
-  // The calls a preparer makes of its container, run on this host.
-  return host as unknown as Container;
+  // SAFETY: a preparer calls only these members of its container, each constructed above to run on this host.
+  return host as Container;
 }
 
 const root = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode === 0;
