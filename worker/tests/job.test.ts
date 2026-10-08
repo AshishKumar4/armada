@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test, setSystemTime } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, refusal, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
@@ -23,6 +23,40 @@ async function job(spec: v.InferInput<typeof JobSpecSchema>) {
 
 const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
   index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: false, ...error === undefined ? {} : { error },
+});
+
+test('a planned queue reaches its exact bound, steals when estimates fail, and publishes one outcome per input', async () => {
+  const predicted = [5, 5, 4, 4, 3, 3, 3];
+  for (const actual of [predicted, [1, 9, 2, 6, 1, 4, 3]]) {
+    const { job: open } = await job({ recipe: {}, pool: 3, run: { kind: 'command' },
+      items: predicted.map((weight) => ({ item: { weight }, argv: ['true'] })) });
+    const start = Date.now();
+    const working: { vessel: string; index: number; until: number }[] = [];
+    let clock = 0;
+    const take = async (vessel: string): Promise<void> => {
+      const claim = await open.claim(vessel);
+      if (claim !== null && !('waitMs' in claim)) working.push({ vessel, index: claim.index, until: clock + (actual[claim.index] ?? 0) });
+    };
+    try {
+      for (const vessel of ['v1', 'v2', 'v3']) await take(vessel);
+      while (working.length > 0) {
+        working.sort((a, b) => a.until - b.until);
+        const task = working.shift();
+        if (task === undefined) throw new Error('no completed task');
+        clock = task.until;
+        setSystemTime(start + clock * 1000);
+        expect(await open.accept(task.vessel, task.index)).toBe(true);
+        await open.complete(task.vessel, exited(task.index, task.vessel), (actual[task.index] ?? 0) * 1000);
+        await take(task.vessel);
+      }
+      const outcomes = (await open.events(0)).events;
+      expect(outcomes.map((row) => row.outcome.index).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      expect((await open.status())?.phase).toBe('done');
+      if (actual === predicted) expect(clock).toBe(9);
+      else expect(clock).toBeLessThanOrEqual(15); // OPT is at least 9; any work-conserving list schedule is ≤5/3 OPT.
+      expect((await open.status())?.schedule?.ratio).toBe(1);
+    } finally { setSystemTime(); }
+  }
 });
 
 /** `vessel` claims, runs and lands its next task, which exits `exitCode`, having thrown `error`. */
