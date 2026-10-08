@@ -266,6 +266,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         if (current.claim.gang !== undefined) await this.keepLog(spec, current);
         await this.ctx.storage.delete('current');
+        // A copy stopped for its twin's answer, which waits until this one can no longer end red.
+        await job.stopped(spec.name, current.claim.index);
       }
     }
 

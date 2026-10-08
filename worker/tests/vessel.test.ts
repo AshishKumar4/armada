@@ -212,12 +212,13 @@ describe('a gang rank', () => {
     expect(steps).toEqual([['relay written'], ['up', 'gang', '1', '2', 'https://armada.example', 'job', 't'.repeat(48), 'v2', 'v1'], ['launch'], ['down'], ['launch']]);
   });
 
-  test('keeps its log, the relay\'s appended, when its gang ends without its answer: refused, or stopped while it ran', async () => {
+  test('keeps its log, the relay\'s appended, when its gang ends without its answer: refused, or stopped while it ran, and says it stopped', async () => {
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: '', token: 't'.repeat(48) };
     const kept = async (accepted: boolean, exits: boolean) => {
       let claimed = false;
       const completed: Outcome[] = [];
       let relayLogs = 0;
+      let stops = 0;
       const stored = state(container((argv) => {
         relayLogs += (argv[2] ?? '').includes(RELAY_LOG) && (argv[2] ?? '').includes('>> /armada/task/log') ? 1 : 0;
 
@@ -231,7 +232,8 @@ describe('a gang rank', () => {
 
           return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang };
         },
-        still: async () => false, accept: async () => accepted, complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
+        still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
+        complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
       };
       const artifacts = bucket();
       const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
@@ -239,12 +241,12 @@ describe('a gang rank', () => {
       await vessel.begin(spec);
       await vessel.alarm();
 
-      return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length, relayLogs };
+      return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length, relayLogs, stops };
     };
     const log = taskKey(spec.jobId, 0, 'log', 1);
 
     expect([await kept(false, true), await kept(true, false), await kept(true, true)])
-      .toEqual([{ logged: [log], completed: 0, relayLogs: 1 }, { logged: [log], completed: 0, relayLogs: 1 }, { logged: [log], completed: 1, relayLogs: 1 }]);
+      .toEqual([{ logged: [log], completed: 0, relayLogs: 1, stops: 0 }, { logged: [log], completed: 0, relayLogs: 1, stops: 1 }, { logged: [log], completed: 1, relayLogs: 1, stops: 0 }]);
   });
 
   test('takes a relay only with its gang\'s token, and only to a port under a link id', async () => {

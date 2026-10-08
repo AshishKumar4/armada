@@ -4,9 +4,9 @@
  * pays its boot once and then pulls task after task, so short and long tasks balance themselves. Each task's outcome
  * is appended to the job's event stream as it lands. A task a vessel lost to the infrastructure is queued again once;
  * a task that exited, red or green, never is. When the queue is empty, an idle vessel may run a straggler again only
- * if the job says its tasks are speculative; the first green answer is kept. A job that hedges also runs its heaviest tasks
- * twice from the start, each second copy as soon as the queue reaches its weight. An open job takes more items until
- * its client closes it, starting vessels for them as they come.
+ * if the job says its tasks are speculative; the first answer is kept, or a red the other copy ends with. A job that
+ * hedges also runs its heaviest tasks twice from the start, each second copy as soon as the queue reaches its weight.
+ * An open job takes more items until its client closes it, starting vessels for them as they come.
  *
  * A gang task (an item's `gang`, `gangOf`) runs on that many vessels at once. The vessels that ask for work join the
  * gang forming, in rank order, before any other task starts, and the gang starts once every rank has joined; each rank
@@ -91,6 +91,9 @@ const INFRA_ATTEMPTS = 3;
 const STRAGGLER_MS = 30_000;
 
 const JOB_DEADLINE_MS = 6 * 60 * 60_000;
+
+/** Where a task's green answer waits while its other copy may still end red (`complete`, `release`). */
+const heldKey = (index: number) => `held/${String(index)}`;
 
 /** The cache lookups a job makes at once. */
 const CACHE_READS = 32;
@@ -475,9 +478,12 @@ export class ArmadaJob extends DurableObject<Env> {
     return spec.secrets.length === 0 ? {} : await this.env.SECRETS.getByName(SINGLE).values(spec.secrets);
   }
 
-  /** Whether `name`'s answer for `index`, which exited `exitCode`, is the one kept: the first green to land, else the
-   *  last red. A red answer while the task's other copy still runs is declined and its copy struck from the task, so a
-   *  quick failure (a crash, a lost download) never beats a slower green; a late duplicate is told no. */
+  /** Whether `name`'s answer for `index`, which exited `exitCode`, is the one kept. A copy's answer is its command's
+   *  verdict and final: the first copy to answer decides, and the other copy, told to stop (`still`), never does.
+   *  A red the other copy answers with while the first answer is still landing is kept in its place, so a red from any
+   *  copy that ran to its end makes the task red, and a flaky or order-dependent failure is never hidden behind a
+   *  green copy: a green is held, unreported, until the other copy has stopped or ended (`complete`, `release`). Only a
+   *  lost container (`vesselFailed`) falls through to the other copy. A late duplicate is told no. */
   async accept(name: string, index: number, exitCode: number): Promise<boolean> {
     const task = this.sql.exec<{ state: string; vessel: string | null; dup: string | null }>('SELECT state, vessel, dup FROM tasks WHERE idx = ?', index).toArray()[0];
     const member = this.member(name, index);
@@ -489,16 +495,49 @@ export class ArmadaJob extends DurableObject<Env> {
       return true;
     }
 
-    if (task === undefined || task.state !== 'running' || (task.vessel !== name && task.dup !== name)) return false;
+    if (task === undefined || (task.vessel !== name && task.dup !== name)) return false;
 
-    if (exitCode !== 0 && task.dup !== null) {
-      this.sql.exec(task.vessel === name ? 'UPDATE tasks SET vessel = dup, dup = NULL WHERE idx = ?' : 'UPDATE tasks SET dup = NULL WHERE idx = ?', index);
+    if (task.state === 'running') {
+      // The other copy stays named, so a red it reaches its end with can still land.
+      this.sql.exec(`UPDATE tasks SET state = 'landing', vessel = ?, dup = ? WHERE idx = ?`, name, task.vessel === name ? task.dup : task.vessel, index);
+
+      return true;
+    }
+
+    if (task.state !== 'landing' || task.dup !== name) return false;
+
+    if (exitCode === 0) {
+      // The other copy ended green too: the first answer stands.
+      this.sql.exec('UPDATE tasks SET dup = NULL WHERE idx = ?', index);
+      await this.release(index);
+      await this.settle();
 
       return false;
     }
-    this.sql.exec(`UPDATE tasks SET state = 'landing', vessel = ? WHERE idx = ?`, name, index);
+    await this.ctx.storage.delete(heldKey(index));
+    this.sql.exec('UPDATE tasks SET vessel = ?, dup = NULL WHERE idx = ?', name, index);
 
     return true;
+  }
+
+  /** `name` stopped its copy of `index` when told to (`still`), so the other copy's green, held until now, is reported. */
+  async stopped(name: string, index: number): Promise<void> {
+    const task = this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', index).toArray()[0];
+
+    if (task?.dup !== name) return;
+    this.sql.exec('UPDATE tasks SET dup = NULL WHERE idx = ?', index);
+    await this.release(index);
+    await this.settle();
+  }
+
+  /** Reports the green answer held for `index` (`complete`), once its other copy can no longer end red. */
+  private async release(index: number): Promise<void> {
+    const held = await this.ctx.storage.get<Outcome>(heldKey(index));
+
+    if (held === undefined) return;
+    await this.ctx.storage.delete(heldKey(index));
+    this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ? AND state = 'landing'`, held.kind, index);
+    this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(held));
   }
 
   /** The kept answer, once its output and log are in R2: appended to the stream, or, for a failure the job's retries
@@ -509,7 +548,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
     const retries = (await this.spec())?.retries;
     const task = kept === null ? undefined
-      : this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = ?`, kept.index, member === undefined ? 'landing' : 'running').toArray()[0];
+      // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
+      : member === undefined ? this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'landing' AND vessel = ?`, kept.index, name).toArray()[0]
+        : this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'running'`, kept.index).toArray()[0];
     const named = kept !== null && kept.exitCode !== 0
       && (retries?.exitCodes.includes(kept.exitCode) === true || (kept.error !== undefined && retries?.errors.includes(kept.error) === true));
 
@@ -519,6 +560,10 @@ export class ArmadaJob extends DurableObject<Env> {
       // A gang forms again: its other ranks stop (`still`).
       this.sql.exec('DELETE FROM members WHERE idx = ?', kept.index);
       this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, dup = NULL, retries = retries + 1, not_before = ? WHERE idx = ?`, Date.now() + backoff, kept.index);
+    } else if (kept !== null && task !== undefined && member === undefined && kept.exitCode === 0
+      && this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', kept.index).one().dup !== null) {
+      // The other copy may still end red, which would be the task's verdict: the green waits for it (`release`).
+      await this.ctx.storage.put(heldKey(kept.index), kept);
     } else if (kept !== null && task !== undefined) {
       // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
       this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ?`, kept.kind, kept.index);
@@ -565,12 +610,19 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (spec === undefined) return;
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
-    this.sql.exec('UPDATE tasks SET dup = NULL WHERE dup = ?', name);
+    // A lost copy cannot end red: the other copy's held green is reported.
+    for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
     this.lostRank(name, error);
 
-    for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null }>(`SELECT idx, infra, dup FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
+    for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null; state: string }>(`SELECT idx, infra, dup, state FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
+      if (task.state === 'landing' && (await this.ctx.storage.get(heldKey(task.idx))) !== undefined) {
+        // Its answer is in, held for the other copy.
+        continue;
+      }
+
       if (task.dup !== null) {
-        this.sql.exec('UPDATE tasks SET vessel = dup, dup = NULL WHERE idx = ?', task.idx);
+        // The other copy runs on, if it has not stopped yet, as the only one.
+        this.sql.exec(`UPDATE tasks SET state = 'running', vessel = dup, dup = NULL WHERE idx = ?`, task.idx);
       } else if (task.infra + 1 < INFRA_ATTEMPTS) {
         this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, infra = infra + 1 WHERE idx = ?`, task.idx);
       } else {

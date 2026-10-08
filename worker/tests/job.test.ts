@@ -95,28 +95,44 @@ describe('a hedged job', () => {
       .toEqual({ claims: [[1, false], [1, true], [3, false], [3, true], [0, false], [2, false], null], landed: [true, false], still: false, events: [[1, 'v2']] });
   });
 
-  test('keeps a copy\'s green over the other\'s quicker red, and a red only once no copy runs on', async () => {
-    const kept = async (first: number, second: number) => {
+  test('keeps the first copy\'s verdict, and a red from either copy that ran to its end, never hiding it behind a green', async () => {
+    /** v1's copy answers `first` and, where `stored`, lands it; then v2's copy answers `then`, stops when told to, or
+     *  loses its container. */
+    const verdict = async (first: number, stored: boolean, then: number | 'stopped' | 'lost') => {
       const { job: hedged } = await job({ recipe: {}, items: [{ item: { weight: 9 }, argv: ['true'] }], run: { kind: 'command' }, hedge: 1 });
 
       await hedged.claim('v1');
       await hedged.claim('v2');
-      // v1's copy ends first.
-      const landed = [await hedged.accept('v1', 0, first)];
+      await hedged.accept('v1', 0, first);
+      if (stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
+      const told = await hedged.still('v2', 0);
 
-      if (landed[0] === true) await hedged.complete('v1', exited(0, 'v1', first), 1000);
-      else landed.push(await hedged.accept('v2', 0, second));
-      if (landed[1] === true) await hedged.complete('v2', exited(0, 'v2', second), 1000);
+      if (then === 'stopped') await hedged.stopped('v2', 0);
+      else if (then === 'lost') await hedged.vesselFailed('v2', 'the container stopped');
+      else if (await hedged.accept('v2', 0, then)) await hedged.complete('v2', exited(0, 'v2', then), 1000);
+      if (!stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
       const { events } = await hedged.events(0);
 
-      return { landed, events: events.map((event) => [event.outcome.vessel, event.outcome.exitCode]) };
+      return { told, events: events.map((event) => [event.outcome.vessel, event.outcome.exitCode]) };
     };
 
-    expect([await kept(1, 0), await kept(1, 2), await kept(0, 1)]).toEqual([
-      { landed: [false, true], events: [['v2', 0]] },
-      { landed: [false, true], events: [['v2', 2]] },
-      { landed: [true], events: [['v1', 0]] },
-    ]);
+    expect({
+      redFirst: await verdict(1, true, 'stopped'),
+      redOverALandingGreen: await verdict(0, false, 1),
+      redOverAStoredGreen: await verdict(0, true, 1),
+      greenOnceTheOtherStopped: await verdict(0, true, 'stopped'),
+      greenBesideAGreen: await verdict(0, true, 0),
+      greenOnceTheOtherWasLost: await verdict(0, true, 'lost'),
+      firstRedBesideAGreen: await verdict(1, true, 0),
+    }).toEqual({
+      redFirst: { told: false, events: [['v1', 1]] },
+      redOverALandingGreen: { told: false, events: [['v2', 1]] },
+      redOverAStoredGreen: { told: false, events: [['v2', 1]] },
+      greenOnceTheOtherStopped: { told: false, events: [['v1', 0]] },
+      greenBesideAGreen: { told: false, events: [['v1', 0]] },
+      greenOnceTheOtherWasLost: { told: false, events: [['v1', 0]] },
+      firstRedBesideAGreen: { told: false, events: [['v1', 1]] },
+    });
   });
 });
 
