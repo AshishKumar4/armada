@@ -71,7 +71,7 @@ async function run(total: number, port: string, dropAfter: number) {
           ws.data.link, () => undefined);
         ws.data.cut = () => { tcp.destroy(); };
 
-        void ws.data.piped.pump(Readable.toWeb(tcp) as unknown as ReadableStream<Uint8Array>);
+        ws.data.piped.start(Readable.toWeb(tcp) as unknown as ReadableStream<Uint8Array>);
       },
       async message(ws, message) {
         const before = reached.get(ws.data.id) ?? 0;

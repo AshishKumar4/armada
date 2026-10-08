@@ -14,6 +14,7 @@
  * the program seeing nothing of it.
  */
 import { STATE } from './container';
+import { said } from './env';
 
 /** Where a rank's peers' connections arrive (loopback, DNAT'd to) and where its vessel connects in (every address). */
 export const RELAY_OUT = 7911;
@@ -55,13 +56,50 @@ export class Piped {
 
   private over = false;
 
+  /** The container's records being pumped to the WebSocket, and the container's side closing. */
+  private pumping: Promise<void> | null = null;
+
+  private closing: Promise<void> | null = null;
+
   constructor(private readonly socket: WebSocket, private readonly writer: WritableStreamDefaultWriter<Uint8Array>,
-    link: string, private readonly log: (event: string, detail: Record<string, unknown>) => void) {
-    this.queue = writer.write(new TextEncoder().encode(`${link}\n`)).catch((error: unknown) => { this.end(1011, `the container's side failed: ${String(error)}`); });
+    link: string, private readonly log: (event: string, detail: Readonly<Record<string, string | number>>) => void) {
+    this.queue = this.write(Promise.resolve(), new TextEncoder().encode(`${link}\n`));
+  }
+
+  /** Starts pumping the container's records to the WebSocket. */
+  start(readable: ReadableStream<Uint8Array>): void {
+    this.pumping ??= this.pump(readable);
+  }
+
+  /** Settles once the pump `start` began ends. */
+  get pumped(): Promise<void> {
+    return this.pumping ?? Promise.resolve();
+  }
+
+  /** A message to the container, as a record, written after those before it though the runtime hands over the next
+   *  message while a write waits. */
+  async message(message: string | ArrayBuffer): Promise<void> {
+    const binary = message instanceof ArrayBuffer;
+    const body = binary ? new Uint8Array(message) : new TextEncoder().encode(message);
+    const record = new Uint8Array(5 + body.byteLength);
+
+    record[0] = binary ? BINARY : TEXT;
+    new DataView(record.buffer).setUint32(1, body.byteLength);
+    record.set(body, 5);
+    this.queue = this.write(this.queue, record);
+    await this.queue;
+  }
+
+  /** The WebSocket closed: the container's connection closes after what was written to it. */
+  async closed(code: number, reason: string): Promise<void> {
+    if (!this.over && code !== 1000) this.log('relay WebSocket closed by its relay', { code, reason });
+    this.over = true;
+    this.queue = this.close(this.queue);
+    await this.queue;
   }
 
   /** The container's records to the WebSocket, as they complete, then the WebSocket's close. */
-  async pump(readable: ReadableStream<Uint8Array>): Promise<void> {
+  private async pump(readable: ReadableStream<Uint8Array>): Promise<void> {
     const reader = readable.getReader();
     let held = new Uint8Array(0);
 
@@ -87,31 +125,31 @@ export class Piped {
       }
 
       this.end(1000, 'the container closed it');
-    } catch (error) {
-      this.end(1011, `the container's side failed: ${String(error)}`);
+    } catch (cause) {
+      this.end(1011, `the container's side failed: ${said({ cause })}`);
     }
   }
 
-  /** A message to the container, as a record, written after those before it though the runtime hands over the next
-   *  message while a write waits. */
-  async message(message: string | ArrayBuffer): Promise<void> {
-    const body = typeof message === 'string' ? new TextEncoder().encode(message) : new Uint8Array(message);
-    const record = new Uint8Array(5 + body.byteLength);
+  /** `record` to the container once `after` is written; a write that fails ends the pipe. */
+  private async write(after: Promise<void>, record: Uint8Array): Promise<void> {
+    await after;
 
-    record[0] = typeof message === 'string' ? TEXT : BINARY;
-    new DataView(record.buffer).setUint32(1, body.byteLength);
-    record.set(body, 5);
-    this.queue = this.queue.then(async () => { await this.writer.write(record); })
-      .catch((error: unknown) => { this.end(1011, `the container's side failed: ${String(error)}`); });
-    await this.queue;
+    try {
+      await this.writer.write(record);
+    } catch (cause) {
+      this.end(1011, `the container's side failed: ${said({ cause })}`);
+    }
   }
 
-  /** The WebSocket closed: the container's connection closes after what was written to it. */
-  async closed(code: number, reason: string): Promise<void> {
-    if (!this.over && code !== 1000) this.log('relay WebSocket closed by its relay', { code, reason });
-    this.over = true;
-    this.queue = this.queue.then(async () => { await this.writer.close(); }).catch(() => undefined);
-    await this.queue;
+  /** The container's side closed once `after` is written, said in the log when it will not close. */
+  private async close(after: Promise<void>): Promise<void> {
+    await after;
+
+    try {
+      await this.writer.close();
+    } catch (cause) {
+      this.log('relay connection to the container did not close', { reason: said({ cause }) });
+    }
   }
 
   private end(code: number, reason: string): void {
@@ -120,7 +158,7 @@ export class Piped {
 
     if (code !== 1000) this.log('relay WebSocket closed by its vessel', { code, reason });
     this.socket.close(code, reason.slice(0, 120));
-    void this.writer.close().catch(() => undefined);
+    this.closing ??= this.close(Promise.resolve());
   }
 }
 

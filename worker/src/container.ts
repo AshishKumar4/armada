@@ -4,6 +4,7 @@
  * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
 import { ARTIFACTS_PATH, failureTail, SIZES, type Size } from '../../src/protocol';
+import { said } from './env';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
  *  a command drops to the user inside. */
@@ -362,7 +363,7 @@ export async function pipeIn(container: Container, body: ReadableStream | string
   const writer = await container.exec(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && part="$(mktemp "$1.XXXXXX")" && cat > "$part" && chmod 644 "$part" && chown ci:ci "$part" && mv -f "$part" "$1"', 'pipe-in', path], { stdin: 'pipe' });
 
   if (writer.stdin === null) throw new Error(`writing ${path}: the exec took no stdin`);
-  const source = typeof body === 'string' ? new Blob([body]).stream() : body;
+  const source = body instanceof ReadableStream ? body : new Blob([body]).stream();
 
   await source.pipeTo(writer.stdin);
   const written = await writer.output();
@@ -391,9 +392,19 @@ export async function startAndAnswer(container: Container, options: ContainerSta
   // Why a start ended, when it did: the runtime says so only through `monitor()`.
   let ended = '';
 
-  const watch = () => {
-    container.monitor().then(() => { ended = 'the container exited'; }, (cause: unknown) => { ended = String(cause); });
+  // Each start's watch, kept while it runs: `ended` is what it found.
+  const watches: Promise<void>[] = [];
+
+  const monitor = async (): Promise<void> => {
+    try {
+      await container.monitor();
+      ended = 'the container exited';
+    } catch (cause) {
+      ended = said({ cause });
+    }
   };
+
+  const watch = () => { watches.push(monitor()); };
 
   await startFresh(container, options);
   watch();

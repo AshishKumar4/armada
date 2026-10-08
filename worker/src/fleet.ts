@@ -9,6 +9,7 @@
  * which the dashboard lists.
  */
 import { DurableObject } from 'cloudflare:workers';
+import * as v from 'valibot';
 import type { Fleet } from '../../src/protocol';
 import type { Env } from './env';
 
@@ -45,7 +46,7 @@ export class ArmadaFleet extends DurableObject<Env> {
   }
 
   async release(holder: string): Promise<void> {
-    const holds = { ...(await this.ctx.storage.get<Record<string, Hold>>('holds')) ?? {} };
+    const holds = { ...await this.ctx.storage.get<Record<string, Hold>>('holds') };
 
     delete holds[holder];
     await this.ctx.storage.put('holds', holds);
@@ -94,7 +95,7 @@ export class ArmadaFleet extends DurableObject<Env> {
   /** The ids of up to `limit` recent jobs made before job `before` (or the newest), newest first. A job's id starts
    *  with the time it was made, so the keys' order is the jobs'. */
   async recent(limit: number, before?: string): Promise<string[]> {
-    const listed = await this.ctx.storage.list({ prefix: 'seen:', reverse: true, limit, ...before === undefined ? {} : { end: `seen:${before}` } });
+    const listed = await this.ctx.storage.list({ prefix: 'seen:', reverse: true, limit, end: before === undefined ? undefined : `seen:${before}` });
 
     return [...listed.keys()].map((key) => key.slice('seen:'.length));
   }
@@ -130,7 +131,7 @@ export class ArmadaFleet extends DurableObject<Env> {
     const drained = await this.ctx.storage.get<Drained | string>('drained');
 
     // A drain an earlier Worker stored names its version alone, and lasted until the deploy admitted again.
-    if (typeof drained === 'string') return drained !== version;
+    if (v.is(v.string(), drained)) return drained !== version;
 
     return drained === undefined || drained.version !== version || drained.until <= Date.now();
   }

@@ -26,7 +26,7 @@ async function prepare(answer: Answer, alarms = 40): Promise<Prepared> {
     })),
   }));
 
-  await preparer.begin('k'.repeat(64), 0, recipe, null);
+  await preparer.begin('k'.repeat(64), 0, { recipe, sha: null });
 
   for (let alarm = 0; alarm < alarms && generations.length + failures.length === 0; alarm += 1) await preparer.alarm();
 

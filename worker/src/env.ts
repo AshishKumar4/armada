@@ -1,3 +1,4 @@
+import { errorOf, INLINE_BYTES } from '../../src/protocol';
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaFleet } from './fleet';
 import type { ArmadaWebhooks } from './hooks';
@@ -45,14 +46,17 @@ export const packKey = (project: string, sha: string, base: string, packer: numb
 export const bundleKey = (digest: string): string => `code/${digest}.mjs`;
 
 
-/** The R2 keys of a task's output, log and artifacts archive: a gang rank's other than 0 under its rank. */
-export const taskKey = (job: string, index: number, leaf: 'output' | 'log' | 'artifacts', rank = 0): string =>
-  `jobs/${job}/tasks/${String(index)}/${rank === 0 ? '' : `rank${String(rank)}/`}${leaf === 'log' ? 'log.gz' : leaf === 'artifacts' ? 'artifacts.tar.gz' : 'output'}`;
+/** Each of a task's stored files, by the name its route has. */
+const LEAVES = { output: 'output', log: 'log.gz', artifacts: 'artifacts.tar.gz' } as const;
 
-/** An R2 object into `key`: `small` when it was read whole, else streamed at its known size. */
-export async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, small: ArrayBuffer | null, customMetadata?: Record<string, string>): Promise<void> {
-  if (small !== null) {
-    await bucket.put(key, small, { httpMetadata: source.httpMetadata, customMetadata });
+/** The R2 keys of a task's output, log and artifacts archive: a gang rank's other than 0 under its rank. */
+export const taskKey = (job: string, index: number, leaf: keyof typeof LEAVES, rank = 0): string =>
+  `jobs/${job}/tasks/${String(index)}/${rank === 0 ? '' : `rank${String(rank)}/`}${LEAVES[leaf]}`;
+
+/** An R2 object into `key`: read whole when it is small, else streamed at its known size. */
+export async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, customMetadata?: Record<string, string>): Promise<void> {
+  if (source.size <= INLINE_BYTES) {
+    await bucket.put(key, await source.arrayBuffer(), { httpMetadata: source.httpMetadata, customMetadata });
 
     return;
   }
@@ -66,8 +70,11 @@ export async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBo
 export function textOf(bytes: ArrayBuffer): string | undefined {
   try {
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    return undefined;
+  } catch (cause) {
+    // A fatal decoder throws a TypeError on bytes that are not UTF-8.
+    if (cause instanceof TypeError) return undefined;
+
+    throw cause;
   }
 }
 
@@ -81,4 +88,5 @@ function chain(error: Error): string {
   return error.cause === undefined ? error.message : `${error.message}: ${JSON.stringify(error.cause)}`;
 }
 
-export const said = (cause: unknown): string => cause instanceof Error ? chain(cause) : String(cause);
+/** A caught value on one line, its causes after it. */
+export const said = ({ cause }: { readonly cause: unknown }): string => chain(errorOf({ cause }));

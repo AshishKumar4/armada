@@ -50,11 +50,11 @@ describe('a relay WebSocket at its vessel', () => {
   test('sends each record from the container as a message once it is whole, however the reads split it', async () => {
     const { piped, container, push, messages, closes } = pipe();
     const stream = new Uint8Array([...record('b', new Uint8Array([7, 8, 9])), ...record('t', new TextEncoder().encode('e3'))]);
-    const pumped = piped.pump(container);
+    piped.start(container);
 
     for (const at of [0, 2, 6, 9]) push()?.enqueue(stream.slice(at, [2, 6, 9, stream.byteLength][[0, 2, 6, 9].indexOf(at)]));
     push()?.close();
-    await pumped;
+    await piped.pumped;
 
     expect({ messages, closes }).toEqual({ messages: [[7, 8, 9], 'e3'], closes: [[1000, 'the container closed it']] });
   });

@@ -31,7 +31,7 @@ const LEASE_MS = 60 * 60_000;
 const FAILURE_HOLD_MS = 5 * 60_000;
 
 /** The environment every command runs under: the runner's defaults, then the job's own. */
-export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>): Record<string, string> {
+export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>) {
   const workdir = workdirOf(recipe);
   const own = Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{workdir}', workdir)]));
 
@@ -66,7 +66,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: commit?.sha ?? null, since: now } satisfies Entry);
     // Each attempt on its own object: one key's preparer refused every standard-4 start for 20 minutes while a new
     // object on the same account started one at once.
-    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, recipe, commit?.sha ?? null, commit?.packer);
+    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, { recipe, sha: commit?.sha ?? null, packer: commit?.packer });
 
     return { kind: 'preparing', since: now };
   }
@@ -77,7 +77,12 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     const keep = Number(this.env.KEEP_ENVIRONMENTS ?? 0);
 
     if (keep > 0 && this.env.REGISTRY_CREDENTIALS !== undefined) {
-      await this.prune(keep, this.env.REGISTRY_CREDENTIALS).catch((cause: unknown) => { console.error(JSON.stringify({ prune: said(cause) })); });
+      try {
+        await this.prune(keep, this.env.REGISTRY_CREDENTIALS);
+      } catch (cause) {
+        // A prune that fails leaves snapshots for the next one: the environment just made is ready either way.
+        console.error(JSON.stringify({ prune: said({ cause }) }));
+      }
     }
   }
 
@@ -103,7 +108,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
       try {
         console.log(JSON.stringify({ pruned: key, snapshot: await deleteSnapshotWith(credentials, snapshot) }));
       } catch (cause) {
-        console.error(JSON.stringify({ pruned: key, snapshot, left: said(cause) }));
+        console.error(JSON.stringify({ pruned: key, snapshot, left: said({ cause }) }));
       }
     }
 
@@ -177,7 +182,7 @@ const LOST_EXECS = 3;
 /** A phase's command: what the container is given first, once, and what then runs, as root or as the user. */
 interface Command {
   readonly doing: string;
-  readonly inputs: () => Promise<unknown>;
+  readonly inputs: () => Promise<void>;
   readonly argv: readonly string[];
   readonly asUser: boolean;
   /** Its environment; the container's own where absent. */
@@ -187,7 +192,7 @@ interface Command {
 }
 
 export class ArmadaPreparer extends DurableObject<Env> {
-  async begin(key: string, since: number, recipe: Recipe, sha: string | null, packer?: number): Promise<void> {
+  async begin(key: string, since: number, { recipe, sha, packer }: { readonly recipe: Recipe; readonly sha: string | null; readonly packer?: number | undefined }): Promise<void> {
     await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
     await this.ctx.storage.setAlarm(Date.now());
   }
@@ -213,8 +218,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.delete('preparation');
       // The preparation failed already; a container that will not stop ends at its inactivity timeout.
       await Promise.allSettled([this.ctx.container?.destroy()]);
-      console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said(cause) }));
-      await this.registry().preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said(cause)}`);
+      console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
+      await this.registry().preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`);
     }
   }
 

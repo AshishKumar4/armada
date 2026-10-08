@@ -57,15 +57,26 @@ export function specOf(stored: VesselSpec): SlotSpec {
 
 /** Everything that differs between a shared container's task and one slot of a slotted container: the slot's task
  *  dir (or the shared `TASK`), its cgroup, its mask file, and whether the launch is the isolated one. */
-export function layoutOf(spec: SlotSpec, slot: number): {
-  readonly dir: string; readonly group: string; readonly mask: string; readonly isolated: boolean;
-} {
+export interface SlotLayout {
+  readonly dir: string;
+  readonly group: string;
+  readonly mask: string;
+  readonly isolated: boolean;
+}
+
+export function layoutOf(spec: SlotSpec, slot: number): SlotLayout {
   if (spec.slots <= 1) return { dir: TASK, group: TASK_GROUP, mask: MASK_VALUES, isolated: false };
 
   return { dir: slotTask(slot), group: taskGroup(slot), mask: maskValuesOf(slot), isolated: true };
 }
 
 type State = 'waiting' | 'booting' | 'working' | 'done' | 'failed' | 'stopped';
+
+/** How a task ended: its exit code, and `timeout` when the vessel killed it at its limit. */
+interface Ending {
+  readonly exitCode: number;
+  readonly reason?: 'timeout';
+}
 
 /** The task running, kept without its environment, which only its launch needed: a job's env may carry a credential. */
 interface Current {
@@ -107,7 +118,8 @@ export class ArmadaVessel extends DurableObject<Env> {
   private readonly born = Date.now();
 
   /** Whether this object watches its container's end (`watch`). */
-  private watching = false;
+  /** Why the container ended, watched once this object runs it. */
+  private watching: Promise<void> | null = null;
 
   /** Each relay WebSocket's pipe into the container, which holds nothing of its link (`Piped`). */
   private readonly pipes = new Map<WebSocket, Piped>();
@@ -160,10 +172,10 @@ export class ArmadaVessel extends DurableObject<Env> {
       await this.ctx.storage.put('state', 'failed' satisfies State);
       await this.ctx.storage.delete('current');
       await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
-      console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said(cause) }));
+      console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said({ cause }) }));
       await Promise.allSettled([this.ctx.container?.destroy()]);
       await this.fleet().release(this.holder(spec));
-      await job.vesselFailed(spec.name, said(cause));
+      await job.vesselFailed(spec.name, said({ cause }));
     }
   }
 
@@ -215,11 +227,19 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** Runs the loop for a slice; true while there is more to do, false once the vessel retired. */
   /** Keeps why the container ended, if it ends while this object runs: the runtime says so only through `monitor()`. */
   private watch(container: Container): void {
-    if (this.watching) return;
-    this.watching = true;
-    const ended = (how: string) => { void this.ctx.storage.put('ended', `${how} at ${new Date().toISOString()}`); };
+    this.watching ??= this.monitor(container);
+  }
 
-    container.monitor().then(() => { ended('exited'); }, (cause: unknown) => { ended(`ended: ${said(cause)}`); });
+  private async monitor(container: Container): Promise<void> {
+    let how = 'exited';
+
+    try {
+      await container.monitor();
+    } catch (cause) {
+      how = `ended: ${said({ cause })}`;
+    }
+
+    await this.ctx.storage.put('ended', `${how} at ${new Date().toISOString()}`);
   }
 
   /** What a lost container's error says of it: how it ended, if this object saw, and whether this object was
@@ -292,7 +312,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // The tasks left wait out a retry's backoff: this slot waits with them; the others run on.
         if ('waitMs' in claim) return claim.waitMs;
-        const { env, ...kept } = claim;
+        // Its env stays out of storage: a job's env may carry a credential, which only the launch needs.
+        const { env: _env, ...kept } = claim;
 
         await this.launch(spec, container, claim, slot);
         current = { claim: kept, startedAt: Date.now() };
@@ -315,13 +336,13 @@ export class ArmadaVessel extends DurableObject<Env> {
       const exit = waited.value.stdout.trim();
 
       if (exit !== '') {
-        await this.finish(spec, slot, current, Number(exit));
+        await this.finish(spec, slot, current, { exitCode: Number(exit) });
         continue;
       }
 
       if (Date.now() - current.startedAt > spec.timeout * 1000) {
         await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
-        await this.finish(spec, slot, current, 124, 'timeout');
+        await this.finish(spec, slot, current, { exitCode: 124, reason: 'timeout' });
         continue;
       }
 
@@ -345,25 +366,29 @@ export class ArmadaVessel extends DurableObject<Env> {
     this.watch(container);
     const until = Date.now() + SLICE_MS;
     const abort = { failed: false };
-    const loops = Array.from({ length: slots }, (_, slot) => this.slotLoop(spec, slot, until, abort));
 
-    // The loops keep answering after the first of them fails; the flag stops their next step, and their late
-    // rejections are swallowed — the alarm's catch fails the vessel once.
-    for (const loop of loops) void loop.catch(() => undefined);
-    const ended: ('reslice' | 'retired' | number)[] = [];
+    // The first loop to fail sets the flag, which stops the others at their next step; once every loop has stopped,
+    // that failure fails the vessel once, through the alarm's catch, with no loop still claiming for it.
+    const loops = Array.from({ length: slots }, async (_, slot) => {
+      try {
+        return await this.slotLoop(spec, slot, until, abort);
+      } catch (cause) {
+        abort.failed = true;
 
-    try {
-      ended.push(...await Promise.all(loops));
-    } catch (cause) {
-      abort.failed = true;
+        throw cause;
+      }
+    });
 
-      throw cause;
-    }
+    const settled = await Promise.allSettled(loops);
+    const failed = settled.find((each) => each.status === 'rejected');
+
+    if (failed !== undefined) throw failed.reason;
+    const ended = settled.flatMap((each) => each.status === 'fulfilled' ? [each.value] : []);
 
     if (ended.every((each) => each === 'retired')) return await this.retire(spec);
 
     if (ended.every((each) => each !== 'reslice')) {
-      const at = Math.min(...ended.filter((each): each is number => typeof each === 'number'));
+      const at = Math.min(...ended.filter((each) => each !== 'retired'));
 
       if (Number.isFinite(at)) {
         await this.ctx.storage.setAlarm(Date.now() + at);
@@ -447,7 +472,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       (event, detail) => { console.log(JSON.stringify({ event, path: url.pathname, id, port, ...detail })); });
 
     this.pipes.set(server, piped);
-    void piped.pump(socket.readable);
+    piped.start(socket.readable);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -465,13 +490,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     this.pipes.delete(socket);
   }
 
-  override async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
-    await this.pipes.get(socket)?.closed(1006, `failed: ${String(error)}`);
+  override async webSocketError(...[socket, error]: Parameters<NonNullable<DurableObject['webSocketError']>>): Promise<void> {
+    await this.pipes.get(socket)?.closed(1006, `failed: ${said({ cause: error })}`);
     this.pipes.delete(socket);
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
-  private async finish(spec: SlotSpec, slot: number, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
+  private async finish(spec: SlotSpec, slot: number, current: Current, { exitCode, reason }: Ending): Promise<void> {
     const container = this.container();
     const { dir, group } = layoutOf(spec, slot);
     const { index, attempt } = current.claim;
@@ -489,7 +514,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
-    const usage = usageFrom(await run(container, ['/bin/sh', '-c', usageOf(group)], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
+    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group)]) ?? '');
 
     await must(container, 'packing the artifacts', ['/bin/sh', '-c', `if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts .; fi`], { ms: EXEC_MS });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
@@ -498,12 +523,12 @@ export class ArmadaVessel extends DurableObject<Env> {
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 ? await this.store(`${dir}/artifacts.tar.gz`, taskKey(spec.jobId, index, 'artifacts'), { contentType: 'application/gzip' }) : null;
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
-    const said = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
-    const [kind = '', error] = said.split('\n');
+    const marker = spec.bundle === null ? '' : (await this.optional(container, 'answer', ['head', '-c', '256', `${dir}/answer`]) ?? '').trim();
+    const [kind = '', error] = marker.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
 
     const outcome: Outcome = {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, error, ...usage,
     };
 
     if (exitCode === 0 && out !== null && current.claim.cache !== undefined) await this.keepInCache(taskKey(spec.jobId, index, 'output'), current.claim.cache, answer);
@@ -518,9 +543,21 @@ export class ArmadaVessel extends DurableObject<Env> {
       const stored = await this.env.ARTIFACTS.get(output);
 
       if (stored === null) return;
-      await copyInto(this.env.ARTIFACTS, cache.key, stored, stored.size <= INLINE_BYTES ? await stored.arrayBuffer() : null, { expires: String(cache.expires), answer: answer ?? '' });
+      await copyInto(this.env.ARTIFACTS, cache.key, stored, { expires: String(cache.expires), answer: answer ?? '' });
     } catch (cause) {
-      console.error(JSON.stringify({ output, cache: cache.key, error: said(cause) }));
+      console.error(JSON.stringify({ output, cache: cache.key, error: said({ cause }) }));
+    }
+  }
+
+  /** What a command printed, or null, said in the log, when it could not run: for what a task's outcome reads but
+   *  never fails over, its usage and its answer's marker. */
+  private async optional(container: Container, what: string, argv: readonly string[]): Promise<string | null> {
+    try {
+      return (await run(container, [...argv], { ms: EXEC_MS })).stdout;
+    } catch (cause) {
+      console.error(JSON.stringify({ reading: what, argv, error: said({ cause }) }));
+
+      return null;
     }
   }
 

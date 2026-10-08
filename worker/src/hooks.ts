@@ -205,7 +205,7 @@ exit "$code"
 
 /** The job the webhook starts for a commit: one micro command task labelled `ci <project> <sha12>`, whose spec names
  *  the GitHub token's secret and asks for the deployment's bearer at claim, never in its stored env. */
-export function driverSpec(project: string, sha: string, origin: string, deploySha: string, config: HookConfig): v.InferInput<typeof JobSpecSchema> {
+export function driverSpec(project: string, sha: string, { origin, sha: deploySha }: { readonly origin: string; readonly sha: string }, config: HookConfig): v.InferInput<typeof JobSpecSchema> {
   return {
     recipe: driverRecipe(deploySha),
     run: { kind: 'command' },

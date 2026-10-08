@@ -164,7 +164,7 @@ describe('the github webhook', () => {
   });
 
   test('builds the driver spec: micro command, ci label, secrets by name only, the bearer at claim', () => {
-    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, 'https://armada.test', 'b'.repeat(40), CONFIG));
+    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG));
 
     expect(spec.label).toBe(`ci armada ${SHA.slice(0, 12)}`);
     expect(spec.run).toEqual({ kind: 'command' });
@@ -210,7 +210,7 @@ describe('the webhooks route', () => {
 describe('a driver job at claim', () => {
   test('gets the deployment bearer in its env, masked by its secrets list, kept nowhere', async () => {
     const { ArmadaJob } = await import('../src/job');
-    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, 'https://armada.test', 'b'.repeat(40), CONFIG));
+    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG));
 
     const open = new ArmadaJob(state().ctx, world({
       ARMADA_TOKEN: TOKEN,

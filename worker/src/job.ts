@@ -81,6 +81,20 @@ const WATCHDOG_MS = 15_000;
 /** A vessel that has not been heard from in this long, while booting or working, is lost. */
 const SILENT_MS = { waiting: 60 * 60_000, booting: 8 * 60_000, working: 4 * 60_000 } as const;
 
+/** What a pushed task's cached answers are keyed by beside the item: its bundle, its id and its environment. */
+interface CacheScope {
+  readonly bundle: string;
+  readonly task: string;
+  readonly environment: string;
+}
+
+/** One run of a task: its index, which attempt it is, and whether it is a copy of a run already going. */
+interface Attempt {
+  readonly index: number;
+  readonly attempt: number;
+  readonly duplicate: boolean;
+}
+
 /** Lost vessels a job replaces before it stops replacing them. */
 const REPLACEMENTS = 8;
 
@@ -156,9 +170,9 @@ export class ArmadaJob extends DurableObject<Env> {
   private insert(items: readonly Task[]): number[] {
     const first = this.count('1 = 1');
 
-    items.forEach((task, at) => {
+    for (const [at, task] of items.entries()) {
       this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued');
-    });
+    }
 
     return items.map((_, at) => first + at);
   }
@@ -257,17 +271,13 @@ export class ArmadaJob extends DurableObject<Env> {
     for (const row of reserved) this.looking.add(row.idx);
     const { bundle, id: task } = spec.run;
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
-    const environment = (await this.ctx.storage.get<string>('key')) ?? '';
+    const scope: CacheScope = { bundle, task, environment: (await this.ctx.storage.get<string>('key')) ?? '' };
 
     for (let from = 0; from < reserved.length; from += CACHE_READS) {
       await Promise.all(reserved.slice(from, from + CACHE_READS).map(async (row) => {
         const index = row.idx;
 
-        const answered = await this.cachedAnswer(bundle, task, environment, index, v.parse(TaskSchema, JSON.parse(row.item)).item).catch((cause: unknown) => {
-          console.error(JSON.stringify({ job: id, index, cache: said(cause) }));
-
-          return null;
-        });
+        const answered = await this.readCache(id, scope, index, v.parse(TaskSchema, JSON.parse(row.item)).item);
 
         this.looking.delete(index);
 
@@ -289,7 +299,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** The cached answer of `item` as task `index`'s outcome, with the key its output is read from; or null when the cache
    *  holds none. Nothing is copied: a small answer rides in the outcome, and a large one is read where it is cached. */
-  private async cachedAnswer(bundle: string, task: string, environment: string, index: number, item: Json): Promise<{ readonly outcome: Outcome; readonly key: string } | null> {
+  private async cachedAnswer({ bundle, task, environment }: CacheScope, index: number, item: Json): Promise<{ readonly outcome: Outcome; readonly key: string } | null> {
     const key = await cacheKey(bundle, task, environment, item);
     const cached = await this.env.ARTIFACTS.head(key);
 
@@ -299,8 +309,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const value = small === undefined ? undefined : textOf(small);
 
     const outcome: Outcome = {
-      index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true,
-      ...value === undefined ? {} : { value }, ...answer === 'value' || answer === 'command' ? { answer } : {},
+      index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true, value,
+      answer: answer === 'value' || answer === 'command' ? answer : undefined,
     };
 
     return { outcome, key };
@@ -349,7 +359,7 @@ export class ArmadaJob extends DurableObject<Env> {
     try {
       await this.env.VESSEL.getByName(`${id}/${name}`).begin(vessel);
     } catch (cause) {
-      await this.vesselFailed(name, `could not start: ${said(cause)}`);
+      await this.vesselFailed(name, `could not start: ${said({ cause })}`);
     }
   }
 
@@ -396,7 +406,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const now = Date.now();
     // Secrets are read for each claim and never kept: the job holds only their names. A driver job's deployToken
     // adds the deployment's bearer at claim, masked as one more secret and stored nowhere.
-    const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec), ...(spec.deployToken ? { ARMADA_TOKEN: this.env.ARMADA_TOKEN } : {}) };
+    const own = { ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec) };
+    const env = spec.deployToken ? { ...own, ARMADA_TOKEN: this.env.ARMADA_TOKEN } : own;
     const ganged = await this.rank(spec, env, name);
 
     if (ganged !== undefined) return ganged;
@@ -412,13 +423,13 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const hedged = this.hedged(spec, name, slot, first?.weight ?? 0);
 
-    if (hedged !== undefined) return await this.cached(spec, this.claimOf(spec, env, hedged.idx, hedged.item, hedged.attempts, true), hedged.item);
+    if (hedged !== undefined) return await this.cached(spec, this.claimOf(spec, env, hedged.item, { index: hedged.idx, attempt: hedged.attempts, duplicate: true }), hedged.item);
 
     const next = first === undefined ? undefined : this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, slot, first.idx,
     ).toArray()[0];
 
-    if (next !== undefined) return await this.cached(spec, this.claimOf(spec, env, next.idx, next.item, next.attempts, false), next.item);
+    if (next !== undefined) return await this.cached(spec, this.claimOf(spec, env, next.item, { index: next.idx, attempt: next.attempts, duplicate: false }), next.item);
     const [later] = this.sql.exec<{ at: number | null }>(`SELECT MIN(not_before) AS at FROM tasks WHERE state = 'queued'`).toArray();
 
     // At most a minute at a time, so a waiting vessel still beats.
@@ -440,7 +451,7 @@ export class ArmadaJob extends DurableObject<Env> {
       name, slot, name, now,
     ).toArray()[0];
 
-    if (straggler !== undefined) return await this.cached(spec, this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true), straggler.item);
+    if (straggler !== undefined) return await this.cached(spec, this.claimOf(spec, env, straggler.item, { index: straggler.idx, attempt: straggler.attempts, duplicate: true }), straggler.item);
     // Stay for a task about to become a straggler, one vessel for each, rather than retire.
     const soon = this.sql.exec<{ n: number; at: number | null }>(`SELECT COUNT(*) AS n, MIN(${due}) AS at FROM tasks WHERE ${lone} AND ${due} <= ?`, name, now + STANDBY_MS).one();
     const staying = Number(this.sql.exec('SELECT COUNT(*) AS n FROM standby WHERE until > ?', now).one()['n']);
@@ -508,7 +519,7 @@ export class ArmadaJob extends DurableObject<Env> {
       token: (await this.ctx.storage.get<string>(`gang:${String(mine.idx)}`)) ?? '',
     };
 
-    const claim = this.claimOf(spec, env, mine.idx, task.item, attempts, false);
+    const claim = this.claimOf(spec, env, task.item, { index: mine.idx, attempt: attempts, duplicate: false });
 
     return { ...claim, env: { ...claim.env, ARMADA_RANK: String(rank), ARMADA_WORLD: String(world) }, gang };
   }
@@ -519,15 +530,37 @@ export class ArmadaJob extends DurableObject<Env> {
     return this.sql.exec<{ rank: number; state: string }>('SELECT rank, state FROM members WHERE idx = ? AND vessel = ?', index, name).toArray()[0];
   }
 
-  private claimOf(spec: Kept, own: Record<string, string>, index: number, stored: string, attempt: number, duplicate: boolean): Claim {
+  private claimOf(spec: Kept, own: Record<string, string>, stored: string, { index, attempt, duplicate }: Attempt): Claim {
     const task = v.parse(TaskSchema, JSON.parse(stored));
 
-    const env = {
+    const common = {
       ...commandEnv(spec.recipe, own), ARMADA_ITEM: JSON.stringify(task.item) ?? 'null', ARMADA_INDEX: String(index), ARMADA_ATTEMPT: String(attempt),
-      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
+      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_CGROUP: TASK_GROUP,
     };
 
-    return { index, attempt, argv: spec.run.kind === 'task' ? (spec.run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH]) : task.argv ?? ['false'], env, secrets: spec.deployToken ? [...spec.secrets, 'ARMADA_TOKEN'] : spec.secrets, duplicate };
+    const { run } = spec;
+
+    // A pushed task's bundle runs under its runtime; a command task runs its own argv.
+    if (run.kind === 'command') return { index, attempt, argv: task.argv ?? ['false'], env: common, secrets: this.secretsOf(spec), duplicate };
+
+    return { index, attempt, argv: run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH], env: { ...common, ARMADA_TASK: run.id }, secrets: this.secretsOf(spec), duplicate };
+  }
+
+  /** The names a claim's log masks: the job's secrets, and the deployment's bearer a driver job gets. */
+  private secretsOf(spec: Kept): readonly string[] {
+    return spec.deployToken ? [...spec.secrets, 'ARMADA_TOKEN'] : spec.secrets;
+  }
+
+  /** `item`'s cached answer as task `index`'s, or null, said in the log, when the cache could not be read: the task then
+   *  runs, as an uncached one does. */
+  private async readCache(id: string, scope: CacheScope, index: number, item: Json): Promise<{ readonly outcome: Outcome; readonly key: string } | null> {
+    try {
+      return await this.cachedAnswer(scope, index, item);
+    } catch (cause) {
+      console.error(JSON.stringify({ job: id, index, cache: said({ cause }) }));
+
+      return null;
+    }
   }
 
   /** `claim` with where its green answer is cached, when the job keeps a cache. */
@@ -606,6 +639,13 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(held));
   }
 
+  /** The task an answer lands for, with its retries: a plain task landing on `name`, or a gang's, running. */
+  private landing(name: string, index: number, ganged: boolean): { readonly retries: number } | undefined {
+    if (ganged) return this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'running'`, index).toArray()[0];
+
+    return this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'landing' AND vessel = ?`, index, name).toArray()[0];
+  }
+
   /** The kept answer, once its output and log are in R2: appended to the stream, or, for a failure the job's retries
    *  name, the task queued again after its backoff. */
   async complete(name: string, outcome: Outcome, busyMs: number): Promise<void> {
@@ -614,10 +654,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
     const retries = (await this.spec())?.retries;
 
-    const task = kept === null ? undefined
-      // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
-      : member === undefined ? this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'landing' AND vessel = ?`, kept.index, name).toArray()[0]
-        : this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'running'`, kept.index).toArray()[0];
+    // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
+    const task = kept === null ? undefined : this.landing(name, kept.index, member !== undefined);
 
     const named = kept !== null && kept.exitCode !== 0
       && (retries?.exitCodes.includes(kept.exitCode) === true || (kept.error !== undefined && retries?.errors.includes(kept.error) === true));
@@ -832,7 +870,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const last = rows.at(-1)?.seq ?? after;
     const more = Number(this.sql.exec('SELECT COUNT(*) AS n FROM events WHERE seq > ?', last).one()['n']) > 0;
 
-    return { events: rows.map((row) => ({ seq: row.seq, outcome: v.parse(OutcomeSchema, JSON.parse(row.outcome)), ...row.at === null ? {} : { at: row.at } })), done: done && !more };
+    return { events: rows.map((row) => ({ seq: row.seq, outcome: v.parse(OutcomeSchema, JSON.parse(row.outcome)), at: row.at ?? undefined })), done: done && !more };
   }
 
   /** Each task running now on each container it runs on: a task on its vessel and on the vessel repeating it, a gang
