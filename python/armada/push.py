@@ -147,11 +147,11 @@ def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
             inside = str(path.relative_to(root))
             # zipimport needs each directory a regular package: an empty __init__.py where the project has none.
             for depth in range(1, inside.count("/") + 1):
-                package = inside.rsplit("/", depth)[0]
-                if package not in packaged:
-                    packaged.add(package)
-                    if not (root / package / "__init__.py").exists():
-                        add(f"{package}/__init__.py", b"")
+                folder = inside.rsplit("/", depth)[0]
+                if folder not in packaged:
+                    packaged.add(folder)
+                    if not (root / folder / "__init__.py").exists():
+                        add(f"{folder}/__init__.py", b"")
             add(inside, path.read_bytes())
         names = sorted(str(path.relative_to(root)).removesuffix(".py").replace(os.sep, ".") for path in files)
         entry = (
