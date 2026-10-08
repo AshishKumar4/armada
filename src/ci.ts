@@ -432,15 +432,19 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     return 2;
   }
 
-  if (planArgs.length === 0) await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
-  else note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
   const usage = usageOf([...planRun, ...results].map((result) => result.meta));
 
-  await armada.post(`/timings/${config.name}`, {
-    rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
-  });
+  if (planArgs.length === 0) {
+    await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
+    // The usage of a narrowed run is not the commit's either: it would size the next full run down to a part's needs.
+    await armada.post(`/timings/${config.name}`, {
+      rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
+    });
+  } else {
+    note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
+  }
   printReds(graded.reds, evidence, note);
   const boots = summary.bootMs;
 
