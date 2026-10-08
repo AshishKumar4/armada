@@ -14,6 +14,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, Optional
 
+from dataclasses import dataclass
+
 from .client import Armada, connect
 
 CONFIG_FILE = "pyproject.toml"
@@ -23,7 +25,26 @@ class PushError(Exception):
     pass
 
 
-def find_project(here: Optional[str] = None) -> Optional[tuple[Path, dict[str, Any]]]:
+@dataclass(frozen=True)
+class Project:
+    """A project's root and its [tool.armada] config."""
+
+    root: Path
+    slug: str
+    tasks: list[str]
+
+
+@dataclass(frozen=True)
+class Pushed:
+    """What a push recorded on the deployment."""
+
+    project: str
+    bundle: str
+    ids: list[str]
+    runtime: str
+
+
+def find_project(here: Optional[str] = None) -> Optional[Project]:
     """The project above `here`: its root and [tool.armada] config (`project`, `tasks`), or None outside one."""
     directory = Path(here or os.getcwd()).resolve()
     while True:
@@ -31,7 +52,7 @@ def find_project(here: Optional[str] = None) -> Optional[tuple[Path, dict[str, A
         if file.exists():
             table = tomllib.loads(file.read_text()).get("tool", {}).get("armada", {})
             if "project" in table:
-                return directory, {"project": table["project"], "tasks": list(table.get("tasks", ["armada"]))}
+                return Project(directory, str(table["project"]), [str(each) for each in table.get("tasks", ["armada"])])
         if directory.parent == directory:
             return None
         directory = directory.parent
@@ -62,8 +83,10 @@ def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str]]:
                 import importlib.util
 
                 spec = importlib.util.spec_from_file_location(f"_armada_scan_{path.stem}_{abs(hash(path))}", path)
-                module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-                spec.loader.exec_module(module)  # type: ignore[union-attr]
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
                 for name, value in vars(module).items():
                     if _is_task(value):
                         if value.id in owners:
@@ -164,15 +187,14 @@ def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
     return archive.getvalue(), ids
 
 
-def push(armada: Armada, here: Optional[str] = None) -> Optional[dict[str, Any]]:
+def push(armada: Armada, here: Optional[str] = None) -> Optional[Pushed]:
     """Pushes the project above `here`: its bundle, then its ids against it. None outside a project."""
     found = find_project(here)
     if found is None:
         return None
-    root, config = found
-    content, ids = bundle_tasks(root, config["tasks"])
-    record = {"project": config["project"], "bundle": armada.upload_bundle(content), "ids": ids, "runtime": "python"}
-    armada.post("/tasks", record)
+    content, ids = bundle_tasks(found.root, found.tasks)
+    record = Pushed(found.slug, armada.upload_bundle(content), ids, "python")
+    armada.post("/tasks", {"project": record.project, "bundle": record.bundle, "ids": record.ids, "runtime": record.runtime})
 
     return record
 
@@ -188,5 +210,5 @@ def pushed(armada: Armada) -> Optional[str]:
     with _lock:
         if key not in _pushes:
             record = push(armada, os.getcwd())
-            _pushes[key] = record["bundle"] if record is not None else None
+            _pushes[key] = record.bundle if record is not None else None
     return _pushes[key]

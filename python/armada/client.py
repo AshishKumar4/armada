@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Optional, Union
 
-from .wire import PROTOCOL, PROTOCOL_HEADER
+from .wire import Json, PROTOCOL, PROTOCOL_HEADER
 
 CONFIG_DIR = Path.home() / ".config" / "armada"
 
@@ -147,9 +147,8 @@ class Armada:
     def cancel(self, job: str) -> None:
         self.call(f"/jobs/{job}/cancel", "POST")
 
-    def status(self, job: str) -> dict[str, Any]:
-        answer = self.call(f"/jobs/{job}").json()
-        return dict(answer) if isinstance(answer, dict) else {}
+    def status(self, job: str) -> "JobStatus":
+        return JobStatus.of(self.call(f"/jobs/{job}").json())
 
     def events(self, job: str, after: int) -> dict[str, Any]:
         answer = self.call(f"/jobs/{job}/events?after={after}").json()
@@ -198,19 +197,103 @@ class Armada:
         return {"key": str(answer["key"]), "base": str(answer["base"])}
 
 
-def summary_of(status: dict[str, Any]) -> dict[str, Any]:
-    """A job's times and counts, from its status."""
-    finished = status["finishedAt"] if status.get("finishedAt") is not None else int(time.time() * 1000)
-    started = status["startedAt"] if status.get("startedAt") is not None else finished
-    map_ms = finished - started
-    tasks = status["tasks"]
+@dataclass(frozen=True)
+class TaskCounts:
+    total: int
+    queued: int
+    running: int
+    exited: int
+    red: int
+    failed: int
 
-    return {
-        "tasks": tasks["total"], "green": tasks["exited"] - tasks["red"], "red": tasks["red"], "failed": tasks["failed"],
-        "wallMs": finished - status["createdAt"], "mapMs": map_ms, "vessels": len(status.get("vessels", [])),
-        "bootMs": sorted(v["bootMs"] for v in status.get("vessels", []) if v.get("bootMs") is not None),
-        "tasksPerSecond": (tasks["exited"] + tasks["failed"]) / (map_ms / 1000) if map_ms > 0 else 0,
-    }
+
+@dataclass(frozen=True)
+class Vessel:
+    """One container's row in a job's status."""
+
+    name: str
+    state: str
+    tasks: int
+    boot_ms: Optional[int]
+    busy_ms: float
+    error: Optional[str]
+
+
+@dataclass(frozen=True)
+class Environment:
+    key: str
+    sha: Optional[str]
+    created: int
+    seconds: dict[str, float]
+
+
+@dataclass(frozen=True)
+class Running:
+    index: int
+    vessel: str
+    started: int
+    slot: Optional[int]
+
+
+@dataclass(frozen=True)
+class JobStatus:
+    """A job's status, as the deployment reports it (`GET /jobs/<id>`)."""
+
+    id: str
+    label: str
+    phase: str
+    key: str
+    created_at: int
+    started_at: Optional[int]
+    finished_at: Optional[int]
+    tasks: TaskCounts
+    vessels: list[Vessel]
+    problems: list[str]
+    environment: Optional[Environment]
+    running: Optional[list[Running]]
+
+    @staticmethod
+    def of(raw: object) -> "JobStatus":
+        assert isinstance(raw, dict)
+        environment = raw.get("environment")
+        return JobStatus(
+            id=str(raw.get("id", "")), label=str(raw.get("label", "")), phase=str(raw.get("phase", "")), key=str(raw.get("key", "")),
+            created_at=int(raw.get("createdAt", 0)), started_at=raw.get("startedAt"), finished_at=raw.get("finishedAt"),
+            tasks=TaskCounts(**{key: int(raw.get("tasks", {}).get(key, 0)) for key in ("total", "queued", "running", "exited", "red", "failed")}),
+            vessels=[Vessel(str(each.get("name", "")), str(each.get("state", "")), int(each.get("tasks", 0)), each.get("bootMs"), float(each.get("busyMs", 0)), each.get("error")) for each in raw.get("vessels", [])],
+            problems=[str(each) for each in raw.get("problems", [])],
+            environment=None if not isinstance(environment, dict) else Environment(str(environment.get("key", "")), environment.get("sha"), int(environment.get("created", 0)), {str(k): float(v) for k, v in environment.get("seconds", {}).items()}),
+            running=None if raw.get("running") is None else [Running(int(each.get("index", 0)), str(each.get("vessel", "")), int(each.get("started", 0)), each.get("slot")) for each in raw.get("running", [])],
+        )
+
+
+@dataclass(frozen=True)
+class Summary:
+    """A job's times and counts, from its status."""
+
+    tasks: int
+    green: int
+    red: int
+    failed: int
+    wall_ms: int
+    map_ms: int
+    vessels: int
+    boot_ms: list[int]
+    tasks_per_second: float
+
+
+def summary_of(status: JobStatus) -> Summary:
+    """A job's times and counts, from its status."""
+    finished = status.finished_at if status.finished_at is not None else int(time.time() * 1000)
+    started = status.started_at if status.started_at is not None else finished
+    map_ms = finished - started
+
+    return Summary(
+        tasks=status.tasks.total, green=status.tasks.exited - status.tasks.red, red=status.tasks.red, failed=status.tasks.failed,
+        wall_ms=finished - status.created_at, map_ms=map_ms, vessels=len(status.vessels),
+        boot_ms=sorted(vessel.boot_ms for vessel in status.vessels if vessel.boot_ms is not None),
+        tasks_per_second=(status.tasks.exited + status.tasks.failed) / (map_ms / 1000) if map_ms > 0 else 0,
+    )
 
 
 def _as_iter_bytes(stream: BinaryIO, chunk: int = 65536) -> Iterator[bytes]:

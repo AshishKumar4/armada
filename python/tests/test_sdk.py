@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from armada import Armada, Connection, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task  # noqa: E402
+from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task  # noqa: E402
 from armada.push import bundle_tasks, find_project  # noqa: E402
 from armada.wire import environment_key  # noqa: E402
 
@@ -56,44 +56,50 @@ class TestRecipe(unittest.TestCase):
         self.assertEqual(built["install"], "a\nb")
 
 
+def _ctx() -> Context:
+    return Context(0, 1, threading.Event(), out_file("/tmp/armada-test-out"), "/tmp", "/tmp", {})
+
+
 class TestEnvelope(unittest.TestCase):
     def test_value_and_error_round_trip_through_the_wire_shapes(self) -> None:
         from armada.runner import run_tasks  # noqa: F401 — the in-container side
 
         @task(id="square")
-        def square(n: int, ctx: object) -> int:
+        def square(n: int, ctx: Context) -> int:
             return n * n
 
-        envelope = square.run_envelope(7, None)  # type: ignore[arg-type]
+        envelope = square.run_envelope(7, _ctx())
         # The client reads exactly what runner.ts writes: {"ok":true,"value":...} / {"ok":false,"error":{...}}.
         self.assertEqual(envelope, {"ok": True, "value": 49})
 
         @task(id="broke")
-        def broke(n: int, ctx: object) -> int:
+        def broke(n: int, ctx: Context) -> int:
             raise ValueError("no")
 
-        failed = broke.run_envelope(1, None)  # type: ignore[arg-type]
+        failed = broke.run_envelope(1, _ctx())
         self.assertFalse(failed["ok"])
         self.assertEqual(failed["error"]["name"], "ValueError")
         self.assertEqual(failed["error"]["message"], "no")
 
         @task(id="raw-bytes")
-        def raw_bytes(n: int, ctx: object) -> bytes:
+        def raw_bytes(n: int, ctx: Context) -> bytes:
             return b"\x00\x01"
 
-        binary = raw_bytes.run_envelope(0, None)  # type: ignore[arg-type]
+        binary = raw_bytes.run_envelope(0, _ctx())
         self.assertEqual(binary, {"ok": True, "bytes": base64.b64encode(b"\x00\x01").decode()})
 
     def test_answer_reads_the_envelope_like_task_ts(self) -> None:
+        from armada.task import RemoteError, _Value
+
         @task(id="square")
-        def square(n: int, ctx: object) -> int:
+        def square(n: int, ctx: Context) -> int:
             return n * n
 
         outcome = {"answer": "value", "value": json.dumps({"ok": True, "value": 9}), "exitCode": 0, "tail": ""}
-        self.assertEqual(square.answer(outcome, lambda: None), ("ok", 9))
+        self.assertEqual(square.answer(outcome, lambda: None), _Value(9))
         dead = {"answer": "value", "exitCode": 137, "tail": "killed", "output": True}
-        kind, error = square.answer(dead, lambda: b"")
-        self.assertEqual((kind, error.name), ("error", "Exit"))
+        error = square.answer(dead, lambda: b"")
+        self.assertEqual((type(error).__name__, error.name if isinstance(error, RemoteError) else ""), ("RemoteError", "Exit"))
 
 
 class TestBundle(unittest.TestCase):
@@ -180,11 +186,11 @@ class TestClient(unittest.TestCase):
 
 class TestTaskShapes(unittest.TestCase):
     def test_result_and_maperror_shapes(self) -> None:
-        from armada.task import Meta, Result
+        from armada.task import Meta, Ok, TimedOut
 
         results = [
-            Result(0, "a", Meta(1.0, 1, "v1", 0, ""), True, "ok", value="x"),
-            Result(1, "b", Meta(1.0, 1, "v1", 124, "tail"), False, "timeout"),
+            Ok(0, "a", Meta(1.0, 1, "v1", 0, ""), "x"),
+            TimedOut(1, "b", Meta(1.0, 1, "v1", 124, "tail")),
         ]
         raised = MapError(results)
         self.assertIn("1 of 2", str(raised))
@@ -197,10 +203,10 @@ class TestTaskShapes(unittest.TestCase):
 
     def test_a_task_validates_its_input_and_output(self) -> None:
         @task(id="typed", input=lambda v: int(v))
-        def typed(n: int, ctx: object) -> int:
+        def typed(n: int, ctx: Context) -> int:
             return n
 
-        self.assertEqual(typed.run_envelope("3", None), {"ok": True, "value": 3})  # type: ignore[arg-type]
+        self.assertEqual(typed.run_envelope("3", _ctx()), {"ok": True, "value": 3})
         with self.assertRaises(SchemaError):
             typed._wire("not-an-int", 0)
 

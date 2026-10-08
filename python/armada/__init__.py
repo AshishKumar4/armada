@@ -5,10 +5,13 @@
 from .client import Armada, Connection, RequestError, connect, summary_of
 from .recipe import RecipeBuilder, debian, from_, recipe
 from .sh import Completed, OutFile, Shell, ShellError, out_file, quote, raw, sh
-from .task import Context, Job, MapError, Meta, RemoteError, Result, SchemaError, Task, task
+from .client import JobStatus, Summary, TaskCounts, Vessel
+from .task import (Cancelled, Context, Errored, Job, Lost, MapError, Meta, Ok, RemoteError, Result, SchemaError,
+                   Task, TimedOut, Validator, task)
 
 __all__ = [
     "Armada", "Completed", "Connection", "Context", "Job", "MapError", "Meta", "OutFile", "RecipeBuilder",
-    "RemoteError", "RequestError", "Result", "SchemaError", "Shell", "ShellError", "Task",
+    "Cancelled", "Errored", "JobStatus", "Lost", "Ok", "RemoteError", "RequestError", "Result", "SchemaError",
+    "Shell", "ShellError", "Summary", "Task", "TaskCounts", "TimedOut", "Validator", "Vessel",
     "connect", "debian", "from_", "out_file", "quote", "raw", "recipe", "sh", "summary_of", "task",
 ]

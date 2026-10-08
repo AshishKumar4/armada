@@ -14,7 +14,7 @@ def main() -> None:
     if record is None:
         print("armada: no [tool.armada] project found above here", file=sys.stderr)
         sys.exit(1)
-    print(f"pushed {len(record['ids'])} tasks ({', '.join(record['ids'])}) as {record['bundle'][:12]}…")
+    print(f"pushed {len(record.ids)} tasks ({', '.join(record.ids)}) as {record.bundle[:12]}…")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,10 @@ protocol.ts holds, so a Python task and a TypeScript one speak the same bytes.""
 
 import hashlib
 import json
+from typing import Dict, List, Union
+
+# A JSON value, as protocol.ts's `Json` — what items and envelopes carry.
+Json = Union[str, float, int, bool, None, List["Json"], Dict[str, "Json"]]
 
 # The wire's version, which every request names in PROTOCOL_HEADER.
 PROTOCOL = 7
