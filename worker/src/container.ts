@@ -14,6 +14,10 @@ export const STATE = '/armada';
 
 export const TASK = `${STATE}/task`;
 
+/** Where slot `slot`'s task runs: its pid, log, exit code, out file and answer. A container runs one task per slot at
+ *  once, and slot 0's is `TASK`. */
+export const taskDir = (slot: number): string => slot === 0 ? TASK : `${TASK}-${String(slot)}`;
+
 /** Where the container's main process marks that the platform asked the container to stop (`hold`). */
 export const STOPPING = `${STATE}/stopping`;
 
@@ -30,18 +34,21 @@ const PARENT_GROUP = '/sys/fs/cgroup/armada';
  *  controllers holds no process. Everything in it ends with the task, daemons it detached with `setsid` included. */
 export const TASK_GROUP = `${PARENT_GROUP}/task`;
 
+/** Slot `slot`'s `TASK_GROUP`. */
+export const taskGroup = (slot: number): string => slot === 0 ? TASK_GROUP : `${TASK_GROUP}-${String(slot)}`;
+
 /** Controllers a task's groups get: CPU and memory to read and to cap, pids to bound. */
 const CONTROLLERS = '+cpu +memory +pids';
 
-/** As root: ends everything in the task's group, the user's nested groups included, and removes them. */
-const END_GROUP = String.raw`if [ -d ${TASK_GROUP} ]; then
-  echo 1 > ${TASK_GROUP}/cgroup.kill
+/** As root: ends everything in `group`, a task's, the user's nested groups included, and removes them. */
+const endGroup = (group: string): string => String.raw`if [ -d ${group} ]; then
+  echo 1 > ${group}/cgroup.kill
   n=0
-  while grep -q '^populated 1' ${TASK_GROUP}/cgroup.events; do
-    n=$((n + 1)); [ "$n" -lt 100 ] || { echo "${TASK_GROUP} would not empty" >&2; exit 1; }
+  while grep -q '^populated 1' ${group}/cgroup.events; do
+    n=$((n + 1)); [ "$n" -lt 100 ] || { echo "${group} would not empty" >&2; exit 1; }
     sleep 0.05
   done
-  find ${TASK_GROUP} -depth -type d -exec rmdir {} +
+  find ${group} -depth -type d -exec rmdir {} +
 fi`;
 
 /** git as a GitHub runner has it: Debian trixie's 2.47 prints no `path=` records for `rev-list --objects -z`. Built
@@ -98,25 +105,27 @@ export function mounts(tmpfs: readonly string[]): string {
 for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); do umount -l "$masked"; done`;
 }
 
-/** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
- *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
- *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
- *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. The
- *  groups are set up here, at each launch, so a container an earlier Worker started has them. */
-export function launchTask(workdir: string): string {
+/** As root, detached so the exec returns: whatever slot `slot`'s last task left running ended, then one task as the
+ *  user in its own session and a fresh `taskGroup(slot)` delegated to the user, its output to the task's log, its exit
+ *  code to the task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would
+ *  inherit that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it
+ *  runs. The groups are set up here, at each launch, so a container an earlier Worker started has them. */
+export function launchTask(workdir: string, slot = 0): string {
+  const [dir, group] = [taskDir(slot), taskGroup(slot)];
+
   return String.raw`set -eu
 if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
-${END_GROUP}
-mkdir -p ${TASK_GROUP}/runner
-echo '${CONTROLLERS}' > ${TASK_GROUP}/cgroup.subtree_control
-for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${TASK_GROUP}/$owned"; done
-rm -rf ${TASK}
-mkdir -p ${TASK}
-chown ci:ci ${TASK}
+${endGroup(group)}
+mkdir -p ${group}/runner
+echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
+for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done
+rm -rf ${dir}
+mkdir -p ${dir}
+chown ci:ci ${dir}
 cd ${workdir}
-setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
+setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${group}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${dir}/pid; "$@" > ${dir}/log 2>&1; echo $? > ${dir}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
@@ -129,6 +138,20 @@ cat ${dir}/exit 2>/dev/null || true`;
 
 export const WAIT = waitOn(TASK);
 
+/** Waits up to `$1` seconds for a task in any of the slots after it to end, then prints `<slot> <exit code>` for each
+ *  that has, or nothing while they all run. */
+export const WAIT_ANY = String.raw`end=$(( $(date +%s) + $1 ))
+shift
+while :; do
+  ended=
+  for slot in "$@"; do
+    if [ "$slot" = 0 ]; then dir=${TASK}; else dir=${TASK}-$slot; fi
+    if [ -f "$dir/exit" ]; then echo "$slot $(cat "$dir/exit")"; ended=1; fi
+  done
+  if [ -n "$ended" ] || [ "$(date +%s)" -ge "$end" ]; then break; fi
+  sleep 0.05
+done`;
+
 /** As root, detached so the exec returns: phase `$1` of a preparation, its command the rest, once per container
  *  however often it is asked (the directory claims it), its output to the phase's log and its exit code to its `exit`. */
 export const LAUNCH_PHASE = String.raw`set -eu
@@ -139,7 +162,9 @@ mkdir "$dir" 2>/dev/null || exit 0
 setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
 /** The task's cgroup after it exited: its peak memory in bytes, then its CPU time in microseconds. */
-export const USAGE = String.raw`cat ${TASK_GROUP}/memory.peak; sed -n 's/^usage_usec //p' ${TASK_GROUP}/cpu.stat`;
+export const usageOf = (slot: number): string => String.raw`cat ${taskGroup(slot)}/memory.peak; sed -n 's/^usage_usec //p' ${taskGroup(slot)}/cpu.stat`;
+
+export const USAGE = usageOf(0);
 
 /** `USAGE`'s answer, or nothing for a group already gone. */
 export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: number } {
@@ -188,15 +213,17 @@ fs.closeSync(input);
 fs.closeSync(output);
 fs.renameSync(file + '.masked', file);`;
 
-/** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
-export const KILL = String.raw`set -eu
-pid="$(cat ${TASK}/pid 2>/dev/null || true)"
+/** Ends slot `slot`'s task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
+export const killOf = (slot: number): string => String.raw`set -eu
+pid="$(cat ${taskDir(slot)}/pid 2>/dev/null || true)"
 if [ -n "$pid" ]; then
   kill -TERM -- "-$pid" 2>/dev/null || true
   sleep 2
   kill -KILL -- "-$pid" 2>/dev/null || true
 fi
-${END_GROUP}`;
+${endGroup(taskGroup(slot))}`;
+
+export const KILL = killOf(0);
 
 /** A size's instance type, as a start takes it. */
 export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;
@@ -204,16 +231,22 @@ export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => S
 /** What a container's main process runs under tini, which reaps orphans as PID 1. The platform stops an instance (a
  *  rollout, a host's maintenance) by sending its main process SIGTERM, then SIGKILL 15 minutes later, and a bare
  *  `sleep` would end at the SIGTERM and take the running task with it. This marks the container stopping
- *  (`STOPPING`), so its vessel claims nothing more, holds while the task under `state` runs, up to `graceSeconds`,
- *  then `lingerSeconds` for the vessel to read the answer, and exits. The containers Dew's CI lost mid-task were not
- *  stopped this way: none was marked stopping first. */
+ *  (`STOPPING`), so its vessel claims nothing more, holds while a task under `state` runs in any slot, up to
+ *  `graceSeconds`, then `lingerSeconds` for the vessel to read the answers, and exits. The containers Dew's CI lost
+ *  mid-task were not stopped this way: none was marked stopping first. */
 export function hold(state: string, graceSeconds: number, lingerSeconds: number): string {
   return String.raw`trap 'stop=1' TERM
 stop=
 while [ -z "$stop" ]; do sleep 5 & wait $!; done
 date -u +%Y-%m-%dT%H:%M:%SZ > ${state}/stopping
 end=$(( $(date +%s) + ${String(graceSeconds)} ))
-while [ -f ${state}/task/pid ] && [ ! -f ${state}/task/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 1; done
+running() {
+  for dir in ${state}/task ${state}/task-*; do
+    if [ -f "$dir/pid" ] && [ ! -f "$dir/exit" ]; then return 0; fi
+  done
+  return 1
+}
+while running && [ "$(date +%s)" -lt "$end" ]; do sleep 1; done
 sleep ${String(lingerSeconds)}`;
 }
 
