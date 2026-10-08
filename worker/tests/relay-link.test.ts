@@ -112,7 +112,8 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
   test('carries a program\'s bytes there and back whole, and ends when both sides closed', async () => {
     const result = await run(8 << 20, 'echo', Number.POSITIVE_INFINITY);
 
-    expect({ out: result.out, opened: result.opened }).toEqual({ out: `${String(8 << 20)} True`, opened: ['open'] });
+    // Neither end waits for the other once both are done.
+    expect({ out: result.out, opened: result.opened, err: result.err }).toEqual({ out: `${String(8 << 20)} True`, opened: ['open'], err: '' });
   }, 60_000);
 
   test('carries on over the next WebSocket each time one drops or the vessel\'s connection in is cut, unseen by the program', async () => {

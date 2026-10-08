@@ -286,7 +286,7 @@ class Link:
         self.sent = self.acked = self.taken = self.received = 0
         self.kept, self.incoming = collections.deque(), collections.deque()
         self.ended = self.peer_ended = None
-        self.over = False
+        self.over = self.delivered = False
         self.attach(carrier)
 
     def log(self, what):
@@ -417,9 +417,12 @@ class Link:
                     return
                 data = self.incoming.popleft() if self.incoming else None
             if data is None:
-                # The far end's whole stream arrived: its last bytes are counted, and the program reads its end.
+                # The far end's whole stream arrived: its last bytes are counted, and the program reads its end. The
+                # link is not done before this count is sent, or the far end would wait for it.
                 self.send(self.carrier, True, b"a%d" % self.received)
                 close(self.local)
+                with self.changed:
+                    self.delivered = True
                 self.settle()
                 return
             try:
@@ -434,8 +437,7 @@ class Link:
 
     def settle(self):
         with self.changed:
-            done = (self.ended is not None and self.acked >= self.ended
-                    and self.peer_ended is not None and self.received >= self.peer_ended)
+            done = self.ended is not None and self.acked >= self.ended and self.delivered
         if done:
             self.finish()
 
