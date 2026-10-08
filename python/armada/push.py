@@ -142,8 +142,17 @@ def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
         marker = Path(__file__).parent / "py.typed"
         if marker.exists():
             add("armada/py.typed", marker.read_bytes())
+        packaged: set[str] = set()
         for name, path in sorted(modules.items()):
-            add(str(path.relative_to(root)), path.read_bytes())
+            inside = str(path.relative_to(root))
+            # zipimport needs each directory a regular package: an empty __init__.py where the project has none.
+            for depth in range(1, inside.count("/") + 1):
+                package = inside.rsplit("/", depth)[0]
+                if package not in packaged:
+                    packaged.add(package)
+                    if not (root / package / "__init__.py").exists():
+                        add(f"{package}/__init__.py", b"")
+            add(inside, path.read_bytes())
         names = sorted(str(path.relative_to(root)).removesuffix(".py").replace(os.sep, ".") for path in files)
         entry = (
             "import importlib\n"
