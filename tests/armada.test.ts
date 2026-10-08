@@ -635,7 +635,7 @@ describe('armada verdict', () => {
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0, planConfig: unknown = { command: ['plan'] }, taskConfig: Record<string, unknown> = {}) {
+  async function run(args: readonly string[], plan: unknown, verdict: unknown, taskExit = 0, planConfig: unknown = { command: ['plan'] }, taskConfig: Record<string, unknown> = {}, timings: unknown = { rows: {}, files: {} }) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const git = (...words: string[]) => expect(Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo }).exitCode).toBe(0);
@@ -654,7 +654,7 @@ describe('armada run', () => {
 
         seen.push(`${request.method} ${pathname.split('/').slice(0, 3).join('/')}`);
         if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
-        if (pathname === '/timings/proj' && request.method === 'GET') return Response.json({ rows: {}, files: {} });
+        if (pathname === '/timings/proj' && request.method === 'GET') return Response.json(timings);
         if (pathname === '/jobs') {
           const body: unknown = await request.json();
 
@@ -723,6 +723,13 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, line: line?.replace(/^\s*\d+:\d+\s+/u, ''), told: ran.stdout.includes('AssertionError: y broke') })
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
+  });
+
+  test('an entry with no weight of its own dispatches by its estimate; its own weight wins', async () => {
+    const ran = await run([], { include: [{ name: 'a' }, { name: 'b' }, { name: 'c', weight: 7 }] }, '', 0, { command: ['plan'] }, { verdict: false }, { rows: { a: 42, b: 10 }, files: {} });
+    const items = v.parse(v.object({ items: v.array(v.looseObject({ item: v.looseObject({ name: v.optional(v.string()), weight: v.optional(v.number()) }) })) }), ran.bodies[1]).items;
+
+    expect(items.map((task) => [task.item.name, task.item.weight])).toEqual([['a', 42], ['b', 10], ['c', 7]]);
   });
 
   test('a run\'s pool counts each rank of a gang, so a gang wider than the plan has entries is not refused', async () => {

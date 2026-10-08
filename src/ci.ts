@@ -11,6 +11,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
+import { listSchedule } from './dispatch';
 import { fileTimings, grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
@@ -284,16 +285,9 @@ export function poolFor(estimates: readonly number[], most: number): number {
   const queue = [...estimates].sort((left, right) => right - left);
 
   for (let pool = 1; pool < most; pool += 1) {
-    const loads = Array.from({ length: pool }, () => ({ seconds: 0, tasks: 0 }));
+    const { lanes, loads } = listSchedule(queue, Array.from({ length: pool }, () => 0));
 
-    for (const seconds of queue) {
-      const next = loads.reduce((least, load) => load.seconds < least.seconds ? load : least);
-
-      next.seconds += seconds;
-      next.tasks += 1;
-    }
-
-    if (loads.every((load) => load.tasks === 1 || load.seconds <= longest * 0.8)) return pool;
+    if (loads.every((load, machine) => (lanes[machine]?.length ?? 0) === 1 || load <= longest * 0.8)) return pool;
   }
 
   return most;
@@ -379,8 +373,12 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   // whole tier never sees them.
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
-  // A matrix entry came from JSON, so it is JSON.
-  const entries = plan.include as Json[];
+  // A matrix entry came from JSON, so it is JSON. An entry with no weight of its own dispatches by its estimate.
+  const entries = plan.include.map((entry, index) => {
+    const estimate = estimates[index];
+
+    return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } as Json : entry as Json;
+  });
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
   const jobId = await job.id;
 
