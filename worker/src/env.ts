@@ -1,5 +1,6 @@
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaFleet } from './fleet';
+import type { ArmadaWebhooks } from './hooks';
 import type { ArmadaSecrets } from './secrets';
 import type { ArmadaTasks } from './tasks';
 import type { ArmadaJob } from './job';
@@ -15,12 +16,15 @@ export interface Env {
   readonly FLEET: DurableObjectNamespace<ArmadaFleet>;
   readonly TASKS: DurableObjectNamespace<ArmadaTasks>;
   readonly SECRETS: DurableObjectNamespace<ArmadaSecrets>;
+  readonly WEBHOOKS: DurableObjectNamespace<ArmadaWebhooks>;
   /** Packs, task outputs and logs, verdicts. */
   readonly ARTIFACTS: R2Bucket;
   /** The bearer the SDK presents (`~/.config/armada/connection.json`). */
   readonly ARMADA_TOKEN: string;
   /** Concurrent vCPUs across every job of this deployment. */
   readonly FLEET_VCPUS: string;
+  /** The commit `armada deploy` built this Worker from, written into the deployed vars. */
+  readonly ARMADA_SHA?: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
 }

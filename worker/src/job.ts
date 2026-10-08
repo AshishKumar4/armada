@@ -394,8 +394,9 @@ export class ArmadaJob extends DurableObject<Env> {
     this.members();
     this.slotted();
     const now = Date.now();
-    // Secrets are read for each claim and never kept: the job holds only their names.
-    const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec) };
+    // Secrets are read for each claim and never kept: the job holds only their names. A driver job's deployToken
+    // adds the deployment's bearer at claim, masked as one more secret and stored nowhere.
+    const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec), ...(spec.deployToken ? { ARMADA_TOKEN: this.env.ARMADA_TOKEN } : {}) };
     const ganged = await this.rank(spec, env, name);
 
     if (ganged !== undefined) return ganged;
@@ -490,7 +491,7 @@ export class ArmadaJob extends DurableObject<Env> {
       ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
     };
 
-    return { index, attempt, argv: spec.run.kind === 'task' ? (spec.run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH]) : task.argv ?? ['false'], env, secrets: spec.secrets, duplicate };
+    return { index, attempt, argv: spec.run.kind === 'task' ? (spec.run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH]) : task.argv ?? ['false'], env, secrets: spec.deployToken ? [...spec.secrets, 'ARMADA_TOKEN'] : spec.secrets, duplicate };
   }
 
   /** `claim` with where its green answer is cached, when the job keeps a cache. */

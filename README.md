@@ -323,6 +323,24 @@ way, under `<dir>/<index>`.
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 | `task.secrets` | `[]` | The secrets each task gets in its environment, by name (`armada secret set <name>`). |
 
+### CI on push, through a GitHub webhook
+
+```
+armada webhook add armada --repo=owner/name --pull-requests
+```
+
+gives a project a webhook on the deployment: each push to the repo's configured branches and each pull request
+from the same repository starts that commit's whole `armada run` on the deployment itself, stores the verdict
+exactly as a local run does, and reports a GitHub commit status ("88 of 90 rows green") that links to the
+dashboard's CI page. The endpoint, `POST /webhooks/github/<project>`, is the one path outside the deployment's
+bearer: it is verified only by GitHub's `X-Hub-Signature-256`, a delivery or a commit seen before is answered
+"duplicate" or "already", and a fork's pull request is never built — a fork's code must never get the
+deployment's secrets. The driver runs in a `micro` container that clones the commit, installs armada at the
+deployment's own source commit (`ARMADA_SHA`, set by `armada deploy` and reported by `/health`), and gets its
+GitHub token and the deployment's bearer at claim, masked in its log like any secret. `armada webhook add`
+creates the GitHub hook through `gh` when it is signed in, or prints the settings to add by hand; `armada
+webhook list` and `armada webhook remove <project>` manage them.
+
 A matrix entry may list the `rows` its task must report.
 
 | Size | vCPU | Memory | Cloudflare instance type |
@@ -346,6 +364,9 @@ armada push
 armada dev
 armada status <job-id>
 armada secret set <NAME> | list | delete <NAME>
+armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]
+armada webhook list
+armada webhook remove <project>
 armada prune [--keep=3]
 ```
 

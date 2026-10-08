@@ -9,6 +9,7 @@ import {
   TaskSchema, TimingsSchema,
 } from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
+import { driverSpec, eventOf, HookConfigSchema } from './hooks';
 
 export { ArmadaJob } from './job';
 
@@ -23,6 +24,7 @@ export { ArmadaFleet } from './fleet';
 export { ArmadaTasks } from './tasks';
 
 export { ArmadaSecrets } from './secrets';
+export { ArmadaWebhooks } from './hooks';
 
 /** The bearer, compared in constant time. */
 function authorized(request: Request, env: Env): boolean {
@@ -347,11 +349,40 @@ const environments: Handler = async (request, env, [key]) => {
   return Response.json({ forgotten: key });
 };
 
+/** `/webhooks` (bearer'd): a project's webhook config, set with its GitHub-signing secret once, listed without
+ *  them, or removed. `POST /webhooks/github/<project>` is the unauthenticated endpoint, in `webhooked`. */
+const webhooks: Handler = async (request, env, [project]) => {
+  const hooks = env.WEBHOOKS.getByName(SINGLE);
+
+  if (project === undefined) return request.method === 'GET' ? Response.json({ webhooks: await hooks.list() }) : undefined;
+  if (!v.is(Project, project)) return undefined;
+
+  if (request.method === 'POST') {
+    const config = v.parse(HookConfigSchema, await request.json());
+    const answer = await hooks.configure(project, config);
+
+    return Response.json({ configured: answer });
+  }
+
+  if (request.method === 'PATCH') {
+    const { hook } = v.parse(v.object({ hook: v.number() }), await request.json());
+
+    await hooks.hooked(project, hook);
+
+    return Response.json({ hooked: hook });
+  }
+
+  if (request.method !== 'DELETE') return undefined;
+  const config = await hooks.remove(project);
+
+  return Response.json({ removed: project, ...(config === null ? {} : config) });
+};
+
 /** `/fleet`: the vCPUs each job holds now, under the deployment's cap. */
 const fleet: Handler = async (request, env) => request.method === 'GET' ? Response.json(await env.FLEET.getByName(SINGLE).shares()) : undefined;
 
 const ROUTES: ReadonlyMap<string, Handler> = new Map([
-  ['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments], ['secrets', secrets], ['fleet', fleet],
+  ['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments], ['secrets', secrets], ['fleet', fleet], ['webhooks', webhooks],
 ]);
 
 async function route(request: Request, env: Env): Promise<Response> {
@@ -360,7 +391,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const fleet = env.FLEET.getByName(SINGLE);
 
-  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs() } satisfies Health);
+  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs(), ...(env.ARMADA_SHA === undefined || env.ARMADA_SHA === '' ? {} : { sha: env.ARMADA_SHA }) } satisfies Health);
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
   if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });
@@ -392,6 +423,82 @@ async function route(request: Request, env: Env): Promise<Response> {
   return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
 }
 
+/** Whether `signature` is GitHub's `X-Hub-Signature-256` for `body` under `secret`, timed-safe. */
+export async function signed(secret: string, signature: string, body: string): Promise<boolean> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = [...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const expected = new TextEncoder().encode(`sha256=${mac}`);
+  const supplied = new TextEncoder().encode(signature);
+
+  return expected.length === supplied.length && crypto.subtle.timingSafeEqual(expected, supplied);
+}
+
+/** `POST /webhooks/github/<project>`: outside the bearer, checked only by GitHub's signature. A valid push to a
+ *  built branch or a same-repo pull request starts that commit's driver job — `armada run <sha> --json` on the
+ *  deployment itself — once per delivery and once per commit. */
+export async function webhooked(request: Request, env: Env, project: string): Promise<Response> {
+  const ignored = (note: string) => Response.json({ note });
+  const hooks = env.WEBHOOKS.getByName(SINGLE);
+  const config = await hooks.configOf(project);
+
+  if (config === undefined) return notFound();
+
+  const body = await request.text();
+  const signature = request.headers.get('X-Hub-Signature-256') ?? '';
+
+  if (!(await signed(config.secret, signature, body))) return Response.json({ error: 'bad signature' }, { status: 401 });
+
+  const delivery = request.headers.get('X-GitHub-Delivery') ?? '';
+
+  if (delivery !== '' && await hooks.seen(delivery)) return ignored('duplicate');
+
+  let payload: unknown = null;
+
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return ignored('ignored');
+  }
+  const asked = eventOf(request.headers.get('X-GitHub-Event') ?? '', payload, config);
+
+  if (asked.kind === 'ping') return ignored('pong');
+  if (asked.kind === 'fork') return ignored('fork pull requests are not built');
+  if (asked.kind !== 'push' && asked.kind !== 'pr') return ignored('ignored');
+
+  const sha = asked.sha;
+
+  if ((await env.ARTIFACTS.head(`verdicts/${project}/${sha}.json`)) !== null) return ignored('already');
+  const open = await hooks.driving(project, sha);
+
+  if (open !== undefined) {
+    const prior = await env.JOB.getByName(open).status();
+
+    if (prior !== null && prior.phase !== 'done') return ignored('already');
+  }
+
+  const created = jobId();
+  const fleet = env.FLEET.getByName(SINGLE);
+
+  if (!(await fleet.reserve(env.VERSION.id, created))) return Response.json({ error: 'armada is being redeployed and takes no new job until that is done' }, { status: 503 });
+  const spec = v.parse(JobSpecSchema, driverSpec(project, sha, new URL(request.url).origin, env.ARMADA_SHA ?? 'main', config));
+  const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
+  const unset = spec.secrets.find((name) => !(name in held));
+
+  if (unset !== undefined) {
+    await fleet.closed(created);
+
+    return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
+  }
+
+  await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin).catch(async (cause: unknown) => {
+    await fleet.closed(created);
+    throw cause;
+  });
+  await hooks.drove(project, sha, created);
+
+  return Response.json({ started: created });
+}
+
 /** `/relay/<job>/<vessel>?port=n`: a gang rank's relay, reaching the rank `vessel` runs. No container holds the
  *  deployment's bearer, so the relay presents its gang's token instead, which the vessel checks. */
 async function relayed(request: Request, env: Env, [job, vessel]: readonly string[]): Promise<Response> {
@@ -405,6 +512,9 @@ export default {
     const [first, ...rest] = new URL(request.url).pathname.split('/').filter((segment) => segment !== '');
 
     if (first === 'relay') return await relayed(request, env, rest);
+
+    // The webhook endpoint is outside the bearer: the project's own GitHub-signing secret is the only check.
+    if (first === 'webhooks' && rest[0] === 'github' && rest.length === 2 && request.method === 'POST') return await webhooked(request, env, rest[1]!);
 
     // The dashboard is static assets under /ui/, served before the Worker runs; a browser at the root is sent there.
     if (first === undefined && (request.method === 'GET' || request.method === 'HEAD')) return Response.redirect(new URL('/ui/', request.url).href, 302);

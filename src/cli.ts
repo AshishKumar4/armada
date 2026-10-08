@@ -32,6 +32,10 @@ Usage:
                                        --serve serves it from this machine instead
   armada secret set <NAME>             set a secret from stdin, for the tasks that name it
   armada secret list | delete <NAME>   list the secrets' names, or delete one
+  armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]
+                                       run pushes and pull requests through the deployment's own armada run
+  armada webhook list                  list the configured projects
+  armada webhook remove <project>      remove one, and its GitHub hook when the CLI made it
   armada prune [--keep=3]              delete the snapshots of all but the newest environments
 
 map options:
@@ -77,6 +81,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['status', { options: [], words: 1 }],
   ['dashboard', { options: ['serve='], words: 0 }],
   ['secret', { options: [], words: 2 }],
+  ['webhook', { options: ['repo=', 'branches=', 'pull-requests', 'token-secret='], words: 2 }],
   ['prune', { options: ['keep='], words: 0 }],
 ]);
 
@@ -342,7 +347,9 @@ async function install(account: string, name: string, vcpus: number | undefined,
     .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
     .replace('"directory": "../dist/dashboard"', `"directory": "${DASHBOARD}"`)
     .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
-    .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`));
+    .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`)
+    // The deployment knows its own source commit: the webhook's driver installs armada at it.
+    .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${Bun.spawnSync(['git', '-C', ROOT, 'rev-parse', 'HEAD']).stdout.toString().trim()}"`));
 
   try {
     const deployed = wrangler(['deploy', '-c', config], account);
@@ -461,6 +468,83 @@ async function secret(armada: Armada, verb: string | undefined, name: string | u
   return 0;
 }
 
+/** `webhook add` configures a project on the deployment and — when `gh` is signed in for the repo — creates the
+ *  GitHub hook to it; otherwise it prints the hook's settings to add by hand. The signing secret is generated here
+ *  and shown once, at creation. `webhook remove` deletes both. */
+async function webhook(armada: Armada, verb: string | undefined, project: string | undefined): Promise<number> {
+  const origin = new URL(armada.connection.url).origin;
+
+  if (verb === 'list') {
+    const { webhooks } = v.parse(v.object({ webhooks: v.array(v.looseObject({})) }), await (await armada.call('/webhooks')).json());
+
+    for (const each of webhooks as { project: string; repo: string; branches?: string[]; pullRequests: boolean; tokenSecret: string; hook?: number }[]) {
+      console.log(`${each.project}  ${each.repo}  ${each.branches?.join(',') ?? 'default branch'}  ${each.pullRequests ? 'push + pull requests' : 'push'}  token: ${each.tokenSecret}${each.hook === undefined ? '' : `  hook ${each.hook}`}`);
+    }
+
+    return 0;
+  }
+
+  if (project === undefined || (verb !== 'add' && verb !== 'remove')) throw new Error('webhook takes add <project>, list or remove <project>; see armada --help');
+
+  if (verb === 'remove') {
+    const removed = v.parse(v.object({ removed: v.string(), repo: v.optional(v.string()), hook: v.optional(v.number()) }), await (await armada.call(`/webhooks/${project}`, { method: 'DELETE' })).json());
+
+    if (removed.hook !== undefined && removed.repo !== undefined && gh(['api', `repos/${removed.repo}/hooks/${String(removed.hook)}`, '-X', 'DELETE']) === 0) console.log(`deleted GitHub hook ${removed.hook} on ${removed.repo}`);
+    console.log(`removed ${project}`);
+
+    return 0;
+  }
+  const repo = option('repo');
+
+  if (repo === undefined || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repo)) throw new Error('webhook add needs --repo=<owner/name>');
+  const secret = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const config = {
+    repo,
+    ...(option('branches') === undefined ? {} : { branches: option('branches')!.split(',').filter(Boolean) }),
+    pullRequests: flag('pull-requests'),
+    ...(option('token-secret') === undefined ? {} : { tokenSecret: option('token-secret') }),
+    secret,
+  };
+  const payload = `${origin}/webhooks/github/${project}`;
+
+  await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config) });
+  console.log(`configured ${project}: ${repo} builds ${config.pullRequests ? 'pushes and pull requests' : 'pushes'} at ${payload}`);
+
+  const events = config.pullRequests ? ['push', 'pull_request'] : ['push'];
+  const hookArgs = ['api', `repos/${repo}/hooks`, '-F', 'name=web', '-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${payload}`, '-F', `config[secret]=${secret}`, ...events.flatMap((event) => ['-f', `events[]=${event}`]), '--jq', '.id'];
+
+  if (gh(['auth', 'status']) === 0) {
+    const created = Bun.spawnSync(['gh', ...hookArgs], { stdout: 'pipe', stderr: 'pipe' });
+
+    if (created.exitCode === 0) {
+      const id = Number(created.stdout.toString().trim());
+
+      if (Number.isInteger(id)) {
+        await armada.call(`/webhooks/${project}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hook: id }) });
+        console.log(`created GitHub hook ${id} on ${repo}`);
+
+        return 0;
+      }
+      console.error(`gh answered ${created.stdout.toString().trim()}`);
+    } else {
+      console.error(`gh api failed: ${created.stderr.toString().trim()}`);
+    }
+  }
+
+  console.log(`add the hook by hand: ${repo} → Settings → Webhooks → Add webhook
+  payload URL: ${payload}
+  content type: application/json
+  secret: ${secret}
+  events: ${events.join(', ')}`);
+
+  return 0;
+}
+
+/** `gh <args>` quietly, its exit code — nonzero also when gh is not installed. */
+function gh(argv: readonly string[]): number {
+  return Bun.spawnSync(['gh', ...argv], { stdout: 'pipe', stderr: 'pipe' }).exitCode ?? 1;
+}
+
 async function main(): Promise<number> {
   const [command, ...words] = args.filter((argument) => !argument.startsWith('-'));
 
@@ -507,6 +591,9 @@ async function main(): Promise<number> {
 
     case 'secret':
       return await secret(connect(), target, words[1]);
+
+    case 'webhook':
+      return await webhook(connect(), target, words[1]);
 
     case 'dashboard': {
       const port = whole('serve');

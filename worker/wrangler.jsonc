@@ -24,18 +24,20 @@
       { "name": "TIMINGS", "class_name": "ArmadaTimings" },
       { "name": "FLEET", "class_name": "ArmadaFleet" },
       { "name": "TASKS", "class_name": "ArmadaTasks" },
-      { "name": "SECRETS", "class_name": "ArmadaSecrets" }
+      { "name": "SECRETS", "class_name": "ArmadaSecrets" },
+      { "name": "WEBHOOKS", "class_name": "ArmadaWebhooks" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] },
     { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] },
-    { "tag": "v3", "new_sqlite_classes": ["ArmadaSecrets"] }
+    { "tag": "v3", "new_sqlite_classes": ["ArmadaSecrets"] },
+    { "tag": "v4", "new_sqlite_classes": ["ArmadaWebhooks"] }
   ],
   // The dashboard (worker/dashboard), built here by `armada deploy` (src/dashboard.ts) and served under /ui/ before the
   // Worker runs; every other path runs the Worker.
   "assets": { "directory": "../dist/dashboard" },
-  "vars": { "FLEET_VCPUS": "1500" },
+  "vars": { "FLEET_VCPUS": "1500", "ARMADA_SHA": "" },
   "version_metadata": { "binding": "VERSION" },
   // Packs and job artifacts expire after 7 days (lifecycle rules `armada deploy` adds); CI verdicts are kept, and a
   // pushed bundle while a task points to it.

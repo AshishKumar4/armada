@@ -217,6 +217,9 @@ export const JobSpecSchema = v.object({
   retries: v.optional(RetriesSchema),
   /** The deployment's secrets each task gets in its environment, by name. Only names travel and are kept. */
   secrets: v.optional(v.array(SecretName), []),
+  /** The deployment's own bearer joins the task's environment at claim (masked like a secret's value, never kept):
+   *  a CI webhook's driver asks, and any bearer'd client could — it is the same token it called with. */
+  deployToken: v.optional(v.boolean(), false),
   /** A pushed task's answers kept this many days, by its bundle, environment and item: an item answered before runs
    *  nothing. Only for a task whose answer those three decide. */
   cache: v.optional(v.object({ days: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(365)) })),
@@ -349,7 +352,11 @@ export const VerdictsSchema = v.object({ verdicts: v.array(v.object({ sha: Sha, 
 /** A deployment's state: its runner layer, its wire, the oldest wire it still serves (absent from a Worker that
  *  predates the field), the vCPUs its fleet holds, and the jobs not yet done, those waiting for an environment or
  *  for a container included. */
-export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number() });
+export const HealthSchema = v.object({
+  ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number(),
+  /** The commit the deployed Worker was built from, `armada deploy`'s ARMADA_SHA var — absent on a Worker before it. */
+  sha: v.optional(v.string()),
+});
 
 export type Health = v.InferOutput<typeof HealthSchema>;
 

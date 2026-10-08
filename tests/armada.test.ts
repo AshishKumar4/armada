@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
@@ -800,6 +800,100 @@ describe('asking the runner', () => {
     } finally {
       globalThis.fetch = original;
       Bun.sleep = sleep;
+    }
+  });
+});
+
+describe('the webhook command', () => {
+  test('add configures the deployment, gh creates the hook and its id is recorded; list shows no secret; remove deletes both', async () => {
+    const calls: { method: string; path: string; body: unknown }[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+        const body = request.method === 'GET' || request.method === 'DELETE' ? undefined : await request.json();
+
+        calls.push({ method: request.method, path: pathname, body });
+        if (request.method === 'POST' && pathname === '/webhooks/armada') return Response.json({ configured: body });
+        if (request.method === 'PATCH' && pathname === '/webhooks/armada') return Response.json({ hooked: (body as { hook: number }).hook });
+        if (request.method === 'GET' && pathname === '/webhooks') return Response.json({ webhooks: [{ project: 'armada', repo: 'owner/armada', pullRequests: true, tokenSecret: 'GITHUB_TOKEN', hook: 77 }] });
+        if (request.method === 'DELETE' && pathname === '/webhooks/armada') return Response.json({ removed: 'armada', repo: 'owner/armada', hook: 77 });
+
+        return Response.json({ error: 'no route' }, { status: 404 });
+      },
+    });
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-hook-'));
+
+    // A stub `gh`: signed in, and the hook create answers id 77 while remembering every call.
+    const bin = join(scratch, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "$@" >> ${scratch}/gh-calls\nif [ "$1" = "api" ]; then echo 77; fi\nexit 0\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    try {
+      const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
+      const cli = async (...words: string[]) => {
+        const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env, stdout: 'pipe', stderr: 'pipe' });
+
+        return { exit: await ran.exited, said: await new Response(ran.stdout).text() + await new Response(ran.stderr).text() };
+      };
+
+      const added = await cli('webhook', 'add', 'armada', '--repo=owner/armada', '--pull-requests');
+      const listed = await cli('webhook', 'list');
+      const removed = await cli('webhook', 'remove', 'armada');
+      const ghCalls = existsSync(join(scratch, 'gh-calls')) ? readFileSync(join(scratch, 'gh-calls'), 'utf8') : '';
+
+      expect(added.exit).toBe(0);
+      expect(added.said).toContain('configured armada');
+      expect(added.said).toContain('created GitHub hook 77');
+      expect(listed.said).toContain('armada  owner/armada');
+      expect(listed.said).not.toContain('secret');
+      expect(removed.said).toContain('removed armada');
+      expect(removed.said).toContain('deleted GitHub hook 77');
+
+      const posted = calls.find(({ method, path }) => method === 'POST' && path === '/webhooks/armada');
+
+      expect(posted?.body).toMatchObject({ repo: 'owner/armada', pullRequests: true });
+      expect((posted?.body as { secret: string }).secret).toMatch(/^[0-9a-f]{48}$/u);
+      expect(calls).toContainEqual({ method: 'PATCH', path: '/webhooks/armada', body: { hook: 77 } });
+      expect(calls).toContainEqual({ method: 'DELETE', path: '/webhooks/armada', body: undefined });
+      expect(ghCalls).toContain('auth status');
+      expect(ghCalls).toContain('repos/owner/armada/hooks');
+      expect(ghCalls).toContain('repos/owner/armada/hooks/77 -X DELETE');
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('add without gh signed in prints the hook to add by hand', async () => {
+    const calls: unknown[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        calls.push({ method: request.method, path: pathname });
+        if (request.method === 'POST' && pathname === '/webhooks/armada') return Response.json({ configured: {} });
+
+        return Response.json({ error: 'no route' }, { status: 404 });
+      },
+    });
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-hook-'));
+    const bin = join(scratch, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 1\n');
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    try {
+      const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
+      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'webhook', 'add', 'armada', '--repo=owner/armada'], { env, stdout: 'pipe', stderr: 'pipe' });
+      const said = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
+
+      expect({ exit: await ran.exited, hasUrl: said.includes('/webhooks/github/armada'), hasSecret: /secret: [0-9a-f]{48}/u.test(said), steps: said.includes('add the hook by hand') }).toEqual({ exit: 0, hasUrl: true, hasSecret: true, steps: true });
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 });
