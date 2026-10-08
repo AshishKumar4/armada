@@ -402,10 +402,9 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     const name = nameOf(index);
     const result = results.find((each) => each.index === index);
     const artifacts = kept.get(index)?.paths ?? null;
-    const exit = { exitCode: result?.meta.exitCode ?? 0, tail: result?.meta.tail ?? '', seconds: result?.meta.seconds };
     const answer: TaskAnswer = result === undefined || result.kind === 'lost' || result.kind === 'cancelled' ? { name, entry, rows: null, artifacts }
       : !config.task.verdict ? { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }], artifacts }
-      : { name, entry, rows: verdicts.get(index) ?? null, exit, artifacts };
+      : { name, entry, rows: verdicts.get(index) ?? null, exit: { exitCode: result.meta.exitCode, tail: result.meta.tail, seconds: result.meta.seconds }, artifacts };
     const dir = kept.get(index)?.dir;
 
     if (dir !== undefined) for (const row of answer.rows ?? []) evidence.set(row, dir);
