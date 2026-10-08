@@ -4,9 +4,10 @@
  * pays its boot once and then pulls task after task, so short and long tasks balance themselves. Each task's outcome
  * is appended to the job's event stream as it lands. A task a vessel lost to the infrastructure is queued again once;
  * a task that exited, red or green, never is. When the queue is empty, an idle vessel may run a straggler again only
- * if the job says its tasks are speculative; the first answer is kept, or a red the other copy ends with. A job that
- * hedges also runs its heaviest tasks twice from the start, each second copy as soon as the queue reaches its weight.
- * An open job takes more items until its client closes it, starting vessels for them as they come.
+ * if the job says its tasks are speculative, and stays for one about to become a straggler rather than retire; the
+ * first answer is kept, or a red the other copy ends with. A job that hedges also runs its heaviest tasks twice from
+ * the start, each second copy as soon as the queue reaches its weight. An open job takes more items until its client
+ * closes it, starting vessels for them as they come.
  *
  * A gang task (an item's `gang`, `gangOf`) runs on that many vessels at once. The vessels that ask for work join the
  * gang forming, in rank order, before any other task starts, and the gang starts once every rank has joined; each rank
@@ -87,8 +88,14 @@ const REPLACEMENTS = 8;
  *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. */
 const INFRA_ATTEMPTS = 3;
 
-/** A running task older than this, and than twice its weight, is a straggler an idle vessel may repeat. */
+/** A running task older than this, and than STRAGGLER_WEIGHTS times its weight, is a straggler an idle vessel may
+ *  repeat. In Dew's CI a task ran up to 3.2 times its weight, at random rather than by container. */
 const STRAGGLER_MS = 30_000;
+const STRAGGLER_WEIGHTS = 1.5;
+
+/** How far ahead an idle vessel looks for a task about to become a straggler, which it stays for rather than retire:
+ *  vessels retired as the queue emptied, before any task was old enough to repeat, so none was ever repeated. */
+const STANDBY_MS = 60_000;
 
 const JOB_DEADLINE_MS = 6 * 60 * 60_000;
 
@@ -129,6 +136,8 @@ export class ArmadaJob extends DurableObject<Env> {
   private members(): void {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS members (idx INTEGER NOT NULL, rank INTEGER NOT NULL, vessel TEXT NOT NULL, state TEXT NOT NULL,
       outcome TEXT, PRIMARY KEY (idx, rank))`);
+    // The vessels staying, each until a time, for a task about to become a straggler (`claim`).
+    this.sql.exec('CREATE TABLE IF NOT EXISTS standby (vessel TEXT PRIMARY KEY, until INTEGER NOT NULL)');
   }
 
   /** The new tasks' indexes. */
@@ -350,6 +359,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if (spec === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return null;
     this.beat(name, 'working');
     this.members();
+    this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     const now = Date.now();
     // Secrets are read for each claim and never kept: the job holds only their names.
     const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec) };
@@ -384,12 +394,23 @@ export class ArmadaJob extends DurableObject<Env> {
       return null;
     }
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
+    const lone = `state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members)`;
+    const due = `MAX(started + ${String(STRAGGLER_MS)}, started + weight * ${String(STRAGGLER_WEIGHTS * 1000)})`;
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members)
-       AND started < ? AND started < ? - weight * 2000 ORDER BY started LIMIT 1) RETURNING idx, item, attempts`, name, name, now - STRAGGLER_MS, now,
+      `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE ${lone} AND ${due} <= ? ORDER BY started LIMIT 1) RETURNING idx, item, attempts`,
+      name, name, now,
     ).toArray()[0];
 
     if (straggler !== undefined) return await this.cached(spec, this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true), straggler.item);
+    // Stay for a task about to become a straggler, one vessel for each, rather than retire.
+    const soon = this.sql.exec<{ n: number; at: number | null }>(`SELECT COUNT(*) AS n, MIN(${due}) AS at FROM tasks WHERE ${lone} AND ${due} <= ?`, name, now + STANDBY_MS).one();
+    const staying = Number(this.sql.exec('SELECT COUNT(*) AS n FROM standby WHERE until > ?', now).one()['n']);
+
+    if (soon.at !== null && soon.n > staying) {
+      this.sql.exec('INSERT INTO standby (vessel, until) VALUES (?, ?)', name, soon.at);
+
+      return { waitMs: Math.max(1000, soon.at - now) };
+    }
     // It retires: marked now, so items an open job takes before its retirement lands get a vessel of their own.
     this.beat(name, 'done');
 
@@ -610,6 +631,9 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (spec === undefined) return;
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
+    // A lost vessel no longer stays for a straggler, so a live one may.
+    this.members();
+    this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
     this.lostRank(name, error);

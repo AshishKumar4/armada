@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, refusal, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
@@ -133,6 +133,32 @@ describe('a hedged job', () => {
       greenOnceTheOtherWasLost: { told: false, events: [['v1', 0]] },
       firstRedBesideAGreen: { told: false, events: [['v1', 1]] },
     });
+  });
+});
+
+describe('a speculative job\'s idle vessel', () => {
+  test('stays for a task about to become a straggler, one vessel a task, and repeats it once it is one', async () => {
+    const start = new Date('2026-10-08T12:00:00Z').getTime();
+
+    setSystemTime(new Date(start));
+    try {
+      const items = [{ item: { weight: 40 }, argv: ['true'] }, { item: { weight: 1 }, argv: ['true'] }];
+      const { job: speculative } = await job({ recipe: {}, items, run: { kind: 'command' }, speculative: true });
+
+      await speculative.claim('v1');
+      await finish(speculative, 'v2');
+      // Task 0 becomes a straggler at 1.5 times its 40 s weight, 60 s in: v2 stays for it, and v3 has none to stay for.
+      setSystemTime(new Date(start + 20_000));
+      const early = [await speculative.claim('v2'), await speculative.claim('v3')];
+
+      setSystemTime(new Date(start + 61_000));
+      const repeated = await speculative.claim('v2');
+
+      expect({ early, repeated: repeated === null || 'waitMs' in repeated ? repeated : [repeated.index, repeated.duplicate] })
+        .toEqual({ early: [{ waitMs: 40_000 }, null], repeated: [0, true] });
+    } finally {
+      setSystemTime();
+    }
   });
 });
 
