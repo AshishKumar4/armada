@@ -8,7 +8,7 @@ import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, SizeSchema, usageOf, type Push } from './protocol';
+import { BaseSchema, describeUsage, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -49,6 +49,7 @@ deploy options:
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
+  --drain              wait for the open jobs first, as a deploy that changes the wire does
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
 The command's {item}, {index}, {out} and {files} are filled per item.
@@ -60,7 +61,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
-  ['deploy', { options: ['account=', 'name=', 'vcpus='], words: 0 }],
+  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label='], words: 0 }],
   ['run', { options: ['label='], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
@@ -265,7 +266,7 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 /** Drains the deployed version first; then the bucket (packs and job artifacts expire after 7 days), the
  *  Worker, its bearer, and the connection file. The version deployed admits jobs at once, and a deploy that fails or
  *  is interrupted lets the drained one admit them again. */
-async function deploy(name: string, vcpus: number | undefined): Promise<number> {
+async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
   const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
@@ -281,7 +282,12 @@ async function deploy(name: string, vcpus: number | undefined): Promise<number> 
   process.once('SIGINT', interrupted).once('SIGTERM', interrupted).once('SIGHUP', interrupted);
 
   try {
-    if (deployed !== null) await drain(deployed, () => { drained = true; });
+    // A version of the same wire takes over the running jobs: their containers outlive the Worker's update, and each
+    // object resumes from storage (measured: six deploys in two minutes over 200 one-minute tasks cut none and refused
+    // no job). Only a version of another wire, or a deploy told to, is drained first.
+    const speaks = deployed === null ? null : await deployed.health().then((health) => health.protocol, () => null);
+
+    if (deployed !== null && (forceDrain || speaks !== PROTOCOL)) await drain(deployed, () => { drained = true; });
     install(account, name, vcpus, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
@@ -484,7 +490,7 @@ async function main(): Promise<number> {
 
       if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, whole('vcpus'));
+      return await deploy(name, whole('vcpus'), flag('drain'));
     }
 
     case 'prune':
