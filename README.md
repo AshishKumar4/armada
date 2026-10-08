@@ -1,6 +1,9 @@
 <p align="center"><img src=".github/banner.svg" alt="armada" width="100%"></p>
 
-armada runs a command or a TypeScript function over many inputs at once, on Cloudflare Containers in your own account.
+*An AI assistant maintains this README. It is presented as-is.*
+
+armada runs a command, or a TypeScript or Python function, over many inputs at once on Cloudflare Containers in your own
+account. I run Kinu's and Dew's CI on it.
 
 - 100 videos re-encoded to 720p in 21 to 22 s on 100 containers, 1.3 to 1.4 times the slowest single encode. One
   container took 12 minutes for the same 100.
@@ -25,27 +28,32 @@ Cloudflare in your browser, or uses `CLOUDFLARE_API_TOKEN`. Containers need the 
 armada is a Worker, a few Durable Objects and an R2 bucket in your account, so your code and data stay there.
 
 1. armada prepares each environment once. It starts a container from the recipe's base image, runs `setup` as root
-   and `install` as the user, and snapshots the result; the ffmpeg recipe's took 5.6 minutes. A changed recipe, or a
+   and `install` as the user, and snapshots the result. The ffmpeg recipe's took 5.6 minutes. A changed recipe, or a
    changed file in `environment.key`, prepares a new one.
 2. Containers start from the snapshot, in as little as 0.2 s, with a fresh tmpfs on `/tmp` and `/dev/shm`.
 3. Each container pulls task after task from the job's one queue until it is empty, so no container waits behind
    another's slow task. Items with a higher `weight` start first.
-4. Results stream back as they land. A small output rides in the result; a large one, and every log, goes to R2.
+4. Results stream back as they land. A small output rides in the result. A large one, and every log, goes to R2.
 
-Each task runs as the user `ci`, in its own cgroup, and anything it leaves running is stopped before the next task.
-Tasks that run one after another in a container share its `/tmp`. A task the platform loses runs again, up to three attempts. Each task gets exactly one recorded outcome, but a cut-off
-attempt may already have done its work, so a task should be safe to run twice.
+Each task runs as the user `ci`, in its own cgroup. armada stops anything a task leaves running before the next task
+starts. Tasks that run one after another in a container share its `/tmp`, unless the job uses slots. A task the
+platform loses runs again, up to three attempts. Each task gets exactly one recorded outcome, but a cut-off attempt
+may already have done its work, so a task should be safe to run twice.
 
-A deploy over a running armada keeps its jobs running as long as the new Worker would still serve every client the
-old one does: six deploys in two minutes, over 200 one-minute tasks, cut no task and refused no job. A deploy waits
-for the open jobs first only with `--drain`, when the deployed version answers no health check, when this Worker
-would refuse a client it serves (its wire newer than this one's, or its floor older than this one's), or when its
-driver differs. That pause lapses after 10 minutes if the deploy dies.
+`lean/` holds machine-checked proofs of the scheduling rules. The `proofs` CI row builds them with warnings as errors.
+
+- The list schedule that sizes a run's pool puts every task in exactly one lane. It meets Graham's bound: m times the
+  makespan is at most the total work plus (m - 1) times the longest task.
+- The fleet never holds more vCPUs than its cap.
+- Every task of a finished job has exactly one outcome: its first accepted answer.
+
+The proofs model the rules, not the Worker's code. A differential test checks the TypeScript `listSchedule` against
+the Lean model on seeded instances.
 
 ## Measured
 
-The video figures are from 2026-10-08, the others from one run each on 2026-10-07. The command is in the table, so you
-can run it on your own deployment.
+The video figures are from 2026-10-08, the others from one run each on 2026-10-07. Each row names its command, so
+you can run it on your own deployment.
 
 | Workload | armada | Comparison |
 |---|---|---|
@@ -87,7 +95,7 @@ armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 | `{index}` | The item's position. |
 | `{out}` | The file a task writes when `output` is set. |
 | `{files}` | The directory with the job's small `files`. |
-| `{artifacts}` | The directory whose files a task keeps as its artifacts, a tar.gz served at the task's `artifacts` route. |
+| `{artifacts}` | The directory whose files the task keeps, as a tar.gz at the task's `artifacts` route. |
 
 An unknown placeholder is an error. An object item's numeric `weight` moves it up the queue. `map` exits 1 if a task
 exits nonzero and 2 if a task could not run.
@@ -95,20 +103,21 @@ exits nonzero and 2 if a task could not run.
 ### Gangs
 
 An object item's `gang` runs it on that many containers at once, for a program that spans hosts, such as a multi-host
-JAX run. Each rank gets `ARMADA_RANK` and `ARMADA_WORLD`, and reaches rank `r` as host `rank<r>` (127.0.1.`r+1`) on any
-port it listens on. jax.distributed's coordinator at `rank0:<port>` and gloo's collectives work over it unchanged.
+JAX run. Each rank gets `ARMADA_RANK` and `ARMADA_WORLD`, and reaches rank `r` as host `rank<r>` (127.0.1.`r+1`) on
+any port it listens on. jax.distributed's coordinator at `rank0:<port>` and gloo's collectives work over it unchanged.
 
 ```sh
 echo '[{"gang": 2}]' | armada map --items=- -- sh -c 'python3 train.py --rank $ARMADA_RANK --coordinator rank0:8476'
 ```
 
 The gang starts once every rank has a container. A rank lost to the platform loses the whole gang, which runs again
-as one task. The task's outcome is its first failing rank's, else rank 0's. Containers have no inbound address, so
-ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a connection, at 2 to 64 ranks. That suits
-tests and coordination, not bandwidth-bound training. A connection to a port nothing listens on yet opens and then
-closes at once, so a client retries it as it would a refused one. A connection outlives its WebSocket being dropped,
-or the vessel between the two ranks being reset or redeployed, the program seeing nothing of it, if both come back
-within a minute: the two ranks' relays hold its bytes, not the vessel.
+as one task. The task's outcome is its first failing rank's, else rank 0's.
+
+Containers have no inbound address, so ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a
+connection, at 2 to 64 ranks. That suits tests and coordination, not bandwidth-bound training. A connection to a port
+nothing listens on yet opens and then closes at once, so a client retries it as it would a refused one. The two ranks'
+relays hold a connection's bytes. If its WebSocket drops, or the vessel between the ranks is reset or redeployed, the
+connection carries on unseen when both ends come back within a minute.
 
 ## From TypeScript
 
@@ -139,7 +148,7 @@ export const transcode = task({
     sh`ffmpeg -loglevel error -i ${url} -vf scale=-2:720 -c:v libx264 -preset veryfast -c:a aac -f mp4 ${out}`,
 });
 
-// Read a video's length and resolution with ffprobe. The schema checks the answer inside the container.
+// Read a video's length and resolution with ffprobe. The output schema checks each answer when it lands.
 export const probe = task({
   id: 'probe',
   recipe: media,
@@ -195,23 +204,24 @@ outputs. A second run printed 9.7 s and 6.7 s.
   container also loads the task's file, so a recipe that reads local files goes in a function, `recipe: () => ...`,
   which runs only on the machine that starts the job.
 - `sh` passes each `${}` as one word. `` sh.raw`...` `` doesn't escape, for a script that is itself shell.
-- Schemas can be valibot, zod or arktype (any [Standard Schema](https://standardschema.dev)). Items are checked before
-  they're sent, and values inside the container. Items and values are plain JSON, or bytes for a value; a `Date`, a
-  `Map`, `any` or `unknown` is a type error.
+- A task's `output` checks each answer when it lands, and types it: a schema, `'text'` or `'bytes'`. Without one, a
+  body's answer is JSON and a command's is `null`. An `input` schema checks each item before it's sent.
+- Schemas can be valibot, zod or arktype (any [Standard Schema](https://standardschema.dev)). Items and answers are
+  plain JSON, or bytes for an answer. A `Date`, a `Map`, `any` or `unknown` is a type error.
 - An output can be up to 4.995 GiB, R2's limit for one upload, and `job.outputStream(i)` streams it. A 336 MB tarball
   built as one task came back as one output in 41 s, start to file.
-- `map(items, { pool, slots, label, env, files, tmpfs })` sets a job's options. `slots` runs that many tasks at once
-  in each container, each in its own mount namespace: the slot's task dir over `{out}`, `{artifacts}` and the answer,
-  a fresh tmpfs, overlays over the checkout and `$HOME`, and a cgroup with a fair share of the size's memory. Network
-  is shared, so two tasks cannot bind one fixed port, and a gang task cannot share a container at all. A task takes
-  `timeout`, `speculative` to let an idle container rerun a straggler, and `hedge` to run that many of the heaviest
-  items twice from the start; either way the first answer is kept.
+- `map(items, { pool, slots, label, env, files, tmpfs })` sets a job's options.
+- `slots` runs that many tasks at once in each container, each in its own mount namespace. A slot gets its own task
+  directory, a fresh tmpfs, overlays over the checkout and `$HOME`, and a cgroup with an even share of the size's
+  memory. The slots share the network, so two tasks cannot bind one fixed port, and a gang task cannot run in slots.
+- A task takes a `timeout`. `speculative` lets an idle container rerun a straggler, and `hedge` runs that many of the
+  heaviest items twice from the start. Either way the first answer is kept.
 - `retries` reruns an item only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
   exitCodes: [75], errors: ['FetchError'] }`, an item that exits 75 or throws a `FetchError` runs up to three times,
   waiting 5 s, then 10 s. Any other failure is final.
 - `secrets` gives a task values kept out of your code. `echo "$KEY" | armada secret set OPENAI_API_KEY` stores one, and
-  a task with `secrets: ['OPENAI_API_KEY']` reads `context.secrets.OPENAI_API_KEY`; a command gets it in its
-  environment. Reading a secret the task didn't name is a type error, no call reads a value back, and each value of 4
+  a task with `secrets: ['OPENAI_API_KEY']` reads `context.secrets.OPENAI_API_KEY`. A command gets it in its
+  environment. Reading a secret the task didn't name is a type error, and no call reads a value back. Each value of 4
   bytes or more shows as `***` in logs. `.local` reads secrets from your environment.
 - `cache: { days: 7 }` keeps each green answer for a week, keyed by the task, the item, the recipe and the pushed task
   files. An item answered before comes back at once with `meta.cached`, and no container starts. Use it only for a
@@ -219,7 +229,9 @@ outputs. A second run printed 9.7 s and 6.7 s.
 
 ## From Python
 
-The Python SDK mirrors the TypeScript one — the same tasks, wire and envelopes, so a job's results read identically on either side. Install it with `pip install "git+https://github.com/AshishKumar4/armada#subdirectory=python"`. A `[tool.armada]` table in `pyproject.toml` names the project and its tasks' folder:
+The Python SDK runs the same tasks over the same wire as the TypeScript one, so a job's results read the same from
+either side. Install it with `pip install "git+https://github.com/AshishKumar4/armada#subdirectory=python"`. A
+`[tool.armada]` table in `pyproject.toml` names the project and its tasks' folder:
 
 ```toml
 # pyproject.toml
@@ -238,7 +250,11 @@ def transcode(url: str, ctx: Context):
     return sh("ffmpeg -loglevel error -i {} -vf scale=-2:720 -c:v libx264 -preset veryfast -c:a aac -f mp4 {}", url, ctx.out)
 ```
 
-`python -m armada push` bundles the tasks and records them; `transcode.map(urls)` runs them, `transcode.stream(urls)` gives a job iterable in completion order, `transcode.run(url)` one item, `transcode.local(url)` this machine. A body that returns a value answers with it; `bytes` comes back as `bytes`. See `examples/python-square/` for validators, secrets, artifacts, retries and caching.
+`python -m armada push` bundles the tasks and records them. `transcode.map(urls)` returns the values in input order,
+`transcode.stream(urls)` yields each result as it lands, `transcode.run(url)` runs one item, and `transcode.local(url)`
+runs it on this machine. A body's return value is its answer, and `bytes` come back as `bytes`. An `output` model
+or function checks each answer when it lands. [`examples/python-square`](examples/python-square) shows validators,
+secrets, artifacts, retries and caching.
 
 ## CI with `armada run`
 
@@ -259,9 +275,9 @@ armada run HEAD
     "install": "ci/install.sh",
     "key": ["bun.lock", "package.json"]
   },
-  "pool": 2,
+  "pool": 8,
   "size": "auto",
-  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}]}"] },
+  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}, {\"name\": \"relay\", \"gang\": 8}, {\"name\": \"proofs\"}, {\"name\": \"python\"}, {\"name\": \"lint\"}]}"] },
   "task": { "command": ["bun", "run", "{name}"], "verdict": false, "timeout": 600 }
 }
 ```
@@ -271,18 +287,20 @@ tasks those secrets, for a narrowed run whose credentials the whole matrix must 
 
 A run of the whole matrix stores its verdict under the commit. `armada verdict <commit>` prints it and exits 0 when
 every row is green, 1 when a row is red and 2 when the commit has none, so a hook or a deploy can reuse the proof.
-A run that cannot grade every row still writes its report, and prints `report: <path>` on every path it takes.
+Every run writes its report and prints `report: <path>`, including a run that cannot grade every row.
 
-`armada run --json` puts the human progress on stderr and ends with one JSON object on stdout:
-`{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`, its rows the same objects the
-report file holds. The exit codes are unchanged, so a caller reads the verdict instead of scraping it.
+`armada run --json` prints the progress on stderr and ends with one JSON object on stdout:
+`{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`. Its rows are the same objects
+the report holds, and its exit code is the same as without `--json`.
 
-A task can keep files beside its verdict: it writes them under `{artifacts}` (also `ARMADA_ARTIFACTS` in its
-environment), and a row names the ones that are its evidence, `"artifacts": ["shots/home.png"]`. `armada run` extracts
-each task's artifacts next to the report, `~/.local/state/armada/runs/<project>-<job>/<task>/`, and prints each named
-file under a red row. A row naming a file its task did not keep leaves the run ungraded. Artifacts are kept as written:
-they may be binary, and the log's secret mask does not apply to them. `armada map --artifacts=<dir>` extracts the same
-way, under `<dir>/<index>`.
+A task can keep files beside its verdict. It writes them under `{artifacts}`, also `ARMADA_ARTIFACTS` in its
+environment, and a row names the ones that are its evidence: `"artifacts": ["shots/home.png"]`. `armada run` extracts
+each task's artifacts next to the report, in `~/.local/state/armada/runs/<project>-<job>/<task>/`, and prints each
+named file under a red row. A row that names a file its task did not keep leaves the run ungraded. Artifacts are kept
+as written: they may be binary, and the log's secret mask does not apply to them. `armada map --artifacts=<dir>`
+extracts them the same way, under `<dir>/<index>`.
+
+A matrix entry may name the `rows` its task must report. A task that reports other rows leaves the run ungraded.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -305,29 +323,9 @@ way, under `<dir>/<index>`.
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.slots` | `1` | The tasks one container runs at once, each in its own slot. |
-| `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept: a copy that drew a slow container holds the run up no longer than the other takes. |
+| `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept, so a slow container holds the run up no longer than the other copy takes. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 | `task.secrets` | `[]` | The secrets each task gets in its environment, by name (`armada secret set <name>`). |
-
-### CI on push, through a GitHub webhook
-
-```
-armada webhook add armada --repo=owner/name --pull-requests
-```
-
-gives a project a webhook on the deployment: each push to the repo's configured branches and each pull request
-from the same repository starts that commit's whole `armada run` on the deployment itself, stores the verdict
-exactly as a local run does, and reports a GitHub commit status ("88 of 90 rows green") that links to the
-dashboard's CI page. The endpoint, `POST /webhooks/github/<project>`, is the one path outside the deployment's
-bearer: it is verified only by GitHub's `X-Hub-Signature-256`, a delivery or a commit seen before is answered
-"duplicate" or "already", and a fork's pull request is never built — a fork's code must never get the
-deployment's secrets. The driver runs in a `micro` container that clones the commit, installs armada at the
-deployment's own source commit (`ARMADA_SHA`, set by `armada deploy` and reported by `/health`), and gets its
-GitHub token and the deployment's bearer at claim, masked in its log like any secret. `armada webhook add`
-creates the GitHub hook through `gh` when it is signed in, or prints the settings to add by hand; `armada
-webhook list` and `armada webhook remove <project>` manage them.
-
-A matrix entry may list the `rows` its task must report.
 
 | Size | vCPU | Memory | Cloudflare instance type |
 |---|---|---|---|
@@ -339,6 +337,63 @@ A matrix entry may list the `rows` its task must report.
 With `"size": "auto"`, each run takes the smallest size that the last five runs' tasks fill to three quarters at most,
 in peak memory and average busy cores. A new size prepares its own environment once.
 
+### CI on push, through a GitHub webhook
+
+```sh
+armada webhook add armada --repo=owner/name --pull-requests
+```
+
+This gives the project a webhook on the deployment. Each push to the repo's branches, and each pull request from the
+same repository, starts that commit's whole `armada run` on the deployment itself. With no `--branches`, only the
+default branch builds. The run stores its verdict as a local run does, and posts a GitHub commit status, such as
+"88 of 90 rows green", that links to the dashboard's CI page.
+
+`POST /webhooks/github/<project>` is the one route outside the deployment's bearer. GitHub's `X-Hub-Signature-256` is
+its only check. A delivery or a commit seen before is skipped. A pull request from a fork never builds, because its
+code must not get the deployment's secrets.
+
+The run's driver is a task in a `micro` container whose environment holds only Bun, so a redeploy prepares no new
+environment. The driver fetches armada at the deployment's own commit, `ARMADA_SHA`, which `armada deploy` sets and
+`/health` reports, so deploy from a pushed commit. It gets the GitHub token and the deployment's bearer when it
+starts, and its log masks both like any secret.
+
+`armada webhook add` creates or updates the GitHub hook through `gh` when you're signed in. Otherwise it prints the
+settings to add by hand. `armada webhook list` and `armada webhook remove <project>` manage them.
+
+## Dashboard
+
+`armada dashboard` opens the deployment's dashboard in your browser, signed in, and the token never leaves the
+browser. `armada dashboard --serve=<port>` serves it from your machine instead, which signs each request itself.
+
+It shows the fleet and its recent jobs, each job's tasks and a timeline of its containers, and each task's item,
+output, log and artifacts. It also lists the environments and each project's CI verdicts. A container that ran tasks
+in more than one slot gets one timeline lane for each slot.
+
+## Deploying
+
+`armada deploy --name=<name>` deploys a second armada on the same account and prints the file that
+`--connection=<file>` takes, to point any command at it. `--vcpus=N` caps that deployment's fleet.
+
+A deploy over a running armada keeps its jobs running when the new Worker still serves every client the old one
+does. Six deploys in two minutes, over 200 one-minute tasks, cut no task and refused no job. A deploy waits for the
+open jobs first in four cases:
+
+- with `--drain`;
+- when the deployed version answers no health check;
+- when the new Worker would refuse a client the old one serves;
+- when the container driver changes.
+
+That wait lapses after 10 minutes if the deploy dies.
+
+An account's snapshots are limited. With `--keep=N`, the Worker deletes old environment snapshots after it prepares
+each new one. It keeps the snapshot of every environment an open job uses, and of the N most recently used of the
+rest. The deploy mints registry credentials through your wrangler login and gives them to the Worker as a secret. A
+later deploy without `--keep` leaves them in place, and warns once they are within 30 days of expiring.
+`armada prune` does the same pruning once, from your machine.
+
+A client and a Worker that speak versions of the wire too far apart refuse each other's requests, and say which one to
+update.
+
 ## Commands
 
 ```
@@ -349,6 +404,7 @@ armada verdict <commit|worktree> [--json]
 armada push
 armada dev
 armada status <job-id>
+armada dashboard [--serve=<port>]
 armada secret set <NAME> | list | delete <NAME>
 armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]
 armada webhook list
@@ -356,13 +412,4 @@ armada webhook remove <project>
 armada prune [--keep=3]
 ```
 
-`armada --help` describes every option. `armada deploy --name=<name>` deploys a second armada on the same account and
-prints the file that `--connection=<file>` takes to point any command at it. `--vcpus=N` caps that deployment's fleet.
-`--keep=N` has it keep the snapshots of every environment an open job uses and of the N most recently used of the rest,
-deleting the others after each new one is prepared, since an account's snapshots are limited: the deploy
-mints registry credentials through your wrangler login and gives them to the Worker as a secret, which a later deploy
-without `--keep` leaves in place. `armada prune` does the same once, from your machine.
-A client and a Worker of different versions refuse each other's requests and say which one to update.
-`armada run --json` prints its progress to stderr and, when it ends, one JSON object to stdout: the commit, the plan and
-task jobs, the report's path, `graded` (`pass`, `fail` or `not graded`, as its exit code says), the problems, and the
-rows.
+`armada --help` describes every option.
