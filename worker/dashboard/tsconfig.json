@@ -1,0 +1,16 @@
+{
+  "//": "The dashboard runs in a browser: the DOM's types, not Bun's or workerd's. It compiles the protocol and grading it shares.",
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "moduleDetection": "force"
+  },
+  "include": ["*.ts", "../../src/protocol.ts", "../../src/grade.ts"]
+}

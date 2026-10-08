@@ -5,10 +5,15 @@
  *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
- * the version deployed after it admits jobs from its first request.
+ * the version deployed after it admits jobs from its first request. And it keeps the ids of the last RECENT jobs made,
+ * which the dashboard lists.
  */
 import { DurableObject } from 'cloudflare:workers';
+import type { Fleet } from '../../src/protocol';
 import type { Env } from './env';
+
+/** The jobs made last that the fleet keeps the ids of. */
+export const RECENT = 500;
 
 /** Longer than a container may live, so only a dead holder's vCPUs lapse. */
 const LEASE_MS = 3 * 60 * 60_000;
@@ -50,6 +55,20 @@ export class ArmadaFleet extends DurableObject<Env> {
     return Object.values(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), Date.now())).reduce((sum, hold) => sum + hold.vcpus, 0);
   }
 
+  /** The cap and each job's live holds: a holder is `<job>/<vessel>`. */
+  async shares(): Promise<Fleet> {
+    const jobs = new Map<string, { vcpus: number; containers: number }>();
+
+    for (const [holder, hold] of Object.entries(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), Date.now()))) {
+      const id = holder.slice(0, holder.lastIndexOf('/'));
+      const share = jobs.get(id) ?? { vcpus: 0, containers: 0 };
+
+      jobs.set(id, { vcpus: share.vcpus + hold.vcpus, containers: share.containers + 1 });
+    }
+
+    return { cap: Number(this.env.FLEET_VCPUS), jobs: [...jobs].map(([id, share]) => ({ id, ...share })).sort((left, right) => right.vcpus - left.vcpus) };
+  }
+
   private live(holds: Record<string, Hold> | undefined, now: number): Record<string, Hold> {
     return Object.fromEntries(Object.entries(holds ?? {}).filter(([, hold]) => hold.until > now));
   }
@@ -64,8 +83,20 @@ export class ArmadaFleet extends DurableObject<Env> {
     return true;
   }
 
+  /** A job made: open until `closed`, and among the recent ones until RECENT newer ones push it out. */
   async opened(job: string): Promise<void> {
-    await this.ctx.storage.put(`job:${job}`, Date.now());
+    await this.ctx.storage.put({ [`job:${job}`]: Date.now(), [`seen:${job}`]: Date.now() });
+    const seen = [...(await this.ctx.storage.list({ prefix: 'seen:' })).keys()];
+
+    if (seen.length > RECENT) await this.ctx.storage.delete(seen.slice(0, seen.length - RECENT));
+  }
+
+  /** The ids of up to `limit` recent jobs made before job `before` (or the newest), newest first. A job's id starts
+   *  with the time it was made, so the keys' order is the jobs'. */
+  async recent(limit: number, before?: string): Promise<string[]> {
+    const listed = await this.ctx.storage.list({ prefix: 'seen:', reverse: true, limit, ...before === undefined ? {} : { end: `seen:${before}` } });
+
+    return [...listed.keys()].map((key) => key.slice('seen:'.length));
   }
 
   async closed(job: string): Promise<void> {

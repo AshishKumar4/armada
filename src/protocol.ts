@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 6;
+export const PROTOCOL = 7;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -232,7 +232,8 @@ export const OutcomeSchema = v.object({
 
 export type Outcome = v.InferOutput<typeof OutcomeSchema>;
 
-export const EventsSchema = v.object({ events: v.array(v.object({ seq: v.number(), outcome: OutcomeSchema })), done: v.boolean() });
+/** A job's outcomes in the order they landed, `at` when each did, in ms: absent for one an earlier Worker recorded. */
+export const EventsSchema = v.object({ events: v.array(v.object({ seq: v.number(), outcome: OutcomeSchema, at: v.optional(v.number()) })), done: v.boolean() });
 
 const VesselSchema = v.object({
   name: v.string(),
@@ -258,9 +259,64 @@ export const JobStatusSchema = v.object({
   vessels: v.array(VesselSchema),
   problems: v.array(v.string()),
   environment: v.nullable(v.object({ key: v.string(), sha: v.nullable(v.string()), created: v.number(), seconds: v.record(v.string(), v.number()) })),
+  /** The tasks running now, one row per container each runs on (every rank of a gang, a straggler's second run), with
+   *  when it began there. Absent from an earlier Worker. */
+  running: v.optional(v.array(v.object({ index: v.number(), vessel: v.string(), started: v.number() }))),
 });
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
+
+/** A job in its deployment's list of recent ones: its status less each container's and task's own rows. */
+export const JobBriefSchema = v.object({
+  ...v.pick(JobStatusSchema, ['id', 'label', 'phase', 'createdAt', 'startedAt', 'finishedAt', 'tasks']).entries,
+  /** The containers it started, and those still up. */
+  containers: v.number(),
+  alive: v.number(),
+  problems: v.array(v.string()),
+});
+
+export type JobBrief = v.InferOutput<typeof JobBriefSchema>;
+
+export const JobsSchema = v.object({ jobs: v.array(JobBriefSchema) });
+
+export function briefOf(status: JobStatus): JobBrief {
+  const { id, label, phase, createdAt, startedAt, finishedAt, tasks, vessels, problems } = status;
+
+  return {
+    id, label, phase, createdAt, startedAt, finishedAt, tasks, problems,
+    containers: vessels.length, alive: vessels.filter((vessel) => vessel.state === 'waiting' || vessel.state === 'booting' || vessel.state === 'working').length,
+  };
+}
+
+/** An environment snapshot: what every container with its key starts from. */
+export const GenerationSchema = v.object({
+  key: v.string(),
+  snapshot: v.object({ id: v.string(), size: v.number() }),
+  /** The commit whose checkout and install it holds, for a repository recipe. */
+  sha: v.nullable(v.string()),
+  created: v.number(),
+  /** Seconds each preparation phase took. */
+  seconds: v.record(v.string(), v.number()),
+});
+
+/** An environment in the deployment's registry: being prepared, ready, or failed a while ago. */
+export const EnvironmentEntrySchema = v.variant('state', [
+  v.object({ state: v.literal('preparing'), sha: v.nullable(v.string()), since: v.number() }),
+  v.object({ state: v.literal('ready'), generation: GenerationSchema, lastUsed: v.number() }),
+  v.object({ state: v.literal('failed'), at: v.number(), reason: v.string() }),
+]);
+
+export const EnvironmentsSchema = v.array(v.object({ key: v.string(), entry: EnvironmentEntrySchema }));
+
+/** What a deployment's fleet holds: the most vCPUs it may run at once, and each job's share of them now. */
+export const FleetSchema = v.object({ cap: v.number(), jobs: v.array(v.object({ id: v.string(), vcpus: v.number(), containers: v.number() })) });
+
+export type Fleet = v.InferOutput<typeof FleetSchema>;
+
+/** The projects with a stored verdict, and one project's verdicts, newest first, each with its rows and its red ones. */
+export const ProjectsSchema = v.object({ projects: v.array(Project) });
+
+export const VerdictsSchema = v.object({ verdicts: v.array(v.object({ sha: Sha, uploaded: v.number(), rows: v.number(), reds: v.number() })) });
 
 /** A deployment's state: its runner layer, its wire, the vCPUs its fleet holds, and the jobs not yet done, those
  *  waiting for an environment or for a container included. */
