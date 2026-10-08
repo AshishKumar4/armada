@@ -489,23 +489,18 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
     if (prior !== null && prior.phase !== 'done') return ignored('already');
   }
 
-  const created = jobId();
-  const fleet = env.FLEET.getByName(SINGLE);
-
-  if (!(await fleet.reserve(env.VERSION.id, created))) return Response.json({ error: 'armada is being redeployed and takes no new job until that is done' }, { status: 503 });
-
   // The driver installs armada at the commit this Worker was deployed from, which `armada deploy` records.
   if (env.ARMADA_SHA === undefined || env.ARMADA_SHA === '') return Response.json({ error: 'this Worker does not know its commit; deploy it with armada deploy' }, { status: 503 });
   const spec = v.parse(JobSpecSchema, driverSpec(project, sha, { origin: new URL(request.url).origin, sha: env.ARMADA_SHA }, config));
   const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
   const unset = spec.secrets.find((name) => !(name in held));
 
-  if (unset !== undefined) {
-    await fleet.closed(created);
+  if (unset !== undefined) return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
+  // Counted open only once nothing above can refuse it, so a drain never waits on a job that was never made.
+  const created = jobId();
+  const fleet = env.FLEET.getByName(SINGLE);
 
-    return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
-  }
-
+  if (!(await fleet.reserve(env.VERSION.id, created))) return Response.json({ error: 'armada is being redeployed and takes no new job until that is done' }, { status: 503 });
   await closedOnFailure(fleet, created, async () => { await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin); });
   await hooks.drove(project, sha, created);
 

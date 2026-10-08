@@ -40,24 +40,31 @@ async function sign(secret: string, body: string): Promise<string> {
   return `sha256=${[...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)))].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
-/** Beyond the webhooks object and the payload, what a delivery meets: its own headers, what R2 holds, and each job's phase. */
+/** Beyond the webhooks object and the payload, what a delivery meets: its own headers, what R2 holds, each job's phase,
+ *  the commit the Worker was deployed from, the secrets set, and the fleet. */
 interface Delivery {
   readonly headers?: Readonly<Record<string, string>>;
   readonly objects?: Map<string, string>;
   readonly jobs?: Readonly<Record<string, { readonly phase: string }>>;
+  readonly deployed?: string;
+  readonly secrets?: Readonly<Record<string, string>>;
+  readonly fleet?: DurableObjectNamespace;
 }
 
-async function deliver(hooksStub: ArmadaWebhooks, payload: Json, { headers = {}, objects = new Map(), jobs = {} }: Delivery = {}): Promise<Response> {
+async function deliver(hooksStub: ArmadaWebhooks, payload: Json, {
+  headers = {}, objects = new Map(), jobs = {}, deployed = 'b'.repeat(40), secrets = { GITHUB_TOKEN: 'gh' }, fleet = namespace(() => ({ reserve: async () => true, closed: async () => undefined })),
+}: Delivery = {}): Promise<Response> {
   const body = JSON.stringify(payload);
 
   const env = world({
     ARMADA_TOKEN: TOKEN,
-    ARMADA_SHA: 'b'.repeat(40),
+    ARMADA_SHA: deployed,
     VERSION: { id: 'v', tag: '', timestamp: '' },
     ARTIFACTS: bucket(objects),
+    FLEET: fleet,
     WEBHOOKS: namespace(() => hooksStub),
     JOB: namespace((name) => ({ status: async () => jobs[name] ?? null, create: async () => undefined })),
-    SECRETS: namespace(() => ({ values: async () => ({ GITHUB_TOKEN: 'gh' }) })),
+    SECRETS: namespace(() => ({ values: async () => secrets })),
   });
 
   return await webhooked(new Request('https://armada.test/webhooks/github/armada', {
@@ -150,6 +157,25 @@ describe('the github webhook', () => {
 
     const done = await deliver(object, push, { headers: { 'X-GitHub-Delivery': 'del-4' }, objects, jobs: { 'job-1': { phase: 'done' } } });
     expect(v.parse(Said, await done.json())).toEqual({ started: expect.any(String) });
+  });
+
+  test('holds no place in the fleet for a push it cannot start: a Worker that does not know its commit, or a secret unset', async () => {
+    const object = await configured();
+    const open = new Set<string>();
+
+    const fleet = namespace(() => ({
+      reserve: async (_version: string, id: string) => {
+        open.add(id);
+
+        return true;
+      },
+      closed: async (id: string) => { open.delete(id); },
+    }));
+
+    const unknown = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-a' }, deployed: '', fleet });
+    const unset = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-b' }, secrets: {}, fleet });
+
+    expect({ refused: [unknown.status, unset.status], open: open.size }).toEqual({ refused: [503, 409], open: 0 });
   });
 
   test('forgets a delivery after a day and a commit\'s driver after a week', async () => {
