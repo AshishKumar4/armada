@@ -1,7 +1,7 @@
 /** How a job and its tasks stand, said the same way on every page. */
 import type { JobBrief, Outcome } from '../../src/protocol';
 import type { TaskState } from './charts';
-import { count, h, pill, type Tone } from './dom';
+import { count, h, pill } from './dom';
 
 type Tasks = JobBrief['tasks'];
 
@@ -26,10 +26,10 @@ export function jobPill(brief: Pick<JobBrief, 'phase' | 'tasks' | 'problems'>): 
 
   if (phase === 'running') return pill('live', 'running');
   const bad = tasks.red + tasks.failed;
-  const cancelled = problems.some((problem) => problem.startsWith('cancelled'));
-  const tone: Tone = bad === 0 ? 'ok' : cancelled ? 'warn' : 'bad';
 
-  return pill(tone, cancelled ? 'cancelled' : bad === 0 ? 'done' : `${count(bad)} not green`);
+  if (bad === 0) return pill('ok', problems.some((problem) => problem.startsWith('cancelled')) ? 'cancelled' : 'done');
+
+  return problems.some((problem) => problem.startsWith('cancelled')) ? pill('warn', 'cancelled') : pill('bad', `${count(bad)} not green`);
 }
 
 /** A bar of the job's tasks: green, red, never finished, and running, over what is still queued. */

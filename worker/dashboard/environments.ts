@@ -25,7 +25,14 @@ export function environments(): View {
 
   const pollster = poll(10_000, banner, async () => {
     const listed = await get('/environments', EnvironmentsSchema);
-    const order = (entry: Entry): number => entry.state === 'preparing' ? Infinity : entry.state === 'ready' ? entry.lastUsed : entry.at;
+
+    const order = (entry: Entry): number => {
+      switch (entry.state) {
+        case 'preparing': return Infinity;
+        case 'ready': return entry.lastUsed;
+        case 'failed': return entry.at;
+      }
+    };
 
     replace(body, listed.length === 0 ? empty('No environment yet', 'The first job of a recipe prepares one.') : h('table', { class: 'table' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Environment'), h('th', {}, 'State'), h('th', { class: 'wide' }, 'Commit'), h('th', { class: 'wide' }, 'Preparing took'),
@@ -35,7 +42,7 @@ export function environments(): View {
     return true;
   });
 
-  return { element, dispose: pollster.stop };
+  return { element, dispose: () => { pollster.stop(); } };
 }
 
 function row(key: string, entry: Entry): HTMLTableRowElement {

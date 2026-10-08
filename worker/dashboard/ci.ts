@@ -45,7 +45,7 @@ export function ci(project: string | null, sha: string | null): View {
     return true;
   });
 
-  return { element, dispose: pollster.stop };
+  return { element, dispose: () => { pollster.stop(); } };
 }
 
 type File = v.InferOutput<typeof VerdictFileSchema>;

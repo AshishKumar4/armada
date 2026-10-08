@@ -64,12 +64,15 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = 
   return made;
 }
 
+const isList = (child: Child): child is readonly Child[] => Array.isArray(child);
+
 export function append(parent: Node, children: readonly Child[]): void {
   for (const child of children) {
     if (child === null || child === undefined || child === false) continue;
 
-    if (Array.isArray(child)) append(parent, child);
-    else parent.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
+    if (child instanceof Node) parent.appendChild(child);
+    else if (isList(child)) append(parent, child);
+    else parent.appendChild(document.createTextNode(String(child)));
   }
 }
 

@@ -9,7 +9,7 @@ import { blob, get } from './api';
 import { TaskGrid, Timeline, type Lane, type Segment, type TaskState } from './charts';
 import { ago, bytes, count, duration, h, icon, pill, replace, save, when, type Tone } from './dom';
 import { counts, jobPill, nameOf, progress, STATE_WORDS, stateOf, tookOf } from './status';
-import { empty, poll, describe as said, type View } from './view';
+import { describe, detach, empty, poll, type View } from './view';
 
 interface Landed {
   readonly outcome: Outcome;
@@ -21,6 +21,8 @@ const VESSEL_TONES: Readonly<Record<JobStatus['vessels'][number]['state'], Tone>
 const KEY: readonly TaskState[] = ['queued', 'running', 'green', 'red', 'timeout', 'lost', 'cancelled'];
 
 export function jobView(id: string, opened: number | null): View {
+  // The task the page was opened at, shown in its drawer once the job is first read.
+  let opening = opened;
   const banner = h('div');
   const title = h('h1', {}, id);
   const pillSlot = h('div');
@@ -49,10 +51,7 @@ export function jobView(id: string, opened: number | null): View {
     const landed = outcomes.get(index);
     const running = status?.running?.find((each) => each.index === index);
 
-    const detail = landed !== undefined ? `${STATE_WORDS[stateOf(landed.outcome)]}${landed.outcome.cached === true ? ', from the cache' : ''} · ${duration(landed.outcome.seconds * 1000)}${landed.outcome.vessel === '' ? '' : ` on ${where(landed.outcome.vessel, landed.outcome.slot)}`}`
-      : running !== undefined ? `running on ${where(running.vessel, running.slot)} for ${duration(Date.now() - running.started)}` : 'queued';
-
-    return h('div', {}, h('b', {}, `Task ${count(index)}`), h('span', { class: 'muted' }, detail));
+    return h('div', {}, h('b', {}, `Task ${count(index)}`), h('span', { class: 'muted' }, detailOf(landed, running, where)));
   };
 
   const describeSegment = (segment: Segment): HTMLElement => segment.task === null
@@ -104,24 +103,23 @@ export function jobView(id: string, opened: number | null): View {
       h('div', { class: 'card-body' }, h('ul', { class: 'problems' }, status.problems.map((problem) => h('li', {}, problem))))));
     const running = new Set((status.running ?? []).map((each) => each.index));
 
-    grid.update(Array.from({ length: status.tasks.total }, (_, index): TaskState => {
-      const landed = outcomes.get(index);
-
-      return landed !== undefined ? stateOf(landed.outcome) : running.has(index) ? 'running' : 'queued';
-    }));
+    grid.update(Array.from({ length: status.tasks.total }, (_, index) => stateNow(outcomes.get(index), running.has(index))));
     split = splitOf(status, outcomes);
     const { lanes, placed } = segments(status, outcomes, now, split);
 
-    timeline.update(lanes, placed, status.startedAt ?? status.createdAt, status.finishedAt ?? now, status.phase !== 'done');
+    timeline.update(lanes, placed, { from: status.startedAt ?? status.createdAt, to: status.finishedAt ?? now, live: status.phase !== 'done' });
   };
 
   const open = (index: number): void => {
     drawer?.();
     history.replaceState(null, '', `#/jobs/${id}/${String(index)}`);
     items ??= get(`/jobs/${id}/items`, v.object({ items: v.array(JsonSchema) })).then((answer) => answer.items);
-    drawer = taskDrawer(id, index, outcomes.get(index) ?? null, status?.running?.find((each) => each.index === index) ?? null, items, where, () => {
-      drawer = null;
-      history.replaceState(null, '', `#/jobs/${id}`);
+    drawer = taskDrawer({
+      job: id, index, landed: outcomes.get(index) ?? null, running: status?.running?.find((each) => each.index === index) ?? null, items, where,
+      closed: () => {
+        drawer = null;
+        history.replaceState(null, '', `#/jobs/${id}`);
+      },
     });
   };
 
@@ -131,16 +129,16 @@ export function jobView(id: string, opened: number | null): View {
     for (let more = true; more;) {
       const batch = await get(`/jobs/${id}/events?after=${String(seq)}`, EventsSchema);
 
-      for (const event of batch.events) outcomes.set(event.outcome.index, { outcome: event.outcome, ...event.at === undefined ? {} : { at: event.at } });
+      for (const event of batch.events) outcomes.set(event.outcome.index, { outcome: event.outcome, at: event.at });
       seq = batch.events.at(-1)?.seq ?? seq;
       more = batch.events.length > 0 && !batch.done;
     }
 
     render();
 
-    if (opened !== null) {
-      open(opened);
-      opened = null;
+    if (opening !== null) {
+      open(opening);
+      opening = null;
     }
 
     // A job that ended is read once more and then held still.
@@ -174,7 +172,13 @@ function splitOf(status: JobStatus, outcomes: ReadonlyMap<number, Landed>): Spli
 
 /** Every container's lanes, its start and every task it ran or runs, placed in time. A task answered before this
  *  Worker stamped outcomes has no place, nor does one answered from the cache. */
-function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now: number, split: Split): { readonly lanes: Lane[]; readonly placed: Segment[] } {
+/** A job's timeline: its lanes, and each container's start and tasks placed on them. */
+interface Placed {
+  readonly lanes: Lane[];
+  readonly placed: Segment[];
+}
+
+function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now: number, split: Split): Placed {
   const tasks: Segment[] = [];
   /** Each container's first task's start, where its start ends. */
   const firsts = new Map<string, number>();
@@ -208,9 +212,20 @@ function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now:
   return { lanes, placed: [...starts, ...tasks] };
 }
 
+/** What a task's drawer shows and is told: the job and task, how it landed or where it runs, the job's items when read,
+ *  how its container is named, and what its close does. */
+interface Drawn {
+  readonly job: string;
+  readonly index: number;
+  readonly landed: Landed | null;
+  readonly running: Running | null;
+  readonly items: Promise<readonly Json[]>;
+  readonly where: (vessel: string, slot: number | undefined) => string;
+  readonly closed: () => void;
+}
+
 /** A task in a drawer: what it was given, how it ended, and its files. Answers the drawer's close. */
-function taskDrawer(job: string, index: number, landed: Landed | null, running: { readonly vessel: string; readonly started: number; readonly slot?: number } | null, items: Promise<readonly Json[]>,
-  where: (vessel: string, slot: number | undefined) => string, closed: () => void): () => void {
+function taskDrawer({ job, index, landed, running, items, where, closed }: Drawn): () => void {
   const previous = document.activeElement;
   const itemSlot = h('pre', { class: 'code' }, '…');
 
@@ -229,14 +244,18 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
 
   const closer = h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: close }, icon('close'));
   const outcome = landed?.outcome;
-  const state: TaskState = outcome === undefined ? running === null ? 'queued' : 'running' : stateOf(outcome);
+  const state = stateNow(landed ?? undefined, running !== null);
   const tones: Readonly<Record<TaskState, Tone>> = { queued: 'idle', running: 'live', green: 'ok', red: 'bad', timeout: 'warn', lost: 'bad', cancelled: 'idle' };
   const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
 
-  const files = outcome === undefined ? null : h('div', { class: 'button-row' },
+  const problem = h('p', { class: 'error' });
+  const fetched = (path: string, name: string) => () => { detach(download(path, name), (error) => { replace(problem, describe(error)); }); };
+
+  const files = outcome === undefined ? null : h('div', {}, h('div', { class: 'button-row' },
     h('button', { class: 'button', type: 'button', onclick: () => { showLog(job, index); } }, icon('log'), 'Whole log'),
-    outcome.output ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`); } }, icon('download'), 'Output') : null,
-    outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`); } }, icon('download'), 'Artifacts') : null);
+    outcome.output ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`) }, icon('download'), 'Output') : null,
+    outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`) }, icon('download'), 'Artifacts') : null),
+  problem);
 
   const backdrop = h('div', { class: 'backdrop', onclick: close });
 
@@ -264,7 +283,7 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
   document.body.append(backdrop, panel);
   document.addEventListener('keydown', escape);
   closer.focus();
-  void items.then((all) => { replace(itemSlot, JSON.stringify(all[index] ?? null, null, 2)); }, (cause: unknown) => { replace(itemSlot, said(cause)); });
+  detach(items.then((all) => { replace(itemSlot, JSON.stringify(all[index] ?? null, null, 2)); }), (error) => { replace(itemSlot, describe(error)); });
 
   return close;
 }
@@ -300,10 +319,40 @@ function showLog(job: string, index: number): void {
 
   document.body.append(shade, modal);
   document.addEventListener('keydown', escape);
-  void blob(`/jobs/${job}/tasks/${String(index)}/log`).then(async (found) => {
+  detach((async () => {
+    const found = await blob(`/jobs/${job}/tasks/${String(index)}/log`);
+
     text = found === null ? '' : await found.text();
-    replace(body, found === null ? 'This task kept no log: it never ran, or its log has expired (a job\'s files last 7 days).' : text === '' ? 'The task printed nothing.' : text);
+    replace(body, logText(found === null ? null : text));
     // A log ends with how its task ended, so it opens at its end.
     body.scrollTop = body.scrollHeight;
-  }, (cause: unknown) => { replace(body, said(cause)); });
+  })(), (error) => { replace(body, describe(error)); });
+}
+
+/** Where a task runs now. */
+type Running = NonNullable<JobStatus['running']>[number];
+
+/** A task's state: how it landed, else running or queued. */
+function stateNow(landed: Landed | undefined, running: boolean): TaskState {
+  if (landed !== undefined) return stateOf(landed.outcome);
+
+  return running ? 'running' : 'queued';
+}
+
+/** A task cell's hover line: how it landed and where, how long it has run and where, or that it waits. */
+function detailOf(landed: Landed | undefined, running: Running | undefined, where: (vessel: string, slot: number | undefined) => string): string {
+  if (landed !== undefined) {
+    const { outcome } = landed;
+
+    return `${STATE_WORDS[stateOf(outcome)]}${outcome.cached === true ? ', from the cache' : ''} · ${duration(outcome.seconds * 1000)}${outcome.vessel === '' ? '' : ` on ${where(outcome.vessel, outcome.slot)}`}`;
+  }
+
+  return running === undefined ? 'queued' : `running on ${where(running.vessel, running.slot)} for ${duration(Date.now() - running.started)}`;
+}
+
+/** What a log's window shows: the log, or why there is none to show. */
+function logText(text: string | null): string {
+  if (text === null) return 'This task kept no log: it never ran, or its log has expired (a job\'s files last 7 days).';
+
+  return text === '' ? 'The task printed nothing.' : text;
 }

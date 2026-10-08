@@ -4,7 +4,7 @@
  * dashboard` hands it over in the page's fragment, which no request carries.
  */
 import * as v from 'valibot';
-import { DEPLOYMENT_HEADER, HealthSchema, PROTOCOL, PROTOCOL_HEADER, type Health } from '../../src/protocol';
+import { DEPLOYMENT_HEADER, HealthSchema, jsonOf, PROTOCOL, PROTOCOL_HEADER, type Health } from '../../src/protocol';
 
 const TOKEN = 'armada.token';
 
@@ -56,7 +56,7 @@ async function request(path: string): Promise<Response> {
 
 /** What a failed answer says: the Worker's own error, or its status. */
 async function failure(response: Response): Promise<string> {
-  const said = v.safeParse(v.object({ error: v.string() }), await response.json().catch(() => null));
+  const said = v.safeParse(v.object({ error: v.string() }), jsonOf(await response.text()));
 
   return said.success ? said.output.error : `the Worker answered ${String(response.status)}`;
 }

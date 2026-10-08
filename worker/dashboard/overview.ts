@@ -7,7 +7,7 @@ import { FleetSchema, HealthSchema, JobsSchema, type Fleet, type JobBrief } from
 import { get } from './api';
 import { ago, count, duration, h, replace } from './dom';
 import { jobPill, nameOf, progress, tookOf } from './status';
-import { empty, poll, type View } from './view';
+import { detach, empty, failed, poll, type View } from './view';
 
 /** The fleet's picture: this many cells, each a share of its cap. */
 const CELLS = 120;
@@ -54,10 +54,15 @@ export function overview(): View {
         const button = event.currentTarget;
 
         if (button instanceof HTMLButtonElement) button.disabled = true;
-        void get(`/jobs?limit=${String(PAGE)}&before=${encodeURIComponent(all.at(-1)?.id ?? '')}`, JobsSchema).then(({ jobs }) => {
+        detach((async () => {
+          const { jobs } = await get(`/jobs?limit=${String(PAGE)}&before=${encodeURIComponent(all.at(-1)?.id ?? '')}`, JobsSchema);
+
           older = [...older, ...jobs];
           exhausted = jobs.length < PAGE;
           drawJobs();
+        })(), (error) => {
+          if (button instanceof HTMLButtonElement) button.disabled = false;
+          failed(banner, error);
         });
       },
     }, 'Show older'));
@@ -96,7 +101,7 @@ export function overview(): View {
     return true;
   });
 
-  return { element, dispose: pollster.stop };
+  return { element, dispose: () => { pollster.stop(); } };
 }
 
 function stat(label: string, value: string, unit?: string): HTMLDivElement {
@@ -108,12 +113,12 @@ function fleetPicture(fleet: Fleet, used: number, names: ReadonlyMap<string, str
   const per = fleet.cap / CELLS;
   const cells: HTMLElement[] = [];
 
-  fleet.jobs.forEach((job, rank) => {
+  for (const [rank, job] of fleet.jobs.entries()) {
     // A job holding anything shows at least one cell.
     const many = Math.max(1, Math.round(job.vcpus / per));
 
     for (let at = 0; at < many && cells.length < CELLS; at += 1) cells.push(h('i', { class: shade(rank), title: `${names.get(job.id) ?? job.id}: ${count(job.vcpus)} vCPU` }));
-  });
+  }
 
   while (cells.length < CELLS) cells.push(h('i', { class: 'free' }));
 

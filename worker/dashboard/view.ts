@@ -1,4 +1,5 @@
 /** A page of the dashboard, and how it stays current: it polls while it is shown and stops when it is left. */
+import { errorOf } from '../../src/protocol';
 import { RequestError, SignedOut } from './api';
 import { h, icon, replace } from './dom';
 
@@ -14,12 +15,25 @@ export function whenSignedOut(handler: () => void): void {
   onSignedOut = handler;
 }
 
+/** A page's poll: stopped when the page is left, run again at once on request. */
+export interface Poller {
+  stop(): void;
+  now(): void;
+}
+
+/** Runs `work` to its end with nothing awaiting it: a failure goes to `failed`, never unhandled. */
+export function detach(work: Promise<void>, onFailure: (error: Error) => void): void {
+  work.then(undefined, (...rejected: [unknown]) => { onFailure(errorOf({ cause: rejected[0] })); });
+}
+
 /** Runs `refresh` now and then every `ms` after each run ends, while the page is visible, until `stop`. A failure is
  *  shown in `banner` and the next run tries again; a refused bearer signs out. `refresh` answers whether to go on. */
-export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boolean>): { stop(): void; now(): void } {
+export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boolean>): Poller {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
+
+  const shown = (error: Error): void => { failed(banner, error); };
 
   const run = async (): Promise<void> => {
     clearTimeout(timer);
@@ -39,20 +53,24 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
         return;
       }
 
-      replace(banner, h('div', { class: 'error-banner' }, icon('alert'), describe(cause)));
+      shown(errorOf({ cause }));
     } finally {
       running = false;
     }
 
-    if (!stopped && again && document.visibilityState === 'visible') timer = setTimeout(() => { void run(); }, ms);
+    if (!stopped && again && document.visibilityState === 'visible') timer = setTimeout(kick, ms);
   };
 
+  function kick(): void {
+    detach(run(), shown);
+  }
+
   const visible = (): void => {
-    if (document.visibilityState === 'visible') void run();
+    if (document.visibilityState === 'visible') kick();
   };
 
   document.addEventListener('visibilitychange', visible);
-  void run();
+  kick();
 
   return {
     stop: () => {
@@ -60,16 +78,20 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', visible);
     },
-    now: () => { void run(); },
+    now: kick,
   };
 }
 
-export function describe(cause: unknown): string {
-  if (cause instanceof RequestError && cause.status === 426) return `${cause.message}. This dashboard and the deployed Worker speak different versions of armada's wire.`;
+/** A failure shown in a page's banner. */
+export function failed(banner: HTMLElement, error: Error): void {
+  replace(banner, h('div', { class: 'error-banner' }, icon('alert'), describe(error)));
+}
 
-  if (cause instanceof Error) return cause.message;
+/** What a failed request says, in words for the page. */
+export function describe(error: Error): string {
+  if (error instanceof RequestError && error.status === 426) return `${error.message}. This dashboard and the deployed Worker speak different versions of armada's wire.`;
 
-  return String(cause);
+  return error.message;
 }
 
 /** A card's empty state: what is missing, and what makes some. */

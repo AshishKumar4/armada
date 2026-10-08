@@ -106,7 +106,7 @@ abstract class Surface<Hit> {
   protected abstract measure(width: number): number;
 
   /** Paints the picture as last measured, and answers whether something on it is live. */
-  protected abstract draw(context: CanvasRenderingContext2D, width: number, height: number, colors: Palette, now: number): boolean;
+  protected abstract draw(frame: Frame): boolean;
 
   /** What is under the point, in CSS pixels from the canvas's corner. */
   protected abstract at(x: number, y: number): Hit | null;
@@ -129,7 +129,7 @@ abstract class Surface<Hit> {
 
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
-    const live = this.draw(context, width, height, palette(), performance.now());
+    const live = this.draw({ context, width, height, colors: palette(), now: performance.now() });
 
     if (live && document.visibilityState === 'visible' && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
       this.frame = requestAnimationFrame(() => { this.paint(); });
@@ -175,7 +175,7 @@ export class TaskGrid extends Surface<number> {
     return Math.max(size, Math.ceil(count / columns) * (size + gap) - gap);
   }
 
-  protected draw(context: CanvasRenderingContext2D, _width: number, _height: number, colors: Palette, now: number): boolean {
+  protected draw({ context, colors, now }: Frame): boolean {
     const { size, gap, columns } = this.layout;
     const live = this.states.length <= BREATHING && this.states.includes('running');
     const glow = live ? breath(now) : 1;
@@ -183,7 +183,7 @@ export class TaskGrid extends Surface<number> {
     const dot = Math.max(1, Math.round(size * 0.44));
     const line = Math.max(1, size / 7);
 
-    this.states.forEach((state, index) => {
+    for (const [index, state] of this.states.entries()) {
       const x = (index % columns) * (size + gap);
       const y = Math.floor(index / columns) * (size + gap);
 
@@ -207,7 +207,7 @@ export class TaskGrid extends Surface<number> {
         context.fill();
         context.globalAlpha = 1;
       }
-    });
+    }
 
     return live;
   }
@@ -221,6 +221,29 @@ export class TaskGrid extends Surface<number> {
 
     return index;
   }
+}
+
+/** One paint of a picture: where, how large in CSS pixels, in which theme's colors, and when. */
+interface Frame {
+  readonly context: CanvasRenderingContext2D;
+  readonly width: number;
+  readonly height: number;
+  readonly colors: Palette;
+  readonly now: number;
+}
+
+/** A timeline's span: from the job's start to its end, which a live job's runs on with the clock. */
+export interface Span {
+  readonly from: number;
+  readonly to: number;
+  readonly live: boolean;
+}
+
+/** A timeline row's height for so many lanes: roomy for few, a thin strip for many. */
+function rowFor(lanes: number): number {
+  if (lanes <= 24) return 20;
+
+  return lanes <= 80 ? 12 : 7;
 }
 
 export interface Lane {
@@ -265,16 +288,17 @@ export class Timeline extends Surface<Segment> {
 
   private segments: readonly Segment[] = [];
 
-  private span = { from: 0, to: 1, live: false };
+  private span: Span = { from: 0, to: 1, live: false };
 
   private geometry = { row: 20, bar: 13, plot: 1, gutter: GUTTER };
 
   private hatch: { readonly pattern: CanvasPattern; readonly accent: string } | null = null;
 
-  update(lanes: readonly Lane[], segments: readonly Segment[], from: number, to: number, live: boolean): void {
+  /** The lanes and segments to draw, over `span`: from the job's start to its end, or on with the clock while live. */
+  update(lanes: readonly Lane[], segments: readonly Segment[], span: Span): void {
     this.lanes = lanes;
     this.segments = segments;
-    this.span = { from, to, live };
+    this.span = span;
     this.paint();
   }
 
@@ -309,7 +333,7 @@ export class Timeline extends Surface<Segment> {
 
   protected measure(width: number): number {
     const count = this.lanes.length;
-    const row = count <= 24 ? 20 : count <= 80 ? 12 : 7;
+    const row = rowFor(count);
     const gutter = gutterFor(this.lanes);
 
     this.geometry = { row, bar: row >= 12 ? row - 7 : row - 2, plot: Math.max(1, width - gutter - 8), gutter };
@@ -317,7 +341,7 @@ export class Timeline extends Surface<Segment> {
     return AXIS + count * row + 4;
   }
 
-  protected draw(context: CanvasRenderingContext2D, _width: number, height: number, colors: Palette, now: number): boolean {
+  protected draw({ context, height, colors, now }: Frame): boolean {
     const { row, bar, plot, gutter } = this.geometry;
     const { from } = this.span;
     const to = this.end();
@@ -342,10 +366,11 @@ export class Timeline extends Surface<Segment> {
 
     if (row >= 12) {
       context.textAlign = 'left';
-      this.lanes.forEach((lane, index) => {
+
+      for (const [index, lane] of this.lanes.entries()) {
         context.fillStyle = lane.state === 'failed' ? colors.bad : colors.muted;
         context.fillText(lane.name, 0, AXIS + index * row + row / 2);
-      });
+      }
     }
 
     const glow = breath(now);

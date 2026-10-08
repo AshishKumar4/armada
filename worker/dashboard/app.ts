@@ -2,14 +2,14 @@
  * armada's dashboard: the deployment's fleet and recent jobs, a job followed live, its environments, and its CI
  * verdicts. The Worker serves it as static files under /ui/; `armada dashboard` opens it signed in.
  */
-import type { Health } from '../../src/protocol';
+import { errorOf, type Health } from '../../src/protocol';
 import { deployment, signIn, signOut, SignedOut, takeToken, token } from './api';
 import { ci } from './ci';
 import { environments } from './environments';
 import { h, icon, replace } from './dom';
 import { jobView } from './job';
 import { overview } from './overview';
-import { describe, whenSignedOut, type View } from './view';
+import { describe, detach, whenSignedOut, type View } from './view';
 
 type Route =
   | { readonly page: 'overview' }
@@ -77,13 +77,19 @@ function signInPage(): void {
 
         if (field.value.trim() === '') return;
         signIn(field.value);
-        void start();
+        restart();
       },
     }, field, h('button', { class: 'button primary', type: 'submit' }, 'Sign in with a token')))));
   field.focus();
 }
 
-function shell(health: Health, host: string): { readonly main: HTMLElement; readonly nav: HTMLElement } {
+/** The page's frame: its navigation, and the main element each view fills. */
+interface Frame {
+  readonly main: HTMLElement;
+  readonly nav: HTMLElement;
+}
+
+function shell(health: Health, host: string): Frame {
   const nav = h('nav', { class: 'nav', label: 'Pages' },
     h('a', { href: '#/', data: { page: 'overview' } }, 'Fleet'), h('a', { href: '#/environments', data: { page: 'environments' } }, 'Environments'), h('a', { href: '#/ci', data: { page: 'ci' } }, 'CI'));
 
@@ -147,9 +153,18 @@ async function start(): Promise<void> {
     show(main, nav);
   } catch (cause) {
     if (cause instanceof SignedOut) return signInPage();
-    replace(document.body, h('div', { class: 'signin' }, h('div', { class: 'card' }, brand(), h('h1', {}, 'The Worker did not answer'), h('p', {}, describe(cause)),
-      h('button', { class: 'button', type: 'button', onclick: () => { void start(); } }, 'Try again'))));
+    unanswered(errorOf({ cause }));
   }
+}
+
+/** The page when the Worker did not answer, with a way to ask again. */
+function unanswered(error: Error): void {
+  replace(document.body, h('div', { class: 'signin' }, h('div', { class: 'card' }, brand(), h('h1', {}, 'The Worker did not answer'), h('p', {}, describe(error)),
+    h('button', { class: 'button', type: 'button', onclick: restart }, 'Try again'))));
+}
+
+function restart(): void {
+  detach(start(), unanswered);
 }
 
 whenSignedOut(() => {
@@ -165,4 +180,4 @@ takeToken();
 
 applyTheme();
 
-void start();
+restart();
