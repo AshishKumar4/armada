@@ -9,7 +9,7 @@ import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './d
 import { expiryWarning, registryCredentials } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Push } from './protocol';
+import { BaseSchema, describeUsage, errorOf, jsonOf, JsonSchema, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -120,20 +120,20 @@ function recipeFrom(path: string | undefined): v.InferOutput<typeof RecipeFileSc
   if (path === undefined) return {};
   const file = v.parse(RecipeFileSchema, JSON.parse(readFileSync(path, 'utf8')));
   const text = (script: string | undefined) => script === undefined ? undefined : readFileSync(resolve(dirname(path), script), 'utf8');
-  const recipe = { ...file };
+  const read = { ...file };
 
-  if (file.setup !== undefined) recipe.setup = text(file.setup);
+  if (file.setup !== undefined) read.setup = text(file.setup);
 
-  if (file.install !== undefined) recipe.install = text(file.install);
+  if (file.install !== undefined) read.install = text(file.install);
 
-  return recipe;
+  return read;
 }
 
 function itemsFrom(source: string): Json[] {
   const text = readFileSync(source === '-' ? 0 : source, 'utf8').trim();
 
   // Parsed from JSON, so JSON.
-  if (text.startsWith('[')) return v.parse(v.array(v.unknown()), JSON.parse(text)) as Json[];
+  if (text.startsWith('[')) return v.parse(v.array(JsonSchema), JSON.parse(text));
 
   return text.split('\n').filter((line) => line.trim() !== '');
 }
@@ -164,11 +164,19 @@ async function map(): Promise<number> {
   console.error(`job ${id}`);
 
   // A ready environment starts the job at once; a new one is prepared first, which is a wait worth a word.
-  const preparing = setTimeout(() => {
-    void job.status().then((status) => {
+  let told: Promise<void> | null = null;
+
+  const tell = async (): Promise<void> => {
+    try {
+      const status = await job.status();
+
       if (status.phase === 'preparing') console.error(`preparing environment ${status.key.slice(0, 12)}: once per recipe, and it takes a few minutes`);
-    }, () => undefined);
-  }, 3_000);
+    } catch (cause) {
+      console.error(`job ${id}'s status did not answer: ${errorOf({ cause }).message}`);
+    }
+  };
+
+  const preparing = setTimeout(() => { told = tell(); }, 3_000);
 
   const artifacts = option('artifacts');
 
@@ -186,7 +194,8 @@ async function map(): Promise<number> {
         }
       }
 
-      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: result.error } : {}, ...kept === undefined ? {} : { artifacts: kept } }));
+      // JSON leaves out what a result does not have: a value, an error, artifacts kept.
+      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, value: result.ok ? result.value : undefined, error: result.kind === 'error' ? result.error : undefined, artifacts: kept }));
       else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
 
       if (result.kind === 'lost' || result.kind === 'cancelled') worst = 2;
@@ -194,6 +203,7 @@ async function map(): Promise<number> {
     }
   });
   clearTimeout(preparing);
+  await told;
 
   for (const problem of (await job.status()).problems) console.error(`problem: ${problem}`);
   const summary = await job.summary();
@@ -210,14 +220,14 @@ async function map(): Promise<number> {
 /** The checkout's wrangler, run by the Bun that runs armada, so it needs no Node.js. */
 const WRANGLER = [process.execPath, join(ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js')];
 
-function wrangler(args: readonly string[], account: string, stdin?: string): string {
-  const ran = Bun.spawnSync([...WRANGLER, ...args], {
+function wrangler(words: readonly string[], account: string, stdin?: string): string {
+  const ran = Bun.spawnSync([...WRANGLER, ...words], {
     cwd: ROOT, env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: account }, stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe',
   });
 
   const output = ran.stdout.toString() + ran.stderr.toString();
 
-  if (ran.exitCode !== 0) throw new Error(`wrangler ${args.slice(0, 3).join(' ')} exited ${String(ran.exitCode)}:\n${output.slice(-3000)}`);
+  if (ran.exitCode !== 0) throw new Error(`wrangler ${words.slice(0, 3).join(' ')} exited ${String(ran.exitCode)}:\n${output.slice(-3000)}`);
 
   return output;
 }
@@ -227,15 +237,8 @@ const WhoamiSchema = v.object({ loggedIn: v.boolean(), accounts: v.optional(v.ar
 function whoami(): v.InferOutput<typeof WhoamiSchema> {
   const ran = Bun.spawnSync([...WRANGLER, 'whoami', '--json'], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
   const output = ran.stdout.toString();
-  let json: unknown = null;
-
-  try {
-    json = JSON.parse(output);
-  } catch {
-    // Not JSON: wrangler printed an error instead, which is said below.
-  }
-
-  const parsed = v.safeParse(WhoamiSchema, json);
+  // Not JSON when wrangler printed an error instead, which is said below.
+  const parsed = v.safeParse(WhoamiSchema, jsonOf(output));
 
   if (!parsed.success) throw new Error(`wrangler whoami failed:\n${(output + ran.stderr.toString()).trim().slice(-2000)}`);
 
@@ -296,6 +299,17 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
   }
 }
 
+/** The deployed Worker's health, or null, said, when it does not answer one: its jobs are drained first then. */
+async function healthOf(name: string, deployed: Armada): Promise<Health | null> {
+  try {
+    return await deployed.health();
+  } catch (cause) {
+    console.error(`armada: ${name}'s health did not answer (${errorOf({ cause }).message}), so its open jobs finish before this deploy`);
+
+    return null;
+  }
+}
+
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
  *  version that still serves every client the deployed one does, on the same driver, takes over the running jobs;
  *  `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and a deploy that
@@ -311,9 +325,16 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     if (drained) await deployed?.admit();
   };
 
+  let leaving: Promise<never> | null = null;
+
+  const leave = async (): Promise<never> => {
+    await admit();
+    process.exit(2);
+  };
+
   const interrupted = (signal: NodeJS.Signals) => {
     console.error(`armada: ${signal}: the deployed version admits jobs again`);
-    void admit().finally(() => process.exit(2));
+    leaving ??= leave();
   };
 
   process.once('SIGINT', interrupted).once('SIGTERM', interrupted).once('SIGHUP', interrupted);
@@ -322,7 +343,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     // A version whose Worker would still serve every client the deployed one does takes over the running jobs:
     // their containers outlive the Worker's update, and each object resumes from storage (measured: six deploys in
     // two minutes over 200 one-minute tasks cut none and refused no job).
-    const health = deployed === null ? null : await deployed.health().then((healthy) => healthy, () => null);
+    const health = deployed === null ? null : await healthOf(name, deployed);
     const warning = keep === undefined ? expiryWarning(name, health) : null;
 
     if (warning !== null) console.warn(warning);
@@ -532,24 +553,23 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   const repo = option('repo');
 
   if (repo === undefined || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repo)) throw new Error('webhook add needs --repo=<owner/name>');
-  const secret = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const signing = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   const url = `${new URL(armada.connection.url).origin}/webhooks/github/${project}`;
   const pullRequests = flag('pull-requests');
   const events = pullRequests ? ['push', 'pull_request'] : ['push'];
-  const settings = ['-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${url}`, '-F', `config[secret]=${secret}`, ...events.flatMap((event) => ['-f', `events[]=${event}`])];
+  const settings = ['-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${url}`, '-F', `config[secret]=${signing}`, ...events.flatMap((event) => ['-f', `events[]=${event}`])];
   const known = (await listed()).find((each) => each.project === project && each.repo === repo)?.hook;
   const signedIn = ghOut(['auth', 'status']) !== null;
 
   // A hook GitHub already signs with another secret is updated first, or the deployment would refuse its deliveries.
   if (known !== undefined && !signedIn) throw new Error(`${project} has GitHub hook ${String(known)} on ${repo}: updating its secret needs gh signed in for ${repo} (gh auth login)`);
 
-  const answered = !signedIn ? null
-    : known === undefined ? ghOut(['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'])
-      : ghOut(['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id']);
+  const made = known === undefined ? ['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'] : ['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id'];
+  const answered = signedIn ? ghOut(made) : null;
 
   const hook = answered === null || !/^\d+$/u.test(answered) ? undefined : Number(answered);
   // JSON leaves the options not given out, so the deployment's defaults apply.
-  const config = { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret, hook };
+  const config = { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret: signing, hook };
 
   await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config) });
   console.log(`configured ${project}: ${repo} builds ${pullRequests ? 'pushes and pull requests' : 'pushes'} at ${url}`);
@@ -563,7 +583,7 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   console.log(`add the hook by hand: ${repo} → Settings → Webhooks → Add webhook
   payload URL: ${url}
   content type: application/json
-  secret: ${secret}
+  secret: ${signing}
   events: ${events.join(', ')}`);
 
   return 0;
@@ -603,7 +623,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, option('label') ?? '', rest, option('secrets')?.split(',').filter(Boolean), flag('json'));
+      return await runCI(connect(), target, { label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');

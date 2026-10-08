@@ -34,14 +34,14 @@ export const dashboardUrl = (armada: Armada): string => `${armada.connection.url
 
 /** Opens `url` in this machine's browser; false when there is none to open it with. */
 export function openInBrowser(url: string): boolean {
-  const opener = process.platform === 'darwin' ? ['open'] : process.platform === 'win32' ? ['cmd', '/c', 'start', ''] : ['xdg-open'];
+  const opener = OPENERS[process.platform] ?? ['xdg-open'];
+  const [program = ''] = opener;
 
-  try {
-    return Bun.spawnSync([...opener, url], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
-  } catch {
-    return false;
-  }
+  return Bun.which(program) !== null && Bun.spawnSync([...opener, url], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
 }
+
+/** What opens a URL in the browser, by platform; the rest have xdg-open. */
+const OPENERS: Partial<Record<NodeJS.Platform, readonly string[]>> = { darwin: ['open'], win32: ['cmd', '/c', 'start', ''] };
 
 /** Serves the dashboard on this machine's loopback `port`, built again for each page load so an edit shows on reload,
  *  and passes every other request to the deployment under its bearer: the browser then holds no token, and nothing

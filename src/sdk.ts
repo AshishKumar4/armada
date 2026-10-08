@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { EventsSchema, HealthSchema, JobStatusSchema, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Health, type JobSpecSchema, type JobStatus, type Json, type Recipe, type Task } from './protocol';
+import { EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -59,16 +59,12 @@ export function connect(): Armada {
  *  such as the error page a Worker still rolling out answers with. */
 async function failureOf(response: Response): Promise<string> {
   const text = await response.text();
+  const said = v.safeParse(v.object({ error: v.string() }), jsonOf(text));
 
-  try {
-    const said = v.safeParse(v.object({ error: v.string() }), JSON.parse(text));
+  if (said.success) return `${String(response.status)} ${said.output.error}`;
+  const line = (/<title>([^<]*)<\/title>/iu.exec(text)?.[1] ?? text.split('\n').find((each) => each.trim() !== '') ?? '').trim().slice(0, 200);
 
-    return `${String(response.status)} ${said.success ? said.output.error : text}`;
-  } catch {
-    const line = (/<title>([^<]*)<\/title>/iu.exec(text)?.[1] ?? text.split('\n').find((each) => each.trim() !== '') ?? '').trim().slice(0, 200);
-
-    return `${String(response.status)} from the Worker (it may still be deploying)${line === '' ? '' : `: ${line}`}`;
-  }
+  return `${String(response.status)} from the Worker (it may still be deploying)${line === '' ? '' : `: ${line}`}`;
 }
 
 /** The first version of the wire whose Worker drains. */
@@ -102,15 +98,22 @@ export class Armada {
     headers.set(PROTOCOL_HEADER, String(protocol));
 
     for (let attempt = 1; ; attempt += 1) {
-      const sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }).catch((error: unknown) => error);
-      const passing = sent instanceof Response ? [500, 502, 503, 504].includes(sent.status) : true;
+      let sent: Response;
 
-      if (passing && attempt < attempts) {
+      try {
+        sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers });
+      } catch (cause) {
+        // A connection that dropped is asked again, as a gateway's failure is.
+        if (attempt >= attempts) throw cause;
         await Bun.sleep(attempt * 1000);
         continue;
       }
 
-      if (!(sent instanceof Response)) throw sent;
+      if ([500, 502, 503, 504].includes(sent.status) && attempt < attempts) {
+        await Bun.sleep(attempt * 1000);
+        continue;
+      }
+
       // The Worker's own 404 says a thing is absent; an HTML one is a page from a Worker not yet answering.
       const absent = sent.status === 404 && sent.headers.get('content-type')?.startsWith('text/html') !== true;
 
@@ -121,7 +124,7 @@ export class Armada {
   }
 
   /** `body` as JSON, and the answer's JSON. */
-  async post<Body>(path: string, body: Body): Promise<Json> {
+  async post(path: string, body: JsonBody): Promise<Json> {
     return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json());
   }
 
@@ -134,10 +137,7 @@ export class Armada {
   async drain(): Promise<number | null> {
     // A Worker that answers the drain only in its own version is asked in each older one, down to the first that had it.
     for (let protocol = PROTOCOL; protocol >= FIRST_DRAIN; protocol -= 1) {
-      const answer = await this.call('/drain', { method: 'POST' }, protocol).catch((cause: unknown) => {
-        if (cause instanceof RequestError && cause.status === 426) return null;
-        throw cause;
-      });
+      const answer = await this.drainIn(protocol);
 
       if (answer !== null) {
         this.spoken = protocol;
@@ -151,6 +151,17 @@ export class Armada {
 
   async admit(): Promise<void> {
     await this.call('/drain', { method: 'DELETE' }, this.spoken);
+  }
+
+  /** The drain asked in wire `protocol`, or null when the Worker answers that it speaks another. */
+  private async drainIn(protocol: number): Promise<Response | null> {
+    try {
+      return await this.call('/drain', { method: 'POST' }, protocol);
+    } catch (cause) {
+      if (cause instanceof RequestError && cause.status === 426) return null;
+
+      throw cause;
+    }
   }
 
   /** A recipe's environment key, and what a commit for it should be packed against. */

@@ -12,8 +12,8 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { listSchedule } from './dispatch';
-import { fileTimings, grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
+import { expectedOf, fileTimings, grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -51,11 +51,21 @@ function resolveCommit(target: string): Commit {
   return { sha: git(process.cwd(), ['rev-parse', '--verify', `${target}^{commit}`]).toString().trim(), repo: process.cwd() };
 }
 
+/** A plan run on this machine: the checkout and commit it runs in, its command, the run's target and timings, and the
+ *  config's env. */
+interface LocalPlan {
+  readonly repo: string;
+  readonly sha: string;
+  readonly command: readonly string[];
+  readonly target: number;
+  readonly timings: Timings;
+  readonly env: Readonly<Record<string, string>>;
+}
+
 /** The plan's stdout, run in `repo` where its checkout is `sha` and clean, with `{target}` and `{timings}` filled here;
  *  undefined where it is not that commit, and the plan runs in a container. A container's start, cold on a new machine,
  *  was 61 of the 70 seconds Dew's plan took. */
-export function localPlan(repo: string, sha: string, command: readonly string[], target: number, timings: Timings,
-  env: Readonly<Record<string, string>>): string | undefined {
+export function localPlan({ repo, sha, command, target, timings, env }: LocalPlan): string | undefined {
   if (git(repo, ['rev-parse', 'HEAD']).toString().trim() !== sha || git(repo, ['status', '--porcelain']).toString().trim() !== '') return undefined;
   const scratch = mkdtempSync(join(tmpdir(), 'armada-plan-'));
 
@@ -118,18 +128,31 @@ const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
 
 const clock = (ms: number): string => `${String(Math.floor(ms / 60_000))}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 
+/** A followed job's interruption: the cancel it started, which the CLI's exit waits on. */
+interface Interruption {
+  cancelling: Promise<never> | null;
+}
+
 /** `body`, while it follows job `id`: interrupting the CLI (Ctrl-C, or a CI job cancelled) cancels the job, rather than
  *  leaving its containers to run for an answer nobody reads, and exits 2. */
 export async function cancelOnInterrupt<T>(job: { cancel(): Promise<void> }, id: string, body: () => Promise<T>): Promise<T> {
-  // Once interrupted, the cancel's end is the CLI's: a job that finishes meanwhile does not answer for it.
-  let cancelling: Promise<never> | null = null;
+  // Once interrupted, the cancel's end is the CLI's: a job that finishes meanwhile does not answer for it. Held in an
+  // object the handler sets, so the read after `body` is not narrowed to the null it starts as.
+  const interruption: Interruption = { cancelling: null };
+
+  const cancel = async (): Promise<never> => {
+    try {
+      await job.cancel();
+    } catch (cause) {
+      console.error(`armada: cancelling job ${id} failed: ${errorOf({ cause }).message}`);
+    }
+
+    process.exit(2);
+  };
 
   const interrupted = (signal: NodeJS.Signals): void => {
     console.error(`armada: ${signal}: cancelling job ${id}`);
-    cancelling ??= job.cancel().then(() => process.exit(2), (cause: unknown) => {
-      console.error(`armada: cancelling job ${id} failed: ${String(cause)}`);
-      process.exit(2);
-    });
+    interruption.cancelling ??= cancel();
   };
 
   process.once('SIGINT', interrupted).once('SIGTERM', interrupted);
@@ -137,7 +160,9 @@ export async function cancelOnInterrupt<T>(job: { cancel(): Promise<void> }, id:
   try {
     const result = await body();
 
-    return cancelling === null ? result :  cancelling;
+    if (interruption.cancelling !== null) return await interruption.cancelling;
+
+    return result;
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted);
   }
@@ -145,7 +170,13 @@ export async function cancelOnInterrupt<T>(job: { cancel(): Promise<void> }, id:
 
 /** A result's word by its exit: green, RED with the exit code, or FAILED with why it never finished. */
 function exitWord(result: Result<Json, string | null>): string {
-  return result.kind === 'lost' || result.kind === 'cancelled' ? `FAILED: ${result.reason.slice(-300)}` : result.kind === 'ok' ? 'green' : `RED (exit ${String(result.meta.exitCode)})`;
+  switch (result.kind) {
+    case 'ok': return 'green';
+    case 'lost':
+    case 'cancelled': return `FAILED: ${result.reason.slice(-300)}`;
+    case 'error':
+    case 'timeout': return `RED (exit ${String(result.meta.exitCode)})`;
+  }
 }
 
 /** A command template's argv for one item: `{item}`, an object item's scalar keys, `{index}`, `{out}`, `{files}`,
@@ -156,20 +187,37 @@ export function argvOf(template: readonly string[], recipe: Recipe): (item: Json
   return (item, { index }) => template.map((word) => fill(word, { ...itemValues(item, index), ...fixed }));
 }
 
-/** Follows a job to its end, saying each phase once and each outcome as it lands, in the words `say` finds for it. */
-async function follow<O extends string | null>(job: Job<Json, O>, began: number, name: (index: number) => string,
-  say: (result: Result<Json, O>) => Promise<string> | string = exitWord, note: (line: string) => void = console.log): Promise<Result<Json, O>[]> {
+/** How a followed job is said: each task's name, the words for its outcome, and where each line goes. */
+interface Following<O> {
+  readonly name: (index: number) => string;
+  readonly say: (result: Result<Json, O>) => Promise<string> | string;
+  readonly note: (line: string) => void;
+}
+
+/** Follows a job to its end, saying each phase once, a status it cannot read once, and each outcome as it lands. */
+async function follow<O extends string | null>(job: Job<Json, O>, began: number, { name, say, note }: Following<O>): Promise<Result<Json, O>[]> {
   const results: Result<Json, O>[] = [];
   const id = await job.id;
-  let phase = '';
+  let said = '';
+  let polled: Promise<void> | null = null;
 
-  const watcher = setInterval(() => {
-    void job.status().then((status) => {
-      if (status.phase === phase) return;
-      phase = status.phase;
-      note(`${clock(Date.now() - began).padStart(6)}  ${phase === 'preparing' ? `preparing environment ${status.key.slice(0, 12)}` : phase}`);
-    }, () => undefined);
-  }, 3_000);
+  const poll = async (): Promise<void> => {
+    let line: string;
+
+    try {
+      const status = await job.status();
+
+      line = status.phase === 'preparing' ? `preparing environment ${status.key.slice(0, 12)}` : status.phase;
+    } catch (cause) {
+      line = `its status is not answering: ${errorOf({ cause }).message}`;
+    }
+
+    if (line === said) return;
+    said = line;
+    note(`${clock(Date.now() - began).padStart(6)}  ${line}`);
+  };
+
+  const watcher = setInterval(() => { polled ??= poll().finally(() => { polled = null; }); }, 3_000);
 
   try {
     return await cancelOnInterrupt(job, id, async () => {
@@ -251,13 +299,21 @@ interface OnCommit {
   readonly tmpfs: readonly string[];
 }
 
+/** A run's container size: the config's, or with `auto` the smallest the last runs' usage fits, medium until a run has
+ *  measured its tasks. */
+function sizeOf(config: Config, timings: Timings): Size {
+  if (config.size !== 'auto') return config.size;
+
+  return timings.usage === null || timings.usage === undefined ? 'medium' : fitSize(timings.usage);
+}
+
 /** A commit and its `.armada.json`: its environment, its job fields, and the upload of its pack, which sends nothing
  *  when the runner has it. */
 async function commitOf(armada: Armada, target: string) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
-  const size = config.size !== 'auto' ? config.size : timings.usage === null || timings.usage === undefined ? 'medium' : fitSize(timings.usage);
+  const size = sizeOf(config, timings);
   const recipe = recipeOf(repo, sha, config, size);
   const environment = await armada.resolve(recipe);
   const base = packBase(repo, environment.base);
@@ -277,9 +333,9 @@ export async function onCommit(armada: Armada, target: string): Promise<OnCommit
 
 /** A task's seconds: its plan entry's `weight`, else the last runs' medians of the rows it names, or of the task. */
 function estimateOf(entry: PlanEntry, name: string, timings: Timings): number | undefined {
-  const rows = entry.rows?.map((row) => timings.rows[typeof row === 'string' ? row : row.name]) ?? [timings.rows[name]];
+  const rows = entry.rows?.map((row) => timings.rows[expectedOf(row).name]) ?? [timings.rows[name]];
 
-  return entry.weight ?? (rows.every((seconds) => seconds !== undefined) ? rows.reduce((sum, seconds) => sum + seconds, 0) : undefined);
+  return entry.weight ?? (rows.every((estimate) => estimate !== undefined) ? rows.reduce((sum, estimate) => sum + estimate, 0) : undefined);
 }
 
 /** The fewest containers, up to `most`, that finish these tasks as soon as `most` would, queued longest first: every
@@ -299,22 +355,45 @@ export function poolFor(estimates: readonly number[], most: number): number {
 
 /** A run's lanes and the containers that carry them: `poolFor` sizes the lanes, and each container carries `slots`
  *  of them. */
-export function lanesFor(estimates: readonly (number | undefined)[], weights: readonly number[], containers: number, slots: number): { readonly lanes: number; readonly pool: number } {
+export function lanesFor(estimates: readonly (number | undefined)[], weights: readonly number[], containers: number, slots: number) {
   const most = Math.min(containers * slots, weights.reduce((sum, each) => sum + each, 0));
   // A gang's every rank takes a container at once: it weighs as many lanes, and the pool holds the widest it can.
   const widest = Math.min(most, Math.max(0, ...weights));
 
-  const lanes = estimates.every((seconds) => seconds !== undefined)
-    ? Math.max(widest, poolFor(estimates.flatMap((seconds, index) => Array<number>(weights[index] ?? 1).fill(seconds ?? 0)), most))
+  const lanes = estimates.every((estimate) => estimate !== undefined)
+    ? Math.max(widest, poolFor(estimates.flatMap((estimate, index) => Array<number>(weights[index] ?? 1).fill(estimate ?? 0)), most))
     : most;
 
   return { lanes, pool: Math.max(widest, Math.ceil(lanes / slots)) };
 }
 
+/** What `armada run` was asked: its label, the plan's narrowing args, its own secrets, and whether it answers as JSON. */
+export interface RunOptions {
+  readonly label: string;
+  readonly planArgs: readonly string[];
+  readonly secrets: readonly string[];
+  readonly json: boolean;
+}
+
+/** A failed task's verdict file, which it may have written before it failed, as text; null when it wrote none. */
+async function verdictText(job: Job<Json, string | null>, index: number): Promise<string | null> {
+  const written = await job.output(index);
+
+  return written === null ? null : new TextDecoder().decode(written);
+}
+
+/** A task's rows: none for a task that never finished, its verdict file's (`verdict`, null for none it can be graded
+ *  by) when the config grades by verdict, else one row of its own exit. */
+function rowsOf(result: Result<Json, string | null> | undefined, name: string, verdict: VerdictRow[] | null | undefined): VerdictRow[] | null {
+  if (result === undefined || result.kind === 'lost' || result.kind === 'cancelled') return null;
+
+  return verdict === undefined ? [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] : verdict;
+}
+
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. With `json` the progress goes to stderr and the run's answer
  *  is the one JSON object on stdout: its verdict, problems, rows and report path. */
-export async function runCI(armada: Armada, target: string, label: string, planArgs: readonly string[] = [], secrets: readonly string[] = [], json = false): Promise<number> {
+export async function runCI(armada: Armada, target: string, { label, planArgs, secrets, json }: RunOptions): Promise<number> {
   const began = Date.now();
   // With --json, stdout carries the run's one JSON object and its progress alone goes to stderr.
   const note = (line: string) => { (json ? console.error : console.log)(line); };
@@ -332,7 +411,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   if (uploaded !== null) note(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots };
-  const here = config.plan.local ? localPlan(repo, sha, [...config.plan.command, ...planArgs], config.target, timings, config.env) : undefined;
+  const here = config.plan.local ? localPlan({ repo, sha, command: [...config.plan.command, ...planArgs], target: config.target, timings, env: config.env }) : undefined;
   let planId = 'local';
   let printed: string;
   // The plan's own usage, which a container's plan reports and a local one does not.
@@ -345,7 +424,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
     planId = await planJob.id;
     note(`plan job ${planId}`);
-    const [planned] = await follow(planJob, began, () => 'plan', exitWord, note);
+    const [planned] = await follow(planJob, began, { name: () => 'plan', say: exitWord, note });
 
     if (planned?.kind !== 'ok') {
       const problem = `the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`;
@@ -384,11 +463,11 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, hedge: config.task.hedge, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
 
-  // A matrix entry came from JSON, so it is JSON. An entry with no weight of its own dispatches by its estimate.
+  // An entry with no weight of its own dispatches by its estimate.
   const entries = plan.include.map((entry, index) => {
     const estimate = estimates[index];
 
-    return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry as Json;
+    return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry;
   });
 
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
@@ -403,11 +482,11 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const say = async (result: Result<Json, string | null>): Promise<string> => {
     if (!config.task.verdict || result.kind === 'lost' || result.kind === 'cancelled') return exitWord(result);
     // A task that exited nonzero may still have written its verdict, whose rows its exit then fails.
-    const written = result.kind === 'ok' ? null : await job.output(result.index);
-    const text = result.kind === 'ok' ? result.value : written === null ? null : new TextDecoder().decode(written);
+    const text = result.kind === 'ok' ? result.value : await verdictText(job, result.index);
     const parsed = text === null ? null : v.safeParse(VerdictFileSchema, jsonOf(text));
     // A task that failed before it wrote a verdict reported no row; one that exited 0 without a verdict is ungradable.
-    const reported = parsed?.success === true ? parsed.output.rows : result.meta.exitCode !== 0 ? [] : null;
+    const ungradable = result.meta.exitCode === 0 ? null : [];
+    const reported = parsed?.success === true ? parsed.output.rows : ungradable;
     const rows = reported === null ? null : underExit(reported, result.meta, nameOf(result.index), plan.include[result.index]?.rows);
 
     verdicts.set(result.index, rows);
@@ -418,7 +497,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     return reds.length === 0 ? exitWord(result) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
   };
 
-  const results = await follow(job, began, nameOf, say, note);
+  const results = await follow(job, began, { name: nameOf, say, note });
   const status = await job.status();
   // Each task's artifacts beside the report, under the task's name; a row names one as its evidence.
   const kept = new Map<number, { readonly dir: string; readonly paths: ReadonlySet<string> }>();
@@ -440,9 +519,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     const result = results.find((each) => each.index === index);
     const artifacts = kept.get(index)?.paths ?? null;
 
-    const answer: TaskAnswer = result === undefined || result.kind === 'lost' || result.kind === 'cancelled' ? { name, entry, rows: null, artifacts }
-      : !config.task.verdict ? { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }], artifacts }
-      : { name, entry, rows: verdicts.get(index) ?? null, artifacts };
+    const answer: TaskAnswer = { name, entry, rows: rowsOf(result, name, config.task.verdict ? verdicts.get(index) ?? null : undefined), artifacts };
 
     const dir = kept.get(index)?.dir;
 

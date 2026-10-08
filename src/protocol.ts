@@ -26,16 +26,18 @@ export const DRIVER = 2;
 
 /** The container sizes, smallest first, each a Cloudflare instance type. Cloudflare's largest is 4 vCPU and 12 GiB. A
  *  container's start refuses its `basic` type, and `lite`, at 1/16 vCPU, is too small to prepare an environment on. */
+export const SIZE_NAMES = ['micro', 'mini', 'small', 'medium'] as const;
+
+export type Size = (typeof SIZE_NAMES)[number];
+
 export const SIZES = {
   micro: { instance: 'standard-1', vcpus: 0.5, memoryGiB: 4 },
   mini: { instance: 'standard-2', vcpus: 1, memoryGiB: 6 },
   small: { instance: 'standard-3', vcpus: 2, memoryGiB: 8 },
   medium: { instance: 'standard-4', vcpus: 4, memoryGiB: 12 },
-} as const;
+} as const satisfies Record<Size, { readonly instance: string; readonly vcpus: number; readonly memoryGiB: number }>;
 
-export type Size = keyof typeof SIZES;
-
-export const SizeSchema = v.picklist(Object.keys(SIZES) as Size[], 'a size is micro, mini, small or medium');
+export const SizeSchema = v.picklist(SIZE_NAMES, 'a size is micro, mini, small or medium');
 
 /** A project's slug, which scopes its environments, packs, timings and verdicts. */
 export const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
@@ -126,6 +128,9 @@ const RunSchema = v.union([v.object({ kind: v.literal('command') }), v.object({ 
 
 /** A JSON value. */
 export type Json = string | number | boolean | null | readonly Json[] | { readonly [key: string]: Json };
+
+/** What a request sends as JSON: JSON whose objects may hold an undefined property, which the JSON leaves out. */
+export type JsonBody = string | number | boolean | null | undefined | readonly JsonBody[] | { readonly [key: string]: JsonBody };
 
 /** Any value a request's JSON parsed to, which is JSON by construction. */
 export const JsonSchema = v.custom<Json>(() => true);
@@ -413,10 +418,23 @@ export const TimingsSchema = v.object({
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;
 
+const JsonArraySchema = v.array(JsonSchema);
+
+const JsonObjectSchema = v.record(v.string(), JsonSchema);
+
+/** A JSON object: an object that is not an array. */
+const isJsonObject = (value: Json): value is { readonly [key: string]: Json } => !v.is(JsonArraySchema, value) && v.is(JsonObjectSchema, value);
+
+/** `value` with every object's keys sorted. */
+function sortedKeys(value: Json): Json {
+  if (v.is(JsonArraySchema, value)) return value.map(sortedKeys);
+
+  return isJsonObject(value) ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : 1)).map(([key, each]) => [key, sortedKeys(each)])) : value;
+}
+
 /** JSON with every object's keys sorted, so two equal items read the same. */
 export function canonical(value: Json): string {
-  return JSON.stringify(value, (_, held: unknown) => typeof held === 'object' && held !== null && !Array.isArray(held)
-    ? Object.fromEntries(Object.entries(held).sort(([left], [right]) => (left < right ? -1 : 1))) : held);
+  return JSON.stringify(sortedKeys(value));
 }
 
 /** The R2 key a pushed task's answer is cached under: its bundle, its id, its environment and its item decide it. A
@@ -457,34 +475,30 @@ export function fill(template: string, values: Readonly<Record<string, string>>)
   });
 }
 
-/** The values an item gives a command: `{item}` (its text, or its JSON), and an object item's scalar keys. */
-export function itemValues(item: unknown, index: number): Record<string, string> {
-  const values: Record<string, string> = { index: String(index), item: typeof item === 'string' ? item : JSON.stringify(item) };
+const ScalarSchema = v.union([v.string(), v.number(), v.boolean()]);
 
-  if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
-    for (const [key, value] of Object.entries(item)) {
-      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') values[key] = String(value);
-    }
-  }
+/** The values an item gives a command: `{index}`, `{item}` (its text, or its JSON), and an object item's scalar keys. */
+export function itemValues(item: Json, index: number) {
+  const scalars = isJsonObject(item) ? Object.entries(item).flatMap(([key, value]) => v.is(ScalarSchema, value) ? [[key, String(value)] as const] : []) : [];
 
-  return values;
+  return { index: String(index), item: v.is(v.string(), item) ? item : JSON.stringify(item), ...Object.fromEntries(scalars) };
 }
 
-/** How many containers an item runs on at once: an object's `gang`, else 1. Rank r of a gang of n runs with
- *  ARMADA_RANK=r and ARMADA_WORLD=n, as host `rank<r>`, and each rank reaches the others' ports at theirs. */
-export function gangOf(item: unknown): number {
-  if (typeof item !== 'object' || item === null || !('gang' in item)) return 1;
+/** How many containers an item runs on at once: an object's `gang`, else 1; a `gang` that is no number is NaN, which a
+ *  job refuses by name. Rank r of a gang of n runs with ARMADA_RANK=r and ARMADA_WORLD=n, as host `rank<r>`, and each
+ *  rank reaches the others' ports at theirs. */
+export function gangOf(item: Json): number {
+  if (!isJsonObject(item) || !Object.hasOwn(item, 'gang')) return 1;
   const { gang } = item;
 
-  return typeof gang === 'number' ? gang : Number.NaN;
+  return v.is(v.number(), gang) ? gang : Number.NaN;
 }
 
-/** An item's weight for longest-first dispatch: an object's numeric `weight`, else 0. */
-export function weightOf(item: unknown): number {
-  if (typeof item !== 'object' || item === null || !('weight' in item)) return 0;
-  const { weight } = item;
+/** An item's weight for longest-first dispatch: an object's finite `weight`, else 0. */
+export function weightOf(item: Json): number {
+  const weighed = v.safeParse(v.looseObject({ weight: v.pipe(v.number(), v.finite()) }), item);
 
-  return typeof weight === 'number' && Number.isFinite(weight) ? weight : 0;
+  return weighed.success ? weighed.output.weight : 0;
 }
 
 /** The end of what a failed command printed, its stderr last and whole up to `limit`: the error a command dies with is
@@ -513,7 +527,7 @@ export function usageOf(outcomes: readonly { readonly seconds: number; readonly 
 /** The smallest size whose memory and vCPUs this usage fills to three quarters at most. Measured on a smaller size, a
  *  task held to its vCPUs fills them, so the next run goes a size up. */
 export function fitSize(usage: Usage): Size {
-  return (Object.keys(SIZES) as Size[]).find((size) => usage.memory <= SIZES[size].memoryGiB * 2 ** 30 * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? 'medium';
+  return SIZE_NAMES.find((size) => usage.memory <= SIZES[size].memoryGiB * 2 ** 30 * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? 'medium';
 }
 
 export const describeUsage = (usage: Usage): string => `${(usage.memory / 2 ** 30).toFixed(2)} GiB and ${usage.cores.toFixed(2)} cores`;

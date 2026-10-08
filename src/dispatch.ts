@@ -1,6 +1,13 @@
+/** A list schedule: each machine's tasks by index, each machine's load, and the last load. */
+export interface Schedule {
+  readonly lanes: number[][];
+  readonly loads: number[];
+  readonly makespan: number;
+}
+
 /** List scheduling: every task, in the given order, onto the machine whose load is least (ties: the first one),
  *  each machine starting at its own release. Integer milliseconds in, so the Lean model agrees exactly. */
-export function listSchedule(durations: readonly number[], releases: readonly number[]): { readonly lanes: number[][]; readonly loads: number[]; readonly makespan: number } {
+export function listSchedule(durations: readonly number[], releases: readonly number[]): Schedule {
   const lanes: number[][] = releases.map(() => []);
   const loads = [...releases];
 

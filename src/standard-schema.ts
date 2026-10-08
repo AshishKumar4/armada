@@ -2,6 +2,8 @@
  * The Standard Schema interface (https://standardschema.dev, v1, MIT), as the spec asks libraries to copy it rather
  * than depend on it. valibot, zod and arktype schemas all implement it.
  */
+import type { Json } from './protocol';
+
 export interface StandardSchemaV1<Input = unknown, Output = Input> {
   readonly '~standard': StandardSchemaV1.Props<Input, Output>;
 }
@@ -10,7 +12,8 @@ export declare namespace StandardSchemaV1 {
   export interface Props<Input = unknown, Output = Input> {
     readonly version: 1;
     readonly vendor: string;
-    readonly validate: (value: unknown) => Result<Output> | Promise<Result<Output>>;
+    /** armada validates only JSON or bytes; a schema's own `validate`, which takes any value, takes these too. */
+    readonly validate: (value: Json | Uint8Array) => Result<Output> | Promise<Result<Output>>;
     readonly types?: Types<Input, Output> | undefined;
   }
 

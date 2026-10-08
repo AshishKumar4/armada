@@ -5,13 +5,17 @@
  * (exit 0). The collected file keeps each row as its task wrote it, under `{sha, part: "all", rows}`.
  */
 import * as v from 'valibot';
+import { JsonSchema } from './protocol';
 
 /** One row a task must report, and the files it must report a timing for, when the project splits rows by file. */
 const ExpectedRow = v.union([v.string(), v.object({ name: v.string(), files: v.optional(v.array(v.string())) })]);
 
+/** A row a plan entry names, as a name with the files it times, if it names them. */
+export const expectedOf = (want: v.InferOutput<typeof ExpectedRow>): { readonly name: string; readonly files?: readonly string[] | undefined } => v.is(v.string(), want) ? { name: want } : want;
+
 /** The plan: a GitHub-Actions-shaped matrix. */
 export const PlanSchema = v.object({
-  include: v.pipe(v.array(v.looseObject({ rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()) })), v.minLength(1)),
+  include: v.pipe(v.array(v.objectWithRest({ rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()) }, JsonSchema)), v.minLength(1)),
 });
 
 export type PlanEntry = v.InferOutput<typeof PlanSchema>['include'][number];
@@ -38,7 +42,7 @@ export const rowName = (row: VerdictRow): string => row.name ?? row.run ?? '';
 
 /** A task's name: the configured matrix key, else `name`, else the first string-valued key, else its position. */
 export function taskName(entry: PlanEntry, key: string | undefined, index: number): string {
-  const strings = Object.entries(entry).filter((pair): pair is [string, string] => typeof pair[1] === 'string');
+  const strings = Object.entries(entry).flatMap(([name, value]) => v.is(v.string(), value) ? [[name, value] as const] : []);
   const named = strings.find(([name]) => name === (key ?? 'name'))?.[1] ?? strings[0]?.[1];
 
   return named !== undefined && /^[A-Za-z0-9._-]{1,80}$/u.test(named) ? named : `task-${String(index + 1)}`;
@@ -59,7 +63,7 @@ export interface TaskExit {
 export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
   if (rows.length === 0 && exit.exitCode !== 0) {
     const output = `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}`;
-    const names = expected === undefined || expected.length === 0 ? [task] : expected.map((want) => (typeof want === 'string' ? want : want.name));
+    const names = expected === undefined || expected.length === 0 ? [task] : expected.map((want) => expectedOf(want).name);
 
     return names.map((name) => ({ name, exitCode: exit.exitCode, seconds: exit.seconds ?? 0, output }));
   }
@@ -144,8 +148,8 @@ function coverage(answer: TaskAnswer): string[] {
   const reported = new Map(answer.rows.map((row) => [rowName(row), row]));
   const problems: string[] = [];
 
-  for (const want of expected) {
-    const name = typeof want === 'string' ? want : want.name;
+  for (const want of expected.map(expectedOf)) {
+    const { name, files } = want;
     const row = reported.get(name);
 
     if (row === undefined) {
@@ -154,7 +158,6 @@ function coverage(answer: TaskAnswer): string[] {
     }
 
     reported.delete(name);
-    const files = typeof want === 'string' ? undefined : want.files;
     const timed = Object.keys(row.timings ?? {});
 
     if (files !== undefined && (timed.length !== files.length || files.some((file) => !timed.includes(file)))) {
