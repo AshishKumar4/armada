@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { BUNDLE_PATH, failureTail, INLINE_BYTES, type Outcome } from '../../src/protocol';
+import { BUNDLE_PATH, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, bounded, killOf, launchSlot, launchTask, maskValuesOf, mounts, must, pipeIn, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
@@ -30,6 +30,8 @@ export interface VesselSpec {
   readonly files: Record<string, string>;
   /** A function job's bundle, by digest. */
   readonly bundle: string | null;
+  /** What runs the bundle; absent on an earlier Worker's spec, which is always node. */
+  readonly runtime?: 'node' | 'python';
   /** Whether a task's `{out}` is kept. */
   readonly output: boolean;
   /** A task's own bound, in seconds. */
@@ -182,7 +184,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       const bundle = await this.env.ARTIFACTS.get(bundleKey(spec.bundle));
 
       if (bundle === null) throw new Error(`the bundle ${spec.bundle} is not in R2`);
-      await pipeIn(container, bundle.body, BUNDLE_PATH);
+      await pipeIn(container, bundle.body, spec.runtime === 'python' ? PY_BUNDLE_PATH : BUNDLE_PATH);
     }
     await this.ctx.storage.put('state', 'working' satisfies State);
     await this.env.JOB.getByName(spec.jobId).booted(spec.name, bootMs);

@@ -112,7 +112,7 @@ export async function push(armada: Armada, from: string): Promise<Push | null> {
 
   if (project === null) return null;
   const { bytes, ids } = await bundleTasks(project.root, project.config.tasks);
-  const record: Push = { project: project.config.project, bundle: await armada.uploadBundle(bytes), ids };
+  const record: Push = { project: project.config.project, bundle: await armada.uploadBundle(bytes), ids, runtime: 'node' };
 
   await armada.post('/tasks', record);
 

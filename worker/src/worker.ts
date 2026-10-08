@@ -148,13 +148,15 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
   if (!spec.open && spec.items.length === 0) return Response.json({ error: 'a job that is not open needs an item' }, { status: 400 });
 
   if (spec.run.kind === 'task') {
-    // The bundle the client just pushed, else the one the task's id was last pushed with.
-    const bundle = spec.run.bundle ?? await env.TASKS.getByName(SINGLE).bundleOf(spec.run.id);
+    // The bundle the client just pushed, else the one the task's id was last pushed with, and its runtime.
+    const entry = await env.TASKS.getByName(SINGLE).entryOf(spec.run.id);
+    const bundle = spec.run.bundle ?? entry?.bundle;
+    const runtime = spec.run.bundle === undefined ? entry?.runtime ?? 'node' : spec.run.runtime;
 
     if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed; run armada push in its project` }, { status: 409 });
 
     if ((await env.ARTIFACTS.head(bundleKey(bundle))) === null) return Response.json({ error: `upload the bundle ${bundle} first` }, { status: 409 });
-    spec.run = { ...spec.run, bundle };
+    spec.run = { ...spec.run, bundle, runtime };
   }
 
   if (spec.cache !== undefined && spec.run.kind !== 'task') return Response.json({ error: 'a cache is for a pushed task: its bundle is part of the key' }, { status: 400 });

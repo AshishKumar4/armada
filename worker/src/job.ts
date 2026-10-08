@@ -22,7 +22,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, cacheKey, environmentKey, failureTail, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, cacheKey, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, textOf, type Env } from './env';
@@ -341,7 +341,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const vessel: VesselSpec = {
       jobId: id, name, snapshot: generation.snapshot.id, instance: instanceOf(spec.recipe.size), vcpus: SIZES[spec.recipe.size].vcpus,
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
-      tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'task' ? spec.run.bundle ?? null : null, output: spec.output, timeout: spec.timeout,
+      tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'task' ? spec.run.bundle ?? null : null,
+      runtime: spec.run.kind === 'task' ? spec.run.runtime : 'node', output: spec.output, timeout: spec.timeout,
       slots: spec.slots, slotMemoryBytes: Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
     };
 
@@ -489,7 +490,7 @@ export class ArmadaJob extends DurableObject<Env> {
       ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
     };
 
-    return { index, attempt, argv: spec.run.kind === 'task' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, secrets: spec.secrets, duplicate };
+    return { index, attempt, argv: spec.run.kind === 'task' ? (spec.run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH]) : task.argv ?? ['false'], env, secrets: spec.secrets, duplicate };
   }
 
   /** `claim` with where its green answer is cached, when the job keeps a cache. */

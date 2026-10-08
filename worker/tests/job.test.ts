@@ -109,6 +109,13 @@ describe('a task\'s claim', () => {
     expect([taskClaim?.argv, taskClaim?.env['ARMADA_TASK'], taskClaim?.env['ARMADA_ITEM'], taskClaim?.env['ARMADA_ATTEMPT'], cmdClaim?.argv, cmdClaim?.env['ARMADA_TASK'], cmdClaim?.env['ARMADA_ITEM']])
       .toEqual([['node', '/armada/bundle.mjs'], 'square', '{"n":1}', '1', ['echo', 'x'], undefined, '"x"']);
   });
+
+  test('runs a python task\'s bundle with python3 at its own path', async () => {
+    const { job: pyJob } = await job({ recipe: {}, items: [{ item: { n: 1 } }], run: { kind: 'task', id: 'square', bundle: 'b'.repeat(64), runtime: 'python' } });
+    const claim = await pyJob.claim('v1');
+
+    expect(claim === null || 'waitMs' in claim ? [] : claim.argv).toEqual(['python3', '/armada/bundle.pyz']);
+  });
 });
 
 describe('a task\'s outcome', () => {

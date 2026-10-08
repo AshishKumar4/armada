@@ -35,7 +35,7 @@ describe('a push', () => {
     const taken = await ask('/tasks', 'POST', JSON.stringify({ project: 'two', bundle: digest, ids: ['square'] }));
     const absent = await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: missing, ids: ['square'] }));
 
-    expect({ before, uploaded, pushed, taken, absent, square: await registry.bundleOf('square') }).toEqual({
+    expect({ before, uploaded, pushed, taken, absent, square: (await registry.entryOf('square'))?.bundle }).toEqual({
       before: [409, { error: `upload the bundle ${digest} first` }],
       uploaded: [200, { stored: digest }],
       pushed: [200, { pushed: 2 }],
@@ -59,6 +59,20 @@ describe('a push', () => {
     expect(digests.map((digest) => artifacts.objects.has(`code/${digest ?? ''}.mjs`))).toEqual([false, true, true]);
   });
 
+  test('records the bundle\'s runtime, node by default, and a re-push switches it', async () => {
+    const { ask, registry } = deployment();
+    const bytes = new TextEncoder().encode('print(1)\n');
+    const digest = digestOf(bytes);
+
+    await ask(`/bundles/${digest}`, 'PUT', bytes);
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: digest, ids: ['square'] }));
+    const node = await registry.entryOf('square');
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: digest, ids: ['square'], runtime: 'python' }));
+    const python = await registry.entryOf('square');
+
+    expect({ node: node?.runtime, python: python?.runtime }).toEqual({ node: 'node', python: 'python' });
+  });
+
   test('drops the ids its project no longer exports, and the bundle they ran from once it is a week old', async () => {
     const { artifacts, ask, registry } = deployment();
     const [first, second] = ['first', 'second'].map((text) => new TextEncoder().encode(`export const v = '${text}';\n`));
@@ -72,7 +86,7 @@ describe('a push', () => {
     if (aged !== undefined) artifacts.kept.set(`code/${one ?? ''}.mjs`, { ...aged, uploaded: new Date(Date.now() - 8 * 24 * 3600 * 1000) });
     await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: two, ids: ['new-name', 'kept'] }));
 
-    expect({ old: await registry.bundleOf('old-name'), renamed: await registry.bundleOf('new-name'), kept: await registry.bundleOf('kept'), first: artifacts.objects.has(`code/${one ?? ''}.mjs`) })
+    expect({ old: await registry.entryOf('old-name'), renamed: (await registry.entryOf('new-name'))?.bundle, kept: (await registry.entryOf('kept'))?.bundle, first: artifacts.objects.has(`code/${one ?? ''}.mjs`) })
       .toEqual({ old: undefined, renamed: two, kept: two, first: false });
   });
 });

@@ -98,6 +98,9 @@ export const FILES_DIR = '/armada/files';
 
 export const BUNDLE_PATH = '/armada/bundle.mjs';
 
+/** The bundle a Python task's container runs, for `python3 <path>`: a zipapp. */
+export const PY_BUNDLE_PATH = '/armada/bundle.pyz';
+
 export const OUT_PATH = '/armada/task/out';
 
 export const ANSWER_PATH = '/armada/task/answer';
@@ -110,9 +113,16 @@ export const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
 /** A task's id: unique in a deployment, so a client names a task by it alone. */
 export const TaskId = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9._/-]{0,99}$/u, 'a task id is lowercase letters, digits and . _ / -, at most 100'));
 
-/** Each task runs its own argv, or a pushed task: `node` runs the bundle, which runs the task named `id` on the item. A
- *  client that just pushed names the bundle; otherwise the Worker takes the id's current one. */
-const RunSchema = v.union([v.object({ kind: v.literal('command') }), v.object({ kind: v.literal('task'), id: TaskId, bundle: v.optional(Digest) })]);
+/** What runs a pushed task's bundle: `node` for a `.mjs`, `python3` for a `.pyz`. An absent one is node, as it always
+ *  was. */
+export const RuntimeSchema = v.optional(v.picklist(['node', 'python']), 'node');
+
+export type Runtime = v.InferOutput<typeof RuntimeSchema>;
+
+/** Each task runs its own argv, or a pushed task: its bundle runs under the runtime it was pushed for, which runs the
+ *  task named `id` on the item. A client that just pushed names the bundle and runtime; otherwise the Worker takes the
+ *  id's current ones. */
+const RunSchema = v.union([v.object({ kind: v.literal('command') }), v.object({ kind: v.literal('task'), id: TaskId, bundle: v.optional(Digest), runtime: RuntimeSchema })]);
 
 /** A JSON value. */
 export type Json = string | number | boolean | null | readonly Json[] | { readonly [key: string]: Json };
@@ -156,8 +166,9 @@ export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: reado
   return ganged < 0 ? null : `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
 }
 
-/** What `armada push` records: a project's bundle, and the ids of the tasks in it. */
-export const PushSchema = v.object({ project: Project, bundle: Digest, ids: v.pipe(v.array(TaskId), v.minLength(1)) });
+/** What a push records: a project's bundle, the ids of the tasks in it, and the runtime that runs them (`node` when
+ *  absent). */
+export const PushSchema = v.object({ project: Project, bundle: Digest, ids: v.pipe(v.array(TaskId), v.minLength(1)), runtime: RuntimeSchema });
 
 export type Push = v.InferOutput<typeof PushSchema>;
 

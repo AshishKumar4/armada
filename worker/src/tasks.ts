@@ -10,6 +10,8 @@ import type { Env } from './env';
 interface Entry {
   readonly project: string;
   readonly bundle: string;
+  /** What runs the bundle; absent on an entry an earlier Worker wrote, which is always node. */
+  readonly runtime?: 'node' | 'python';
 }
 
 export class ArmadaTasks extends DurableObject<Env> {
@@ -25,14 +27,16 @@ export class ArmadaTasks extends DurableObject<Env> {
     const gone = [...all].filter(([key, entry]) => entry.project === push.project && !push.ids.includes(key.slice('id:'.length))).map(([key]) => key);
 
     await this.ctx.storage.delete(gone);
-    await this.ctx.storage.put(Object.fromEntries(push.ids.map((id) => [`id:${id}`, { project: push.project, bundle: push.bundle } satisfies Entry])));
+    await this.ctx.storage.put(Object.fromEntries(push.ids.map((id) => [`id:${id}`, { project: push.project, bundle: push.bundle, runtime: push.runtime } satisfies Entry])));
 
     return null;
   }
 
-  /** The bundle `id` runs from, or undefined when no push named it. */
-  async bundleOf(id: string): Promise<string | undefined> {
-    return (await this.ctx.storage.get<Entry>(`id:${id}`))?.bundle;
+  /** What `id` runs from and under, or undefined when no push named it. */
+  async entryOf(id: string): Promise<{ readonly bundle: string; readonly runtime: 'node' | 'python' } | undefined> {
+    const entry = await this.ctx.storage.get<Entry>(`id:${id}`);
+
+    return entry === undefined ? undefined : { bundle: entry.bundle, runtime: entry.runtime ?? 'node' };
   }
 
   /** Every bundle some id runs from. */
