@@ -3,10 +3,11 @@
   "environment": {
     "setup": "ci/setup.sh",
     "install": "ci/install.sh",
-    "key": ["bun.lock", "package.json"]
+    "key": ["bun.lock", "package.json", "lean/lean-toolchain", "lean/lakefile.lean"]
   },
   "pool": 2,
   "size": "auto",
-  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}, {\"name\": \"relay\", \"gang\": 2}]}"] },
+  "env": { "ELAN_HOME": "/opt/elan" },
+  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}, {\"name\": \"proofs\"}, {\"name\": \"relay\", \"gang\": 2}]}"] },
   "task": { "command": ["bun", "run", "{name}"], "verdict": false, "timeout": 600 }
 }

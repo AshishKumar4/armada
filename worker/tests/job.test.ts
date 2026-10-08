@@ -197,6 +197,20 @@ async function land(open: ArmadaJob, vessel: string, index: number, exitCode: nu
 }
 
 describe('a gang task', () => {
+  test('reserves before continuing single arrivals and eventually takes every rank', async () => {
+    const { job: open } = await job({ recipe: {}, open: true, pool: 2, timeout: 10, run: { kind: 'command' },
+      items: [{ item: { weight: 1 }, argv: ['true'] }, { item: { weight: 1 }, argv: ['true'] }] });
+    const first = await open.claim('v1');
+    if (first === null || 'waitMs' in first) throw new Error('the initial single never started');
+    await open.add([{ item: { gang: 2 }, argv: ['true'] }]);
+    await open.add([{ item: { weight: 1000 }, argv: ['true'] }]);
+    const held = await open.claim('v2');
+    expect(held).toEqual({ waitMs: 1000 });
+    expect(await open.accept('v1', first.index)).toBe(true);
+    await open.complete('v1', exited(first.index, 'v1'), 1000);
+    const ranks = await formed(open, ['v1', 'v2']);
+    expect(Object.values(ranks).map((claim) => claim.env['ARMADA_WORLD'])).toEqual(['2', '2']);
+  });
   test('is refused unless it is a whole number of containers the pool holds', () => {
     const items = (gang: number) => [{ item: { gang }, argv: ['true'] }];
 
