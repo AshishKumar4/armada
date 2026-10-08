@@ -228,6 +228,11 @@ tasks those secrets, for a narrowed run whose credentials the whole matrix must 
 
 A run of the whole matrix stores its verdict under the commit. `armada verdict <commit>` prints it and exits 0 when
 every row is green, 1 when a row is red and 2 when the commit has none, so a hook or a deploy can reuse the proof.
+A run that cannot grade every row still writes its report, and prints `report: <path>` on every path it takes.
+
+`armada run --json` puts the human progress on stderr and ends with one JSON object on stdout:
+`{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`, its rows the same objects the
+report file holds. The exit codes are unchanged, so a caller reads the verdict instead of scraping it.
 
 A task can keep files beside its verdict: it writes them under `{artifacts}` (also `ARMADA_ARTIFACTS` in its
 environment), and a row names the ones that are its evidence, `"artifacts": ["shots/home.png"]`. `armada run` extracts
@@ -276,7 +281,7 @@ in peak memory and average busy cores. A new size prepares its own environment o
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain]
 armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--secrets=<A,B>] [--json] -- <command>
-armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [-- <plan args>]
+armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push
 armada dev
