@@ -14,5 +14,5 @@
     "allowImportingTsExtensions": true,
     "moduleDetection": "force"
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "examples/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "examples/**/*.ts", "tools/**/*.ts"]
 }

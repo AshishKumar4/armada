@@ -1,0 +1,453 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
+
+import antiSlopPlugin from "./index.ts";
+import { isParseable, isRunnableSuite, readRepositoryFile, trackedFiles } from "../../../scripts/sources.ts";
+import { declaredName, importBindings, literalString, parse, walk, type SyntaxNode } from "../../../scripts/syntax.ts";
+
+const config = JSON.parse(readFileSync(".oxlintrc.json", "utf8"));
+const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+const pluginPackage = JSON.parse(
+  readFileSync("tools/oxlint/anti-slop/package.json", "utf8"),
+);
+
+// Four-way equality. A rule file with no index.ts registration is dead; a registration with no
+// .oxlintrc entry is registered and silently off; a rule with no suite is untested. Each set is
+// asserted non-empty so an empty glob cannot report perfect agreement.
+const pluginDirectory = "tools/oxlint/anti-slop";
+const ruleEntries = trackedFiles()
+  .filter((file) => file.startsWith(`${pluginDirectory}/rules/`))
+  .map((file) => file.slice(`${pluginDirectory}/rules/`.length));
+const ruleFiles = ruleEntries
+  .filter((entry) => isParseable(entry) && !isRunnableSuite(entry))
+  .map((entry) => `anti-slop/${entry.slice(0, -".ts".length)}`)
+  .sort();
+const registeredRules = Object.keys(antiSlopPlugin.rules ?? {})
+  .map((rule) => `anti-slop/${rule}`)
+  .sort();
+const testedRules = ruleFiles.filter((name) =>
+  ruleEntries.some((entry) =>
+    entry.startsWith(`${name.slice("anti-slop/".length)}.`) && isRunnableSuite(entry)),
+);
+
+assert.ok(ruleFiles.length > 0, "no rule source files found");
+assert.ok(registeredRules.length > 0, "the plugin registered no rules");
+assert.deepEqual(
+  Object.keys(config.rules).filter((name) => name.startsWith("anti-slop/")).sort(),
+  ruleFiles,
+  "every anti-slop rule file must remain enabled",
+);
+assert.deepEqual(registeredRules, ruleFiles, "every rule must be registered in index.ts");
+assert.deepEqual([...testedRules].sort(), ruleFiles, "every rule must own a suite");
+
+// Value mapping extends the four-way key equality above. A registry value can point at a
+// sibling rule and leave every key set equal, so parse index.ts itself: each property key must
+// resolve to an import whose rule-module basename is that key. The module path is authoritative,
+// not the symbol spelling — no-shape-in-symbol-names intentionally uses
+// noForbiddenTermInSymbolNamesRule from ./rules/no-shape-in-symbol-names.ts.
+type RegistryEntry = readonly [key: string, symbol: string];
+
+function parseRuleRegistry(source: string): {
+  readonly importModuleBySymbol: ReadonlyMap<string, string>;
+  readonly entries: readonly RegistryEntry[];
+} {
+  const tree = parse("index.ts", source).root;
+  const importModuleBySymbol = new Map<string, string>();
+  for (const statement of tree.children) {
+    if (statement.raw.type !== "ImportDeclaration") continue;
+    const specifier = statement.raw.source.value;
+    if (dirname(specifier) !== "./rules" || !specifier.endsWith(".ts")) continue;
+    for (const { local } of importBindings(statement)) {
+      assert.ok(
+        !importModuleBySymbol.has(local),
+        `index.ts imports ${JSON.stringify(local)} from more than one rule module`,
+      );
+      importModuleBySymbol.set(local, basename(specifier, ".ts"));
+    }
+  }
+
+  const registries: SyntaxNode[] = [];
+  walk(tree, (node) => {
+    if (node.raw.type === "Property" && declaredName(node) === "rules") registries.push(node);
+  });
+  assert.equal(registries.length, 1, "index.ts must declare exactly one rules registry");
+  const [registryNode] = registries;
+  const registry = registryNode?.raw;
+  assert.ok(registry?.type === "Property" && registry.value.type === "ObjectExpression", "index.ts's rules registry is not an object literal");
+  const entries = registry.value.properties.map((property): RegistryEntry => {
+    if (property.type !== "Property") return ["...", "<spread>"];
+    const key = property.key.type === "Identifier" ? property.key.name : literalString(property.key);
+    return [key ?? "<computed>", property.value.type === "Identifier" ? property.value.name : "<not an identifier>"];
+  });
+  return { importModuleBySymbol, entries };
+}
+
+function registryValueMappingFindings(
+  importModuleBySymbol: ReadonlyMap<string, string>,
+  entries: readonly RegistryEntry[],
+): readonly string[] {
+  return entries.flatMap(([key, symbol]) => {
+    const module = importModuleBySymbol.get(symbol);
+    if (module === undefined) {
+      return [`${key}: ${symbol} is not imported from ./rules/${key}.ts`];
+    }
+    return module === key
+      ? []
+      : [`${key}: ${symbol} is imported from ./rules/${module}.ts, not ./rules/${key}.ts`];
+  });
+}
+
+// A registry spelled the ways the parser must read and a line match did not: single quotes, a
+// multi-name import, keys on one line, an unquoted key, and an import inside a block comment.
+const plantedRegistry = parseRuleRegistry(`import { xRule } from './rules/x.ts';
+import { yRule, yHelper } from "./rules/y.ts";
+/*
+import { zRule } from "./rules/z.ts";
+*/
+export default eslintCompatPlugin({ meta: { name: "anti-slop" }, rules: { x: xRule, "y": yRule } });
+`);
+assert.deepEqual(
+  [...plantedRegistry.importModuleBySymbol],
+  [["xRule", "x"], ["yRule", "y"], ["yHelper", "y"]],
+  "every rule-module import binding is read, and a commented-out import is not",
+);
+assert.deepEqual(plantedRegistry.entries, [["x", "xRule"], ["y", "yRule"]], "every registry property is read");
+
+const indexRegistry = parseRuleRegistry(
+  readRepositoryFile(process.cwd(), `${pluginDirectory}/index.ts`),
+);
+assert.equal(
+  indexRegistry.entries.length,
+  ruleFiles.length,
+  "the parsed registry must carry every governed value",
+);
+assert.deepEqual(
+  indexRegistry.entries.map(([key]) => `anti-slop/${key}`).sort(),
+  registeredRules,
+  "the parsed index.ts registry must cover every runtime registration",
+);
+assert.deepEqual(
+  [...indexRegistry.importModuleBySymbol.values()]
+    .map((module) => `anti-slop/${module}`)
+    .sort(),
+  registeredRules,
+  "every registered key must have one imported rule module",
+);
+assert.deepEqual(
+  registryValueMappingFindings(indexRegistry.importModuleBySymbol, indexRegistry.entries),
+  [],
+  "every registry value must resolve to the rule module its key names",
+);
+
+// Self-test: give no-reflect-apply the value from its adjacent no-reflect-get entry. Only the
+// sabotaged mapping should fail; a key-only gate would report green here.
+const sabotageIndex = indexRegistry.entries.findIndex(([key]) => key === "no-reflect-apply");
+assert.ok(sabotageIndex >= 0, "the mapping self-test key is missing from index.ts");
+const adjacentMapping = indexRegistry.entries[sabotageIndex + 1];
+assert.ok(adjacentMapping !== undefined, "the mapping self-test needs an adjacent registry entry");
+assert.equal(adjacentMapping[0], "no-reflect-get", "the mapping self-test entries must stay adjacent");
+const sabotagedMapping = indexRegistry.entries[sabotageIndex];
+assert.ok(sabotagedMapping !== undefined, "the mapping self-test cannot copy a missing entry");
+const sabotagedEntries = [...indexRegistry.entries];
+sabotagedEntries[sabotageIndex] = [sabotagedMapping[0], adjacentMapping[1]];
+assert.deepEqual(
+  registryValueMappingFindings(indexRegistry.importModuleBySymbol, sabotagedEntries),
+  [
+    `${sabotagedMapping[0]}: ${adjacentMapping[1]} is imported from ./rules/${adjacentMapping[0]}.ts, not ./rules/${sabotagedMapping[0]}.ts`,
+  ],
+  "sabotaging one adjacent registry value mapping must fail exactly once",
+);
+
+for (const name of ruleFiles) {
+  const setting = config.rules[name];
+  const severity = Array.isArray(setting) ? setting[0] : setting;
+  assert.equal(severity, "error", `${name} must remain an error`);
+}
+
+assert.equal(config.rules["anti-slop/no-runtime-typeof"], "error");
+// The lint's ignore list is where hand-written code would go to hide, so it is pinned two ways.
+// The first three entries are the lint's own blind spots: dependencies, build output, and the
+// vendored plugin. Every entry past them must be one of two things a person did not write here:
+// COMMITTED BUILD OUTPUT — a tracked file whose first line (after Bun's `// @bun` pragma) is the
+// GENERATED banner naming the `bun run` script that produces it, so an ignore entry can name a
+// bundle the bootstrap needs before any build step could run (scripts/security-scanner.bundle.js,
+// which `bun install` loads before it installs anything) — or a DIGEST-PINNED VENDORED CLOSURE, a
+// directory carrying an `upstream.json` manifest whose per-file digests a drift test verifies
+// (third_party/mossaic, verified by scripts/mossaic-sdk.test.ts; packages/cf-backend/public/kasmvnc, by
+// packages/cf-backend/tests/unit-kasmvnc-vendor.test.ts). Neither kind can name a file a
+// person wrote.
+const GENERATED_BANNER = /^(?:\/\/ @bun\n)?\/\/ GENERATED by `bun run [a-z:-]+` from [\w./-]+\. Do not edit\.\n/u;
+function ignoredHandWrittenFiles(
+  entries: readonly string[],
+  text: (entry: string) => string,
+  pinnedClosure: (entry: string) => boolean,
+): string[] {
+  return entries.slice(3).filter((entry) => !pinnedClosure(entry) && !GENERATED_BANNER.test(text(entry)));
+}
+const isPinnedClosure = (entry: string): boolean => existsSync(`${entry}/upstream.json`);
+assert.deepEqual(config.ignorePatterns.slice(0, 3), ["node_modules", "dist", "tools/oxlint/anti-slop"]);
+assert.deepEqual(
+  ignoredHandWrittenFiles(config.ignorePatterns, (entry) => readFileSync(entry, "utf8"), isPinnedClosure),
+  [],
+  "every lint-ignored entry past the three blind spots must be generated output or a pinned vendored closure",
+);
+assert.deepEqual(config.ignorePatterns.slice(3), ["third_party/mossaic", "scripts/security-scanner.bundle.js", "packages/cf-backend/public/kasmvnc"]);
+// The red direction, both kinds: an entry naming a hand-written file, and a directory that
+// carries no provenance manifest, are each reported by name.
+assert.deepEqual(
+  ignoredHandWrittenFiles(
+    [...config.ignorePatterns.slice(0, 3), "scripts/security-scanner.ts", "scripts/fixtures"],
+    (entry) => (entry === "scripts/fixtures" ? "" : readFileSync(entry, "utf8")),
+    isPinnedClosure,
+  ),
+  ["scripts/security-scanner.ts", "scripts/fixtures"],
+  "an ignore entry naming hand-written source or an unpinned directory must be reported",
+);
+assert.equal(config.options?.denyWarnings, true);
+assert.equal(config.options?.reportUnusedDisableDirectives, "error");
+
+// KINU-069. These two are oxlint BUILT-INS, so they own no rule file, no suite and no entry in
+// the plugin rule corpus; their whole existence is this config. That makes them the one kind of rule that
+// can be deleted without leaving a trace anywhere else, so the policy is pinned here as well as
+// behaviourally in typescript-escapes.gate.test.ts. The options matter as much as the severity:
+// `ignoreRestArgs` would re-admit the `(...args: any[])` wrapper this ticket removed, and
+// ban-ts-comment's own default of "allow-with-description" would re-admit the described
+// `@ts-expect-error` it removed.
+assert.equal(config.rules["typescript/no-explicit-any"], "error");
+assert.deepEqual(
+  config.rules["typescript/ban-ts-comment"],
+  ["error", { "ts-expect-error": true, "ts-ignore": true, "ts-nocheck": true }],
+  "all three suppression directives must be banned outright",
+);
+
+// The same argument covers every other built-in the config turns on: no rule file, no suite, no
+// tracked plugin rule file, so the severity and the option are only ever true here. A bare "error"
+// for a rule with an option leaves the threshold to whatever the next oxlint release defaults to,
+// which is why each pin carries its option. The `typescript/*` block is governed as one set in
+// type-aware.gate.test.ts; these two are read from syntax alone and state their reason here.
+const builtinRulePins = [
+  ["max-depth", ["error", { max: 4 }], "a fifth level of nesting hides a branch from the reader"],
+  ["max-params", ["error", { max: 4 }], "past four positional parameters a caller gets the order wrong silently"],
+  ["no-nested-ternary", "error", "a ternary inside a ternary hides one of its branches"],
+  ["no-shadow", "error", "an inner binding reusing an outer name makes the reader track two values under one name"],
+  ["no-param-reassign", "error", "a reassigned parameter erases the argument the caller passed"],
+  ["no-implicit-coercion", "error", "`+value` and `!!value` hide a conversion whose failure is a silent NaN or a dropped empty string"],
+  ["no-else-return", "error", "an else after a return buries the main path one level deeper than it is"],
+  ["unicorn/no-lonely-if", "error", "a lone if inside an else is one condition written as two levels"],
+  ["unicorn/no-array-for-each", "error", "forEach discards an await and cannot break, so control flow stays in a loop"],
+  ["typescript/no-non-null-assertion", "error", "`x!` asserts away a null the compiler proved reachable"],
+  ["typescript/no-inferrable-types", "error", "an annotation the initializer already fixes goes stale when the initializer changes"],
+] as const;
+
+for (const [rule, setting, protects] of builtinRulePins) {
+  assert.deepEqual(config.rules[rule], setting, `${rule} must stay at this severity and option: ${protects}`);
+}
+
+assert.equal(packageJson.devDependencies.oxlint, packageJson.devDependencies["@oxlint/plugins"]);
+assert.equal(packageJson.devDependencies.oxlint, "1.78.0");
+assert.equal(pluginPackage.private, true);
+assert.equal(pluginPackage.type, "module");
+assert.match(packageJson.scripts["test:anti-slop"], /tsc --noEmit -p tools\/oxlint\/anti-slop/u);
+assert.match(packageJson.scripts["test:anti-slop"], /anti-slop\/rules\.test\.ts/u);
+assert.match(packageJson.scripts["test:anti-slop"], /anti-slop\/drift\.test\.ts/u);
+/**
+ * Parse the restricted `&&` command chain we deliberately use for gate runners.
+ * The parser understands shell quotes and escapes, but refuses other operators:
+ * a conditional branch or pipeline would mean a gate could be textually present
+ * without being reached by the mandatory sequence.
+ */
+function commandTokens(script: string): readonly (readonly string[])[] {
+  const commands: string[][] = [];
+  let command: string[] = [];
+  let token = "";
+  let quote: "'" | "\"" | undefined;
+  let escaped = false;
+
+  const finishToken = (): void => {
+    if (token.length > 0) command.push(token);
+    token = "";
+  };
+  const finishCommand = (): void => {
+    finishToken();
+    assert.ok(command.length > 0, "test:anti-slop has an empty command");
+    commands.push(command);
+    command = [];
+  };
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index]!;
+    if (escaped) {
+      token += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else token += char;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      finishToken();
+      continue;
+    }
+    if (char === "&" && script[index + 1] === "&") {
+      finishCommand();
+      index += 1;
+      continue;
+    }
+    assert.ok(
+      !["#", ";", "|", "(", ")", "<", ">", "`"].includes(char),
+      `test:anti-slop uses unsupported shell syntax ${JSON.stringify(char)}; gate reachability must be an unconditional && chain`,
+    );
+    assert.ok(
+      char !== "&",
+      "test:anti-slop uses a background shell operator; the gate sequence must wait for every command",
+    );
+    token += char;
+  }
+  assert.equal(quote, undefined, "test:anti-slop has an unclosed shell quote");
+  assert.equal(escaped, false, "test:anti-slop ends with a shell escape");
+  finishCommand();
+  return commands;
+}
+
+const gateFiles = trackedFiles()
+  .filter((file) => file.startsWith(`${pluginDirectory}/`) && file.endsWith(".gate.test.ts"))
+  .map((file) => file.slice(`${pluginDirectory}/`.length))
+  .sort();
+assert.ok(gateFiles.length > 0, "no *.gate.test.ts found, so this enumeration proves nothing");
+const antiSlopCommands = commandTokens(packageJson.scripts["test:anti-slop"]);
+function runsNodeGate(tokens: readonly string[], program: string): boolean {
+  if (tokens[0] !== "node" || tokens.at(-1) !== program) return false;
+  // Model exactly the flags the repository runner permits. In particular, an
+  // `--eval` or `--print` token would make the final path an argv value rather
+  // than an executed module while still satisfying a mere token-membership check.
+  return tokens.slice(1, -1).every((token) =>
+    ["--no-warnings", "--experimental-strip-types"].includes(token));
+}
+
+assert.throws(
+  () => commandTokens("node gate.test.ts # && node hidden.gate.test.ts"),
+  /unsupported shell syntax/u,
+  "an unquoted shell comment must not let a hidden gate look reachable",
+);
+assert.equal(
+  runsNodeGate(["node", "-e", "", "gate.test.ts"], "gate.test.ts"),
+  false,
+  "a Node eval body must not treat a trailing argv value as an executed gate",
+);
+assert.equal(
+  runsNodeGate(["node", "--no-warnings", "--experimental-strip-types", "gate.test.ts"], "gate.test.ts"),
+  true,
+  "the runner's supported Node flags must still reach its final gate module",
+);
+
+const gatePrograms = gateFiles.map((gate) => `${pluginDirectory}/${gate}`);
+for (const program of gatePrograms) {
+  assert.ok(
+    antiSlopCommands.some((tokens) => runsNodeGate(tokens, program)),
+    `${program} is not the executed final module of an unconditional supported node command in test:anti-slop`,
+  );
+}
+// The whole-tree lint runs once, in `live-tree.gate.test.ts`, which asserts the
+// empty report AND oxlint's exit status. The plain `oxlint` that followed it
+// could only pass once that gate had, and cost 55 CPU-s a commit (2026-09-22).
+// The pin stays exact so any other change to the lint invocation still fails here.
+assert.match(packageJson.scripts.lint, /^bun run test:anti-slop$/u);
+assert.match(packageJson.scripts.check, /^bun run lint && /u);
+assert.doesNotMatch(packageJson.scripts.lint, /--quiet|--allow|--fix|baseline/u);
+
+// The strict gate must provably run in CI. ci.yml runs the ladder's ci tier, which
+// `scripts/ladder.test.ts` proves over the parsed workflow; here, the ci tier claims `bun run lint`
+// (the lint half of `bun run check`, its own ladder row since 2026-09-15 so its closure is keyed
+// apart from the typecheck's). `LADDER` is data in a module raw Node cannot load, so its rows are
+// read off the syntax tree: each object literal's `run` and `tier`.
+function ladderTiers(source: string): ReadonlyMap<string, string> {
+  const tiers = new Map<string, string>();
+  walk(parse("scripts/ladder.ts", source).root, (node) => {
+    if (node.raw.type !== "VariableDeclarator" || declaredName(node) !== "LADDER") return;
+    walk(node, (row) => {
+      if (row.raw.type !== "ObjectExpression") return;
+      const fields = new Map(row.raw.properties.flatMap((property) =>
+        property.type === "Property" && !property.computed && property.key.type === "Identifier"
+          ? [[property.key.name, literalString(property.value)] as const]
+          : []));
+      const run = fields.get("run");
+      const tier = fields.get("tier");
+      if (run !== undefined && tier !== undefined) tiers.set(run, tier);
+    });
+  });
+  return tiers;
+}
+assert.deepEqual(
+  [...ladderTiers(`export const LADDER = [\n  { tier: 'deploy', label: 'Lint', run: 'bun run lint' },\n];\n/*\n  run: 'bun run lint',\n  label: 'Lint',\n  tier: 'ci',\n*/\n`)],
+  [["bun run lint", "deploy"]],
+  "a ladder row is read whatever its field order, and a row inside a comment is not a row",
+);
+const ladderRows = ladderTiers(readFileSync("scripts/ladder.ts", "utf8"));
+assert.ok(ladderRows.size > 50, `read ${ladderRows.size} LADDER rows; the table has far more, so the reader is not matching`);
+assert.ok(
+  ["commit", "push", "ci"].includes(ladderRows.get("bun run lint") ?? "absent"),
+  `the ladder must claim \`bun run lint\` at or before the ci tier; it is at ${ladderRows.get("bun run lint") ?? "no tier"}`,
+);
+
+function isForbiddenLintDirective(line: string): boolean {
+  const directive = line.match(
+    /(?:oxlint|eslint)-disable(?:-next-line|-line)?(?:\s+(?<rules>[^\n]*))?/u,
+  );
+  if (directive === null) return false;
+  const rules = (directive.groups?.rules ?? "").split("--", 1)[0]?.trim() ?? "";
+  if (rules.length === 0) return true;
+  return rules.split(/[\s,]+/u).some((rule) => rule.startsWith("anti-slop/"));
+}
+
+assert.equal(isForbiddenLintDirective("// oxlint-disable"), true);
+assert.equal(
+  isForbiddenLintDirective("// eslint-disable-next-line anti-slop/no-runtime-typeof"),
+  true,
+);
+assert.equal(
+  isForbiddenLintDirective("// eslint-disable-next-line react-hooks/exhaustive-deps"),
+  false,
+);
+
+// From the ONE enumeration, read through the ONE reader. This was `git ls-files --cached --others
+// --exclude-standard -z` plus a local `existsSync` filter and a local
+// `/\.[cm]?[jt]sx?$/` — three things `scripts/sources.ts` already does for every
+// gate, spelled a second time here where they were free to drift from it.
+//
+// `readRepositoryFile` and not `readFileSync`: the enumeration deliberately keeps a tracked path
+// whose working-tree copy is gone, because the index blob is what a push publishes. Reading from
+// disk instead threw ENOENT on any tree with an unstaged deletion — a crash, not a finding, in the
+// gate that is supposed to be the authority on suppressions.
+const forbiddenDirectives: string[] = [];
+for (const filename of trackedFiles()) {
+  if (filename.startsWith(`${pluginDirectory}/`) || !isParseable(filename)) continue;
+  for (const [index, line] of readRepositoryFile(process.cwd(), filename).split("\n").entries()) {
+    if (isForbiddenLintDirective(line)) {
+      forbiddenDirectives.push(`${filename}:${index + 1}:${line.trim()}`);
+    }
+  }
+}
+assert.ok(
+  forbiddenDirectives.length > 0 || trackedFiles().filter(isParseable).length > 100,
+  "no parseable file was read at all, so finding zero suppressions means nothing",
+);
+assert.deepEqual(
+  forbiddenDirectives,
+  [],
+  "blanket and anti-slop-specific lint suppressions are forbidden",
+);
+
+process.stdout.write(
+  `anti-slop: registry-value mapping equality (${indexRegistry.entries.length}/${ruleFiles.length}); ${ladderRows.size} LADDER rows read; blind: a registry value that is not an identifier maps to no module, and a LADDER run or tier that is not a string literal is not read\n`,
+);

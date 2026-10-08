@@ -1,0 +1,160 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "jsPlugins": [
+    {
+      "name": "anti-slop",
+      "specifier": "./tools/oxlint/anti-slop/index.ts"
+    }
+  ],
+  "plugins": [
+    "eslint",
+    "unicorn",
+    "oxc",
+    "typescript",
+    "import"
+  ],
+  "options": {
+    "typeAware": true,
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error"
+  },
+  "ignorePatterns": [
+    "tools/oxlint/anti-slop",
+    "lean/**",
+    "python/**"
+  ],
+  "rules": {
+    "import/no-cycle": "error",
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": [
+              "**/node_modules/**"
+            ],
+            "message": "A dependency is used through its export map. If the package exports no subpath for what you need, patch its package.json under patches/ (bun patchedDependencies) and say so there; never reach through the installed tree."
+          }
+        ]
+      }
+    ],
+    "typescript/no-explicit-any": "error",
+    "typescript/ban-ts-comment": [
+      "error",
+      {
+        "ts-expect-error": true,
+        "ts-ignore": true,
+        "ts-nocheck": true
+      }
+    ],
+    "typescript/await-thenable": "off",
+    "typescript/no-array-delete": "error",
+    "typescript/no-base-to-string": "error",
+    "typescript/no-duplicate-type-constituents": "error",
+    "typescript/no-floating-promises": [
+      "error",
+      {
+        "ignoreVoid": false
+      }
+    ],
+    "typescript/no-for-in-array": "error",
+    "typescript/no-implied-eval": "off",
+    "typescript/no-meaningless-void-operator": "error",
+    "typescript/no-misused-promises": [
+      "error",
+      {
+        "checksVoidReturn": true,
+        "checksConditionals": false,
+        "checksSpreads": false
+      }
+    ],
+    "typescript/no-misused-spread": "error",
+    "typescript/no-redundant-type-constituents": "error",
+    "typescript/no-unsafe-unary-minus": "error",
+    "typescript/no-useless-default-assignment": "error",
+    "typescript/require-array-sort-compare": "error",
+    "typescript/restrict-template-expressions": "error",
+    "typescript/unbound-method": "error",
+    "typescript/return-await": [
+      "error",
+      "error-handling-correctness-only"
+    ],
+    "typescript/use-unknown-in-catch-callback-variable": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "typescript/no-unnecessary-type-parameters": "error",
+    "typescript/prefer-nullish-coalescing": "error",
+    "typescript/prefer-readonly": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/consistent-type-assertions": [
+      "error",
+      {
+        "assertionStyle": "never"
+      }
+    ],
+    "typescript/no-inferrable-types": "error",
+    "typescript/no-non-null-assertion": "error",
+    "max-depth": [
+      "error",
+      {
+        "max": 4
+      }
+    ],
+    "max-params": [
+      "error",
+      {
+        "max": 4
+      }
+    ],
+    "no-else-return": "error",
+    "no-implicit-coercion": "error",
+    "no-nested-ternary": "error",
+    "no-param-reassign": "error",
+    "no-shadow": "error",
+    "unicorn/no-array-for-each": "error",
+    "unicorn/no-lonely-if": "error",
+    "oxc/no-accumulating-spread": "error",
+    "anti-slop/no-ambient-bun-in-tests": "error",
+    "anti-slop/no-ambient-git-in-tests": "error",
+    "anti-slop/no-chained-type-assertions": "error",
+    "anti-slop/no-cli-credential-flag": "error",
+    "anti-slop/no-conditional-empty-object-spread": "error",
+    "anti-slop/no-ddl-in-catch": "error",
+    "anti-slop/no-empty-catch": "error",
+    "anti-slop/no-known-value-widening": "error",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-near-duplicate-functions": "error",
+    "anti-slop/no-object-parameters": "error",
+    "anti-slop/no-reduce-accumulator-copy": "error",
+    "anti-slop/no-reflect-apply": "error",
+    "anti-slop/no-reflect-get": "error",
+    "anti-slop/no-runtime-typeof": "error",
+    "anti-slop/no-sentinel-catch": "error",
+    "anti-slop/no-shape-in-symbol-names": "error",
+    "anti-slop/no-unaccounted-catch": "error",
+    "anti-slop/no-unknown-parameters": "error",
+    "anti-slop/no-unknown-returns": "error",
+    "anti-slop/no-unknown-type-aliases": "error",
+    "anti-slop/no-unsafe-dictionary-type": "error",
+    "anti-slop/no-vacuous-type-predicate": "error",
+    "anti-slop/no-wait-until-in-durable-object": "error",
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-cause-on-rethrow": "error",
+    "anti-slop/require-readable-spacing": "error",
+    "anti-slop/require-safety-comment-for-type-assertion": "error"
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/tests/**",
+        "**/test/**",
+        "**/__tests__/**",
+        "**/*.test.*",
+        "**/*.eval.*",
+        "**/*.spec.*"
+      ],
+      "rules": {
+        "typescript/consistent-type-assertions": "off"
+      }
+    }
+  ]
+}

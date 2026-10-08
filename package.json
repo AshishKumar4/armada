@@ -23,7 +23,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260930.2",
+    "@oxlint/plugins": "1.78.0",
     "@types/bun": "latest",
+    "oxlint": "1.78.0",
+    "oxlint-tsgolint": "7.0.2001",
     "typescript": "7.0.2",
     "wrangler": "4.145.0"
   },
