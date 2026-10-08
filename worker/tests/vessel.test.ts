@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Outcome } from '../../src/protocol';
 import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, USAGE } from '../src/container';
-import type { Claim } from '../src/job';
+import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
@@ -15,8 +15,9 @@ const spec: VesselSpec = {
 };
 
 /** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read, whose cgroup
- *  reads `usage`, and whose output file holds `out` when the job keeps outputs. */
-async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }, out?: string, stopping = '', launched?: number) {
+ *  reads `usage`, whose output file holds `out` when the job keeps outputs, whose artifacts directory packed to a
+ *  tar.gz when `packed`, and whose claim is rank `gang`'s when given. */
+async function run(lost: number, usage: { readonly exitCode: number; readonly stdout: string } | Error = { exitCode: 0, stdout: '' }, out?: string, stopping = '', launched?: number, packed = false, gang?: Gang) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   let claimed = false;
@@ -26,9 +27,11 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
 
     if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
 
+    if (argv[0] === 'stat' && argv[3] === '/armada/task/artifacts.tar.gz') return packed ? { exitCode: 0, stdout: '6' } : { exitCode: 1, stdout: '' };
+
     if (argv[0] === 'stat') return argv[3] === '/armada/task/out' && out === undefined ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: String(argv[3] === '/armada/task/out' ? new TextEncoder().encode(out).byteLength : 0) };
 
-    if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? out ?? '' : '' };
+    if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? out ?? '' : argv[1] === '/armada/task/artifacts.tar.gz' ? 'packed' : '' };
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     waits += 1;
@@ -42,7 +45,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
       if (claimed) return null;
       claimed = true;
 
-      return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false };
+      return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, ...gang === undefined ? {} : { gang } };
     },
     still: async () => true,
     accept: async () => true,
@@ -90,6 +93,22 @@ describe('a finished task', () => {
     const [lost] = (await run(0, new Error('Network connection lost.'))).completed;
 
     expect([measured, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds])).toEqual([[0, 734003200, 2.5], [0, undefined, undefined]]);
+  });
+});
+
+describe('a task\'s artifacts', () => {
+  test('are stored as a tar.gz when its directory kept a file, and named on its outcome; an empty one stores none', async () => {
+    const kept = await run(0, undefined, undefined, '', undefined, true);
+    const empty = await run(0);
+
+    expect([kept.completed[0]?.artifacts, kept.stored.get('jobs/job/tasks/0/artifacts.tar.gz'), empty.completed[0]?.artifacts, empty.stored.has('jobs/job/tasks/0/artifacts.tar.gz')])
+      .toEqual([true, 'packed', undefined, false]);
+  });
+
+  test('of a gang are its rank 0\'s only: rank 1 stores nothing and says none', async () => {
+    const second = await run(0, undefined, undefined, '', undefined, true, { rank: 1, job: 'job', vessels: ['v1', 'v2'], origin: 'https://origin', token: 't' });
+
+    expect([second.completed[0]?.artifacts, second.stored.has('jobs/job/tasks/0/artifacts.tar.gz')]).toEqual([undefined, false]);
   });
 });
 

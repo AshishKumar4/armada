@@ -103,12 +103,21 @@ export function namespace<T>(named: (name: string) => T): DurableObjectNamespace
 
 /** An R2 bucket in memory: what a test reads back of what was put, by key. */
 export function bucket(objects = new Map<string, string>()) {
-  const kept = new Map<string, { readonly uploaded: Date; readonly customMetadata: Record<string, string> }>();
-  const object = (key: string) => ({ key, size: new TextEncoder().encode(objects.get(key) ?? '').byteLength, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {} });
+  const kept = new Map<string, { readonly uploaded: Date; readonly customMetadata: Record<string, string>; readonly httpMetadata: R2HTTPMetadata }>();
+  const object = (key: string) => ({
+    key, size: new TextEncoder().encode(objects.get(key) ?? '').byteLength, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {},
+    httpMetadata: kept.get(key)?.httpMetadata ?? {},
+    writeHttpMetadata: (headers: Headers) => {
+      const meta = kept.get(key)?.httpMetadata;
+
+      if (meta?.contentType !== undefined) headers.set('content-type', meta.contentType);
+      if (meta?.contentEncoding !== undefined) headers.set('content-encoding', meta.contentEncoding);
+    },
+  });
 
   return {
     objects,
-    /** When each object was put, which a test may move back. */
+    /** When each object was put, and its type headers, which a test may move back or read. */
     kept,
     head: async (key: string) => objects.has(key) ? object(key) : null,
     get: async (key: string) => {
@@ -117,13 +126,11 @@ export function bucket(objects = new Map<string, string>()) {
       if (text === undefined) return null;
       const bytes = new TextEncoder().encode(text);
 
-      return {
-        ...object(key), size: bytes.byteLength, httpMetadata: {}, body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<unknown> => JSON.parse(text), arrayBuffer: async () => bytes.buffer,
-      };
+      return { ...object(key), size: bytes.byteLength, body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<unknown> => JSON.parse(text), arrayBuffer: async () => bytes.buffer };
     },
-    put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string> } = {}) => {
+    put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string>; readonly httpMetadata?: R2HTTPMetadata } = {}) => {
       objects.set(key, typeof body === 'string' ? body : await new Response(body).text());
-      kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {} });
+      kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {}, httpMetadata: options.httpMetadata ?? {} });
     },
     delete: async (key: string) => {
       objects.delete(key);

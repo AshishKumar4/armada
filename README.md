@@ -35,9 +35,11 @@ Each task runs as the user `ci`, in its own cgroup, and anything it leaves runni
 Tasks that run one after another in a container share its `/tmp`. A task the platform loses runs again, up to three attempts. Each task gets exactly one recorded outcome, but a cut-off
 attempt may already have done its work, so a task should be safe to run twice.
 
-A deploy over a running armada keeps its jobs running. Six deploys in two minutes, over 200 one-minute tasks, cut no
-task and refused no job. Only a deploy that changes the wire protocol, or one run with `--drain`, waits for open jobs
-first, and that pause lapses after 10 minutes if the deploy dies.
+A deploy over a running armada keeps its jobs running as long as the new Worker would still serve every client the
+old one does: six deploys in two minutes, over 200 one-minute tasks, cut no task and refused no job. A deploy waits
+for the open jobs first only with `--drain`, when the deployed version answers no health check, when this Worker
+would refuse a client it serves (its wire newer than this one's, or its floor older than this one's), or when its
+driver differs. That pause lapses after 10 minutes if the deploy dies.
 
 ## Measured
 
@@ -89,6 +91,7 @@ armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 | `{index}` | The item's position. |
 | `{out}` | The file a task writes when `output` is set. |
 | `{files}` | The directory with the job's small `files`. |
+| `{artifacts}` | The directory whose files a task keeps as its artifacts, a tar.gz served at the task's `artifacts` route. |
 
 An unknown placeholder is an error. An object item's numeric `weight` moves it up the queue. `map` exits 1 if a task
 exits nonzero and 2 if a task could not run.
@@ -227,6 +230,18 @@ tasks those secrets, for a narrowed run whose credentials the whole matrix must 
 
 A run of the whole matrix stores its verdict under the commit. `armada verdict <commit>` prints it and exits 0 when
 every row is green, 1 when a row is red and 2 when the commit has none, so a hook or a deploy can reuse the proof.
+A run that cannot grade every row still writes its report, and prints `report: <path>` on every path it takes.
+
+`armada run --json` puts the human progress on stderr and ends with one JSON object on stdout:
+`{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`, its rows the same objects the
+report file holds. The exit codes are unchanged, so a caller reads the verdict instead of scraping it.
+
+A task can keep files beside its verdict: it writes them under `{artifacts}` (also `ARMADA_ARTIFACTS` in its
+environment), and a row names the ones that are its evidence, `"artifacts": ["shots/home.png"]`. `armada run` extracts
+each task's artifacts next to the report, `~/.local/state/armada/runs/<project>-<job>/<task>/`, and prints each named
+file under a red row. A row naming a file its task did not keep leaves the run ungraded. Artifacts are kept as written:
+they may be binary, and the log's secret mask does not apply to them. `armada map --artifacts=<dir>` extracts the same
+way, under `<dir>/<index>`.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -267,8 +282,8 @@ in peak memory and average busy cores. A new size prepares its own environment o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--secrets=<A,B>] [--json] -- <command>
-armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [-- <plan args>]
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--secrets=<A,B>] [--json] -- <command>
+armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push
 armada dev

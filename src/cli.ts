@@ -4,12 +4,12 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFil
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
-import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
+import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, EnvironmentsSchema, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
+import { BaseSchema, describeUsage, EnvironmentsSchema, mustDrain, SizeSchema, usageOf, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -20,8 +20,9 @@ Usage:
   armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
                                        deploy armada to your Cloudflare account, logging in if needed
   armada map [options] -- <command>    run the command once per item
-  armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [-- <plan args>]
-                                       run a project's CI from the commit's .armada.json
+  armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
+                                       run a project's CI from the commit's .armada.json; --json prints the
+                                       progress to stderr and one JSON verdict object to stdout
   armada verdict <commit|worktree> [--json]
                                        print the verdict armada run stored for the commit
   armada push                          send this project's tasks (armada.config.ts) to armada
@@ -42,6 +43,7 @@ map options:
   --pool=N             the most containers at once (default 50)
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
+  --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
   --speculative        let an idle container run a straggler again
   --secrets=<A,B>      give each task these secrets (armada secret set) in its environment
   --json               print each outcome as a JSON line
@@ -52,10 +54,11 @@ deploy options:
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
-  --drain              wait for the open jobs first, as a deploy that changes the wire does
+  --drain              wait for the open jobs first; automatic when this Worker would refuse a
+                       client the deployed one serves, or its driver differs
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
-The command's {item}, {index}, {out} and {files} are filled per item.
+The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
 verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.
@@ -65,8 +68,8 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label='], words: 0 }],
-  ['run', { options: ['label=', 'secrets='], words: 1 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['run', { options: ['label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
@@ -156,11 +159,23 @@ async function map(): Promise<number> {
     }, () => undefined);
   }, 3_000);
 
+  const artifacts = option('artifacts');
+
   await cancelOnInterrupt(job, id, async () => {
     for await (const result of job) {
       metas.push(result.meta);
+      let kept: string | undefined;
 
-      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: result.error } : {} }));
+      if (artifacts !== undefined && result.meta.artifacts) {
+        const archive = await job.artifacts(result.index);
+
+        if (archive !== null) {
+          kept = join(artifacts, String(result.index));
+          extractTar(archive, kept);
+        }
+      }
+
+      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: result.error } : {}, ...kept === undefined ? {} : { artifacts: kept } }));
       else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
 
       if (result.kind === 'lost' || result.kind === 'cancelled') worst = 2;
@@ -268,8 +283,9 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 }
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
- *  version of the same wire takes over the running jobs; one of another wire, or with `--drain`, is drained first, and
- *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
+ *  version that still serves every client the deployed one does, on the same driver, takes over the running jobs;
+ *  `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and a deploy that
+ *  fails or is interrupted lets the drained one admit jobs again. */
 async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
@@ -286,12 +302,12 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   process.once('SIGINT', interrupted).once('SIGTERM', interrupted).once('SIGHUP', interrupted);
 
   try {
-    // A version of the same wire takes over the running jobs: their containers outlive the Worker's update, and each
-    // object resumes from storage (measured: six deploys in two minutes over 200 one-minute tasks cut none and refused
-    // no job). Only a version of another wire, or a deploy told to, is drained first.
-    const speaks = deployed === null ? null : await deployed.health().then((health) => health.protocol, () => null);
+    // A version whose Worker would still serve every client the deployed one does takes over the running jobs:
+    // their containers outlive the Worker's update, and each object resumes from storage (measured: six deploys in
+    // two minutes over 200 one-minute tasks cut none and refused no job).
+    const health = deployed === null ? null : await deployed.health().then((healthy) => healthy, () => null);
 
-    if (deployed !== null && (forceDrain || speaks !== PROTOCOL)) await drain(deployed, () => { drained = true; });
+    if (deployed !== null && mustDrain(health, forceDrain)) await drain(deployed, () => { drained = true; });
     await install(account, name, vcpus, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
@@ -467,7 +483,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, option('label') ?? '', rest, option('secrets')?.split(',').filter(Boolean));
+      return await runCI(connect(), target, option('label') ?? '', rest, option('secrets')?.split(',').filter(Boolean), flag('json'));
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');

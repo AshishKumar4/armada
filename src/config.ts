@@ -11,8 +11,9 @@
  *                the queue longest first. Placeholders: `{target}`, `{timings}` (the runner's medians as
  *                `{"rows": {...}, "files": {...}}`).
  *   task         the command each entry runs. With `verdict` (the default) it writes a verdict file to `{out}`:
- *                `{"rows": [{"name" | "run", "exitCode", "seconds"?, "output"?, "timings"?}]}`. Without, its exit
- *                code is its one row.
+ *                `{"rows": [{"name" | "run", "exitCode", "seconds"?, "output"?, "timings"?, "artifacts"?}]}`. Without,
+ *                its exit code is its one row. A row's `artifacts` name files in the task's `{artifacts}` directory
+ *                as its evidence, extracted next to the run's report; one the task did not keep fails the run ungraded.
  */
 import * as v from 'valibot';
 import { BaseSchema, DEFAULT_BASE, Project, SecretName, SizeSchema } from './protocol';

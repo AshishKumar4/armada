@@ -218,7 +218,7 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
     return Response.json({ closed: id });
   }
 
-  if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log')) return undefined;
+  if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log' && leaf !== 'artifacts')) return undefined;
   // A task answered from the cache ran nothing: its output is the cached object itself.
   const cached = leaf === 'output' ? await job.cachedFrom(Number(index)) : undefined;
 
@@ -358,7 +358,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const fleet = env.FLEET.getByName(SINGLE);
 
-  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, vcpus: await fleet.used(), jobs: await fleet.jobs() } satisfies Health);
+  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs() } satisfies Health);
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
   if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });

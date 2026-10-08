@@ -35,9 +35,9 @@ export const packKey = (project: string, sha: string, base: string, packer: numb
 export const bundleKey = (digest: string): string => `code/${digest}.mjs`;
 
 
-/** The R2 keys of a task's output and log: a gang rank's other than 0 under its rank. */
-export const taskKey = (job: string, index: number, leaf: 'output' | 'log', rank = 0): string =>
-  `jobs/${job}/tasks/${String(index)}/${rank === 0 ? '' : `rank${String(rank)}/`}${leaf === 'log' ? 'log.gz' : 'output'}`;
+/** The R2 keys of a task's output, log and artifacts archive: a gang rank's other than 0 under its rank. */
+export const taskKey = (job: string, index: number, leaf: 'output' | 'log' | 'artifacts', rank = 0): string =>
+  `jobs/${job}/tasks/${String(index)}/${rank === 0 ? '' : `rank${String(rank)}/`}${leaf === 'log' ? 'log.gz' : leaf === 'artifacts' ? 'artifacts.tar.gz' : 'output'}`;
 
 /** An R2 object into `key`: `small` when it was read whole, else streamed at its known size. */
 export async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, small: ArrayBuffer | null, customMetadata?: Record<string, string>): Promise<void> {

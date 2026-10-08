@@ -3,11 +3,14 @@
  * scheduling policy, so each start names what it starts from (the recipe's base image while preparing, an environment
  * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
-import { failureTail, SIZES, type Size } from '../../src/protocol';
+import { ARTIFACTS_PATH, failureTail, SIZES, type Size } from '../../src/protocol';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
  *  a command drops to the user inside. */
 export const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
+
+/** The user's home: its HOME wherever it runs, or root's would be read instead. */
+export const USER_HOME = '/home/ci';
 
 /** The runner's own state in a container: the pack, the job's files, a function's bundle, the current task. */
 export const STATE = '/armada';
@@ -114,8 +117,8 @@ mkdir -p ${TASK_GROUP}/runner
 echo '${CONTROLLERS}' > ${TASK_GROUP}/cgroup.subtree_control
 for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${TASK_GROUP}/$owned"; done
 rm -rf ${TASK}
-mkdir -p ${TASK}
-chown ci:ci ${TASK}
+mkdir -p ${TASK} ${ARTIFACTS_PATH}
+chown ci:ci ${TASK} ${ARTIFACTS_PATH}
 cd ${workdir}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
@@ -247,14 +250,31 @@ export interface Ran {
   readonly stderr: string;
 }
 
+/** `body` with an abort signal armed for `ms`, disarmed once `body` settles. `AbortSignal.timeout` is never disarmed:
+ *  its timer aborts the exec even after the exec answered, and the platform logs that abort as an error on whatever
+ *  event the object is in then. */
+export async function bounded<T>(ms: number, body: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => { controller.abort(new DOMException(`the exec did not answer in ${String(ms)} ms`, 'TimeoutError')); }, ms);
+
+  try {
+    return await body(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** `argv` in the container, as root or as the user, and its whole output. */
 export async function run(container: Container, argv: readonly string[], options: Exec): Promise<Ran> {
   const { ms, asUser = false, ...exec } = options;
-  const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal: AbortSignal.timeout(ms) });
-  const out = await child.output();
-  const decoder = new TextDecoder();
 
-  return { exitCode: out.exitCode, stdout: decoder.decode(out.stdout), stderr: decoder.decode(out.stderr) };
+  return await bounded(ms, async (signal) => {
+    const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal });
+    const out = await child.output();
+    const decoder = new TextDecoder();
+
+    return { exitCode: out.exitCode, stdout: decoder.decode(out.stdout), stderr: decoder.decode(out.stderr) };
+  });
 }
 
 /** `run`, refused on a non-zero exit with the tail of what it said, and named on any other failure. */

@@ -102,6 +102,9 @@ export const OUT_PATH = '/armada/task/out';
 
 export const ANSWER_PATH = '/armada/task/answer';
 
+/** The directory whose contents a task keeps as its artifacts: a tar.gz in R2 once it finishes. */
+export const ARTIFACTS_PATH = '/armada/task/artifacts';
+
 export const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
 
 /** A task's id: unique in a deployment, so a client names a task by it alone. */
@@ -221,6 +224,8 @@ export const OutcomeSchema = v.object({
    *  of at most INLINE_BYTES. */
   output: v.boolean(),
   value: v.optional(v.string()),
+  /** Whether the task's artifacts directory was stored, at `/jobs/<id>/tasks/<index>/artifacts`, a tar.gz. */
+  artifacts: v.optional(v.boolean()),
   /** A pushed task's answer, as its runner says: `value` is an envelope with the body's value or error, `command` the
    *  file the body's command wrote. */
   answer: v.optional(v.picklist(['value', 'command'])),
@@ -321,11 +326,25 @@ export const ProjectsSchema = v.object({ projects: v.array(Project) });
 
 export const VerdictsSchema = v.object({ verdicts: v.array(v.object({ sha: Sha, uploaded: v.number(), rows: v.number(), reds: v.number() })) });
 
-/** A deployment's state: its runner layer, its wire, the vCPUs its fleet holds, and the jobs not yet done, those
- *  waiting for an environment or for a container included. */
-export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), vcpus: v.number(), jobs: v.number() });
+/** A deployment's state: its runner layer, its wire, the oldest wire it still serves (absent from a Worker that
+ *  predates the field), the vCPUs its fleet holds, and the jobs not yet done, those waiting for an environment or
+ *  for a container included. */
+export const HealthSchema = v.object({ ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number() });
 
 export type Health = v.InferOutput<typeof HealthSchema>;
+
+/** The oldest wire the Worker of a `health` still serves: what it says, else the floor of one that predates the
+ *  field — OLDEST_CLIENT has been 3 since protocol 4, and before that a Worker served only its own. */
+export function servedFloor(health: Health): number {
+  return health.oldest ?? (health.protocol >= 4 ? 3 : health.protocol);
+}
+
+/** Whether the deployed Worker of `health` is drained before this one replaces it: when the deploy is told so, when
+ *  it cannot be asked what it serves, when this Worker would refuse a client it serves — its wire newer than this
+ *  one's, or its floor older than this one's — or when its containers run under another driver. */
+export function mustDrain(health: Health | null, force: boolean): boolean {
+  return force || health === null || health.protocol > PROTOCOL || servedFloor(health) < OLDEST_CLIENT || health.driver !== DRIVER;
+}
 
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });
 
