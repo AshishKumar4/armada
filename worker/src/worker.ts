@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, DEFAULT_VCPUS, DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, DRIVER, environmentKey, type Health, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   TaskSchema, TimingsSchema,
 } from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
@@ -358,7 +358,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   const fleet = env.FLEET.getByName(SINGLE);
 
-  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs(), cap: Number(env.FLEET_VCPUS ?? DEFAULT_VCPUS) } satisfies Health);
+  if (head === 'health') return Response.json({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs(), cap: Number(env.FLEET_VCPUS) } satisfies Health);
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
   if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });
