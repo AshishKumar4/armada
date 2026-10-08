@@ -155,6 +155,17 @@ describe('grading a CI run', () => {
     expect(underExit([], { exitCode: 0, tail: '' }, 'a')).toEqual([]);
   });
 
+  test('a task cut off before it reported a row is red in every row its entry names, graded, with its exit', () => {
+    const expected = ['one', { name: 'two', files: ['two.test.ts'] }];
+    const exited = underExit([], { exitCode: 124, tail: 'still running at the timeout', seconds: 1800 }, 'a', expected);
+
+    expect(exited.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
+      ['one', 124, 'the task exited 124 and reported no row\nstill running at the timeout'],
+      ['two', 124, 'the task exited 124 and reported no row\nstill running at the timeout'],
+    ]);
+    expect(grade([{ name: 'a', entry: { rows: ['one', 'two'] }, rows: exited }])).toMatchObject({ problems: [], reds: exited });
+  });
+
   test('a missing verdict, a missing or extra row, a row twice, and an untimed file are each named, and none is green', () => {
     const graded = grade([
       { name: 'a', entry: { rows: ['one', 'two', { name: 'split', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('stray'), row('split', 0, { 'x.test.ts': 1 })] },
@@ -626,6 +637,13 @@ describe('armada run', () => {
     const path = /^report: (.+)$/mu.exec(ran.stdout)?.[1];
 
     expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), named: path?.endsWith('proj-tasks.json') }).toEqual({ exit: 2, graded: false, named: true });
+  });
+
+  test('a task cut off before it wrote a verdict is graded red, each row its entry names with its exit', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, '', 124);
+
+    expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), reds: ['x.mjs', 'y.mjs'].map((name) => ran.stdout.includes(`RED  ${name}  (exit 124`)) })
+      .toEqual({ exit: 1, graded: true, reds: [true, true] });
   });
 
   test('a task that wrote its verdict and then exited nonzero is graded, its green rows red with its exit', async () => {

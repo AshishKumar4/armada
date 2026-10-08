@@ -52,10 +52,14 @@ export interface TaskExit {
 
 /** A verdict file's rows under its task's exit: a task that exited nonzero failed, so every row it reported green is
  *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's.
- *  A task that exited nonzero having reported no row is a red row of its own, under its name. */
-export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string): VerdictRow[] {
+ *  A task that exited nonzero having reported no row, cut off at its timeout or killed before it wrote one, is red in
+ *  every row its plan entry names (`expected`), or in a row of its own under its name when the entry names none. */
+export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected: PlanEntry['rows'] = undefined): VerdictRow[] {
   if (rows.length === 0 && exit.exitCode !== 0) {
-    return [{ name: task, exitCode: exit.exitCode, seconds: exit.seconds ?? 0, output: `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}` }];
+    const output = `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}`;
+    const names = expected === undefined || expected.length === 0 ? [task] : expected.map((want) => (typeof want === 'string' ? want : want.name));
+
+    return names.map((name) => ({ name, exitCode: exit.exitCode, seconds: exit.seconds ?? 0, output }));
   }
 
   return rows.map((row) => {
