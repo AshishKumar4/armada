@@ -113,14 +113,21 @@ const numbers = new Intl.NumberFormat('en-US');
 
 export const count = (value: number): string => numbers.format(value);
 
-/** A duration for a person: `850 ms`, `4.2 s`, `3 min 12 s`, `2 h 5 min`. */
+/** A duration for a person: `850 ms`, `4.2 s`, `3 min 12 s`, `2 h 5 min`. Each unit is chosen after rounding to it,
+ *  so 59.6 s reads `1 min 0 s`, never `60 s`. */
 export function duration(ms: number): string {
-  if (ms < 1000) return `${String(Math.max(0, Math.round(ms)))} ms`;
+  const millis = Math.max(0, Math.round(ms));
 
-  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
-  const minutes = Math.floor(ms / 60_000);
+  if (millis < 1000) return `${String(millis)} ms`;
+  const tenths = Math.round(ms / 100);
 
-  if (minutes < 60) return `${String(minutes)} min ${String(Math.floor(ms / 1000) % 60)} s`;
+  if (tenths < 100) return `${(tenths / 10).toFixed(1)} s`;
+  const seconds = Math.round(ms / 1000);
+
+  if (seconds < 60) return `${String(seconds)} s`;
+
+  if (seconds < 3600) return `${String(Math.floor(seconds / 60))} min ${String(seconds % 60)} s`;
+  const minutes = Math.round(ms / 60_000);
 
   return `${String(Math.floor(minutes / 60))} h ${String(minutes % 60)} min`;
 }

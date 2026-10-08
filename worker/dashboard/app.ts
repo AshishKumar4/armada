@@ -2,8 +2,8 @@
  * armada's dashboard: the deployment's fleet and recent jobs, a job followed live, its environments, and its CI
  * verdicts. The Worker serves it as static files under /ui/; `armada dashboard` opens it signed in.
  */
-import { HealthSchema, type Health } from '../../src/protocol';
-import { get, signIn, signOut, SignedOut, takeToken, token } from './api';
+import type { Health } from '../../src/protocol';
+import { deployment, signIn, signOut, SignedOut, takeToken, token } from './api';
 import { ci } from './ci';
 import { environments } from './environments';
 import { h, icon, replace } from './dom';
@@ -83,7 +83,7 @@ function signInPage(): void {
   field.focus();
 }
 
-function shell(health: Health): { readonly main: HTMLElement; readonly nav: HTMLElement } {
+function shell(health: Health, host: string): { readonly main: HTMLElement; readonly nav: HTMLElement } {
   const nav = h('nav', { class: 'nav', label: 'Pages' },
     h('a', { href: '#/', data: { page: 'overview' } }, 'Fleet'), h('a', { href: '#/environments', data: { page: 'environments' } }, 'Environments'), h('a', { href: '#/ci', data: { page: 'ci' } }, 'CI'));
   const themeButton = h('button', { class: 'icon-button', type: 'button', label: 'Switch between light and dark' });
@@ -101,7 +101,7 @@ function shell(health: Health): { readonly main: HTMLElement; readonly nav: HTML
       brand(),
       nav,
       h('div', { class: 'topbar-end' },
-        h('span', { class: 'host', title: `runner layer ${String(health.driver)}, wire ${String(health.protocol)}` }, h('span', { class: 'dot ok' }), location.hostname.split('.')[0] ?? location.hostname),
+        h('span', { class: 'host', title: `${host}: runner layer ${String(health.driver)}, wire ${String(health.protocol)}` }, h('span', { class: 'dot ok' }), host.split('.')[0] ?? host),
         themeButton,
         // A dashboard served from this machine (`armada dashboard --serve`) signs its requests itself, and holds no token.
         token() === null ? null : h('button', { class: 'icon-button', type: 'button', label: 'Sign out', title: 'Sign out', onclick: () => { signOut(); signInPage(); } }, icon('out'))))),
@@ -135,7 +135,8 @@ async function start(): Promise<void> {
   if (routed !== null) window.removeEventListener('hashchange', routed);
 
   try {
-    const { main, nav } = shell(await get('/health', HealthSchema));
+    const { health, host } = await deployment();
+    const { main, nav } = shell(health, host);
 
     routed = () => { show(main, nav); };
     window.addEventListener('hashchange', routed);

@@ -59,12 +59,18 @@ function verdict(file: File): HTMLElement {
 
 function rowOf(row: VerdictRow): HTMLElement {
   const red = row.exitCode !== 0;
+  const output = h('pre', { class: 'code' }, row.output);
   const details = h('details', { class: 'verdict-row' },
     h('summary', {}, h('span', { class: `dot ${red ? 'bad' : 'ok'}` }), h('span', { class: 'mono' }, rowName(row)),
       h('span', { class: 'faint' }, row.cached === undefined ? '' : `reused from ${row.cached.slice(0, 10)}`),
       h('span', { class: 'num muted' }, `${red ? `exit ${String(row.exitCode)} · ` : ''}${duration(row.seconds * 1000)}`)),
-    row.output === '' ? h('p', { class: 'faint card-body' }, 'It printed nothing that was kept.') : h('pre', { class: 'code' }, row.output));
+    row.output === '' ? h('p', { class: 'faint card-body' }, 'It printed nothing that was kept.') : output);
 
+  // A row's output ends with why it failed, so it opens scrolled to its end. The toggle event comes once the row is on
+  // the page, where the output has a height to scroll.
+  details.addEventListener('toggle', () => {
+    if (details.open) output.scrollTop = output.scrollHeight;
+  });
   details.open = red;
 
   return details;

@@ -258,5 +258,7 @@ function showLog(job: string, index: number): void {
   void blob(`/jobs/${job}/tasks/${String(index)}/log`).then(async (found) => {
     text = found === null ? '' : await found.text();
     replace(body, found === null ? 'This task kept no log: it never ran, or its log has expired (a job\'s files last 7 days).' : text === '' ? 'The task printed nothing.' : text);
+    // A log ends with how its task ended, so it opens at its end.
+    body.scrollTop = body.scrollHeight;
   }, (cause: unknown) => { replace(body, said(cause)); });
 }

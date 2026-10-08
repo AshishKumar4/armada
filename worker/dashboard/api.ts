@@ -4,7 +4,7 @@
  * dashboard` hands it over in the page's fragment, which no request carries.
  */
 import * as v from 'valibot';
-import { PROTOCOL, PROTOCOL_HEADER } from '../../src/protocol';
+import { DEPLOYMENT_HEADER, HealthSchema, PROTOCOL, PROTOCOL_HEADER, type Health } from '../../src/protocol';
 
 const TOKEN = 'armada.token';
 
@@ -61,12 +61,23 @@ async function failure(response: Response): Promise<string> {
   return said.success ? said.output.error : `the Worker answered ${String(response.status)}`;
 }
 
-export async function get<const S extends v.GenericSchema>(path: string, schema: S): Promise<v.InferOutput<S>> {
+async function answered(path: string): Promise<Response> {
   const response = await request(path);
 
   if (!response.ok) throw new RequestError(response.status, await failure(response));
 
-  return v.parse(schema, await response.json());
+  return response;
+}
+
+export async function get<const S extends v.GenericSchema>(path: string, schema: S): Promise<v.InferOutput<S>> {
+  return v.parse(schema, await (await answered(path)).json());
+}
+
+/** The deployment's health and its host: this page's own, or the one `armada dashboard --serve` passes requests to. */
+export async function deployment(): Promise<{ readonly health: Health; readonly host: string }> {
+  const response = await answered('/health');
+
+  return { health: v.parse(HealthSchema, await response.json()), host: response.headers.get(DEPLOYMENT_HEADER) ?? location.hostname };
 }
 
 /** A stored object (a log, an output, a task's artifacts), or null where there is none. */

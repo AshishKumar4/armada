@@ -511,7 +511,7 @@ main { max-width: 1360px; margin: 0 auto; padding: 28px 28px 80px; }
   overflow-wrap: anywhere;
 }
 
-.code.tall { max-height: none; flex: 1; }
+.code.tall { max-height: none; flex: 1; min-height: 0; }
 
 .modal {
   position: fixed;
@@ -550,7 +550,7 @@ main { max-width: 1360px; margin: 0 auto; padding: 28px 28px 80px; }
 
 .tab[aria-current='page'] { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
 
-.phases { display: flex; height: 8px; gap: 2px; border-radius: 4px; overflow: hidden; min-width: 140px; }
+.phases { display: flex; height: 8px; gap: 2px; border-radius: 4px; overflow: hidden; }
 
 .phases span { display: block; height: 100%; }
 

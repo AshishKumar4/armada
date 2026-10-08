@@ -17,6 +17,9 @@ export const OLDEST_CLIENT = 3;
 
 export const PROTOCOL_HEADER = 'armada-protocol';
 
+/** The host of the deployment `armada dashboard --serve` passes a page's requests to, on each answer it passes back. */
+export const DEPLOYMENT_HEADER = 'armada-deployment';
+
 /** The driver's version: bump when what the Worker installs or runs in a container changes. It is in every
  *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it. */
 export const DRIVER = 2;

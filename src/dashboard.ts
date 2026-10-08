@@ -6,6 +6,7 @@
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DEPLOYMENT_HEADER } from './protocol';
 import type { Armada } from './sdk';
 
 const SOURCE = join(import.meta.dir, '..', 'worker', 'dashboard');
@@ -77,6 +78,7 @@ export async function serveDashboard(armada: Armada, port: number): Promise<neve
 
       passed.delete('content-encoding');
       passed.delete('content-length');
+      passed.set(DEPLOYMENT_HEADER, new URL(origin).hostname);
 
       return new Response(answer.body, { status: answer.status, headers: passed });
     },
