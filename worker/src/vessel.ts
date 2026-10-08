@@ -163,7 +163,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
       if (pack === null) throw new Error(`the pack of ${spec.commit.sha} is not in R2`);
       await pipeIn(container, pack.body, `${STATE}/pack`);
-      await must(container, 'the checkout', ['/bin/sh', '-c', receive(spec.workdir, spec.commit.history), 'receive', spec.commit.sha], { asUser: true, cwd: spec.workdir, ms: EXEC_MS });
+      // As the user under its own home, or git warns it cannot read root's, pushing its real error down.
+      await must(container, 'the checkout', ['/bin/sh', '-c', receive(spec.workdir, spec.commit.history), 'receive', spec.commit.sha], { asUser: true, env: { HOME: '/home/ci' }, cwd: spec.workdir, ms: EXEC_MS });
     }
 
     for (const [name, text] of Object.entries(spec.files)) await pipeIn(container, text, `${STATE}/files/${name}`);

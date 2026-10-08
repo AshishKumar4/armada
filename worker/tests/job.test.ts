@@ -145,9 +145,31 @@ describe('a job none of whose containers starts', () => {
     expect({ phase: status?.phase, problems: status?.problems, tails: events.map((event) => event.outcome.tail), vessels: failed.length }).toEqual({
       phase: 'done',
       problems: [`no container started from environment ${(status?.key ?? '').slice(0, 12)}: the container did not start: snapshot snapshot is not runnable`],
-      tails: ['no vessel was left to run it', 'no vessel was left to run it'],
+      tails: [
+        'no vessel was left to run it\nthe container did not start: snapshot snapshot is not runnable',
+        'no vessel was left to run it\nthe container did not start: snapshot snapshot is not runnable',
+      ],
       vessels: 10,
     });
+  });
+
+  test('a lost task\'s tail keeps the last three distinct reasons its vessels failed with', async () => {
+    const { job: broken, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1 });
+    const reasons = ['the first way it failed', 'the second way', 'the third way', 'the fourth way', 'the fourth way'];
+
+    for (let round = 0; round < 20; round += 1) {
+      const alive = begun.filter((name) => !name.endsWith('-failed'));
+
+      if (alive.length === 0) break;
+
+      for (const name of alive) {
+        begun.splice(begun.indexOf(name), 1, `${name}-failed`);
+        await broken.vesselFailed(name.split('/')[1] ?? '', reasons.shift() ?? 'the last way');
+      }
+    }
+    const { events } = await broken.events(0);
+
+    expect(events.map((event) => event.outcome.tail)).toEqual(['no vessel was left to run it\nthe last way\nthe fourth way\nthe third way']);
   });
 });
 

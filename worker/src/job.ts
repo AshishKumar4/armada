@@ -22,7 +22,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, cacheKey, environmentKey, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, cacheKey, environmentKey, failureTail, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, textOf, type Env } from './env';
@@ -625,18 +625,21 @@ export class ArmadaJob extends DurableObject<Env> {
     if (open > 0 && alive > 0) return;
 
     if (open > 0) {
-      const [failed] = this.sql.exec<{ error: string | null }>(`SELECT error FROM vessels WHERE state = 'failed' ORDER BY beat DESC LIMIT 1`).toArray();
+      // Why no vessel is left, in the vessels' own last distinct failures, most recent first.
+      const errors = [...new Set(this.sql.exec<{ error: string }>(`SELECT error FROM vessels WHERE state = 'failed' AND error IS NOT NULL ORDER BY beat DESC, rowid DESC`)
+        .toArray().map(({ error }) => error))].slice(0, 3);
       const started = Number(this.sql.exec('SELECT COUNT(*) AS n FROM vessels WHERE boot_ms IS NOT NULL').one()['n']);
 
       // A snapshot that does not start fails every vessel the same way, so the job names its environment once.
-      if (started === 0 && failed?.error) {
+      if (started === 0 && errors.length > 0) {
         const key = (await this.ctx.storage.get<string>('key')) ?? '';
 
-        await this.ctx.storage.put('problems', [...(await this.ctx.storage.get<string[]>('problems')) ?? [], `no container started from environment ${key.slice(0, 12)}: ${failed.error}`]);
+        await this.ctx.storage.put('problems', [...(await this.ctx.storage.get<string[]>('problems')) ?? [], `no container started from environment ${key.slice(0, 12)}: ${errors[0] ?? ''}`]);
       }
+      const tail = ['no vessel was left to run it', ...errors.map((error) => failureTail('', error))].join('\n');
 
       for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE ${OPEN}`).toArray()) {
-        const outcome: Outcome = { index: task.idx, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: 'no vessel was left to run it', output: false };
+        const outcome: Outcome = { index: task.idx, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail, output: false };
 
         this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
         this.append(outcome);
