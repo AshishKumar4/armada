@@ -180,6 +180,13 @@ class Context:
     secrets: dict[str, str]
 
 
+@dataclass(frozen=True)
+class _Value:
+    """An answer that came back ok, before it is joined with its item and meta into a Result."""
+
+    value: Any
+
+
 def _command_answer(output: object, exit_code: int, tail: str, read: Callable[[], Optional[bytes]], inline: object = None) -> Union[_Value, RemoteError]:
     """A command's answer: its `out` read as `output` says, once it exited 0 — the same shapes the TS `answer` gives."""
     if exit_code != 0:
@@ -216,13 +223,6 @@ def _envelope_answer(outcome: dict[str, Any], read: Callable[[], Optional[bytes]
     if isinstance(envelope.get("bytes"), str):
         return _Value(base64.b64decode(envelope["bytes"]))
     return _Value(envelope.get("value"))
-
-
-@dataclass(frozen=True)
-class _Value:
-    """An answer that came back ok, before it is joined with its item and meta into a Result."""
-
-    value: Any
 
 
 class Submission(Generic[I]):
