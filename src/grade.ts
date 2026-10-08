@@ -74,6 +74,8 @@ export interface TaskAnswer {
   readonly entry: PlanEntry;
   /** The task's verdict rows, or null when it wrote no verdict file. */
   readonly rows: readonly VerdictRow[] | null;
+  /** How the task's command exited, when it ran; a lost or cancelled task has none. */
+  readonly exit?: TaskExit;
   /** The relative paths the task's artifacts directory kept, or null when it kept none. */
   readonly artifacts: ReadonlySet<string> | null;
 }
@@ -90,12 +92,16 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
   const seen = new Map<string, string>();
 
   for (const answer of answers) {
-    if (answer.rows === null) {
+    // A task that failed before it wrote its verdict is red, not ungradeable: each row its entry names gets its
+    // exit. One that exited 0 while dropping rows, or never ran, has nothing to grade.
+    const reported = answer.rows ?? unreported(answer);
+
+    if (reported === null) {
       problems.push(`${answer.name} wrote no verdict`);
       continue;
     }
 
-    for (const row of answer.rows) {
+    for (const row of reported) {
       const name = rowName(row);
       const owner = seen.get(name);
 
@@ -109,10 +115,23 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       }
     }
 
-    problems.push(...coverage(answer));
+    if (answer.rows !== null) problems.push(...coverage(answer));
   }
 
   return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0) };
+}
+
+/** The rows a task that exited nonzero with no verdict is graded by: each row its entry names, red with the task's
+ *  exit and its output's tail as `underExit` keeps it; the task itself where its entry names none. Null when it
+ *  exited 0 or never ran. */
+function unreported(answer: TaskAnswer): VerdictRow[] | null {
+  const exit = answer.exit;
+
+  if (exit === undefined || exit.exitCode === 0) return null;
+  const named = answer.entry.rows ?? [];
+
+  return (named.length === 0 ? [answer.name] : named.map((row) => typeof row === 'string' ? row : row.name))
+    .flatMap((name) => underExit([], exit, name));
 }
 
 /** A task whose plan entry names its rows reported exactly those, each with exactly its declared files' timings. */

@@ -167,6 +167,22 @@ describe('grading a CI run', () => {
     ]);
   });
 
+  test('a task that exited nonzero with no verdict is graded by each row its entry names, red with its exit', () => {
+    const graded = grade([
+      { name: 'a', entry: { rows: ['one', 'two'] }, rows: null, exit: { exitCode: 124, tail: 'the timeout killed it', seconds: 1800 }, artifacts: null },
+      { name: 'b', entry: {}, rows: null, exit: { exitCode: 7, tail: 'boom' }, artifacts: null },
+      { name: 'c', entry: { rows: ['three'] }, rows: null, exit: { exitCode: 0, tail: '' }, artifacts: null },
+      { name: 'd', entry: { rows: ['four'] }, rows: null, artifacts: null },
+    ]);
+
+    expect({ problems: graded.problems, rows: graded.rows.map((each) => [rowName(each), each.exitCode, each.seconds]) }).toEqual({
+      problems: ['c wrote no verdict', 'd wrote no verdict'],
+      rows: [['one', 124, 1800], ['two', 124, 1800], ['b', 7, 0]],
+    });
+    expect(graded.rows[0]?.output).toBe('the task exited 124 and reported no row\nthe timeout killed it');
+    expect(graded.reds).toHaveLength(3);
+  });
+
   test('a row may name the task\'s kept artifacts as evidence; one it did not keep is a problem', () => {
     const withFile = { name: 'a', entry: {}, rows: [{ ...row('x'), artifacts: ['shots/home.png'] }], artifacts: new Set(['shots/home.png']) };
     const without = { name: 'a', entry: {}, rows: [{ ...row('x'), artifacts: ['shots/home.png'] }], artifacts: null };
