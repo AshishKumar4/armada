@@ -263,6 +263,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
       if (!(await job.still(spec.name, current.claim.index))) {
         await must(container, 'the kill', ['/bin/sh', '-c', KILL], { ms: EXEC_MS });
+
+        if (current.claim.gang !== undefined) await this.keepLog(spec, current);
         await this.ctx.storage.delete('current');
       }
     }
@@ -342,16 +344,17 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     await this.ctx.storage.delete('current');
 
+    // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
+    if (current.claim.gang !== undefined) await this.keepLog(spec, current);
+
     if (!(await job.accept(spec.name, index))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
-    await this.mask(current.claim.secrets);
+    if (current.claim.gang === undefined) await this.keepLog(spec, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(TASK)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
-    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz`], { ms: EXEC_MS });
-    await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, index, 'log', rank), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
     const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output', rank), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
@@ -383,6 +386,14 @@ export class ArmadaVessel extends DurableObject<Env> {
 
   /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
    *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
+  /** The task's log, its secrets masked, into R2 as its rank's. */
+  private async keepLog(spec: VesselSpec, current: Current): Promise<void> {
+    await this.mask(current.claim.secrets);
+    await must(this.container(), 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz`], { ms: EXEC_MS });
+    await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, current.claim.index, 'log', current.claim.gang?.rank ?? 0),
+      { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+  }
+
   private async mask(names: readonly string[] | undefined): Promise<void> {
     if (names === undefined || names.length === 0) return;
     await must(this.container(), 'masking the secrets', ['node', '-e', MASK, `${TASK}/log`, MASK_VALUES], { ms: EXEC_MS });
