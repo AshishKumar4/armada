@@ -371,7 +371,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const { lanes, pool } = lanesFor(estimates, ranks, config.pool, slots);
   // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
   // whole tier never sees them.
-  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
+  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, hedge: config.task.hedge, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
   // A matrix entry came from JSON, so it is JSON. An entry with no weight of its own dispatches by its estimate.
   const entries = plan.include.map((entry, index) => {

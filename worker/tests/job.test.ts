@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, refusal, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
@@ -30,7 +30,7 @@ const exited = (index: number, vessel: string, exitCode = 0, error?: string): Ou
 async function finish(open: ArmadaJob, vessel: string, exitCode = 0, error?: string): Promise<void> {
   const claim = await open.claim(vessel);
 
-  if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
+  if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
   await open.complete(vessel, exited(claim.index, vessel, exitCode, error), 1000);
 }
 
@@ -88,7 +88,7 @@ describe('the claim order', () => {
 
       expect(claim === null || 'waitMs' in claim ? -1 : claim.index).toBe(expected);
       if (claim === null || 'waitMs' in claim) throw new Error('unreachable');
-      await open.accept(vessel, claim.index);
+      await open.accept(vessel, claim.index, 0);
       await open.complete(vessel, exited(claim.index, vessel), durations[claim.index] ?? 0);
       lanes[least]?.push(claim.index);
       loads[least] = (loads[least] ?? 0) + (durations[claim.index] ?? 0);
@@ -118,12 +118,100 @@ describe('a task\'s claim', () => {
   });
 });
 
+describe('a hedged job', () => {
+  test('runs its heaviest tasks twice from the start, each copy once the queue reaches its weight, and keeps the first answer', async () => {
+    const items = [5, 9, 1, 7].map((weight) => ({ item: { weight }, argv: ['true'] }));
+    const { job: hedged } = await job({ recipe: {}, items, run: { kind: 'command' }, hedge: 2 });
+    const claims = [];
+
+    for (const vessel of ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7']) {
+      const claim = await hedged.claim(vessel);
+
+      claims.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
+    }
+    // The copy on v2 lands first: its answer is the one kept, and the first copy stops.
+    const landed = [await hedged.accept('v2', 1, 0), await hedged.accept('v1', 1, 0)];
+
+    await hedged.complete('v2', exited(1, 'v2'), 1000);
+    const { events } = await hedged.events(0);
+
+    expect({ claims, landed, still: await hedged.still('v1', 1), events: events.map((event) => [event.outcome.index, event.outcome.vessel]) })
+      .toEqual({ claims: [[1, false], [1, true], [3, false], [3, true], [0, false], [2, false], null], landed: [true, false], still: false, events: [[1, 'v2']] });
+  });
+
+  test('keeps the first copy\'s verdict, and a red from either copy that ran to its end, never hiding it behind a green', async () => {
+    /** v1's copy answers `first` and, where `stored`, lands it; then v2's copy answers `then`, stops when told to, or
+     *  loses its container. */
+    const verdict = async (first: number, stored: boolean, then: number | 'stopped' | 'lost') => {
+      const { job: hedged } = await job({ recipe: {}, items: [{ item: { weight: 9 }, argv: ['true'] }], run: { kind: 'command' }, hedge: 1 });
+
+      await hedged.claim('v1');
+      await hedged.claim('v2');
+      await hedged.accept('v1', 0, first);
+      if (stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
+      const told = await hedged.still('v2', 0);
+
+      if (then === 'stopped') await hedged.stopped('v2', 0);
+      else if (then === 'lost') await hedged.vesselFailed('v2', 'the container stopped');
+      else if (await hedged.accept('v2', 0, then)) await hedged.complete('v2', exited(0, 'v2', then), 1000);
+      if (!stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
+      const { events } = await hedged.events(0);
+
+      return { told, events: events.map((event) => [event.outcome.vessel, event.outcome.exitCode]) };
+    };
+
+    expect({
+      redFirst: await verdict(1, true, 'stopped'),
+      redOverALandingGreen: await verdict(0, false, 1),
+      redOverAStoredGreen: await verdict(0, true, 1),
+      greenOnceTheOtherStopped: await verdict(0, true, 'stopped'),
+      greenBesideAGreen: await verdict(0, true, 0),
+      greenOnceTheOtherWasLost: await verdict(0, true, 'lost'),
+      firstRedBesideAGreen: await verdict(1, true, 0),
+    }).toEqual({
+      redFirst: { told: false, events: [['v1', 1]] },
+      redOverALandingGreen: { told: false, events: [['v2', 1]] },
+      redOverAStoredGreen: { told: false, events: [['v2', 1]] },
+      greenOnceTheOtherStopped: { told: false, events: [['v1', 0]] },
+      greenBesideAGreen: { told: false, events: [['v1', 0]] },
+      greenOnceTheOtherWasLost: { told: false, events: [['v1', 0]] },
+      firstRedBesideAGreen: { told: false, events: [['v1', 1]] },
+    });
+  });
+});
+
+describe('a speculative job\'s idle vessel', () => {
+  test('stays for a task about to become a straggler, one vessel a task, and repeats it once it is one', async () => {
+    const start = new Date('2026-10-08T12:00:00Z').getTime();
+
+    setSystemTime(new Date(start));
+    try {
+      const items = [{ item: { weight: 40 }, argv: ['true'] }, { item: { weight: 1 }, argv: ['true'] }];
+      const { job: speculative } = await job({ recipe: {}, items, run: { kind: 'command' }, speculative: true });
+
+      await speculative.claim('v1');
+      await finish(speculative, 'v2');
+      // Task 0 becomes a straggler at 1.5 times its 40 s weight, 60 s in: v2 stays for it, and v3 has none to stay for.
+      setSystemTime(new Date(start + 20_000));
+      const early = [await speculative.claim('v2'), await speculative.claim('v3')];
+
+      setSystemTime(new Date(start + 61_000));
+      const repeated = await speculative.claim('v2');
+
+      expect({ early, repeated: repeated === null || 'waitMs' in repeated ? repeated : [repeated.index, repeated.duplicate] })
+        .toEqual({ early: [{ waitMs: 40_000 }, null], repeated: [0, true] });
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
 describe('a task\'s outcome', () => {
   test('is one per task: an answer that lands after the job cancelled it adds none', async () => {
     const { job: cancelled } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
     const claim = await cancelled.claim('v1');
 
-    await cancelled.accept('v1', claim === null || 'waitMs' in claim ? -1 : claim.index);
+    await cancelled.accept('v1', claim === null || 'waitMs' in claim ? -1 : claim.index, 0);
     await cancelled.cancel('cancelled by its client', 'cancelled');
     await cancelled.complete('v1', exited(0, 'v1'), 1000);
     const { events } = await cancelled.events(0);
@@ -324,7 +412,7 @@ async function formed(open: ArmadaJob, vessels: readonly string[]): Promise<Reco
 
 /** `vessel` lands its rank's answer, exiting `exitCode`, with `extra` on its outcome. */
 async function land(open: ArmadaJob, vessel: string, index: number, exitCode: number, extra?: Partial<Outcome>): Promise<void> {
-  if (!(await open.accept(vessel, index))) throw new Error(`${vessel}'s answer was refused`);
+  if (!(await open.accept(vessel, index, exitCode))) throw new Error(`${vessel}'s answer was refused`);
   await open.complete(vessel, { ...exited(index, vessel), exitCode, tail: `${vessel} said this`, ...extra }, 1000);
 }
 

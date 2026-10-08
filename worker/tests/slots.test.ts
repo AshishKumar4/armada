@@ -56,6 +56,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
       return { index: given++, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false };
     },
     still: async (_name: string, index: number) => still(index),
+    stopped: async () => undefined,
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => undefined,
@@ -124,7 +125,7 @@ describe('a slotted vessel', () => {
     const job = {
       booted: async () => undefined, waiting: async () => undefined,
       claim: async () => ({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }),
-      still: async () => true, accept: async () => true, complete: async () => undefined, retired: async () => undefined,
+      still: async () => true, stopped: async () => undefined, accept: async () => true, complete: async () => undefined, retired: async () => undefined,
       vesselFailed: async () => { failed += 1; },
     };
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: bucket() }));

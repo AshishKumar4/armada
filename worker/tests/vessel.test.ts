@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { Outcome } from '../../src/protocol';
 import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, USAGE } from '../src/container';
 import type { Claim, Gang } from '../src/job';
-import { GANG_DOWN, GANG_UP, RELAY_HEADER } from '../src/relay';
+import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { taskKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
@@ -231,12 +231,18 @@ describe('a gang rank', () => {
     expect(steps).toEqual([['relay written'], ['up', 'gang', '1', '2', 'https://armada.example', 'job', 't'.repeat(48), 'v2', 'v1'], ['launch'], ['down'], ['launch']]);
   });
 
-  test('keeps its log when its gang ends without its answer: refused, or stopped while it ran', async () => {
+  test('keeps its log, the relay\'s appended, when its gang ends without its answer: refused, or stopped while it ran, and says it stopped', async () => {
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: '', token: 't'.repeat(48) };
     const kept = async (accepted: boolean, exits: boolean) => {
       let claimed = false;
       const completed: Outcome[] = [];
-      const stored = state(container((argv) => ({ exitCode: 0, stdout: argv[3] === 'wait' && exits ? '3\n' : '' })));
+      let relayLogs = 0;
+      let stops = 0;
+      const stored = state(container((argv) => {
+        relayLogs += (argv[2] ?? '').includes(RELAY_LOG) && (argv[2] ?? '').includes('>> /armada/task/log') ? 1 : 0;
+
+        return { exitCode: 0, stdout: argv[3] === 'wait' && exits ? '3\n' : '' };
+      }));
       const job = {
         booted: async () => undefined, waiting: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
         claim: async () => {
@@ -245,7 +251,8 @@ describe('a gang rank', () => {
 
           return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang };
         },
-        still: async () => false, accept: async () => accepted, complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
+        still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
+        complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
       };
       const artifacts = bucket();
       const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
@@ -253,15 +260,15 @@ describe('a gang rank', () => {
       await vessel.begin(spec);
       await vessel.alarm();
 
-      return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length };
+      return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length, relayLogs, stops };
     };
     const log = taskKey(spec.jobId, 0, 'log', 1);
 
     expect([await kept(false, true), await kept(true, false), await kept(true, true)])
-      .toEqual([{ logged: [log], completed: 0 }, { logged: [log], completed: 0 }, { logged: [log], completed: 1 }]);
+      .toEqual([{ logged: [log], completed: 0, relayLogs: 1, stops: 0 }, { logged: [log], completed: 0, relayLogs: 1, stops: 1 }, { logged: [log], completed: 1, relayLogs: 1, stops: 0 }]);
   });
 
-  test('takes a relay only with its gang\'s token, only to a port under a link id, and a resumed link only if it holds it', async () => {
+  test('takes a relay only with its gang\'s token, and only to a port under a link id', async () => {
     const stored = state(container(() => ({ exitCode: 0, stdout: '' })));
     const vessel = new ArmadaVessel(stored.ctx, world({}));
     const relay = async (token: string, query: string) => (await vessel.fetch(new Request(`https://armada.example/relay/job/v1?${query}`,
@@ -271,8 +278,8 @@ describe('a gang rank', () => {
 
     await stored.ctx.storage.put('current', { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false, gang: { rank: 0, job: 'job', vessels: ['v1', 'v2'], origin: '', token: 't'.repeat(48) } }, startedAt: 0 });
 
-    expect([none, await relay('u'.repeat(48), `port=8476&${link}`), await relay('t'.repeat(48), `port=0&${link}`), await relay('t'.repeat(48), 'port=8476&id=x'),
-      await relay('t'.repeat(48), `port=8476&${link}&resume=1`)]).toEqual([403, 403, 400, 400, 410]);
+    expect([none, await relay('u'.repeat(48), `port=8476&${link}`), await relay('t'.repeat(48), `port=0&${link}`), await relay('t'.repeat(48), 'port=8476&id=x')])
+      .toEqual([403, 403, 400, 400]);
   });
 });
 

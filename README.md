@@ -123,8 +123,9 @@ The gang starts once every rank has a container. A rank lost to the platform los
 as one task. The task's outcome is its first failing rank's, else rank 0's. Containers have no inbound address, so
 ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a connection, at 2 to 64 ranks. That suits
 tests and coordination, not bandwidth-bound training. A connection to a port nothing listens on yet opens and then
-closes at once, so a client retries it as it would a refused one. One whose WebSocket the network drops goes on over
-another, the program seeing nothing of it, if the far end's vessel still holds it, for up to a minute.
+closes at once, so a client retries it as it would a refused one. A connection outlives its WebSocket being dropped,
+or the vessel between the two ranks being reset or redeployed, the program seeing nothing of it, if both come back
+within a minute: the two ranks' relays hold its bytes, not the vessel.
 
 ## From TypeScript
 
@@ -220,7 +221,8 @@ outputs. A second run printed 9.7 s and 6.7 s.
   in each container, each in its own mount namespace: the slot's task dir over `{out}`, `{artifacts}` and the answer,
   a fresh tmpfs, overlays over the checkout and `$HOME`, and a cgroup with a fair share of the size's memory. Network
   is shared, so two tasks cannot bind one fixed port, and a gang task cannot share a container at all. A task takes
-  `timeout`, and `speculative` to let an idle container rerun a straggler.
+  `timeout`, `speculative` to let an idle container rerun a straggler, and `hedge` to run that many of the heaviest
+  items twice from the start; either way the first answer is kept.
 - `retries` reruns an item only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
   exitCodes: [75], errors: ['FetchError'] }`, an item that exits 75 or throws a `FetchError` runs up to three times,
   waiting 5 s, then 10 s. Any other failure is final.
@@ -320,6 +322,7 @@ way, under `<dir>/<index>`.
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.slots` | `1` | The tasks one container runs at once, each in its own slot. |
+| `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept: a copy that drew a slow container holds the run up no longer than the other takes. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 | `task.secrets` | `[]` | The secrets each task gets in its environment, by name (`armada secret set <name>`). |
 
@@ -357,7 +360,7 @@ in peak memory and average busy cores. A new size prepares its own environment o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

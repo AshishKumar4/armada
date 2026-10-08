@@ -96,7 +96,7 @@ describe('a job\'s outcomes', () => {
 
     if (claim === null || 'waitMs' in claim) throw new Error('v1 got no task');
     setSystemTime(new Date(1_800_000_000_000));
-    await job.accept('v1', claim.index);
+    await job.accept('v1', claim.index, 0);
     await job.complete('v1', exited(claim.index, 'v1'), 2000);
     const { events } = v.parse(EventsSchema, await job.events(0));
 

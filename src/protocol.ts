@@ -212,6 +212,9 @@ export const JobSpecSchema = v.object({
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
+  /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
+   *  container holds the job up no longer than the other copy takes. Only for tasks safe to repeat. */
+  hedge: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
   /** A task's own bound, in seconds. */
   timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
   retries: v.optional(RetriesSchema),
