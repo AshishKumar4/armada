@@ -14,7 +14,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p worker && tsc --noEmit -p worker/tests && tsc --noEmit -p worker/dashboard",
     "test": "bun test tests/ worker/tests/",
-    "relay": "python3 ci/relay.py"
+    "relay": "python3 ci/relay.py",
+    "proofs": "sh ci/proofs.sh && bun test tests/dispatch.test.ts"
   },
   "dependencies": {
     "valibot": "1.4.1"

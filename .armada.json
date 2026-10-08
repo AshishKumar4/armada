@@ -7,6 +7,6 @@
   },
   "pool": 8,
   "size": "auto",
-  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}, {\"name\": \"relay\", \"gang\": 8}]}"] },
+  "plan": { "command": ["echo", "{\"include\": [{\"name\": \"test\"}, {\"name\": \"typecheck\"}, {\"name\": \"relay\", \"gang\": 8}, {\"name\": \"proofs\"}]}"] },
   "task": { "command": ["bun", "run", "{name}"], "verdict": false, "timeout": 600 }
 }

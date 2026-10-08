@@ -3,6 +3,7 @@ import * as v from 'valibot';
 import { JobSpecSchema, refusal, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
+import { listSchedule } from '../../src/dispatch';
 import { namespace, state, world } from './harness';
 
 const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
@@ -59,6 +60,42 @@ describe('an open job', () => {
     const { job: open } = await job({ recipe: {}, items: [], open: true, run: { kind: 'command' } });
 
     expect(await open.add([{ item: 'a' }])).toBe('item 0 has no argv for its command');
+  });
+});
+
+describe('the claim order', () => {
+  test('vessels claim as they free, landing the lanes `listSchedule` computes, ties included', async () => {
+    // weights order the queue (heaviest first, index on a tie); durations are each task's busyMs.
+    const weights = [9, 4, 8, 4, 8, 1, 6, 9, 2];
+    const durations = [5, 3, 5, 3, 5, 3, 5, 3, 5];
+    const machines = 3;
+    const { job: open } = await job({
+      recipe: {},
+      items: weights.map((weight, index) => ({ item: { name: `t${String(index)}`, weight }, argv: ['true'] })),
+      run: { kind: 'command' },
+      pool: machines,
+    });
+    const queue = weights.map((_, index) => index).sort((left, right) => (weights[right] ?? 0) - (weights[left] ?? 0) || left - right);
+    const model = listSchedule(queue.map((index) => durations[index] ?? 0), Array.from({ length: machines }, () => 0));
+    const loads = Array.from({ length: machines }, () => 0);
+    const lanes: number[][] = Array.from({ length: machines }, () => []);
+
+    for (const expected of queue) {
+      let least = 0;
+      for (let machine = 1; machine < machines; machine += 1) if ((loads[machine] ?? 0) < (loads[least] ?? 0)) least = machine;
+      const vessel = `v${String(least + 1)}`;
+      const claim = await open.claim(vessel);
+
+      expect(claim === null || 'waitMs' in claim ? -1 : claim.index).toBe(expected);
+      if (claim === null || 'waitMs' in claim) throw new Error('unreachable');
+      await open.accept(vessel, claim.index);
+      await open.complete(vessel, exited(claim.index, vessel), durations[claim.index] ?? 0);
+      lanes[least]?.push(claim.index);
+      loads[least] = (loads[least] ?? 0) + (durations[claim.index] ?? 0);
+    }
+
+    expect(lanes).toEqual(model.lanes.map((lane) => lane.map((position) => queue[position] ?? -1)));
+    expect(await open.claim('v1')).toBeNull();
   });
 });
 
