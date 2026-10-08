@@ -379,9 +379,9 @@ class Task(Generic[I, O]):
                 if isinstance(items, list):
                     if len(items) > MAX_TASKS:
                         raise ValueError(f"a job takes at most {MAX_TASKS} items, not {len(items)}")
+                    submission.sent = list(items)
                     spec = {**self._spec(options, bundle), "items": [self._wire(item, at) for at, item in enumerate(items)]}
                     submission.resolve(armada.create(spec))
-                    submission.sent = list(items)
                     submission.done.set()
                 else:
                     spec = {**self._spec(options, bundle), "items": [], "open": True}
