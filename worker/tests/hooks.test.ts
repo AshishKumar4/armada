@@ -1,6 +1,7 @@
 /** The GitHub webhook's checks: its signature gate, the event filter, the two dedupes, and the driver job's spec —
  *  exercised through `webhooked` with the DO's own methods on in-memory storage. */
 import { describe, expect, test } from 'bun:test';
+import worker from '../src/worker';
 import { JobSpecSchema, PROTOCOL } from '../../src/protocol';
 import { ArmadaWebhooks, driverSpec, eventOf, type HookConfig } from '../src/hooks';
 import { webhooked, signed } from '../src/worker';
@@ -143,6 +144,26 @@ describe('the github webhook', () => {
     const script = spec.items[0]?.argv?.[2] ?? '';
     expect(script).toContain('armada run');
     expect(script).toContain('--json');
+  });
+});
+
+describe('the webhooks route', () => {
+  test('configures, patches a hook id, lists and removes through the bearer', async () => {
+    const object = hooks();
+    const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, WEBHOOKS: namespace(() => object), ARTIFACTS: bucket() });
+    const ask = async (method: string, path: string, body?: object) => await worker.fetch(new Request(`https://armada.test${path}`, {
+      method, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }), env);
+
+    expect((await ask('POST', '/webhooks/armada', CONFIG)).status).toBe(200);
+    expect((await ask('PATCH', '/webhooks/armada', { hook: 77 })).status).toBe(200);
+    const listed = (await (await ask('GET', '/webhooks')).json()) as { webhooks: { repo: string; hook?: number }[] };
+
+    expect(listed.webhooks[0]?.repo).toBe('owner/armada');
+    expect(listed.webhooks[0]?.hook).toBe(77);
+    expect((await ask('DELETE', '/webhooks/armada')).status).toBe(200);
+    expect((await ask('GET', '/webhooks')).status).toBe(200);
+    expect(((await (await ask('GET', '/webhooks')).json()) as { webhooks: unknown[] }).webhooks).toHaveLength(0);
   });
 });
 
