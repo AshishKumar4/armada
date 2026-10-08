@@ -44,8 +44,8 @@ export function jobView(id: string, opened: number | null): View {
   const describeTask = (index: number): HTMLElement => {
     const landed = outcomes.get(index);
     const running = status?.running?.find((each) => each.index === index);
-    const detail = landed !== undefined ? `${STATE_WORDS[stateOf(landed.outcome)]}${landed.outcome.cached === true ? ', from the cache' : ''} · ${duration(landed.outcome.seconds * 1000)}${landed.outcome.vessel === '' ? '' : ` on ${landed.outcome.vessel}`}`
-      : running !== undefined ? `running on ${running.vessel} for ${duration(Date.now() - running.started)}` : 'queued';
+    const detail = landed !== undefined ? `${STATE_WORDS[stateOf(landed.outcome)]}${landed.outcome.cached === true ? ', from the cache' : ''} · ${duration(landed.outcome.seconds * 1000)}${landed.outcome.vessel === '' ? '' : ` on ${laneOf(landed.outcome.vessel, landed.outcome.slot)}`}`
+      : running !== undefined ? `running on ${laneOf(running.vessel, running.slot)} for ${duration(Date.now() - running.started)}` : 'queued';
 
     return h('div', {}, h('b', {}, `Task ${count(index)}`), h('span', { class: 'muted' }, detail));
   };
@@ -104,8 +104,9 @@ export function jobView(id: string, opened: number | null): View {
 
       return landed !== undefined ? stateOf(landed.outcome) : running.has(index) ? 'running' : 'queued';
     }));
-    timeline.update(status.vessels.map((vessel): Lane => ({ name: vessel.name, state: vessel.state })), segments(status, outcomes, now), status.startedAt ?? status.createdAt,
-      status.finishedAt ?? now, status.phase !== 'done');
+    const { lanes, placed } = segments(status, outcomes, now);
+
+    timeline.update(lanes, placed, status.startedAt ?? status.createdAt, status.finishedAt ?? now, status.phase !== 'done');
   };
 
   const open = (index: number): void => {
@@ -150,33 +151,48 @@ export function jobView(id: string, opened: number | null): View {
   };
 }
 
-/** Every container's start and every task it ran or runs, placed in time. A task answered before this Worker stamped
- *  outcomes has no place, nor does one answered from the cache. */
-function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now: number): Segment[] {
-  const placed: Segment[] = [];
+/** A container's lane, or one slot's of a container that runs several tasks at once. */
+const laneOf = (vessel: string, slot: number | undefined): string => slot === undefined ? vessel : `${vessel} · ${String(slot)}`;
+
+/** Every container's lanes (one, or one a slot it has run a task in), its start and every task it ran or runs, placed
+ *  in time. A task answered before this Worker stamped outcomes has no place, nor does one answered from the cache. */
+function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now: number): { readonly lanes: Lane[]; readonly placed: Segment[] } {
+  const tasks: Segment[] = [];
+  const slots = new Map<string, Set<number>>();
+  /** Each container's first task's start, where its start ends. */
+  const firsts = new Map<string, number>();
+  const place = (vessel: string, slot: number | undefined, segment: Omit<Segment, 'lane'>): void => {
+    if (slot !== undefined) slots.set(vessel, (slots.get(vessel) ?? new Set()).add(slot));
+    firsts.set(vessel, Math.min(segment.start, firsts.get(vessel) ?? Infinity));
+    tasks.push({ ...segment, lane: laneOf(vessel, slot) });
+  };
 
   for (const [index, { outcome, at }] of outcomes) {
     if (at === undefined || outcome.vessel === '' || outcome.cached === true) continue;
-    placed.push({ lane: outcome.vessel, task: index, start: at - outcome.seconds * 1000, end: at, state: stateOf(outcome) });
+    place(outcome.vessel, outcome.slot, { task: index, start: at - outcome.seconds * 1000, end: at, state: stateOf(outcome) });
   }
 
-  for (const running of status.running ?? []) placed.push({ lane: running.vessel, task: running.index, start: running.started, end: now, state: 'running' });
+  for (const running of status.running ?? []) place(running.vessel, running.slot, { task: running.index, start: running.started, end: now, state: 'running' });
   const from = status.startedAt ?? status.createdAt;
-  const firsts = new Map<string, number>();
+  const lanes: Lane[] = [];
+  const starts: Segment[] = [];
 
-  for (const segment of placed) firsts.set(segment.lane, Math.min(segment.start, firsts.get(segment.lane) ?? Infinity));
-  // A container's start ends where its first task begins.
-  const starts = status.vessels.flatMap((vessel): Segment[] => {
+  for (const vessel of status.vessels) {
+    const names = [...slots.get(vessel.name) ?? []].sort((left, right) => left - right).map((slot) => laneOf(vessel.name, slot));
+    const own = names.length === 0 ? [vessel.name] : names;
     const first = firsts.get(vessel.name);
+    const boot = vessel.bootMs;
 
-    return vessel.bootMs === null || first === undefined ? [] : [{ lane: vessel.name, task: null, start: Math.max(from, first - vessel.bootMs), end: first, state: 'boot' }];
-  });
+    lanes.push(...own.map((name): Lane => ({ name, state: vessel.state })));
+    // A container's start ends where its first task begins, on each of its lanes.
+    if (boot !== null && first !== undefined) starts.push(...own.map((lane): Segment => ({ lane, task: null, start: Math.max(from, first - boot), end: first, state: 'boot' })));
+  }
 
-  return [...starts, ...placed];
+  return { lanes, placed: [...starts, ...tasks] };
 }
 
 /** A task in a drawer: what it was given, how it ended, and its files. Answers the drawer's close. */
-function taskDrawer(job: string, index: number, landed: Landed | null, running: { readonly vessel: string; readonly started: number } | null, items: Promise<readonly Json[]>, closed: () => void): () => void {
+function taskDrawer(job: string, index: number, landed: Landed | null, running: { readonly vessel: string; readonly started: number; readonly slot?: number } | null, items: Promise<readonly Json[]>, closed: () => void): () => void {
   const previous = document.activeElement;
   const itemSlot = h('pre', { class: 'code' }, '…');
   const close = (): void => {
@@ -204,12 +220,12 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
     h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}`), h('div', { class: 'button-row' }, pill(tones[state], STATE_WORDS[state]), closer)),
     h('div', { class: 'drawer-body' },
       outcome === undefined
-        ? h('dl', { class: 'facts' }, fact('Container', running?.vessel ?? null), fact('Running for', running === null ? null : duration(Date.now() - running.started)),
+        ? h('dl', { class: 'facts' }, fact('Container', running === null ? null : laneOf(running.vessel, running.slot)), fact('Running for', running === null ? null : duration(Date.now() - running.started)),
           running === null ? fact('State', 'queued: no container has taken it yet') : null)
         : h('dl', { class: 'facts' },
           fact('Exit code', outcome.kind === 'exited' ? String(outcome.exitCode) : null),
           fact('Took', duration(outcome.seconds * 1000)),
-          fact('Container', outcome.vessel === '' ? null : outcome.vessel),
+          fact('Container', outcome.vessel === '' ? null : laneOf(outcome.vessel, outcome.slot)),
           fact('Attempt', String(outcome.attempt)),
           fact('Landed', landed?.at === undefined ? null : when(landed.at)),
           fact('Peak memory', outcome.peakMemory === undefined ? null : bytes(outcome.peakMemory)),
