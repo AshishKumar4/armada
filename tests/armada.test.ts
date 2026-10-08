@@ -401,7 +401,6 @@ describe('packing a commit', () => {
   test('a clone without the environment\'s commit packs from the root, and that pack checks out where the environment is', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
 
-
     try {
       const origin = join(scratch, 'origin');
 
@@ -446,7 +445,6 @@ describe('a commit checkout', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
     const origin = join(scratch, 'origin');
     const checkout = join(scratch, 'checkout');
-
 
     const commit = (message: string, files: Record<string, string>) => {
       for (const [path, text] of Object.entries(files)) {

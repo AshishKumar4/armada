@@ -75,7 +75,6 @@ const OPEN = `state IN ('queued', 'forming', 'running', 'landing')`;
 const NEEDED = `SELECT COALESCE(SUM(CASE WHEN json_type(item, '$.item.gang') = 'integer' THEN json_extract(item, '$.item.gang') ELSE 1 END), 0) AS n
   FROM tasks WHERE ${OPEN}`;
 
-
 const WATCHDOG_MS = 15_000;
 
 /** A vessel that has not been heard from in this long, while booting or working, is lost. */
