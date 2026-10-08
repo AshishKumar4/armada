@@ -38,6 +38,7 @@ export function overview(): View {
       h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Containers now')), fleetBody),
       h('div', { class: 'stack' }, figure, h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Secrets')), secretsBody))),
     h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Recent jobs'), h('span', { class: 'aside' }, 'newest first')), jobsBody));
+
   const drawJobs = (): void => {
     const all = [...first, ...older.filter((job) => !first.some((each) => each.id === job.id))];
 
@@ -46,6 +47,7 @@ export function overview(): View {
 
       return;
     }
+
     const more = exhausted ? null : h('div', { class: 'more' }, h('button', {
       class: 'button', type: 'button',
       onclick: (event) => {
@@ -70,6 +72,7 @@ export function overview(): View {
     const [health, fleet, jobs, secrets] = await Promise.all([
       get('/health', HealthSchema), get('/fleet', FleetSchema), get(`/jobs?limit=${String(PAGE)}`, JobsSchema), get('/secrets', v.object({ names: v.array(v.string()) })),
     ]);
+
     const used = fleet.jobs.reduce((sum, job) => sum + job.vcpus, 0);
     const containers = fleet.jobs.reduce((sum, job) => sum + job.containers, 0);
     const open = jobs.jobs.filter((job) => job.phase !== 'done');

@@ -71,6 +71,7 @@ export async function typed(): Promise<void> {
 
     void narrowed;
   }
+
   void [values, checked, bytes, buffer, text, json, none];
 }
 

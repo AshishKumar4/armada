@@ -156,11 +156,13 @@ export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: reado
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
   if (odd >= 0) return `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
+
   if (slots > 1) {
     const ganged = tasks.findIndex((task) => gangOf(task.item) > 1);
 
     if (ganged >= 0) return `item ${String(ganged)}'s gang takes a whole container to itself: a slotted job's containers share each slot's view, so a gang runs only with 1 slot`;
   }
+
   const ganged = tasks.findIndex((task) => !Number.isInteger(gangOf(task.item)) || gangOf(task.item) < 1 || gangOf(task.item) > Math.min(MAX_GANG, pool));
 
   return ganged < 0 ? null : `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
@@ -419,6 +421,7 @@ export async function environmentKey(recipe: Recipe): Promise<string> {
     ...recipe.repo,
     manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map((entry) => `${entry.path} ${entry.id}`),
   };
+
   // The size keys by its instance type, as the instance type did before sizes were named.
   const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[recipe.size].instance, repo];
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(inputs)));

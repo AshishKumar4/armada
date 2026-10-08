@@ -3,15 +3,20 @@
 import { encode, encodeAll, encodeCached } from './armada/video';
 
 const count = Number(process.argv[2] ?? '100');
+
 const mode = process.argv[3] ?? 'parallel';
+
 const items = Array.from({ length: count }, (_, index) => index + 1);
+
 const timed = async <T>(run: () => Promise<T>) => {
   const started = Date.now();
   const value = await run();
 
   return { seconds: (Date.now() - started) / 1000, value };
 };
+
 const s = (seconds: number) => `${seconds.toFixed(1)} s`;
+
 const median = (values: readonly number[]) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)] ?? 0;
 
 if (mode === 'serial') {

@@ -126,6 +126,7 @@ abstract class Surface<Hit> {
       this.canvas.height = pixels.height;
       this.canvas.style.height = `${String(height)}px`;
     }
+
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
     const live = this.draw(context, width, height, palette(), performance.now());
@@ -336,6 +337,7 @@ export class Timeline extends Surface<Segment> {
       context.textAlign = tick === 0 ? 'left' : 'center';
       context.fillText(clock(tick), at, 9);
     }
+
     const rows = new Map(this.lanes.map((lane, index) => [lane.name, index]));
 
     if (row >= 12) {
@@ -345,6 +347,7 @@ export class Timeline extends Surface<Segment> {
         context.fillText(lane.name, 0, AXIS + index * row + row / 2);
       });
     }
+
     const glow = breath(now);
 
     for (const segment of this.segments) {
@@ -390,6 +393,7 @@ export class Timeline extends Surface<Segment> {
     const time = from + ((px - this.geometry.gutter) / this.geometry.plot) * (to - from);
     // Two pixels of slack either side, so a bar a few milliseconds wide can still be pointed at.
     const slack = (2 / this.geometry.plot) * (to - from);
+
     const under = this.segments.filter((segment) => segment.lane === lane.name && time >= segment.start - slack
       && time <= (segment.state === 'running' ? Date.now() : segment.end) + slack);
 

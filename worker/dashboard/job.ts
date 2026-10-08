@@ -40,6 +40,7 @@ export function jobView(id: string, opened: number | null): View {
   const where = (vessel: string, slot: number | undefined): string => laneOf(vessel, slot, split);
 
   const grid = new TaskGrid('every task of the job, as a cell coloured by how it stands', (index) => describeTask(index), (index) => { open(index); });
+
   const timeline = new Timeline('each container of the job, with the tasks it ran over time', (segment) => describeSegment(segment), (segment) => {
     if (segment.task !== null) open(segment.task);
   });
@@ -47,6 +48,7 @@ export function jobView(id: string, opened: number | null): View {
   const describeTask = (index: number): HTMLElement => {
     const landed = outcomes.get(index);
     const running = status?.running?.find((each) => each.index === index);
+
     const detail = landed !== undefined ? `${STATE_WORDS[stateOf(landed.outcome)]}${landed.outcome.cached === true ? ', from the cache' : ''} · ${duration(landed.outcome.seconds * 1000)}${landed.outcome.vessel === '' ? '' : ` on ${where(landed.outcome.vessel, landed.outcome.slot)}`}`
       : running !== undefined ? `running on ${where(running.vessel, running.slot)} for ${duration(Date.now() - running.started)}` : 'queued';
 
@@ -133,6 +135,7 @@ export function jobView(id: string, opened: number | null): View {
       seq = batch.events.at(-1)?.seq ?? seq;
       more = batch.events.length > 0 && !batch.done;
     }
+
     render();
 
     if (opened !== null) {
@@ -175,6 +178,7 @@ function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now:
   const tasks: Segment[] = [];
   /** Each container's first task's start, where its start ends. */
   const firsts = new Map<string, number>();
+
   const place = (vessel: string, slot: number | undefined, segment: Omit<Segment, 'lane'>): void => {
     firsts.set(vessel, Math.min(segment.start, firsts.get(vessel) ?? Infinity));
     tasks.push({ ...segment, lane: laneOf(vessel, slot, split) });
@@ -196,6 +200,7 @@ function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now:
     const boot = vessel.bootMs;
 
     lanes.push(...own.map((name): Lane => ({ name, state: vessel.state })));
+
     // A container's start ends where its first task begins, on each of its lanes.
     if (boot !== null && first !== undefined) starts.push(...own.map((lane): Segment => ({ lane, task: null, start: Math.max(from, first - boot), end: first, state: 'boot' })));
   }
@@ -208,6 +213,7 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
   where: (vessel: string, slot: number | undefined) => string, closed: () => void): () => void {
   const previous = document.activeElement;
   const itemSlot = h('pre', { class: 'code' }, '…');
+
   const close = (): void => {
     backdrop.remove();
     panel.remove();
@@ -216,19 +222,24 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
     if (previous instanceof HTMLElement) previous.focus();
     closed();
   };
+
   const escape = (event: KeyboardEvent): void => {
     if (event.key === 'Escape' && document.querySelector('.modal') === null) close();
   };
+
   const closer = h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: close }, icon('close'));
   const outcome = landed?.outcome;
   const state: TaskState = outcome === undefined ? running === null ? 'queued' : 'running' : stateOf(outcome);
   const tones: Readonly<Record<TaskState, Tone>> = { queued: 'idle', running: 'live', green: 'ok', red: 'bad', timeout: 'warn', lost: 'bad', cancelled: 'idle' };
   const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
+
   const files = outcome === undefined ? null : h('div', { class: 'button-row' },
     h('button', { class: 'button', type: 'button', onclick: () => { showLog(job, index); } }, icon('log'), 'Whole log'),
     outcome.output ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`); } }, icon('download'), 'Output') : null,
     outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`); } }, icon('download'), 'Artifacts') : null);
+
   const backdrop = h('div', { class: 'backdrop', onclick: close });
+
   const panel = h('aside', { class: 'drawer', label: `Task ${String(index)}` },
     h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}`), h('div', { class: 'button-row' }, pill(tones[state], STATE_WORDS[state]), closer)),
     h('div', { class: 'drawer-body' },
@@ -268,15 +279,19 @@ async function download(path: string, name: string): Promise<void> {
 function showLog(job: string, index: number): void {
   const body = h('pre', { class: 'code tall' }, 'Reading the log…');
   let text = '';
+
   const close = (): void => {
     modal.remove();
     shade.remove();
     document.removeEventListener('keydown', escape);
   };
+
   const escape = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') close();
   };
+
   const shade = h('div', { class: 'backdrop', onclick: close });
+
   const modal = h('div', { class: 'modal', label: `Task ${String(index)}'s log` },
     h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}'s log`), h('div', { class: 'button-row' },
       h('button', { class: 'button', type: 'button', onclick: () => { save(new Blob([text], { type: 'text/plain' }), `${job}-${String(index)}.log`); } }, icon('download'), 'Save'),

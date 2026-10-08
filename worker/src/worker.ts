@@ -24,6 +24,7 @@ export { ArmadaFleet } from './fleet';
 export { ArmadaTasks } from './tasks';
 
 export { ArmadaSecrets } from './secrets';
+
 export { ArmadaWebhooks } from './hooks';
 
 /** The bearer, compared in constant time. */
@@ -195,6 +196,7 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
 
     return Response.json({ jobs: statuses.flatMap((status) => status === null ? [] : [briefOf(status)]) });
   }
+
   const job = env.JOB.getByName(id);
 
   if (tail === undefined) return Response.json(await job.status() ?? { error: 'no such job' });
@@ -304,6 +306,7 @@ async function verdictsOf(env: Env, project: string): Promise<{ sha: string; upl
     if (!page.truncated) break;
     cursor = page.cursor;
   }
+
   const newest = listed.sort((left, right) => right.uploaded.getTime() - left.uploaded.getTime()).slice(0, VERDICTS_LISTED);
 
   return await Promise.all(newest.map(async (stored) => {
@@ -362,6 +365,7 @@ const webhooks: Handler = async (request, env, [project]) => {
   const hooks = env.WEBHOOKS.getByName(SINGLE);
 
   if (project === undefined) return request.method === 'GET' ? Response.json({ webhooks: await hooks.list() }) : undefined;
+
   if (!v.is(Project, project)) return undefined;
 
   if (request.method === 'POST') {
@@ -414,6 +418,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!(await fleet.reserve(env.VERSION.id, created))) {
       return Response.json({ error: 'armada is being redeployed and takes no new job until that is done; run again in a few minutes' }, { status: 503 });
     }
+
     const answer = await createJob(request, env, created).catch(async (cause: unknown) => {
       await fleet.closed(created);
       throw cause;
@@ -459,7 +464,9 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
   const asked = eventOf(request.headers.get('X-GitHub-Event') ?? '', jsonOf(body), config);
 
   if (asked.kind === 'ping') return ignored('pong');
+
   if (asked.kind === 'fork') return ignored('fork pull requests are not built');
+
   if (asked.kind !== 'push' && asked.kind !== 'pr') return ignored('ignored');
 
   const sha = asked.sha;
@@ -477,6 +484,7 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
   const fleet = env.FLEET.getByName(SINGLE);
 
   if (!(await fleet.reserve(env.VERSION.id, created))) return Response.json({ error: 'armada is being redeployed and takes no new job until that is done' }, { status: 503 });
+
   // The driver installs armada at the commit this Worker was deployed from, which `armada deploy` records.
   if (env.ARMADA_SHA === undefined || env.ARMADA_SHA === '') return Response.json({ error: 'this Worker does not know its commit; deploy it with armada deploy' }, { status: 503 });
   const spec = v.parse(JobSpecSchema, driverSpec(project, sha, new URL(request.url).origin, env.ARMADA_SHA, config));

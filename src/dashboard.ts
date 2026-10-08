@@ -54,6 +54,7 @@ export async function serveDashboard(armada: Armada, port: number): Promise<neve
     rmSync(out, { recursive: true, force: true });
     process.exit(0);
   });
+
   const server = Bun.serve({
     port,
     hostname: '127.0.0.1',
@@ -68,6 +69,7 @@ export async function serveDashboard(armada: Armada, port: number): Promise<neve
 
         return await file.exists() ? new Response(file) : new Response('not found', { status: 404 });
       }
+
       const headers = new Headers(request.headers);
 
       headers.set('authorization', `Bearer ${armada.connection.token}`);

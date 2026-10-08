@@ -11,6 +11,7 @@ describe('a task\'s artifacts', () => {
       ARTIFACTS: bucket(new Map([['jobs/j1/tasks/0/artifacts.tar.gz', 'packed']])),
       JOB: namespace(() => ({})),
     });
+
     const ask = async (path: string) => await worker.fetch(new Request(`https://armada.test${path}`, { headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7' } }), env);
     const kept = await ask('/jobs/j1/tasks/0/artifacts');
     const none = await ask('/jobs/j1/tasks/1/artifacts');

@@ -52,6 +52,7 @@ export function state(container?: Container): Stored {
   const entries = new Map<string, unknown>();
   let alarm: number | null = null;
   const db = new Database(':memory:');
+
   const storage = {
     get: async (key: string | readonly string[]) => typeof key === 'string' ? structuredClone(entries.get(key))
       : new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : [])),
@@ -85,6 +86,7 @@ export function state(container?: Container): Stored {
       },
     },
   };
+
   const dump = () => {
     const tables = db.query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type = 'table'`).all().map(({ name }) => db.query(`SELECT * FROM ${name}`).all());
 
@@ -107,6 +109,7 @@ export function namespace<T>(named: (name: string) => T): DurableObjectNamespace
 /** An R2 bucket in memory: what a test reads back of what was put, by key. */
 export function bucket(objects = new Map<string, string>()) {
   const kept = new Map<string, { readonly uploaded: Date; readonly customMetadata: Record<string, string>; readonly httpMetadata: R2HTTPMetadata }>();
+
   const object = (key: string) => ({
     key, size: new TextEncoder().encode(objects.get(key) ?? '').byteLength, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {},
     httpMetadata: kept.get(key)?.httpMetadata ?? {},
@@ -114,6 +117,7 @@ export function bucket(objects = new Map<string, string>()) {
       const meta = kept.get(key)?.httpMetadata;
 
       if (meta?.contentType !== undefined) headers.set('content-type', meta.contentType);
+
       if (meta?.contentEncoding !== undefined) headers.set('content-encoding', meta.contentEncoding);
     },
   });

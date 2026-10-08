@@ -82,8 +82,10 @@ export class Piped {
           this.socket.send(joined[at] === TEXT ? new TextDecoder().decode(body) : body);
           at += 5 + length;
         }
+
         held = joined.slice(at);
       }
+
       this.end(1000, 'the container closed it');
     } catch (error) {
       this.end(1011, `the container's side failed: ${String(error)}`);

@@ -18,6 +18,7 @@ async function prepare(answer: Answer, alarms = 40): Promise<Prepared> {
   const generations: Generation[] = [];
   const failures: string[] = [];
   const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+
   const preparer = new ArmadaPreparer(stored.ctx, world({
     ENVIRONMENTS: namespace(() => ({
       prepared: async (generation: Generation) => { generations.push(generation); },
@@ -119,9 +120,11 @@ describe.skipIf(!root)('a preparation phase', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-prep-'));
     const failures: string[] = [];
     const stored = state(here());
+
     const preparer = new ArmadaPreparer(stored.ctx, world({
       ENVIRONMENTS: namespace(() => ({ preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
     }));
+
     // A setup that holds a lock while it runs, as apt-get holds dpkg's.
     const setup = `mkdir ${scratch}/lock || { echo "held by another setup" >&2; exit 100; }\necho ran >> ${scratch}/runs\nsleep 2\nrmdir ${scratch}/lock\n`;
 

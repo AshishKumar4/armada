@@ -19,14 +19,17 @@ function pipe() {
   const written: number[][] = [];
   const logged: string[] = [];
   let inputClosed = false;
+
   const socket = {
     send: (data: string | Uint8Array) => { messages.push(typeof data === 'string' ? data : [...data]); },
     close: (code: number, reason: string) => { closes.push([code, reason]); },
   } as unknown as WebSocket;
+
   const writer = {
     write: async (bytes: Uint8Array) => { written.push([...bytes]); },
     close: async () => { inputClosed = true; },
   } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+
   let push: ReadableStreamDefaultController<Uint8Array> | undefined;
   const container = new ReadableStream<Uint8Array>({ start: (controller) => { push = controller; } });
   const piped = new Piped(socket, writer, 'abcd 9000 1', (event) => { logged.push(event); });

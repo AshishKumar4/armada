@@ -118,6 +118,7 @@ export async function execute(script: string, options: { readonly env?: Readonly
 
   child.stdout?.on('data', (chunk: Buffer) => { stdout.push(chunk); });
   child.stderr?.on('data', (chunk: Buffer) => { stderr.push(chunk); });
+
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code, signal) => { resolve(code ?? (signal === null ? 1 : 128)); });

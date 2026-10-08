@@ -11,6 +11,7 @@ const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot'
 /** A job on a ready environment whose vessels only record that they began. */
 async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   const begun: string[] = [];
+
   const created = new ArmadaJob(state().ctx, world({
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
     ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
@@ -69,12 +70,14 @@ describe('the claim order', () => {
     const weights = [9, 4, 8, 4, 8, 1, 6, 9, 2];
     const durations = [5, 3, 5, 3, 5, 3, 5, 3, 5];
     const machines = 3;
+
     const { job: open } = await job({
       recipe: {},
       items: weights.map((weight, index) => ({ item: { name: `t${String(index)}`, weight }, argv: ['true'] })),
       run: { kind: 'command' },
       pool: machines,
     });
+
     const queue = weights.map((_, index) => index).sort((left, right) => (weights[right] ?? 0) - (weights[left] ?? 0) || left - right);
     const model = listSchedule(queue.map((index) => durations[index] ?? 0), Array.from({ length: machines }, () => 0));
     const loads = Array.from({ length: machines }, () => 0);
@@ -82,11 +85,13 @@ describe('the claim order', () => {
 
     for (const expected of queue) {
       let least = 0;
+
       for (let machine = 1; machine < machines; machine += 1) if ((loads[machine] ?? 0) < (loads[least] ?? 0)) least = machine;
       const vessel = `v${String(least + 1)}`;
       const claim = await open.claim(vessel);
 
       expect(claim === null || 'waitMs' in claim ? -1 : claim.index).toBe(expected);
+
       if (claim === null || 'waitMs' in claim) throw new Error('unreachable');
       await open.accept(vessel, claim.index, 0);
       await open.complete(vessel, exited(claim.index, vessel), durations[claim.index] ?? 0);
@@ -129,6 +134,7 @@ describe('a hedged job', () => {
 
       claims.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
     }
+
     // The copy on v2 lands first: its answer is the one kept, and the first copy stops.
     const landed = [await hedged.accept('v2', 1, 0), await hedged.accept('v1', 1, 0)];
 
@@ -148,12 +154,14 @@ describe('a hedged job', () => {
       await hedged.claim('v1');
       await hedged.claim('v2');
       await hedged.accept('v1', 0, first);
+
       if (stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
       const told = await hedged.still('v2', 0);
 
       if (then === 'stopped') await hedged.stopped('v2', 0);
       else if (then === 'lost') await hedged.vesselFailed('v2', 'the container stopped');
       else if (await hedged.accept('v2', 0, then)) await hedged.complete('v2', exited(0, 'v2', then), 1000);
+
       if (!stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
       const { events } = await hedged.events(0);
 
@@ -185,6 +193,7 @@ describe('a speculative job\'s idle vessel', () => {
     const start = new Date('2026-10-08T12:00:00Z').getTime();
 
     setSystemTime(new Date(start));
+
     try {
       const items = [{ item: { weight: 40 }, argv: ['true'] }, { item: { weight: 1 }, argv: ['true'] }];
       const { job: speculative } = await job({ recipe: {}, items, run: { kind: 'command' }, speculative: true });
@@ -231,6 +240,7 @@ describe('a task whose container stopped under it', () => {
       lost.push(claim === null || 'waitMs' in claim ? null : claim.index);
       await lossy.vesselFailed(vessel, 'the wait failed to run: exec() cannot be called on a container that is not running.');
     }
+
     const { events } = await lossy.events(0);
 
     expect({ lost, events: events.map((event) => [event.outcome.index, event.outcome.kind, event.outcome.reason, event.outcome.attempt]) })
@@ -322,6 +332,7 @@ describe('a slotted job', () => {
 describe('a job none of whose containers starts', () => {
   test('says so once, naming its environment and why, however many vessels failed', async () => {
     const { job: broken, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+
     const failing = async () => {
       for (let round = 0; round < 20; round += 1) {
         const alive = begun.filter((name) => !failed.includes(name));
@@ -334,6 +345,7 @@ describe('a job none of whose containers starts', () => {
         }
       }
     };
+
     const failed: string[] = [];
 
     await failing();
@@ -365,6 +377,7 @@ describe('a job none of whose containers starts', () => {
         await broken.vesselFailed(name.split('/')[1] ?? '', reasons.shift() ?? 'the last way');
       }
     }
+
     const { events } = await broken.events(0);
 
     expect(events.map((event) => event.outcome.tail)).toEqual(['no vessel was left to run it\nthe last way\nthe fourth way\nthe third way']);

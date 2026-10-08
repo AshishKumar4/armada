@@ -22,6 +22,7 @@ function localFleet(lose: readonly number[] = []) {
   const outputs = new Map<string, Uint8Array>();
   const jobs = new Map<string, { spec: v.InferOutput<typeof JobSpecSchema>; events: Outcome[]; running: Promise<void>[]; open: boolean }>();
   const seen: string[] = [];
+
   const run = (id: string, index: number) => {
     const job = jobs.get(id);
     const task = job?.spec.items[index];
@@ -33,14 +34,17 @@ function localFleet(lose: readonly number[] = []) {
 
         return;
       }
+
       const out = join(dir, `${id}-${String(index)}.out`);
       const marker = join(dir, `${id}-${String(index)}.answer`);
       const { run: spec } = job.spec;
       const argv = spec.kind === 'task' ? ['node', join(dir, `${spec.bundle ?? ''}.mjs`)] : task.argv ?? [];
+
       const ran = Bun.spawn(argv, {
         env: { ...process.env, ARMADA_ITEM: JSON.stringify(task.item), ARMADA_INDEX: String(index), ARMADA_ATTEMPT: '1', ARMADA_OUT: out, ARMADA_ANSWER: marker, ARMADA_TASK: spec.kind === 'task' ? spec.id : '' },
         stdout: 'pipe', stderr: 'pipe',
       });
+
       const exitCode = await ran.exited;
       const tail = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
       const kept = job.spec.output || spec.kind === 'task' ? readFileSync(out, { flag: 'a+' }) : null;
@@ -54,6 +58,7 @@ function localFleet(lose: readonly number[] = []) {
       });
     })());
   };
+
   const server = Bun.serve({
     port: 0,
     async fetch(request) {
@@ -91,6 +96,7 @@ function localFleet(lose: readonly number[] = []) {
           if (bundle === undefined) return Response.json({ error: `no task ${spec.run.id} is pushed` }, { status: 409 });
           spec.run = { ...spec.run, bundle };
         }
+
         const created = `j${String(jobs.size + 1)}`;
 
         jobs.set(created, { spec, events: [], running: [], open: spec.open });
@@ -98,6 +104,7 @@ function localFleet(lose: readonly number[] = []) {
 
         return Response.json({ id: created });
       }
+
       const job = jobs.get(id);
 
       if (job === undefined) return Response.json({ error: 'no such job' }, { status: 404 });
@@ -228,6 +235,7 @@ describe('a push\'s bundle', () => {
   test('is the same bytes for the same task files, wherever the project is and whichever push made it', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-bundle-'));
     const sdk = join(import.meta.dir, '..');
+
     const project = (where: string, name: string) => {
       const root = join(scratch, where);
 
@@ -239,6 +247,7 @@ describe('a push\'s bundle', () => {
 
       return root;
     };
+
     const digest = async (root: string) => new Bun.CryptoHasher('sha256').update((await bundleTasks(root, ['armada'])).bytes).digest('hex');
 
     try {
@@ -304,6 +313,7 @@ describe('a task\'s secrets', () => {
     const { armada, jobs } = await fleet();
 
     process.env['ARMADA_TEST_KEY'] = 'sk-1234';
+
     try {
       const remote = await keyed.run(null, { armada });
 
@@ -311,6 +321,7 @@ describe('a task\'s secrets', () => {
     } finally {
       delete process.env['ARMADA_TEST_KEY'];
     }
+
     expect(await keyed.local(null).catch((error: unknown) => String(error)))
       .toBe('Error: .local reads the secret ARMADA_TEST_KEY from this machine\'s environment, which lacks it');
   });
@@ -344,7 +355,7 @@ describe('a task run locally', () => {
       bytes: [...await twoBytes.local(null)], none: await touch.local(1), shouted: await shout.local('hi'), thrown, lied: String(lied).startsWith('SchemaError: the value does not fit its schema'), failed,
     }).toEqual({
       square: 16, greet: { text: 'hello, ada' }, text: 'a b; c', json: { n: 2 }, bytes: [255, 254], none: null, shouted: 'HI', thrown: 'RangeError: no 3', lied: true,
-      failed: expect.stringContaining('ShellError: `printf \'{"n": %s}\' 3 > ') as unknown as string,
+      failed: expect.stringContaining('ShellError: `printf \'{"n": %s}\' 3 > '),
     });
   });
 });
@@ -352,9 +363,11 @@ describe('a task run locally', () => {
 describe('a job\'s items', () => {
   test('stream from an async iterable into an open job in batches, and come back in input order through ordered()', async () => {
     const { armada, seen, jobs } = await fleet();
+
     const items = async function* numbers() {
       for (let n = 0; n < 1_100; n += 1) yield n;
     };
+
     const ordered: number[] = [];
 
     seen.length = 0;
@@ -370,11 +383,14 @@ describe('a job\'s items', () => {
 
   test('from a source that waits are sent on a timer, and a cancel ends the job without waiting on the source', async () => {
     const { armada } = await fleet();
+
     const items = async function* stalls() {
       yield 'a';
       await new Promise(() => undefined);
     };
+
     const job = echo.stream(items(), { armada });
+
     const [first] = await (async () => {
       for await (const result of job) return [result];
 
@@ -390,11 +406,13 @@ describe('a job\'s items', () => {
     const { armada } = await fleet();
     let more: () => void = () => undefined;
     const later = new Promise<void>((resolve) => { more = resolve; });
+
     const items = async function* twoParts() {
       yield 'a';
       await later;
       yield 'b';
     };
+
     const streamed = echo.stream(items(), { armada });
     const attached = echo.job(await streamed.id, { armada });
     const seen: [number, string][] = [];

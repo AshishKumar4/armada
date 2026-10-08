@@ -49,6 +49,7 @@ async function run(total: number, port: string, dropAfter: number) {
   const opened: string[] = [];
   let drops = 0;
   let inPort = 0;
+
   const server = Bun.serve<{ readonly link: string; readonly id: string; piped?: Piped; cut?: () => void }>({
     port: 0,
     fetch(request, bun) {
@@ -69,6 +70,7 @@ async function run(total: number, port: string, dropAfter: number) {
         ws.data.piped = new Piped(ws as unknown as WebSocket, Writable.toWeb(tcp).getWriter() as WritableStreamDefaultWriter<Uint8Array>,
           ws.data.link, () => undefined);
         ws.data.cut = () => { tcp.destroy(); };
+
         void ws.data.piped.pump(Readable.toWeb(tcp) as unknown as ReadableStream<Uint8Array>);
       },
       async message(ws, message) {
@@ -76,7 +78,7 @@ async function run(total: number, port: string, dropAfter: number) {
         const end = typeof message === 'string' ? before : Number(new DataView(message.buffer, message.byteOffset).getBigUint64(0)) + message.byteLength - 8;
 
         reached.set(ws.data.id, Math.max(before, end));
-        await ws.data.piped?.message(typeof message === 'string' ? message : message.buffer.slice(message.byteOffset, message.byteOffset + message.byteLength) as ArrayBuffer);
+        await ws.data.piped?.message(typeof message === 'string' ? message : message.buffer.slice(message.byteOffset, message.byteOffset + message.byteLength));
 
         if (Math.floor(Math.max(before, end) / dropAfter) > Math.floor(before / dropAfter)) {
           drops += 1;
@@ -90,8 +92,10 @@ async function run(total: number, port: string, dropAfter: number) {
       },
     },
   });
+
   const relays = Bun.spawn(['python3', '-c', RELAYS, String(total), port, `http://127.0.0.1:${String(server.port)}`],
     { stdin: new TextEncoder().encode(RELAY_PY), stdout: 'pipe', stderr: 'pipe' });
+
   const [out, err] = await Promise.all([(async () => {
     let text = '';
 

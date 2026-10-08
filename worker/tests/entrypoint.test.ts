@@ -18,6 +18,7 @@ async function started(running: boolean) {
 
   roots.push(state);
   mkdirSync(join(state, 'task'));
+
   if (running) writeFileSync(join(state, 'task', 'pid'), '1\n');
   const main = Bun.spawn(['/bin/sh', '-c', hold(state, 30, 1)]);
 

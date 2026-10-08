@@ -20,15 +20,18 @@ function deployment() {
   const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '64' }));
   const jobs = new Map<string, ArmadaJob>();
   const artifacts = bucket();
+
   const env: Env = world({
     ARMADA_TOKEN: TOKEN, FLEET: namespace(() => fleet), ARTIFACTS: artifacts,
     JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name)),
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
     ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
   });
+
   const ask = async (path: string, init: RequestInit = {}) => await worker.fetch(new Request(`https://armada.test${path}`, {
     ...init, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json', ...init.headers },
   }), env);
+
   const json = async <S extends v.GenericSchema>(path: string, schema: S) => v.parse(schema, await (await ask(path)).json());
 
   return { fleet, jobs, artifacts, ask, json };
@@ -60,6 +63,7 @@ describe('the list of recent jobs', () => {
 
       made.push(v.parse(v.object({ id: v.string() }), await created.json()).id);
     }
+
     const all = await json('/jobs', JobsSchema);
     const page = await json(`/jobs?limit=1&before=${made[2] ?? ''}`, JobsSchema);
 

@@ -286,6 +286,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
     }
 
     let lost = 0;
+
     // An exec's output, or null where the platform lost it and it is to be made again.
     const attempt = async (what: string, exec: readonly string[], options: Exec): Promise<string | null> => {
       const [answered] = await Promise.allSettled([run(container, exec, options)]);
@@ -301,6 +302,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       return answered.value.stdout.trim();
     };
+
     const until = Date.now() + SLICE_MS;
 
     while (Date.now() < until) {

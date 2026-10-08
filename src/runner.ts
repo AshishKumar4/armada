@@ -80,6 +80,7 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
     console.error(`armada: no task ${id} in this bundle`);
     process.exit(1);
   }
+
   const controller = new AbortController();
 
   process.once('SIGTERM', () => { controller.abort(new Error('the task was stopped')); });
@@ -91,10 +92,12 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
     console.error(`armada: the secret ${given.missing} was deleted; set it again with armada secret set ${given.missing}`);
     process.exit(1);
   }
+
   const context: Context = {
     index: Number(process.env['ARMADA_INDEX'] ?? '0'), attempt: Number(process.env['ARMADA_ATTEMPT'] ?? '1'), signal: controller.signal, out: outFile(out), files: FILES_DIR,
     artifacts: process.env['ARMADA_ARTIFACTS'] ?? ARTIFACTS_PATH, secrets: given.secrets,
   };
+
   const answer = await task[RUN](JSON.parse(process.env['ARMADA_ITEM'] ?? 'null') as Json, context);
   const marker = process.env['ARMADA_ANSWER'] ?? ANSWER_PATH;
 
@@ -102,6 +105,7 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
     writeFileSync(marker, 'command');
     process.exit((await execute(answer.script, { signal: controller.signal, inherit: true })).exitCode);
   }
+
   // The error's name follows, for the job to decide a retry by.
   writeFileSync(marker, answer.ok ? 'value' : `value\n${answer.error.name}`);
   writeFileSync(out, JSON.stringify(answer));

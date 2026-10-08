@@ -6,15 +6,18 @@ import { listSchedule } from '../src/dispatch';
 const EXE = new URL('../lean/.lake/build/bin/sched', import.meta.url).pathname;
 
 const have = existsSync(EXE);
+
 if (!have) console.log('dispatch differential test skipped: lean/.lake/build/bin/sched not built (cd lean && lake build)');
 
 /** A deterministic source of instances, so a failing case reproduces from its seed. */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
+
   return () => {
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
@@ -23,12 +26,14 @@ const leanSchedule = (durations: readonly number[], releases: readonly number[])
   const child = Bun.spawnSync([EXE], { stdin: new TextEncoder().encode(JSON.stringify({ durations, releases })) });
 
   if (child.exitCode !== 0) throw new Error(`sched failed: ${new TextDecoder().decode(child.stderr)}`);
+
   return JSON.parse(new TextDecoder().decode(child.stdout)) as { lanes: number[][]; loads: number[]; makespan: number };
 };
 
 (have ? describe : describe.skip)('listSchedule agrees with the Lean model', () => {
   test('seeded instances: 0..200 tasks on 1..64 machines, releases and ties', () => {
     const rand = mulberry32(0x5eed);
+
     for (let trial = 0; trial < 300; trial += 1) {
       const machines = 1 + Math.floor(rand() * 64);
       const durations = Array.from({ length: Math.floor(rand() * 201) }, () => Math.floor(rand() * 51));

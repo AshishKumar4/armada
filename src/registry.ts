@@ -29,6 +29,7 @@ export async function registryCredentials(account: string, token: string, minute
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ expiration_minutes: minutes, permissions: ['pull', 'push'] }),
   });
+
   const answer = v.parse(Minted, await minted.json());
 
   if (!answer.success || answer.result == null) throw new Error(`minting registry credentials answered ${String(minted.status)}: ${answer.errors.map((error) => error.message).join('; ')}`);

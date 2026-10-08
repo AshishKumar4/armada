@@ -15,6 +15,7 @@ const bundle = 'b'.repeat(64);
 async function cachedJob(id: string, items: readonly unknown[], artifacts: ReturnType<typeof bucket>, task = 'square', open = false) {
   const begun: string[] = [];
   const stored = state();
+
   const job = new ArmadaJob(stored.ctx, world({
     ARTIFACTS: artifacts,
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
@@ -33,6 +34,7 @@ async function answer(job: ArmadaJob, id: string, artifacts: ReturnType<typeof b
 
   if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
   await artifacts.put(taskKey(id, claim.index, 'output'), envelope);
+
   // What a vessel does with a green answer its claim says to cache (vessel.test.ts holds the vessel to it).
   if (exitCode === 0 && claim.cache !== undefined) await artifacts.put(claim.cache.key, envelope, { customMetadata: { expires: String(claim.cache.expires), answer: 'value' } });
   const outcome: Outcome = { index: claim.index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: true, value: envelope, answer: 'value' };
@@ -104,6 +106,7 @@ describe('a cached task', () => {
 
       return await read(key);
     };
+
     const open = await cachedJob('w2', [], artifacts, 'square', true);
     const adding = open.job.add([{ item: 5 }]);
 
@@ -131,6 +134,7 @@ describe('a cached task', () => {
 
       return await read(key);
     };
+
     const failing = await cachedJob('f2', [6], artifacts);
 
     expect({ begun: failing.begun, status: (await failing.job.status())?.tasks }).toMatchObject({ begun: ['f2/v1'], status: { queued: 1 } });

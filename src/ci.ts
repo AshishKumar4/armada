@@ -123,6 +123,7 @@ const clock = (ms: number): string => `${String(Math.floor(ms / 60_000))}:${Stri
 export async function cancelOnInterrupt<T>(job: { cancel(): Promise<void> }, id: string, body: () => Promise<T>): Promise<T> {
   // Once interrupted, the cancel's end is the CLI's: a job that finishes meanwhile does not answer for it.
   let cancelling: Promise<never> | null = null;
+
   const interrupted = (signal: NodeJS.Signals): void => {
     console.error(`armada: ${signal}: cancelling job ${id}`);
     cancelling ??= job.cancel().then(() => process.exit(2), (cause: unknown) => {
@@ -136,7 +137,7 @@ export async function cancelOnInterrupt<T>(job: { cancel(): Promise<void> }, id:
   try {
     const result = await body();
 
-    return cancelling === null ? result : await cancelling;
+    return cancelling === null ? result :  cancelling;
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted);
   }
@@ -161,6 +162,7 @@ async function follow<O extends string | null>(job: Job<Json, O>, began: number,
   const results: Result<Json, O>[] = [];
   const id = await job.id;
   let phase = '';
+
   const watcher = setInterval(() => {
     void job.status().then((status) => {
       if (status.phase === phase) return;
@@ -195,6 +197,7 @@ export function extractTar(archive: Uint8Array, dir: string): string[] {
   for (const member of members) {
     if (member.startsWith('/') || member.split('/').includes('..')) throw new Error(`the artifacts hold ${member}, which escapes ${dir}`);
   }
+
   mkdirSync(dir, { recursive: true });
   const ran = Bun.spawnSync(['tar', '-xzf', '-', '-C', dir], { stdin: archive, stdout: 'pipe', stderr: 'pipe' });
 
@@ -227,6 +230,7 @@ export async function verdictCI(armada: Armada, target: string, json: boolean): 
 
     return 2;
   }
+
   const text = await answer.text();
   const { rows } = v.parse(VerdictFileSchema, JSON.parse(text));
   const reds = rows.filter((row) => row.exitCode !== 0);
@@ -299,6 +303,7 @@ export function lanesFor(estimates: readonly (number | undefined)[], weights: re
   const most = Math.min(containers * slots, weights.reduce((sum, each) => sum + each, 0));
   // A gang's every rank takes a container at once: it weighs as many lanes, and the pool holds the widest it can.
   const widest = Math.min(most, Math.max(0, ...weights));
+
   const lanes = estimates.every((seconds) => seconds !== undefined)
     ? Math.max(widest, poolFor(estimates.flatMap((seconds, index) => Array<number>(weights[index] ?? 1).fill(seconds ?? 0)), most))
     : most;
@@ -313,6 +318,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const began = Date.now();
   // With --json, stdout carries the run's one JSON object and its progress alone goes to stderr.
   const note = (line: string) => { (json ? console.error : console.log)(line); };
+
   const { sha, repo, config, timings, environment, spec, upload } = await commitOf(armada, target);
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
@@ -320,6 +326,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   if (config.size === 'auto') {
     note(`size ${spec.recipe.size}${timings.usage === null || timings.usage === undefined ? ', until a run has measured its tasks' : `: the last runs' tasks used at most ${describeUsage(timings.usage)}`}`);
   }
+
   const uploaded = await upload();
 
   if (uploaded !== null) note(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
@@ -349,6 +356,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
       return 2;
     }
+
     printed = planned.value;
     planRun.push(planned);
   } else {
@@ -359,6 +367,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const plan = v.parse(PlanSchema, JSON.parse(printed));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const slots = config.task.slots;
+
   // Each rank of a gang takes a container at once, so the ranks count toward the lanes the pool carries; a gang that
   // is no whole number counts as one, for the Worker to refuse it by name.
   const ranks = plan.include.map((entry) => {
@@ -366,6 +375,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
     return Number.isInteger(gang) && gang > 0 ? gang : 1;
   });
+
   const most = Math.min(config.pool * slots, ranks.reduce((sum, each) => sum + each, 0));
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
   const { lanes, pool } = lanesFor(estimates, ranks, config.pool, slots);
@@ -373,12 +383,14 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   // whole tier never sees them.
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, hedge: config.task.hedge, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
+
   // A matrix entry came from JSON, so it is JSON. An entry with no weight of its own dispatches by its estimate.
   const entries = plan.include.map((entry, index) => {
     const estimate = estimates[index];
 
-    return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } as Json : entry as Json;
+    return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry as Json;
   });
+
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
   const jobId = await job.id;
 
@@ -387,6 +399,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   // Each task's rows, read from its verdict file as its result lands, and graded as read: a task that reports many rows
   // exits 0 with red ones among them, so its exit alone would say green. Null for a file missing or malformed.
   const verdicts = new Map<number, VerdictRow[] | null>();
+
   const say = async (result: Result<Json, string | null>): Promise<string> => {
     if (!config.task.verdict || result.kind === 'lost' || result.kind === 'cancelled') return exitWord(result);
     // A task that exited nonzero may still have written its verdict, whose rows its exit then fails.
@@ -404,6 +417,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
     return reds.length === 0 ? exitWord(result) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
   };
+
   const results = await follow(job, began, nameOf, say, note);
   const status = await job.status();
   // Each task's artifacts beside the report, under the task's name; a row names one as its evidence.
@@ -418,20 +432,25 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
     kept.set(result.index, { dir, paths: new Set(extractTar(archive, dir)) });
   }
+
   const evidence = new Map<VerdictRow, string>();
+
   const answers: TaskAnswer[] = plan.include.map((entry, index) => {
     const name = nameOf(index);
     const result = results.find((each) => each.index === index);
     const artifacts = kept.get(index)?.paths ?? null;
+
     const answer: TaskAnswer = result === undefined || result.kind === 'lost' || result.kind === 'cancelled' ? { name, entry, rows: null, artifacts }
       : !config.task.verdict ? { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }], artifacts }
       : { name, entry, rows: verdicts.get(index) ?? null, artifacts };
+
     const dir = kept.get(index)?.dir;
 
     if (dir !== undefined) for (const row of answer.rows ?? []) evidence.set(row, dir);
 
     return answer;
   });
+
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };
   const report = join(REPORTS, `${config.name}-${jobId}.json`);
@@ -465,6 +484,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   } else {
     note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   }
+
   printReds(graded.reds, evidence, note);
   const boots = summary.bootMs;
 

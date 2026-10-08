@@ -11,6 +11,7 @@ function deployment() {
   const artifacts = bucket();
   const registry = new ArmadaTasks(state().ctx, world({}));
   const env = world({ ARMADA_TOKEN: TOKEN, ARTIFACTS: artifacts, TASKS: namespace(() => registry) });
+
   const ask = async (path: string, method: string, body?: string | Uint8Array) => {
     const answer = await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env);
 

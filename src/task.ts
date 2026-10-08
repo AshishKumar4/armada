@@ -298,6 +298,7 @@ abstract class Base<I, O> {
   private async submit(armada: Armada, items: Iterable<I> | AsyncIterable<I>, submission: Submission<I>, options: MapOptions): Promise<string> {
     const { run, output } = await this.runOf(armada);
     const { commit, ...recipe } = this.recipe;
+
     const spec = {
       recipe, commit, run, output, pool: options.pool, slots: options.slots, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
@@ -369,6 +370,7 @@ class Submission<I> {
   pump(id: string, items: Iterable<I> | AsyncIterable<I>, task: (item: I, index: number) => Promise<WireTask>): void {
     let batch: WireTask[] = [];
     let flushing = Promise.resolve();
+
     const flush = (): Promise<void> => {
       const sending = batch;
 
@@ -491,9 +493,11 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
 
         return (value instanceof Uint8Array ? new Uint8Array(value) : value) as O;
       }
+
       const ran = await execute(returned.script, { env: { ARMADA_OUT: out, ARMADA_ARTIFACTS: artifacts } });
 
       if (ran.exitCode !== 0) throw new ShellError(returned.script, ran.exitCode, ran.stderr);
+
       const answered = await commandAnswer<O>(this.config.output, { exitCode: 0, tail: ran.stderr }, async () => {
         try {
           return new Uint8Array(readFileSync(out));
@@ -596,7 +600,7 @@ async function check<S extends StandardSchemaV1>(schema: S, value: unknown, what
 
   if (result.issues !== undefined) throw new SchemaError(what, result.issues);
 
-  return result.value as OutputOf<S>;
+  return result.value;
 }
 
 /** A job's results: in completion order by iterating it, or in input order. */
@@ -740,10 +744,12 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
 
   private async resultOf(id: string, outcome: Outcome): Promise<Result<I, O>> {
     const item = await this.item(id, outcome.index);
+
     const meta: Meta = {
       seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true,
       ...outcome.peakMemory === undefined ? {} : { peakMemory: outcome.peakMemory }, ...outcome.cpuSeconds === undefined ? {} : { cpuSeconds: outcome.cpuSeconds },
     };
+
     const base = { index: outcome.index, item, meta };
 
     if (outcome.kind === 'failed') return { ...base, ok: false, kind: outcome.reason === 'cancelled' ? 'cancelled' : 'lost', reason: outcome.tail };

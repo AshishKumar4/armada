@@ -10,6 +10,7 @@ export function listSchedule(durations: readonly number[], releases: readonly nu
     for (let machine = 1; machine < loads.length; machine += 1) {
       if ((loads[machine] ?? 0) < (loads[least] ?? 0)) least = machine;
     }
+
     lanes[least]?.push(task);
     loads[least] = (loads[least] ?? 0) + duration;
   }

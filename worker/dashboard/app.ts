@@ -86,8 +86,10 @@ function signInPage(): void {
 function shell(health: Health, host: string): { readonly main: HTMLElement; readonly nav: HTMLElement } {
   const nav = h('nav', { class: 'nav', label: 'Pages' },
     h('a', { href: '#/', data: { page: 'overview' } }, 'Fleet'), h('a', { href: '#/environments', data: { page: 'environments' } }, 'Environments'), h('a', { href: '#/ci', data: { page: 'ci' } }, 'CI'));
+
   const themeButton = h('button', { class: 'icon-button', type: 'button', label: 'Switch between light and dark' });
   const drawTheme = (): void => { replace(themeButton, icon(theme() === 'dark' ? 'sun' : 'moon')); };
+
   const main = h('main');
 
   themeButton.addEventListener('click', () => {
@@ -123,6 +125,7 @@ function show(main: HTMLElement, nav: HTMLElement): void {
     if (link.dataset['page'] === (route.page === 'job' ? 'overview' : route.page)) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+
   window.scrollTo(0, 0);
 }
 
@@ -139,6 +142,7 @@ async function start(): Promise<void> {
     const { main, nav } = shell(health, host);
 
     routed = () => { show(main, nav); };
+
     window.addEventListener('hashchange', routed);
     show(main, nav);
   } catch (cause) {
@@ -154,7 +158,11 @@ whenSignedOut(() => {
   signOut();
   signInPage();
 });
+
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
+
 takeToken();
+
 applyTheme();
+
 void start();

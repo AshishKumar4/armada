@@ -58,6 +58,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = 
 
     element.addEventListener('submit', (event) => { onsubmit(event); });
   }
+
   append(element, children);
 
   return made;

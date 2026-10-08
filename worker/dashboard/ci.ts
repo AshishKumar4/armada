@@ -14,6 +14,7 @@ export function ci(project: string | null, sha: string | null): View {
   const element = h('div', { class: 'page' }, head, banner, tabs, body);
 
   document.title = 'CI · armada';
+
   const pollster = poll(15_000, banner, async () => {
     const { projects } = await get('/verdicts', ProjectsSchema);
     const shown = project ?? projects[0] ?? null;
@@ -33,6 +34,7 @@ export function ci(project: string | null, sha: string | null): View {
 
       return false;
     }
+
     const { verdicts } = await get(`/verdicts/${shown}`, VerdictsSchema);
 
     replace(body, verdicts.length === 0 ? empty('No verdict yet') : h('div', { class: 'rows' }, verdicts.map((each) => h('a', { class: 'row-link', href: `#/ci/${shown}/${each.sha}` },
@@ -60,6 +62,7 @@ function verdict(file: File): HTMLElement {
 function rowOf(row: VerdictRow): HTMLElement {
   const red = row.exitCode !== 0;
   const output = h('pre', { class: 'code' }, row.output);
+
   const details = h('details', { class: 'verdict-row' },
     h('summary', {}, h('span', { class: `dot ${red ? 'bad' : 'ok'}` }), h('span', { class: 'mono' }, rowName(row)),
       h('span', { class: 'faint' }, row.cached === undefined ? '' : `reused from ${row.cached.slice(0, 10)}`),

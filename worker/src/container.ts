@@ -390,6 +390,7 @@ export async function startAndAnswer(container: Container, options: ContainerSta
   const deadline = Date.now() + ms;
   // Why a start ended, when it did: the runtime says so only through `monitor()`.
   let ended = '';
+
   const watch = () => {
     container.monitor().then(() => { ended = 'the container exited'; }, (cause: unknown) => { ended = String(cause); });
   };

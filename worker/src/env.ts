@@ -56,6 +56,7 @@ export async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBo
 
     return;
   }
+
   const known = new FixedLengthStream(source.size);
 
   await Promise.all([source.body.pipeTo(known.writable), bucket.put(key, known.readable, { httpMetadata: source.httpMetadata, customMetadata })]);

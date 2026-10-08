@@ -18,6 +18,7 @@ interface Running {
 /** A job with two tasks and a credential in its env, its environment ready (or `readiness`), its vessels launched. */
 async function running(readiness: Readiness = { kind: 'ready', generation }): Promise<Running> {
   const stored = state();
+
   const job = new ArmadaJob(stored.ctx, world({
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
     ENVIRONMENTS: namespace(() => ({ ensure: async () => readiness })),
@@ -120,10 +121,12 @@ describe('a job\'s env', () => {
     await jobState.ctx.storage.put({ spec: { ...kept, env }, phase: 'running' });
     await job.cancel('cancelled by its client', 'cancelled');
     const claim = { index: 0, attempt: 1, argv: ['true'], env: { TOKEN: SECRET }, duplicate: false };
+
     const ends: Record<string, (vessel: ArmadaVessel) => Promise<void>> = {
       stopped: async (vessel) => { await vessel.stop(); },
       lost: async (vessel) => { await vessel.alarm(); },
     };
+
     const vessels: Record<string, boolean> = {};
 
     for (const [end, conclude] of Object.entries(ends)) {
@@ -141,6 +144,7 @@ describe('a job\'s env', () => {
   test('reaches a vessel\'s task but never its storage, before or after the vessel is lost mid-task', async () => {
     const waits: string[] = [];
     const launched: (string | undefined)[] = [];
+
     const vesselState = state(container((argv, options) => {
       if (argv[3] === 'launch') launched.push(options?.env?.['TOKEN']);
 
@@ -152,8 +156,10 @@ describe('a job\'s env', () => {
 
       return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     }));
+
     const jobState = state();
     let vessel: ArmadaVessel | undefined;
+
     const job = new ArmadaJob(jobState.ctx, world({
       VESSEL: namespace((name): unknown => name === 'j1/v1' ? vessel : { begin: async () => undefined, stop: async () => undefined }),
       ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),

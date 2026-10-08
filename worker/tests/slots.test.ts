@@ -27,8 +27,10 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
   const killed: string[] = [];
   const queue = [...claims];
   let given = 0;
+
   const stored = state(container(async (argv, options) => {
     if (argv[3] === 'launch') launched.push({ script: argv[2] ?? '', group: options?.env?.['ARMADA_CGROUP'] });
+
     if ((argv[2] ?? '').startsWith('set -eu\npid=')) killed.push(argv[2] ?? '');
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
@@ -39,6 +41,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
 
     return { exitCode: 0, stdout: endsOf.shift() ?? '0\n' };
   }));
+
   const job = {
     booted: async () => undefined,
     waiting: async () => undefined,
@@ -50,6 +53,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
 
         return next;
       }
+
       if (given >= tasks) return null;
       claimed.push(slot);
 
@@ -62,9 +66,11 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
     retired: async () => undefined,
     vesselFailed: async () => undefined,
   };
+
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: bucket() }));
 
   await vessel.begin({ ...spec, ...over });
+
   if (put !== undefined) await stored.ctx.storage.put({ state: 'working', ...put });
 
   for (let alarm = 0; alarm < 6; alarm += 1) await vessel.alarm();
@@ -81,7 +87,7 @@ describe('a slotted vessel', () => {
       own: completed.map((outcome) => outcome.slot === claimed[outcome.index]),
       isolated: launched.every((each) => each.script.includes('unshare --mount')),
       overlay: launched.every((each) => each.script.includes('lowerdir=/home/ci/work')),
-      groups: [...launched.map((each) => each.group)].sort(),
+      groups: launched.map((each) => each.group).sort(),
     }).toEqual({ slots: [0, 1, 2], own: [true, true, true], isolated: true, overlay: true, groups: [taskGroup(0), taskGroup(1), taskGroup(2)].sort() });
   });
 
@@ -120,14 +126,17 @@ describe('a slotted vessel', () => {
 
       return { exitCode: 0, stdout: '' };
     });
+
     const stored = state(failing);
     let failed = 0;
+
     const job = {
       booted: async () => undefined, waiting: async () => undefined,
       claim: async () => ({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }),
       still: async () => true, stopped: async () => undefined, accept: async () => true, complete: async () => undefined, retired: async () => undefined,
       vesselFailed: async () => { failed += 1; },
     };
+
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: bucket() }));
 
     await vessel.begin(spec);

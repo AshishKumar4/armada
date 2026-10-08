@@ -14,6 +14,7 @@ const PHASES = ['base', 'setup', 'receive', 'install', 'snapshot'] as const;
 export function environments(): View {
   const banner = h('div');
   const body = h('div', { class: 'card-body flush' }, h('div', { class: 'card-body' }, h('div', { class: 'skeleton' })));
+
   const element = h('div', { class: 'page' },
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Environments'),
       h('p', {}, 'Each recipe is prepared once and snapshotted; every container of its jobs starts from the snapshot.'))),
@@ -21,6 +22,7 @@ export function environments(): View {
     h('section', { class: 'card' }, body));
 
   document.title = 'Environments · armada';
+
   const pollster = poll(10_000, banner, async () => {
     const listed = await get('/environments', EnvironmentsSchema);
     const order = (entry: Entry): number => entry.state === 'preparing' ? Infinity : entry.state === 'ready' ? entry.lastUsed : entry.at;
@@ -48,6 +50,7 @@ function row(key: string, entry: Entry): HTMLTableRowElement {
     return h('tr', {}, name, h('td', {}, pill('bad', 'failed')), h('td', { class: 'muted', title: entry.reason }, entry.reason.slice(0, 140)), h('td', { class: 'wide' }), h('td', { class: 'wide' }),
       h('td', { class: 'right muted' }, ago(entry.at)));
   }
+
   const { generation } = entry;
   const total = PHASES.reduce((sum, phase) => sum + (generation.seconds[phase] ?? 0), 0);
 

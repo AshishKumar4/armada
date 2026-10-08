@@ -21,12 +21,15 @@ const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot'
 function deployment() {
   const kept = state();
   const secrets = new ArmadaSecrets(state().ctx, world({}));
+
   const env = world({
     ARMADA_TOKEN: TOKEN, SECRETS: namespace(() => secrets), JOB: namespace(() => job),
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
     ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
   });
+
   const job = new ArmadaJob(kept.ctx, env);
+
   const ask = async (path: string, method: string, body?: string) => {
     const answer = await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env);
 

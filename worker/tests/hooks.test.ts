@@ -9,7 +9,9 @@ import * as v from 'valibot';
 import { bucket, namespace, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
+
 const SECRET = 's'.repeat(48);
+
 const SHA = 'a'.repeat(40);
 
 const CONFIG: HookConfig = { repo: 'owner/armada', pullRequests: true, tokenSecret: 'GITHUB_TOKEN', secret: SECRET };
@@ -37,6 +39,7 @@ async function sign(secret: string, body: string): Promise<string> {
 
 async function deliver(objects: Map<string, string>, hooksStub: ArmadaWebhooks, jobs: Record<string, { phase: string }>, payload: object, headers: Record<string, string> = {}): Promise<Response> {
   const body = JSON.stringify(payload);
+
   const env = world({
     ARMADA_TOKEN: TOKEN,
     ARMADA_SHA: 'b'.repeat(40),
@@ -82,7 +85,7 @@ describe('the github webhook', () => {
     const denied = await deliver(new Map(), object, {}, pushed('refs/heads/main'), { 'X-Hub-Signature-256': 'sha256=bad', 'X-GitHub-Delivery': 'del-2' });
 
     expect(denied.status).toBe(401);
-    expect((await answer.json()) as object).toEqual({ started: expect.any(String) });
+    expect((await answer.json())).toEqual({ started: expect.any(String) });
   });
 
   test('reads the push events: built branch, filtered branch, deletion, tag, ping, and other events', async () => {
@@ -123,20 +126,20 @@ describe('the github webhook', () => {
     const push = pushed('refs/heads/main');
 
     const first = await deliver(objects, object, {}, push, { 'X-GitHub-Delivery': 'del-1' });
-    expect((await first.json()) as object).toEqual({ started: expect.any(String) });
+    expect((await first.json())).toEqual({ started: expect.any(String) });
 
     const again = await deliver(objects, object, {}, push, { 'X-GitHub-Delivery': 'del-1' });
-    expect((await again.json()) as object).toEqual({ note: 'duplicate' });
+    expect((await again.json())).toEqual({ note: 'duplicate' });
 
     const judged = await deliver(new Map([['verdicts/armada/' + SHA + '.json', '{}']]), object, {}, push, { 'X-GitHub-Delivery': 'del-2' });
-    expect((await judged.json()) as object).toEqual({ note: 'already' });
+    expect((await judged.json())).toEqual({ note: 'already' });
 
     await object.drove('armada', SHA, 'job-1');
     const running = await deliver(objects, object, { 'job-1': { phase: 'running' } }, push, { 'X-GitHub-Delivery': 'del-3' });
-    expect((await running.json()) as object).toEqual({ note: 'already' });
+    expect((await running.json())).toEqual({ note: 'already' });
 
     const done = await deliver(objects, object, { 'job-1': { phase: 'done' } }, push, { 'X-GitHub-Delivery': 'del-4' });
-    expect((await done.json()) as object).toEqual({ started: expect.any(String) });
+    expect((await done.json())).toEqual({ started: expect.any(String) });
   });
 
   test('forgets a delivery after a day and a commit\'s driver after a week', async () => {
@@ -185,6 +188,7 @@ describe('the webhooks route', () => {
   test('configures with the hook id, lists and removes through the bearer', async () => {
     const object = hooks();
     const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, WEBHOOKS: namespace(() => object), ARTIFACTS: bucket() });
+
     const ask = async (method: string, path: string, body?: object) => await worker.fetch(new Request(`https://armada.test${path}`, {
       method, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7', 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }), env);
@@ -196,7 +200,7 @@ describe('the webhooks route', () => {
     expect(listed.webhooks[0]?.hook).toBe(77);
     expect((await ask('DELETE', '/webhooks/armada')).status).toBe(200);
     expect((await ask('GET', '/webhooks')).status).toBe(200);
-    expect(((await (await ask('GET', '/webhooks')).json()) as { webhooks: object[] }).webhooks).toHaveLength(0);
+    expect(((await (await ask('GET', '/webhooks')).json())).webhooks).toHaveLength(0);
   });
 });
 
@@ -204,6 +208,7 @@ describe('a driver job at claim', () => {
   test('gets the deployment bearer in its env, masked by its secrets list, kept nowhere', async () => {
     const { ArmadaJob } = await import('../src/job');
     const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, 'https://armada.test', 'b'.repeat(40), CONFIG));
+
     const open = new ArmadaJob(state().ctx, world({
       ARMADA_TOKEN: TOKEN,
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),

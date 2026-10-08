@@ -24,6 +24,7 @@ export class ArmadaTasks extends DurableObject<Env> {
 
       if (owner !== undefined && owner !== push.project) return `the task id ${id} belongs to the project ${owner}`;
     }
+
     const gone = [...all].filter(([key, entry]) => entry.project === push.project && !push.ids.includes(key.slice('id:'.length))).map(([key]) => key);
 
     await this.ctx.storage.delete(gone);

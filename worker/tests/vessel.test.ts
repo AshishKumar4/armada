@@ -23,6 +23,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
   const failed: string[] = [];
   let claimed = false;
   let waits = 0;
+
   const stored = state(container((argv) => {
     if (argv[2] === USAGE) return usage;
 
@@ -39,6 +40,7 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
 
     return waits <= lost ? new Error('Network connection lost.') : { exitCode: 0, stdout: '0\n' };
   }));
+
   const job = {
     booted: async () => undefined,
     waiting: async () => undefined,
@@ -54,10 +56,12 @@ async function run(lost: number, usage: { readonly exitCode: number; readonly st
     retired: async () => undefined,
     vesselFailed: async (_name: string, error: string) => { failed.push(error); },
   };
+
   const artifacts = bucket();
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
 
   await vessel.begin({ ...spec, output: out !== undefined });
+
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
   // storage.
   if (launched !== undefined) {
@@ -127,6 +131,7 @@ describe('a task that names secrets', () => {
   test('has the values it started with masked in its log before its tail is read or the log is stored, the deployment\'s secrets unread', async () => {
     const seen: { readonly argv: readonly string[]; readonly env: unknown }[] = [];
     let claimed = false;
+
     const stored = state(container((argv, options) => {
       seen.push({ argv, env: options?.env });
 
@@ -134,6 +139,7 @@ describe('a task that names secrets', () => {
 
       return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     }));
+
     const job = {
       booted: async () => undefined,
       waiting: async () => undefined,
@@ -149,9 +155,12 @@ describe('a task that names secrets', () => {
       retired: async () => undefined,
       vesselFailed: async () => undefined,
     };
+
     // Set anew while the task runs: the mask must not read it.
     let read = 0;
-    const secrets = { values: async (names: readonly string[]) => { read += 1; return Object.fromEntries(names.map((name) => [name, 'sk-rotated'])); } };
+    const secrets = { values: async (names: readonly string[]) => { read += 1;
+
+ return Object.fromEntries(names.map((name) => [name, 'sk-rotated'])); } };
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), SECRETS: namespace(() => secrets), ARTIFACTS: bucket() }));
 
     await vessel.begin(spec);
@@ -170,6 +179,7 @@ describe('a task that names secrets', () => {
     let claimed = false;
     let cachedAtReport: string | undefined;
     const artifacts = bucket();
+
     const stored = state(container((argv) => {
       if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
 
@@ -179,6 +189,7 @@ describe('a task that names secrets', () => {
 
       return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     }));
+
     const job = {
       booted: async () => undefined,
       waiting: async () => undefined,
@@ -194,6 +205,7 @@ describe('a task that names secrets', () => {
       retired: async () => undefined,
       vesselFailed: async () => undefined,
     };
+
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
 
     await vessel.begin({ ...spec, output: true });
@@ -208,23 +220,28 @@ describe('a gang rank', () => {
   test('waits for its gang, joins its network as its rank before it launches, and leaves it before a task of no gang', async () => {
     const ran: string[][] = [];
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: 'https://armada.example', token: 't'.repeat(48) };
+
     const claims: (Claim | { readonly waitMs: number } | null)[] = [{ waitMs: 1 }, { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang },
       { index: 1, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }, null];
+
     const stored = state(container((argv) => {
       ran.push([...argv]);
 
       return { exitCode: 0, stdout: argv[3] === 'wait' ? '0\n' : '' };
     }));
+
     const job = {
       booted: async () => undefined, waiting: async () => undefined, claim: async () => claims.shift() ?? null, still: async () => true,
       accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
     };
+
     const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job) }));
 
     await vessel.begin(spec);
     // The first alarm ends waiting for the gang; the next runs both tasks.
     await vessel.alarm();
     await vessel.alarm();
+
     const steps = ran.filter((argv) => argv[2] === GANG_UP || argv[2] === GANG_DOWN || argv[3] === 'launch' || argv[4] === '/armada/relay.py')
       .map((argv) => argv[2] === GANG_UP ? ['up', ...argv.slice(3)] : argv[2] === GANG_DOWN ? ['down'] : argv[3] === 'launch' ? ['launch'] : ['relay written']);
 
@@ -233,16 +250,19 @@ describe('a gang rank', () => {
 
   test('keeps its log, the relay\'s appended, when its gang ends without its answer: refused, or stopped while it ran, and says it stopped', async () => {
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: '', token: 't'.repeat(48) };
+
     const kept = async (accepted: boolean, exits: boolean) => {
       let claimed = false;
       const completed: Outcome[] = [];
       let relayLogs = 0;
       let stops = 0;
+
       const stored = state(container((argv) => {
         relayLogs += (argv[2] ?? '').includes(RELAY_LOG) && (argv[2] ?? '').includes('>> /armada/task/log') ? 1 : 0;
 
         return { exitCode: 0, stdout: argv[3] === 'wait' && exits ? '3\n' : '' };
       }));
+
       const job = {
         booted: async () => undefined, waiting: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
         claim: async () => {
@@ -254,6 +274,7 @@ describe('a gang rank', () => {
         still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
         complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
       };
+
       const artifacts = bucket();
       const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
 
@@ -262,6 +283,7 @@ describe('a gang rank', () => {
 
       return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length, relayLogs, stops };
     };
+
     const log = taskKey(spec.jobId, 0, 'log', 1);
 
     expect([await kept(false, true), await kept(true, false), await kept(true, true)])
@@ -271,8 +293,10 @@ describe('a gang rank', () => {
   test('takes a relay only with its gang\'s token, and only to a port under a link id', async () => {
     const stored = state(container(() => ({ exitCode: 0, stdout: '' })));
     const vessel = new ArmadaVessel(stored.ctx, world({}));
+
     const relay = async (token: string, query: string) => (await vessel.fetch(new Request(`https://armada.example/relay/job/v1?${query}`,
       { headers: { [RELAY_HEADER]: token, upgrade: 'websocket' } }))).status;
+
     const link = `id=${'0'.repeat(16)}`;
     const none = await relay('t'.repeat(48), `port=8476&${link}`);
 

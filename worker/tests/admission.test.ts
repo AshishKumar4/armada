@@ -15,6 +15,7 @@ afterEach(() => { globalThis.fetch = original; });
 /** A deployment of `version` whose fleet and jobs live in memory, and a client whose requests reach it. */
 function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' })), version = 'a') {
   const jobs = new Map<string, ArmadaJob>();
+
   const env: Env = world({
     ARMADA_TOKEN: TOKEN, VERSION: { id: version, tag: '', timestamp: '' }, FLEET: namespace(() => fleet),
     JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name)),
@@ -30,10 +31,11 @@ const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 
 describe('a client and a Worker', () => {
   test('that speak versions of the wire too far apart say which one to update, and an older client the wire still fits is served', async () => {
     const { env, armada } = deployment();
+
     const asked = async (version?: string) => {
       const answer = await worker.fetch(new Request('https://armada.test/jobs/none', { headers: { authorization: `Bearer ${TOKEN}`, ...version === undefined ? {} : { 'armada-protocol': version } } }), env);
 
-      return [answer.status, (await answer.json() as { error?: string }).error];
+      return [answer.status, (await answer.json()).error];
     };
 
     expect({ older: await asked('2'), served: await asked('3'), newer: await asked('8'), same: (await armada.health()).protocol }).toEqual({
@@ -69,6 +71,7 @@ describe('a drained version', () => {
     let reached = () => undefined as void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const making = new Promise<void>((resolve) => { reached = resolve; });
+
     const env: Env = world({
       ARMADA_TOKEN: TOKEN, VERSION: { id: 'a', tag: '', timestamp: '' }, FLEET: namespace(() => fleet),
       // The job's own making waits for `release`, as a slow storage write or RPC would.
@@ -105,6 +108,7 @@ describe('a drained version', () => {
     const refused = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
 
     setSystemTime(new Date(Date.now() + DRAIN_MS + 1000));
+
     try {
       const admitted = await armada.create(spec).then(() => 'admitted', (error: unknown) => String(error));
 
@@ -123,6 +127,7 @@ describe('a drained version', () => {
 
   test('that drains only in its own older version is drained in that version, and polled and admitted in it', async () => {
     const asked: string[] = [];
+
     const server = Bun.serve({
       port: 0,
       fetch: (request) => {

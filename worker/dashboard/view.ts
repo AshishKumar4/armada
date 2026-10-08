@@ -20,6 +20,7 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
+
   const run = async (): Promise<void> => {
     clearTimeout(timer);
 
@@ -37,6 +38,7 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
 
         return;
       }
+
       replace(banner, h('div', { class: 'error-banner' }, icon('alert'), describe(cause)));
     } finally {
       running = false;
@@ -44,6 +46,7 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
 
     if (!stopped && again && document.visibilityState === 'visible') timer = setTimeout(() => { void run(); }, ms);
   };
+
   const visible = (): void => {
     if (document.visibilityState === 'visible') void run();
   };

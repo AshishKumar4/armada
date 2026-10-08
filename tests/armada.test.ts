@@ -50,6 +50,7 @@ describe('an environment', () => {
     const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'apt-get install -y git', install: '', size: 'medium' };
     const repo = { project: 'app', checkout: '/home/ci/work/app/app', history: 'full' as const, manifest: [{ path: 'bun.lock', id: 'a'.repeat(40) }, { path: 'package.json', id: 'b'.repeat(40) }] };
     const key = await environmentKey(recipe);
+
     const keys = {
       fixed: await environmentKey({ ...recipe, setup: 'apt-get install -y git strace' }),
       rebased: await environmentKey({ ...recipe, base: 'cloudflare/debian-trixie@sha256:' + 'c'.repeat(64) }),
@@ -90,10 +91,13 @@ describe('a project\'s CI config', () => {
     expect(() => parseConfig(JSON.stringify({ ...base, environment: { base: 'ubuntu:26.04' } }))).toThrow('Cloudflare-managed image');
     const scratch = mkdtempSync(join(tmpdir(), 'armada-base-'));
     const requests: string[] = [];
-    const server = Bun.serve({ port: 0, fetch: (request) => { requests.push(new URL(request.url).pathname); return Response.json({ id: 'j1' }); } });
+    const server = Bun.serve({ port: 0, fetch: (request) => { requests.push(new URL(request.url).pathname);
+
+ return Response.json({ id: 'j1' }); } });
 
     try {
       writeFileSync(join(scratch, 'recipe.json'), JSON.stringify({ base: 'ubuntu:26.04@sha256:' + 'f'.repeat(64) }));
+
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', `--env=${join(scratch, 'recipe.json')}`, '--times=1', '--', 'true'], {
         env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
@@ -125,6 +129,7 @@ describe('grading a CI run', () => {
       { name: 'a', entry: { rows: ['one', { name: 'two', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('two', 1, { 'x.test.ts': 2, 'y.test.ts': 3 })], artifacts: null },
       { name: 'b', entry: {}, rows: [{ run: 'bun scripts/three.ts', exitCode: 0, seconds: 0, output: '' }], artifacts: null },
     ];
+
     const graded = grade(answers);
 
     expect({ problems: graded.problems, rows: graded.rows.length, reds: graded.reds.map((each) => each.name) }).toEqual({ problems: [], rows: 3, reds: ['two'] });
@@ -318,9 +323,13 @@ describe('uploading a pack', () => {
       const method = init?.method ?? 'GET';
 
       seen.push(`${method} ${url.pathname.split('/').slice(-1)[0] ?? ''}${url.search}`);
+
       if (init?.body instanceof Uint8Array) sent.push(init.body.length);
+
       if (method === 'HEAD') return new Response(null, { status: 404 });
+
       if (url.searchParams.has('uploads')) return Response.json({ upload: 'u1' });
+
       if (url.searchParams.has('part')) return Response.json({ partNumber: Number(url.searchParams.get('part')), etag: `e${url.searchParams.get('part') ?? ''}` });
 
       return Response.json({ stored: 'key' });
@@ -346,6 +355,7 @@ describe('uploading a pack', () => {
 describe('a failed request', () => {
   test('says the Worker\'s own error, and an HTML error page by its status and title, even a 404 one', async () => {
     const page = '<!DOCTYPE html>\n<html>\n<head>\n<title>Service Unavailable</title>\n</head>\n<body>' + '<p>retry</p>'.repeat(500) + '</body>\n</html>\n';
+
     const server = Bun.serve({
       port: 0,
       fetch: (request) => {
@@ -381,6 +391,7 @@ describe('a failed request', () => {
 describe('packing a commit', () => {
   test('a clone without the environment\'s commit packs from the root, and that pack checks out where the environment is', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
+
     const git = (cwd: string, ...args: string[]): string => {
       const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
 
@@ -412,6 +423,7 @@ describe('packing a commit', () => {
       const checkout = join(scratch, 'checkout');
 
       git(scratch, 'init', '-q', checkout);
+
       for (const { sha, from, base } of [{ sha: environment, from: origin, base: 'root' }, { sha: head, from: shallow, base: packBase(shallow, environment) }]) {
         const pack = new Uint8Array(await packOf(from, sha, base, 'commit').arrayBuffer());
 
@@ -432,6 +444,7 @@ describe('a commit checkout', () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
     const origin = join(scratch, 'origin');
     const checkout = join(scratch, 'checkout');
+
     const git = (cwd: string, ...args: string[]): string => {
       const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' });
 
@@ -439,11 +452,13 @@ describe('a commit checkout', () => {
 
       return ran.stdout.toString().trim();
     };
+
     const commit = (message: string, files: Record<string, string>) => {
       for (const [path, text] of Object.entries(files)) {
         mkdirSync(join(origin, path, '..'), { recursive: true });
         writeFileSync(join(origin, path), text);
       }
+
       git(origin, 'add', '.');
       git(origin, 'commit', '-qm', message);
 
@@ -459,6 +474,7 @@ describe('a commit checkout', () => {
       const head = commit('overlay', { 'c.txt': 'c\n' });
 
       git(scratch, 'init', '-q', checkout);
+
       // The environment's own commit run again packs nothing, and the overlay's pack carries what the checkout lacks.
       for (const [sha, base] of [[environment, 'root'], [environment, environment], [head, environment]] as const) {
         const pack = new Uint8Array(await packOf(origin, sha, base, 'commit').arrayBuffer());
@@ -500,6 +516,7 @@ describe('the CLI\'s arguments', () => {
 
   test('are its own before --, and every word after -- is the command\'s', async () => {
     const jobs: unknown[] = [];
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -510,6 +527,7 @@ describe('the CLI\'s arguments', () => {
 
           return Response.json({ id: 'j1' });
         }
+
         if (pathname === '/jobs/j1/events') return Response.json({ events: [], done: true });
 
         return Response.json({
@@ -540,18 +558,22 @@ describe('the CLI following a job', () => {
     const polling = new Promise<void>((resolve) => { polled = resolve; });
     let cancelled = false;
     const green = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false };
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
         const { pathname } = new URL(request.url);
 
         seen.push(`${request.method} ${pathname}`);
+
         if (pathname === '/jobs') return Response.json({ id: 'j1' });
+
         if (pathname === '/jobs/j1/events') {
           polled();
 
           return Response.json(cancelled ? { events: [{ seq: 1, outcome: green }], done: true } : { events: [], done: false });
         }
+
         if (pathname === '/jobs/j1/cancel') {
           cancelled = true;
           await Bun.sleep(2_500);
@@ -586,6 +608,7 @@ describe('armada verdict', () => {
     const repo = join(scratch, 'repo');
     const git = (...words: string[]) => Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...words], { cwd: repo, stdout: 'pipe' });
     const stored = new Map<string, unknown>();
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
@@ -594,6 +617,7 @@ describe('armada verdict', () => {
         return found === undefined ? Response.json({ error: 'not found' }, { status: 404 }) : Response.json(found);
       },
     });
+
     const verdict = async (...words: string[]) => {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'verdict', 'HEAD', ...words], {
         cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
@@ -644,18 +668,23 @@ describe('armada run', () => {
     const bodies: unknown[] = [];
     const seen: string[] = [];
     const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
+
     const status = (id: string) => ({
       id, label: '', phase: 'done', key: 'k'.repeat(64), createdAt: 0, startedAt: 0, finishedAt: 1,
       tasks: { total: 1, queued: 0, running: 0, exited: 1, red: 0, failed: 0 }, vessels: [], problems: [], environment: null,
     });
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
         const { pathname } = new URL(request.url);
 
         seen.push(`${request.method} ${pathname.split('/').slice(0, 3).join('/')}`);
+
         if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
+
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json(timings);
+
         if (pathname === '/jobs') {
           const body: unknown = await request.json();
 
@@ -664,9 +693,13 @@ describe('armada run', () => {
 
           return Response.json({ id: commands.at(-1)?.includes('task') === true ? 'tasks' : 'plan' });
         }
+
         if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: pathname.startsWith('/jobs/tasks/') ? { ...outcome, exitCode: taskExit } : outcome }], done: true });
+
         if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify(plan));
+
         if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify(verdict));
+
         if (pathname.startsWith('/jobs/')) return Response.json(status(pathname.split('/')[2] ?? ''));
 
         return request.method === 'HEAD' ? new Response(null) : Response.json({ ok: true });
@@ -679,6 +712,7 @@ describe('armada run', () => {
       writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig } }));
       git('add', '.');
       git('commit', '-qm', 'one');
+
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
@@ -720,6 +754,7 @@ describe('armada run', () => {
     const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, {
       rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }, { name: 'y.mjs', exitCode: 1, seconds: 1, output: 'AssertionError: y broke' }],
     });
+
     const line = ran.stdout.split('\n').find((each) => each.includes('part-1'));
 
     expect({ exit: ran.exit, line: line?.replace(/^\s*\d+:\d+\s+/u, ''), told: ran.stdout.includes('AssertionError: y broke') })
@@ -775,9 +810,10 @@ describe('asking the runner', () => {
     const seen: string[] = [];
     let failures = 2;
 
-    Bun.sleep = (async () => undefined) as typeof Bun.sleep;
+    Bun.sleep = (async () => undefined);
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       seen.push(`${init?.method ?? 'GET'} ${new URL(String(input)).pathname}`);
+
       if (failures > 0) {
         failures -= 1;
 
@@ -810,6 +846,7 @@ describe('the webhook command', () => {
     const calls: { method: string; path: string; body: unknown }[] = [];
     // The deployment's configs, as its route keeps them: the list answers what the last POST stored, secret out.
     let stored: { repo: string; pullRequests: boolean; hook?: number } | null = null;
+
     const server = Bun.serve({
       port: 0,
       async fetch(request) {
@@ -817,19 +854,23 @@ describe('the webhook command', () => {
         const body: unknown = request.method === 'GET' || request.method === 'DELETE' ? undefined : await request.json();
 
         calls.push({ method: request.method, path: pathname, body });
+
         if (request.method === 'POST' && pathname === '/webhooks/armada') {
           stored = v.parse(v.object({ repo: v.string(), pullRequests: v.boolean(), hook: v.optional(v.number()) }), body);
 
           return Response.json({ configured: 'armada' });
         }
+
         if (request.method === 'GET' && pathname === '/webhooks') {
           return Response.json({ webhooks: stored === null ? [] : [{ project: 'armada', repo: stored.repo, pullRequests: stored.pullRequests, tokenSecret: 'GITHUB_TOKEN', hook: stored.hook }] });
         }
+
         if (request.method === 'DELETE' && pathname === '/webhooks/armada') return Response.json({ removed: 'armada', repo: 'owner/armada', hook: 77 });
 
         return Response.json({ error: 'no route' }, { status: 404 });
       },
     });
+
     const scratch = mkdtempSync(join(tmpdir(), 'armada-hook-'));
 
     // A stub `gh`: signed in, and a hook create or update answers id 77 while remembering every call.
@@ -840,6 +881,7 @@ describe('the webhook command', () => {
 
     try {
       const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
+
       const cli = async (...words: string[]) => {
         const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env, stdout: 'pipe', stderr: 'pipe' });
 
@@ -874,13 +916,16 @@ describe('the webhook command', () => {
   test('add without gh refuses to change a hook GitHub already signs for, and prints a new one to add by hand', async () => {
     const posted: string[] = [];
     let hooked = false;
+
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         const { pathname } = new URL(request.url);
 
         if (request.method === 'POST' && pathname === '/webhooks/armada') posted.push(pathname);
+
         if (request.method === 'POST' && pathname === '/webhooks/armada') return Response.json({ configured: 'armada' });
+
         if (request.method === 'GET' && pathname === '/webhooks') {
           return Response.json({ webhooks: hooked ? [{ project: 'armada', repo: 'owner/armada', pullRequests: false, tokenSecret: 'GITHUB_TOKEN', hook: 77 }] : [] });
         }
@@ -888,6 +933,7 @@ describe('the webhook command', () => {
         return Response.json({ error: 'no route' }, { status: 404 });
       },
     });
+
     const scratch = mkdtempSync(join(tmpdir(), 'armada-hook-'));
     const bin = join(scratch, 'bin');
     mkdirSync(bin);
@@ -896,11 +942,13 @@ describe('the webhook command', () => {
 
     try {
       const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
+
       const add = async () => {
         const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'webhook', 'add', 'armada', '--repo=owner/armada'], { env, stdout: 'pipe', stderr: 'pipe' });
 
         return { exit: await ran.exited, said: await new Response(ran.stdout).text() + await new Response(ran.stderr).text() };
       };
+
       const fresh = await add();
 
       hooked = true;

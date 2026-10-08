@@ -109,6 +109,7 @@ export class Armada {
         await Bun.sleep(attempt * 1000);
         continue;
       }
+
       if (!(sent instanceof Response)) throw sent;
       // The Worker's own 404 says a thing is absent; an HTML one is a page from a Worker not yet answering.
       const absent = sent.status === 404 && sent.headers.get('content-type')?.startsWith('text/html') !== true;
@@ -170,6 +171,7 @@ export class Armada {
 
       return body.size;
     }
+
     const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}&uploads`, {}));
     const bytes = new Uint8Array(await body.arrayBuffer());
     const parts = [];
@@ -179,6 +181,7 @@ export class Armada {
 
       parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
     }
+
     await this.post(`${path}&upload=${encodeURIComponent(upload)}`, { parts });
 
     return body.size;

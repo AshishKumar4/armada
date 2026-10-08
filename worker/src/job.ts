@@ -91,6 +91,7 @@ const INFRA_ATTEMPTS = 3;
 /** A running task older than this, and than STRAGGLER_WEIGHTS times its weight, is a straggler an idle vessel may
  *  repeat. In Dew's CI a task ran up to 3.2 times its weight, at random rather than by container. */
 const STRAGGLER_MS = 30_000;
+
 const STRAGGLER_WEIGHTS = 1.5;
 
 /** How far ahead an idle vessel looks for a task about to become a straggler, which it stays for rather than retire:
@@ -248,6 +249,7 @@ export class ArmadaJob extends DurableObject<Env> {
    */
   private async answerFromCache(spec: Kept, indexes: readonly number[]): Promise<void> {
     if (spec.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined) return;
+
     const reserved = indexes.flatMap((index) => this.sql.exec<{ idx: number; item: string }>(
       `UPDATE tasks SET state = 'checking' WHERE idx = ? AND state = 'queued' AND attempts = 0 RETURNING idx, item`, index,
     ).toArray());
@@ -260,6 +262,7 @@ export class ArmadaJob extends DurableObject<Env> {
     for (let from = 0; from < reserved.length; from += CACHE_READS) {
       await Promise.all(reserved.slice(from, from + CACHE_READS).map(async (row) => {
         const index = row.idx;
+
         const answered = await this.cachedAnswer(bundle, task, environment, index, v.parse(TaskSchema, JSON.parse(row.item)).item).catch((cause: unknown) => {
           console.error(JSON.stringify({ job: id, index, cache: said(cause) }));
 
@@ -273,6 +276,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
           return;
         }
+
         const landed = this.sql.exec<{ idx: number }>(`UPDATE tasks SET state = 'exited' WHERE idx = ? AND state = 'checking' RETURNING idx`, index).toArray();
 
         if (landed.length === 0) return;
@@ -293,6 +297,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const small = cached.size <= INLINE_BYTES ? await (await this.env.ARTIFACTS.get(key))?.arrayBuffer() : undefined;
     const answer = cached.customMetadata?.['answer'];
     const value = small === undefined ? undefined : textOf(small);
+
     const outcome: Outcome = {
       index, kind: 'exited', exitCode: 0, seconds: 0, vessel: 'cache', attempt: 0, tail: '', output: true, cached: true,
       ...value === undefined ? {} : { value }, ...answer === 'value' || answer === 'command' ? { answer } : {},
@@ -332,6 +337,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
+
     const vessel: VesselSpec = {
       jobId: id, name, snapshot: generation.snapshot.id, instance: instanceOf(spec.recipe.size), vcpus: SIZES[spec.recipe.size].vcpus,
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
@@ -403,9 +409,11 @@ export class ArmadaJob extends DurableObject<Env> {
 
       return { waitMs: GANG_WAIT_MS };
     }
+
     const hedged = this.hedged(spec, name, slot, first?.weight ?? 0);
 
     if (hedged !== undefined) return await this.cached(spec, this.claimOf(spec, env, hedged.idx, hedged.item, hedged.attempts, true), hedged.item);
+
     const next = first === undefined ? undefined : this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, slot, first.idx,
     ).toArray()[0];
@@ -422,9 +430,11 @@ export class ArmadaJob extends DurableObject<Env> {
 
       return null;
     }
+
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
     const lone = `state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members)`;
     const due = `MAX(started + ${String(STRAGGLER_MS)}, started + weight * ${String(STRAGGLER_WEIGHTS * 1000)})`;
+
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
       `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE ${lone} AND ${due} <= ? ORDER BY started LIMIT 1) RETURNING idx, item, attempts`,
       name, slot, name, now,
@@ -440,6 +450,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
       return { waitMs: Math.max(1000, soon.at - now) };
     }
+
     // It retires: marked now, so items an open job takes before its retirement lands get a vessel of their own.
     if (!this.busy(name)) this.beat(name, 'done');
 
@@ -473,6 +484,7 @@ export class ArmadaJob extends DurableObject<Env> {
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, (SELECT COUNT(*) FROM members WHERE idx = ?), ?, 'joined')`, forming.idx, forming.idx, name);
       mine = { idx: forming.idx, state: 'joined' };
     }
+
     const task = this.sql.exec<{ item: string; attempts: number }>('SELECT item, attempts FROM tasks WHERE idx = ?', mine.idx).one();
     const world = gangOf(v.parse(TaskSchema, JSON.parse(task.item)).item);
 
@@ -484,15 +496,18 @@ export class ArmadaJob extends DurableObject<Env> {
       this.sql.exec(`UPDATE members SET state = 'ready' WHERE idx = ?`, mine.idx);
       await this.ctx.storage.put(`gang:${String(mine.idx)}`, [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
     }
+
     const vessels = this.sql.exec<{ vessel: string }>('SELECT vessel FROM members WHERE idx = ? ORDER BY rank', mine.idx).toArray().map((row) => row.vessel);
     const rank = vessels.indexOf(name);
     const { attempts } = this.sql.exec<{ attempts: number }>('SELECT attempts FROM tasks WHERE idx = ?', mine.idx).one();
 
     this.sql.exec(`UPDATE members SET state = 'running' WHERE idx = ? AND vessel = ?`, mine.idx, name);
+
     const gang: Gang = {
       rank, vessels, job: (await this.ctx.storage.get<string>('id')) ?? '', origin: (await this.ctx.storage.get<string>('origin')) ?? '',
       token: (await this.ctx.storage.get<string>(`gang:${String(mine.idx)}`)) ?? '',
     };
+
     const claim = this.claimOf(spec, env, mine.idx, task.item, attempts, false);
 
     return { ...claim, env: { ...claim.env, ARMADA_RANK: String(rank), ARMADA_WORLD: String(world) }, gang };
@@ -506,6 +521,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
   private claimOf(spec: Kept, own: Record<string, string>, index: number, stored: string, attempt: number, duplicate: boolean): Claim {
     const task = v.parse(TaskSchema, JSON.parse(stored));
+
     const env = {
       ...commandEnv(spec.recipe, own), ARMADA_ITEM: JSON.stringify(task.item) ?? 'null', ARMADA_INDEX: String(index), ARMADA_ATTEMPT: String(attempt),
       ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
@@ -563,6 +579,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
       return false;
     }
+
     await this.ctx.storage.delete(heldKey(index));
     this.sql.exec('UPDATE tasks SET vessel = ?, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?', name, index);
 
@@ -596,10 +613,12 @@ export class ArmadaJob extends DurableObject<Env> {
     // A gang's outcome is kept once its ranks decide it (`ranked`).
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
     const retries = (await this.spec())?.retries;
+
     const task = kept === null ? undefined
       // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
       : member === undefined ? this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'landing' AND vessel = ?`, kept.index, name).toArray()[0]
         : this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'running'`, kept.index).toArray()[0];
+
     const named = kept !== null && kept.exitCode !== 0
       && (retries?.exitCodes.includes(kept.exitCode) === true || (kept.error !== undefined && retries?.errors.includes(kept.error) === true));
 
@@ -618,6 +637,7 @@ export class ArmadaJob extends DurableObject<Env> {
       this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ?`, kept.kind, kept.index);
       this.append(kept);
     }
+
     this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
     await this.settle();
   }
@@ -631,6 +651,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if (outcome.kind !== 'exited' || outcome.exitCode !== 0) {
       return rank === 0 ? outcome : { ...outcome, output: false, value: undefined, answer: undefined, artifacts: undefined, tail: `rank ${String(rank)} of ${String(world)}:\n${outcome.tail}` };
     }
+
     const done = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM members WHERE idx = ? AND state = 'done' ORDER BY rank`, outcome.index).toArray();
 
     return done.length < world ? null : v.parse(OutcomeSchema, JSON.parse(done[0]?.outcome ?? 'null'));
@@ -661,6 +682,7 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
+
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
     this.lostRank(name, error);
@@ -710,12 +732,14 @@ export class ArmadaJob extends DurableObject<Env> {
         this.sql.exec('UPDATE members SET rank = (SELECT COUNT(*) FROM members AS before WHERE before.idx = members.idx AND before.rank < members.rank) WHERE idx = ?', idx);
         continue;
       }
+
       this.sql.exec('DELETE FROM members WHERE idx = ?', idx);
 
       if (infra + 1 < INFRA_ATTEMPTS) {
         this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, infra = infra + 1 WHERE idx = ?`, idx);
         continue;
       }
+
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, idx);
       const outcome: Outcome = { index: idx, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: name, attempt: INFRA_ATTEMPTS, tail: error.slice(-4000), output: false };
 
@@ -738,6 +762,7 @@ export class ArmadaJob extends DurableObject<Env> {
       // Why no vessel is left, in the vessels' own last distinct failures, most recent first.
       const errors = [...new Set(this.sql.exec<{ error: string }>(`SELECT error FROM vessels WHERE state = 'failed' AND error IS NOT NULL ORDER BY beat DESC, rowid DESC`)
         .toArray().map(({ error }) => error))].slice(0, 3);
+
       const started = Number(this.sql.exec('SELECT COUNT(*) AS n FROM vessels WHERE boot_ms IS NOT NULL').one()['n']);
 
       // A snapshot that does not start fails every vessel the same way, so the job names its environment once.
@@ -746,6 +771,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
         await this.ctx.storage.put('problems', [...(await this.ctx.storage.get<string[]>('problems')) ?? [], `no container started from environment ${key.slice(0, 12)}: ${errors[0] ?? ''}`]);
       }
+
       const tail = ['no vessel was left to run it', ...errors.map((error) => failureTail('', error))].join('\n');
 
       for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE ${OPEN}`).toArray()) {
@@ -830,9 +856,11 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (id === undefined) return null;
     const generation = await this.ctx.storage.get<Generation>('environment');
+
     const vessels = this.sql.exec<{ name: string; state: VesselRow['state']; tasks: number; boot_ms: number | null; busy_ms: number; error: string | null }>(
       'SELECT name, state, tasks, boot_ms, busy_ms, error FROM vessels ORDER BY rowid',
     ).toArray();
+
     const red = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM events WHERE json_extract(outcome, '$.kind') = 'exited' AND json_extract(outcome, '$.exitCode') != 0`).one()['n']);
 
     return {

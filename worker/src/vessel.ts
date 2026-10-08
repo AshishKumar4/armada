@@ -207,6 +207,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (bundle === null) throw new Error(`the bundle ${spec.bundle} is not in R2`);
       await pipeIn(container, bundle.body, spec.runtime === 'python' ? PY_BUNDLE_PATH : BUNDLE_PATH);
     }
+
     await this.ctx.storage.put('state', 'working' satisfies State);
     await this.env.JOB.getByName(spec.jobId).booted(spec.name, bootMs);
   }
@@ -237,6 +238,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const kept = await this.ctx.storage.get<Current>(`slot:${String(slot)}`);
 
     if (kept !== undefined) return kept;
+
     if (slot !== 0) return undefined;
     const legacy = await this.ctx.storage.get<Current>('current');
 
@@ -296,6 +298,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         current = { claim: kept, startedAt: Date.now() };
         await this.putCurrent(slot, current);
       }
+
       const seconds = Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
       const [waited] = await Promise.allSettled([run(container, ['/bin/sh', '-c', waitOn(dir), 'wait', String(seconds)], { ms: (seconds + 30) * 1000 })]);
 
@@ -305,6 +308,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         if (lost < LOST_WAITS) continue;
         throw new Error(`the wait failed to run (${await this.lostAt(current)})`, { cause: waited.reason });
       }
+
       lost = 0;
 
       if (waited.value.exitCode !== 0) throw new Error(`the wait exited ${String(waited.value.exitCode)}: ${failureTail(waited.value.stdout, waited.value.stderr)}`);
@@ -377,6 +381,7 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  the file lives, so the keeping goes last there; a plain one keeps today's order. */
   private async launch(spec: SlotSpec, container: Container, claim: Claim, slot: number): Promise<void> {
     const layout = layoutOf(spec, slot);
+
     const keep = async () => {
       // The values the task gets are the ones its log is masked with, kept as root in the container: a secret set
       // again or deleted while the task runs changes neither.
@@ -431,11 +436,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (!Number.isInteger(port) || port < 1 || port > 65_535 || !LINK_ID.test(id) || request.headers.get('upgrade') !== 'websocket') {
       return new Response('a relay is a WebSocket to a port, under a link id', { status: 400 });
     }
+
     const [client, server] = Object.values(new WebSocketPair());
 
     if (client === undefined || server === undefined) throw new Error('a WebSocketPair has two ends');
     this.ctx.acceptWebSocket(server);
     const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
+
     const piped = new Piped(server, socket.writable.getWriter(), `${id} ${String(port)} ${url.searchParams.has('resume') ? '1' : '0'}`,
       (event, detail) => { console.log(JSON.stringify({ event, path: url.pathname, id, port, ...detail })); });
 
@@ -494,6 +501,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const said = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
     const [kind = '', error] = said.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
+
     const outcome: Outcome = {
       index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
     };
@@ -526,6 +534,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (current.claim.gang !== undefined) {
       await must(this.container(), 'appending the relay\'s log', ['/bin/sh', '-c', `{ echo; echo '--- the relay'; tail -c 65536 ${RELAY_LOG}; } >> ${dir}/log 2>/dev/null || :`], { ms: EXEC_MS });
     }
+
     await must(this.container(), 'packing the log', ['/bin/sh', '-c', `gzip -c ${dir}/log > ${dir}/log.gz 2>/dev/null || : > ${dir}/log.gz`], { ms: EXEC_MS });
     await this.store(`${dir}/log.gz`, taskKey(spec.jobId, current.claim.index, 'log', current.claim.gang?.rank ?? 0),
       { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
@@ -559,6 +568,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         return { small: read.stdout };
       });
     }
+
     const reading = await container.exec(['cat', path], { stdout: 'pipe', stderr: 'ignore' });
 
     if (reading.stdout === null) throw new Error(`reading ${path}: the exec gave no stdout`);

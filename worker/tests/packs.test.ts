@@ -12,9 +12,11 @@ describe('a commit\'s pack', () => {
     const stored = bucket(new Map([[`packs/proj/${sha}.root.pack`, 'an earlier client\'s pack']]));
     const env = world({ ARTIFACTS: stored, ARMADA_TOKEN: TOKEN, JOB: namespace(() => ({ create: async () => undefined })) });
     const call = async (method: string, path: string, body?: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env)).status;
+
     const job = async (packer?: number) => await call('POST', '/jobs', JSON.stringify(v.parse(JobSpecSchema, {
       recipe: { repo: { project: 'proj', checkout: '/home/ci/work', history: 'commit', manifest: [] } }, commit: { sha, base: 'root', packer }, items: [{ item: 1, argv: ['true'] }], run: { kind: 'command' },
     })));
+
     const before = { earlier: await call('HEAD', `/packs/proj/${sha}/root`), current: await call('HEAD', `/packs/proj/${sha}/root?packer=2`), job: await job(2) };
     const put = await call('PUT', `/packs/proj/${sha}/root?packer=2`, 'this client\'s pack');
 

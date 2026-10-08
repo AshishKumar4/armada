@@ -145,6 +145,7 @@ async function map(): Promise<number> {
   if (rest.length === 0 || (items === undefined) === (times === undefined)) {
     throw new Error('map needs one of --times=N and --items=<file|->, and a command after --, as in: armada map --times=3 -- echo {item}');
   }
+
   const armada = connect();
   const began = Date.now();
   const target = option('commit');
@@ -161,6 +162,7 @@ async function map(): Promise<number> {
   const metas: Meta[] = [];
 
   console.error(`job ${id}`);
+
   // A ready environment starts the job at once; a new one is prepared first, which is a wait worth a word.
   const preparing = setTimeout(() => {
     void job.status().then((status) => {
@@ -212,6 +214,7 @@ function wrangler(args: readonly string[], account: string, stdin?: string): str
   const ran = Bun.spawnSync([...WRANGLER, ...args], {
     cwd: ROOT, env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: account }, stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe',
   });
+
   const output = ran.stdout.toString() + ran.stderr.toString();
 
   if (ran.exitCode !== 0) throw new Error(`wrangler ${args.slice(0, 3).join(' ')} exited ${String(ran.exitCode)}:\n${output.slice(-3000)}`);
@@ -231,6 +234,7 @@ function whoami(): v.InferOutput<typeof WhoamiSchema> {
   } catch {
     // Not JSON: wrangler printed an error instead, which is said below.
   }
+
   const parsed = v.safeParse(WhoamiSchema, json);
 
   if (!parsed.success) throw new Error(`wrangler whoami failed:\n${(output + ran.stderr.toString()).trim().slice(-2000)}`);
@@ -281,6 +285,7 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 
     return;
   }
+
   drained();
 
   // Each ask renews the drain, which lapses by itself if this process dies.
@@ -301,9 +306,11 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   const file = connectionFile(name);
   const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
   let drained = false;
+
   const admit = async () => {
     if (drained) await deployed?.admit();
   };
+
   const interrupted = (signal: NodeJS.Signals) => {
     console.error(`armada: ${signal}: the deployed version admits jobs again`);
     void admit().finally(() => process.exit(2));
@@ -447,6 +454,7 @@ async function dev(armada: Armada): Promise<number> {
   if (project === null) throw new Error('no armada.config.ts here or above: a project names its tasks there');
   let pushing = Promise.resolve();
   let timer: ReturnType<typeof setTimeout> | undefined;
+
   // A task file is a module this process already imported, so each push runs in a fresh process.
   const again = () => {
     pushing = pushing.then(() => {
@@ -464,6 +472,7 @@ async function dev(armada: Armada): Promise<number> {
       timer = setTimeout(again, 300);
     });
   }
+
   console.log('watching for changes; Ctrl-C stops');
   await new Promise<never>(() => undefined);
 
@@ -485,6 +494,7 @@ async function secret(armada: Armada, verb: string | undefined, name: string | u
 
     return 0;
   }
+
   const value = (await Bun.stdin.text()).replace(/\r?\n$/u, '');
 
   await armada.setSecret(name, value);
@@ -518,6 +528,7 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
     return 0;
   }
+
   const repo = option('repo');
 
   if (repo === undefined || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repo)) throw new Error('webhook add needs --repo=<owner/name>');
@@ -531,9 +542,11 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
   // A hook GitHub already signs with another secret is updated first, or the deployment would refuse its deliveries.
   if (known !== undefined && !signedIn) throw new Error(`${project} has GitHub hook ${String(known)} on ${repo}: updating its secret needs gh signed in for ${repo} (gh auth login)`);
+
   const answered = !signedIn ? null
     : known === undefined ? ghOut(['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'])
       : ghOut(['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id']);
+
   const hook = answered === null || !/^\d+$/u.test(answered) ? undefined : Number(answered);
   // JSON leaves the options not given out, so the deployment's defaults apply.
   const config = { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret, hook };
@@ -546,6 +559,7 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
     return 0;
   }
+
   console.log(`add the hook by hand: ${repo} → Settings → Webhooks → Add webhook
   payload URL: ${url}
   content type: application/json
