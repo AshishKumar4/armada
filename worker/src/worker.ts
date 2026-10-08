@@ -203,7 +203,7 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
     return Response.json({ closed: id });
   }
 
-  if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log')) return undefined;
+  if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log' && leaf !== 'artifacts')) return undefined;
   // A task answered from the cache ran nothing: its output is the cached object itself.
   const cached = leaf === 'output' ? await job.cachedFrom(Number(index)) : undefined;
 

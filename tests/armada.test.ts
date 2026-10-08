@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { packBase, packOf, poolFor } from '../src/ci';
+import { argvOf, extractTar, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, failureTail, fill, fitSize, itemValues, medians, recordSamples, usageOf, weightOf, type Outcome, type Recipe } from '../src/protocol';
@@ -22,6 +22,11 @@ describe('a task\'s command', () => {
 
   test('a placeholder the task does not have is refused, never left empty', () => {
     expect(() => fill('--part={part}', itemValues({ row: 'x' }, 0))).toThrow('{part}');
+  });
+
+  test('{artifacts} is the directory the task keeps after it', () => {
+    expect(argvOf(['sh', '-c', 'echo x > {artifacts}/f'], { base: 'cloudflare/debian-trixie', setup: '', install: '', size: 'medium' })('i', { index: 0 }))
+      .toEqual(['sh', '-c', 'echo x > /armada/task/artifacts/f']);
   });
 
   test('an item weighs its numeric `weight`, and anything else nothing', () => {
@@ -116,8 +121,8 @@ describe('grading a CI run', () => {
 
   test('every named row reported once by its task, a red one listed: graded, with the red', () => {
     const answers: TaskAnswer[] = [
-      { name: 'a', entry: { rows: ['one', { name: 'two', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('two', 1, { 'x.test.ts': 2, 'y.test.ts': 3 })] },
-      { name: 'b', entry: {}, rows: [{ run: 'bun scripts/three.ts', exitCode: 0, seconds: 0, output: '' }] },
+      { name: 'a', entry: { rows: ['one', { name: 'two', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('two', 1, { 'x.test.ts': 2, 'y.test.ts': 3 })], artifacts: null },
+      { name: 'b', entry: {}, rows: [{ run: 'bun scripts/three.ts', exitCode: 0, seconds: 0, output: '' }], artifacts: null },
     ];
     const graded = grade(answers);
 
@@ -132,7 +137,7 @@ describe('grading a CI run', () => {
       ['two', 1, 'two said this'],
       ['three', 1, 'Segmentation fault'],
     ]);
-    expect(grade([{ name: 'a', entry: {}, rows: exited }]).reds.map(rowName)).toEqual(['one', 'two', 'three']);
+    expect(grade([{ name: 'a', entry: {}, rows: exited, artifacts: null }]).reds.map(rowName)).toEqual(['one', 'two', 'three']);
     expect(underExit([row('one')], { exitCode: 0, tail: '' }, 'a')).toEqual([row('one')]);
   });
 
@@ -142,15 +147,15 @@ describe('grading a CI run', () => {
     expect(exited.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
       ['a', 7, 'the task exited 7 and reported no row\nSegmentation fault'],
     ]);
-    expect(grade([{ name: 'a', entry: {}, rows: exited }])).toMatchObject({ problems: [], reds: exited });
+    expect(grade([{ name: 'a', entry: {}, rows: exited, artifacts: null }])).toMatchObject({ problems: [], reds: exited });
     expect(underExit([], { exitCode: 0, tail: '' }, 'a')).toEqual([]);
   });
 
   test('a missing verdict, a missing or extra row, a row twice, and an untimed file are each named, and none is green', () => {
     const graded = grade([
-      { name: 'a', entry: { rows: ['one', 'two', { name: 'split', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('stray'), row('split', 0, { 'x.test.ts': 1 })] },
-      { name: 'b', entry: {}, rows: [row('one')] },
-      { name: 'c', entry: { rows: ['four'] }, rows: null },
+      { name: 'a', entry: { rows: ['one', 'two', { name: 'split', files: ['x.test.ts', 'y.test.ts'] }] }, rows: [row('one'), row('stray'), row('split', 0, { 'x.test.ts': 1 })], artifacts: null },
+      { name: 'b', entry: {}, rows: [row('one')], artifacts: null },
+      { name: 'c', entry: { rows: ['four'] }, rows: null, artifacts: null },
     ]);
 
     expect(graded.problems).toEqual([
@@ -160,6 +165,44 @@ describe('grading a CI run', () => {
       'one was reported by both a and b',
       'c wrote no verdict',
     ]);
+  });
+
+  test('a row may name the task\'s kept artifacts as evidence; one it did not keep is a problem', () => {
+    const withFile = { name: 'a', entry: {}, rows: [{ ...row('x'), artifacts: ['shots/home.png'] }], artifacts: new Set(['shots/home.png']) };
+    const without = { name: 'a', entry: {}, rows: [{ ...row('x'), artifacts: ['shots/home.png'] }], artifacts: null };
+
+    expect({ graded: grade([withFile]).problems, missing: grade([without]).problems })
+      .toEqual({ graded: [], missing: ['a: x names evidence shots/home.png its task did not keep'] });
+  });
+});
+
+describe('a task\'s stored artifacts', () => {
+  test('extract as the tar.gz lists them, refusing a member that is absolute or climbs out', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-artifacts-'));
+
+    try {
+      mkdirSync(join(scratch, 'src', 'shots'), { recursive: true });
+      writeFileSync(join(scratch, 'src', 'shots', 'home.png'), 'png');
+      const made = Bun.spawnSync(['tar', '-czf', '-', '-C', join(scratch, 'src'), '.'], { stdout: 'pipe' });
+      const members = extractTar(new Uint8Array(made.stdout), join(scratch, 'out'));
+
+      expect({ members, file: readFileSync(join(scratch, 'out', 'shots', 'home.png'), 'utf8') }).toEqual({ members: ['shots/home.png'], file: 'png' });
+
+      const evil = Bun.spawnSync(['tar', '-czf', '-', '-C', join(scratch, 'src'), '--transform', 's|^\\./shots/home\\.png$|../evil|', '.'], { stdout: 'pipe' });
+      const abs = Bun.spawnSync(['tar', '-czf', '-', '-C', join(scratch, 'src'), '--transform', 's|^\\./shots/home\\.png$|/etc/evil|', '.'], { stdout: 'pipe' });
+
+      expect([() => extractTar(new Uint8Array(evil.stdout), join(scratch, 'x')), () => extractTar(new Uint8Array(abs.stdout), join(scratch, 'y'))].map((fn) => {
+        try {
+          fn();
+
+          return null;
+        } catch (error) {
+          return String(error);
+        }
+      })).toEqual(['Error: the artifacts hold ../evil, which escapes ' + join(scratch, 'x'), 'Error: the artifacts hold /etc/evil, which escapes ' + join(scratch, 'y')]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 

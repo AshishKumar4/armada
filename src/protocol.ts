@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 6;
+export const PROTOCOL = 7;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -98,6 +98,9 @@ export const BUNDLE_PATH = '/armada/bundle.mjs';
 export const OUT_PATH = '/armada/task/out';
 
 export const ANSWER_PATH = '/armada/task/answer';
+
+/** The directory whose contents a task keeps as its artifacts: a tar.gz in R2 once it finishes. */
+export const ARTIFACTS_PATH = '/armada/task/artifacts';
 
 export const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
 
@@ -218,6 +221,8 @@ export const OutcomeSchema = v.object({
    *  of at most INLINE_BYTES. */
   output: v.boolean(),
   value: v.optional(v.string()),
+  /** Whether the task's artifacts directory was stored, at `/jobs/<id>/tasks/<index>/artifacts`, a tar.gz. */
+  artifacts: v.optional(v.boolean()),
   /** A pushed task's answer, as its runner says: `value` is an envelope with the body's value or error, `command` the
    *  file the body's command wrote. */
   answer: v.optional(v.picklist(['value', 'command'])),

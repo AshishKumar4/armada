@@ -4,7 +4,7 @@
  * which runs here and writes `ARMADA_OUT` itself. `ARMADA_ANSWER` says which, for the client to read it by.
  */
 import { writeFileSync } from 'node:fs';
-import { ANSWER_PATH, FILES_DIR, OUT_PATH, type Json } from './protocol';
+import { ANSWER_PATH, ARTIFACTS_PATH, FILES_DIR, OUT_PATH, type Json } from './protocol';
 import { execute, isShell, outFile, type OutFile, type Shell } from './sh';
 
 /** The method a task answers a container's call by. A registered symbol, so a bundle holding a second copy of this
@@ -23,6 +23,8 @@ export interface Context<S extends string = string> {
   readonly out: OutFile;
   /** The directory holding the job's `files`. */
   readonly files: string;
+  /** The directory whose contents the job keeps as the task's artifacts once it finishes. */
+  readonly artifacts: string;
   /** The deployment's secrets the task asked for, by name. A command gets each in its environment too. */
   readonly secrets: Readonly<Record<S, string>>;
 }
@@ -91,7 +93,7 @@ export async function runTasks(modules: readonly Record<string, unknown>[]): Pro
   }
   const context: Context = {
     index: Number(process.env['ARMADA_INDEX'] ?? '0'), attempt: Number(process.env['ARMADA_ATTEMPT'] ?? '1'), signal: controller.signal, out: outFile(out), files: FILES_DIR,
-    secrets: given.secrets,
+    artifacts: process.env['ARMADA_ARTIFACTS'] ?? ARTIFACTS_PATH, secrets: given.secrets,
   };
   const answer = await task[RUN](JSON.parse(process.env['ARMADA_ITEM'] ?? 'null') as Json, context);
   const marker = process.env['ARMADA_ANSWER'] ?? ANSWER_PATH;

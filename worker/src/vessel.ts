@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
+import { ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, deadline, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
@@ -350,17 +350,20 @@ export class ArmadaVessel extends DurableObject<Env> {
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
-    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz`], { ms: EXEC_MS });
+    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz
+if [ -n "$(find ${ARTIFACTS_PATH} -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${TASK}/artifacts.tar.gz -C ${ARTIFACTS_PATH} .; fi`], { ms: EXEC_MS });
     await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, index, 'log', rank), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
     const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output', rank), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
+    // A gang's artifacts are its rank 0's; an empty directory stores nothing.
+    const packed = rank === 0 ? await this.store(`${TASK}/artifacts.tar.gz`, taskKey(spec.jobId, index, 'artifacts'), { contentType: 'application/gzip' }) : null;
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
     const said = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
     const [kind = '', error] = said.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
     const outcome: Outcome = {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...error === undefined ? {} : { error }, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
     };
 
     if (exitCode === 0 && out !== null && current.claim.cache !== undefined) await this.keepInCache(taskKey(spec.jobId, index, 'output'), current.claim.cache, answer);

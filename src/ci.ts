@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, describeUsage, FILES_DIR, fill, fitSize, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -147,9 +147,9 @@ function exitWord(result: Result<Json, string | null>): string {
 }
 
 /** A command template's argv for one item: `{item}`, an object item's scalar keys, `{index}`, `{out}`, `{files}`,
- *  `{workdir}` and `{commit}` filled; any other placeholder is an error, never an empty string. */
+ *  `{artifacts}`, `{workdir}` and `{commit}` filled; any other placeholder is an error, never an empty string. */
 export function argvOf(template: readonly string[], recipe: Recipe): (item: Json, at: { readonly index: number }) => string[] {
-  const fixed = { out: OUT_PATH, files: FILES_DIR, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
+  const fixed = { out: OUT_PATH, files: FILES_DIR, artifacts: ARTIFACTS_PATH, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
 
   return (item, { index }) => template.map((word) => fill(word, { ...itemValues(item, index), ...fixed }));
 }
@@ -181,10 +181,33 @@ async function follow<O extends string | null>(job: Job<Json, O>, began: number,
   }
 }
 
-function printReds(reds: readonly VerdictRow[]): void {
+/** `archive`, a task's stored tar.gz, extracted under `dir` with the system tar: a member that is absolute or climbs
+ *  out of `dir` is refused, so a task's archive cannot write outside where it lands. The members' relative paths,
+ *  directories out. */
+export function extractTar(archive: Uint8Array, dir: string): string[] {
+  const listed = Bun.spawnSync(['tar', '-tzf', '-'], { stdin: archive, stdout: 'pipe', stderr: 'pipe' });
+
+  if (listed.exitCode !== 0) throw new Error(`listing the artifacts: ${listed.stderr.toString().trim()}`);
+  const members = listed.stdout.toString().split('\n').filter((line) => line !== '').map((member) => member.startsWith('./') ? member.slice(2) : member);
+
+  for (const member of members) {
+    if (member === '' || member.startsWith('/') || member.split('/').includes('..')) throw new Error(`the artifacts hold ${member}, which escapes ${dir}`);
+  }
+  mkdirSync(dir, { recursive: true });
+  const ran = Bun.spawnSync(['tar', '-xzf', '-', '-C', dir], { stdin: archive, stdout: 'pipe', stderr: 'pipe' });
+
+  if (ran.exitCode !== 0) throw new Error(`extracting the artifacts: ${ran.stderr.toString().trim()}`);
+
+  return members.filter((member) => member !== '' && !member.endsWith('/'));
+}
+
+function printReds(reds: readonly VerdictRow[], evidence: ReadonlyMap<VerdictRow, string>): void {
   for (const row of reds) {
     console.log(`\nRED  ${rowName(row)}  (exit ${String(row.exitCode)}, ${seconds(row.seconds * 1000)})`);
     console.log(row.output.split('\n').slice(-TAIL_LINES).map((line) => `  | ${line}`).join('\n'));
+    const dir = evidence.get(row);
+
+    if (dir !== undefined) for (const path of row.artifacts ?? []) console.log(`  evidence: ${join(dir, path)}`);
   }
 }
 
@@ -208,7 +231,7 @@ export async function verdictCI(armada: Armada, target: string, json: boolean): 
 
   if (json) console.log(text);
   else {
-    printReds(reds);
+    printReds(reds, new Map());
     console.log(`${reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(rows.length - reds.length)} of ${String(rows.length)} rows green, ${config.name} ${sha}`);
   }
 
@@ -354,15 +377,31 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   };
   const results = await follow(job, began, nameOf, say);
   const status = await job.status();
+  // Each task's artifacts beside the report, under the task's name; a row names one as its evidence.
+  const kept = new Map<number, { readonly dir: string; readonly paths: ReadonlySet<string> }>();
+
+  for (const result of results) {
+    if (result.kind === 'lost' || result.kind === 'cancelled' || result.meta.artifacts !== true) continue;
+    const archive = await job.artifacts(result.index);
+
+    if (archive === null) continue;
+    const dir = join(REPORTS, `${config.name}-${jobId}`, nameOf(result.index));
+
+    kept.set(result.index, { dir, paths: new Set(extractTar(archive, dir)) });
+  }
+  const evidence = new Map<VerdictRow, string>();
   const answers: TaskAnswer[] = plan.include.map((entry, index) => {
     const name = nameOf(index);
     const result = results.find((each) => each.index === index);
+    const artifacts = kept.get(index)?.paths ?? null;
+    const answer: TaskAnswer = result === undefined || result.kind === 'lost' || result.kind === 'cancelled' ? { name, entry, rows: null, artifacts }
+      : !config.task.verdict ? { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }], artifacts }
+      : { name, entry, rows: verdicts.get(index) ?? null, artifacts };
+    const dir = kept.get(index)?.dir;
 
-    if (result === undefined || result.kind === 'lost' || result.kind === 'cancelled') return { name, entry, rows: null };
+    if (dir !== undefined) for (const row of answer.rows ?? []) evidence.set(row, dir);
 
-    if (!config.task.verdict) return { name, entry, rows: [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] };
-
-    return { name, entry, rows: verdicts.get(index) ?? null };
+    return answer;
   });
   const graded = grade(answers);
   const file = { sha, part: 'all', rows: graded.rows };
@@ -370,13 +409,13 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const summary = await job.summary();
 
   mkdirSync(REPORTS, { recursive: true });
-  writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, status, summary, problems: graded.problems, verdicts: file }, null, 2));
+  writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, status, summary, problems: graded.problems, verdicts: file, artifacts: Object.fromEntries([...kept].map(([index, held]) => [nameOf(index), held.dir])) }, null, 2));
 
   for (const problem of status.problems) console.log(`problem: ${problem}`);
 
   if (graded.problems.length > 0) {
     console.log(`\nNOT GRADED:\n${graded.problems.map((problem) => `  ${problem}`).join('\n')}`);
-    printReds(graded.reds);
+    printReds(graded.reds, evidence);
 
     return 2;
   }
@@ -390,7 +429,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   await armada.post(`/timings/${config.name}`, {
     rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: Object.assign({}, ...green.map((row) => row.timings ?? {})), usage,
   });
-  printReds(graded.reds);
+  printReds(graded.reds, evidence);
   const boots = summary.bootMs;
 
   console.log(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(graded.rows.length - graded.reds.length)} of ${String(graded.rows.length)} rows green, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);

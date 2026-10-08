@@ -22,7 +22,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, cacheKey, environmentKey, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
 import { said, SINGLE, textOf, type Env } from './env';
@@ -439,7 +439,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = v.parse(TaskSchema, JSON.parse(stored));
     const env = {
       ...commandEnv(spec.recipe, own), ARMADA_ITEM: JSON.stringify(task.item) ?? 'null', ARMADA_INDEX: String(index), ARMADA_ATTEMPT: String(attempt),
-      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
+      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_CGROUP: TASK_GROUP, ...spec.run.kind === 'task' ? { ARMADA_TASK: spec.run.id } : {},
     };
 
     return { index, attempt, argv: spec.run.kind === 'task' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, secrets: spec.secrets, duplicate };
@@ -510,7 +510,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const world = Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE idx = ?', outcome.index).one()['n']);
 
     if (outcome.kind !== 'exited' || outcome.exitCode !== 0) {
-      return rank === 0 ? outcome : { ...outcome, output: false, value: undefined, answer: undefined, tail: `rank ${String(rank)} of ${String(world)}:\n${outcome.tail}` };
+      return rank === 0 ? outcome : { ...outcome, output: false, value: undefined, answer: undefined, artifacts: undefined, tail: `rank ${String(rank)} of ${String(world)}:\n${outcome.tail}` };
     }
     const done = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM members WHERE idx = ? AND state = 'done' ORDER BY rank`, outcome.index).toArray();
 

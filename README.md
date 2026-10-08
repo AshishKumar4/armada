@@ -89,6 +89,7 @@ armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 | `{index}` | The item's position. |
 | `{out}` | The file a task writes when `output` is set. |
 | `{files}` | The directory with the job's small `files`. |
+| `{artifacts}` | The directory whose files a task keeps as its artifacts, a tar.gz served at the task's `artifacts` route. |
 
 An unknown placeholder is an error. An object item's numeric `weight` moves it up the queue. `map` exits 1 if a task
 exits nonzero and 2 if a task could not run.
@@ -228,6 +229,13 @@ tasks those secrets, for a narrowed run whose credentials the whole matrix must 
 A run of the whole matrix stores its verdict under the commit. `armada verdict <commit>` prints it and exits 0 when
 every row is green, 1 when a row is red and 2 when the commit has none, so a hook or a deploy can reuse the proof.
 
+A task can keep files beside its verdict: it writes them under `{artifacts}` (also `ARMADA_ARTIFACTS` in its
+environment), and a row names the ones that are its evidence, `"artifacts": ["shots/home.png"]`. `armada run` extracts
+each task's artifacts next to the report, `~/.local/state/armada/runs/<project>-<job>/<task>/`, and prints each named
+file under a red row. A row naming a file its task did not keep leaves the run ungraded. Artifacts are kept as written:
+they may be binary, and the log's secret mask does not apply to them. `armada map --artifacts=<dir>` extracts the same
+way, under `<dir>/<index>`.
+
 | Field | Default | Meaning |
 |---|---|---|
 | `name` | | The project's slug. |
@@ -267,7 +275,7 @@ in peak memory and average busy cores. A new size prepares its own environment o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

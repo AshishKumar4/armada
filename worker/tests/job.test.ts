@@ -190,10 +190,10 @@ async function formed(open: ArmadaJob, vessels: readonly string[]): Promise<Reco
   return held;
 }
 
-/** `vessel` lands its rank's answer, exiting `exitCode`. */
-async function land(open: ArmadaJob, vessel: string, index: number, exitCode: number): Promise<void> {
+/** `vessel` lands its rank's answer, exiting `exitCode`, with `extra` on its outcome. */
+async function land(open: ArmadaJob, vessel: string, index: number, exitCode: number, extra?: Partial<Outcome>): Promise<void> {
   if (!(await open.accept(vessel, index))) throw new Error(`${vessel}'s answer was refused`);
-  await open.complete(vessel, { ...exited(index, vessel), exitCode, tail: `${vessel} said this` }, 1000);
+  await open.complete(vessel, { ...exited(index, vessel), exitCode, tail: `${vessel} said this`, ...extra }, 1000);
 }
 
 describe('a gang task', () => {
@@ -221,15 +221,15 @@ describe('a gang task', () => {
     await land(green, 'v2', 0, 0);
     const early = (await green.events(0)).events.length;
 
-    await land(green, 'v1', 0, 0);
+    await land(green, 'v1', 0, 0, { artifacts: true });
     const { job: red } = await job(gang(2));
 
     await formed(red, ['v1', 'v2']);
-    await land(red, 'v2', 0, 3);
-    const outcomes = [...(await green.events(0)).events, ...(await red.events(0)).events].map((event) => [event.outcome.vessel, event.outcome.exitCode, event.outcome.tail]);
+    await land(red, 'v2', 0, 3, { artifacts: true });
+    const outcomes = [...(await green.events(0)).events, ...(await red.events(0)).events].map((event) => [event.outcome.vessel, event.outcome.exitCode, event.outcome.tail, event.outcome.artifacts ?? false]);
 
     expect({ early, outcomes, stillRank0: await red.still('v1', 0) })
-      .toEqual({ early: 0, outcomes: [['v1', 0, 'v1 said this'], ['v2', 3, 'rank 1 of 2:\nv2 said this']], stillRank0: false });
+      .toEqual({ early: 0, outcomes: [['v1', 0, 'v1 said this', true], ['v2', 3, 'rank 1 of 2:\nv2 said this', false]], stillRank0: false });
   });
 
   test('is lost whole with any rank: the others stop, and it forms again from the vessels left and a replacement', async () => {

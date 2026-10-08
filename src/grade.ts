@@ -24,6 +24,8 @@ const VerdictRowSchema = v.looseObject({
   seconds: v.optional(v.number(), 0),
   output: v.optional(v.string(), ''),
   timings: v.optional(v.record(v.string(), v.number())),
+  /** Files in the task's artifacts directory the row points at as its evidence. */
+  artifacts: v.optional(v.array(v.string())),
   /** The revision whose proof an unchanged row reused, where a project caches green rows. */
   cached: v.optional(v.string()),
 });
@@ -72,6 +74,8 @@ export interface TaskAnswer {
   readonly entry: PlanEntry;
   /** The task's verdict rows, or null when it wrote no verdict file. */
   readonly rows: readonly VerdictRow[] | null;
+  /** The relative paths the task's artifacts directory kept, or null when it kept none. */
+  readonly artifacts: ReadonlySet<string> | null;
 }
 
 export interface Graded {
@@ -99,6 +103,10 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       else if (owner !== undefined) problems.push(`${name} was reported by both ${owner} and ${answer.name}`);
       else seen.set(name, answer.name);
       rows.push(row);
+
+      for (const path of row.artifacts ?? []) {
+        if (answer.artifacts?.has(path) !== true) problems.push(`${answer.name}: ${rowName(row)} names evidence ${path} its task did not keep`);
+      }
     }
 
     problems.push(...coverage(answer));

@@ -258,6 +258,13 @@ export class Armada {
 
     return response.status === 404 ? null : await response.text();
   }
+
+  /** A task's artifacts directory as its stored tar.gz, or null. */
+  async artifacts(id: string, index: number): Promise<Uint8Array | null> {
+    const response = await this.call(`/jobs/${id}/tasks/${String(index)}/artifacts`);
+
+    return response.status === 404 ? null : await new Response(response.body).bytes();
+  }
 }
 
 /** A job's times and counts, from its status. */

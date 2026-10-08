@@ -3,7 +3,7 @@
  * scheduling policy, so each start names what it starts from (the recipe's base image while preparing, an environment
  * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
-import { failureTail, SIZES, type Size } from '../../src/protocol';
+import { ARTIFACTS_PATH, failureTail, SIZES, type Size } from '../../src/protocol';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
  *  a command drops to the user inside. */
@@ -114,8 +114,8 @@ mkdir -p ${TASK_GROUP}/runner
 echo '${CONTROLLERS}' > ${TASK_GROUP}/cgroup.subtree_control
 for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${TASK_GROUP}/$owned"; done
 rm -rf ${TASK}
-mkdir -p ${TASK}
-chown ci:ci ${TASK}
+mkdir -p ${TASK} ${ARTIFACTS_PATH}
+chown ci:ci ${TASK} ${ARTIFACTS_PATH}
 cd ${workdir}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }

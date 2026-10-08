@@ -6,7 +6,7 @@
  *   export const square = task({ id: 'square', run: (n: number) => n * n });
  *   const squares = await square.map([1, 2, 3]);   // number[]
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
@@ -131,6 +131,8 @@ export interface Meta {
   /** The most memory its cgroup held, in bytes, and the CPU it used. */
   readonly peakMemory?: number;
   readonly cpuSeconds?: number;
+  /** Whether the task's artifacts directory was kept; `job.artifacts(index)` reads it. */
+  readonly artifacts: boolean;
   /** Answered from the task's cache, with nothing run. */
   readonly cached: boolean;
 }
@@ -470,10 +472,12 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
 
     try {
       const out = join(scratch, 'out');
+      const artifacts = join(scratch, 'artifacts');
       const given = secretsFrom(this.secrets, process.env);
 
       if ('missing' in given) throw new Error(`.local reads the secret ${given.missing} from this machine's environment, which lacks it`);
-      const context: Context = { index: 0, attempt: 1, signal: new AbortController().signal, out: outFile(out), files: scratch, secrets: given.secrets };
+      mkdirSync(artifacts);
+      const context: Context = { index: 0, attempt: 1, signal: new AbortController().signal, out: outFile(out), files: scratch, secrets: given.secrets, artifacts };
       const input = this.config.input === undefined ? item : await check(this.config.input, item, 'the input');
       const returned = await this.config.run(input as Json, context);
 
@@ -482,7 +486,7 @@ class PushedTask<I, O> extends Base<I, O> implements Task<I, O>, Runnable {
 
         return (value instanceof Uint8Array ? new Uint8Array(value) : value) as O;
       }
-      const ran = await execute(returned.script, { env: { ARMADA_OUT: out } });
+      const ran = await execute(returned.script, { env: { ARMADA_OUT: out, ARMADA_ARTIFACTS: artifacts } });
 
       if (ran.exitCode !== 0) throw new ShellError(returned.script, ran.exitCode, ran.stderr);
       const answered = await commandAnswer<O>(this.config.output, { exitCode: 0, tail: ran.stderr }, async () => {
@@ -696,6 +700,11 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     return await this.armada.output(await this.id, index);
   }
 
+  /** A task's artifacts directory as its stored tar.gz, or null when it kept none. */
+  async artifacts(index: number): Promise<Uint8Array | null> {
+    return await this.armada.artifacts(await this.id, index);
+  }
+
   /** The same as it downloads, for an output too large to hold in memory. */
   async outputStream(index: number): Promise<ReadableStream<Uint8Array> | null> {
     return await this.armada.outputStream(await this.id, index);
@@ -727,7 +736,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
   private async resultOf(id: string, outcome: Outcome): Promise<Result<I, O>> {
     const item = await this.item(id, outcome.index);
     const meta: Meta = {
-      seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true,
+      seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true,
       ...outcome.peakMemory === undefined ? {} : { peakMemory: outcome.peakMemory }, ...outcome.cpuSeconds === undefined ? {} : { cpuSeconds: outcome.cpuSeconds },
     };
     const base = { index: outcome.index, item, meta };

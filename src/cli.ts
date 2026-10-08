@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFil
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
-import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
+import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
@@ -39,6 +39,7 @@ map options:
   --pool=N             the most containers at once (default 50)
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
+  --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
   --speculative        let an idle container run a straggler again
   --secrets=<A,B>      give each task these secrets (armada secret set) in its environment
   --json               print each outcome as a JSON line
@@ -52,7 +53,7 @@ deploy options:
   --drain              wait for the open jobs first, as a deploy that changes the wire does
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
-The command's {item}, {index}, {out} and {files} are filled per item.
+The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
 verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.
@@ -62,7 +63,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['label=', 'secrets='], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
@@ -152,11 +153,23 @@ async function map(): Promise<number> {
     }, () => undefined);
   }, 3_000);
 
+  const artifacts = option('artifacts');
+
   await cancelOnInterrupt(job, id, async () => {
     for await (const result of job) {
       metas.push(result.meta);
+      let kept: string | undefined;
 
-      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: result.error } : {} }));
+      if (artifacts !== undefined && result.meta.artifacts) {
+        const archive = await job.artifacts(result.index);
+
+        if (archive !== null) {
+          kept = join(artifacts, String(result.index));
+          extractTar(archive, kept);
+        }
+      }
+
+      if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, ...'value' in result ? { value: result.value } : {}, ...'error' in result ? { error: result.error } : {}, ...kept === undefined ? {} : { artifacts: kept } }));
       else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
 
       if (result.kind === 'lost' || result.kind === 'cancelled') worst = 2;
