@@ -10,9 +10,9 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
+import { BUNDLE_PATH, failureTail, INLINE_BYTES, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, USER_HOME, WAIT, bounded, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
+  ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, bounded, killOf, launchSlot, launchTask, maskValuesOf, mounts, must, pipeIn, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -34,6 +34,11 @@ export interface VesselSpec {
   readonly output: boolean;
   /** A task's own bound, in seconds. */
   readonly timeout: number;
+  /** The tasks this container runs at once: 1 (absent for an earlier Worker's spec) shares today's layout; more
+   *  gives each slot its own namespace, overlay and cgroup. */
+  readonly slots?: number;
+  /** One slot's memory cap in bytes: the size's memory split evenly across the slots. */
+  readonly slotMemoryBytes?: number;
 }
 
 type State = 'waiting' | 'booting' | 'working' | 'done' | 'failed' | 'stopped';
@@ -95,6 +100,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('state', 'stopped' satisfies State);
     // A claim an earlier Worker stored kept its env: a stopped vessel takes up no task again.
     await this.ctx.storage.delete('current');
+    await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
     await this.ctx.storage.deleteAlarm();
     // Stopping is the job's last word: a container that will not stop ends at its inactivity timeout.
     await Promise.allSettled([this.ctx.container?.destroy()]);
@@ -128,6 +134,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
       await this.ctx.storage.put('state', 'failed' satisfies State);
       await this.ctx.storage.delete('current');
+      await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
       console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said(cause) }));
       await Promise.allSettled([this.ctx.container?.destroy()]);
       await this.fleet().release(this.holder(spec));
@@ -198,47 +205,79 @@ export class ArmadaVessel extends DurableObject<Env> {
     return `the container ${ended}; this object ${restarted}`;
   }
 
-  private async work(spec: VesselSpec): Promise<boolean> {
+  /** The task running in `slot`: `slot:<n>` now, a `current` an earlier Worker left read as slot 0, whose dir is
+   *  `TASK` because its vessel is not slotted. Each slot's own key: concurrent slot loops never lose each other's
+   *  update. */
+  private async current(slot: number): Promise<Current | undefined> {
+    const kept = await this.ctx.storage.get<Current>(`slot:${String(slot)}`);
+
+    if (kept !== undefined) return kept;
+    if (slot !== 0) return undefined;
+    const legacy = await this.ctx.storage.get<Current>('current');
+
+    if (legacy === undefined) return undefined;
+    await this.ctx.storage.delete('current');
+    await this.putCurrent(0, legacy);
+
+    return legacy;
+  }
+
+  private async putCurrent(slot: number, current: Current): Promise<void> {
+    await this.ctx.storage.put(`slot:${String(slot)}`, current);
+  }
+
+  private async dropCurrent(slot: number): Promise<void> {
+    await this.ctx.storage.delete(`slot:${String(slot)}`);
+  }
+
+  /** Every task this vessel runs, by slot: for the gang token `fetch` answers and a lost container's word. */
+  private async currents(): Promise<Map<number, Current>> {
+    const slots = new Map<number, Current>();
+    const legacy = await this.ctx.storage.get<Current>('current');
+
+    for (const [key, current] of await this.ctx.storage.list<Current>({ prefix: 'slot:' })) slots.set(Number(key.slice('slot:'.length)), current);
+
+    if (legacy !== undefined) slots.set(0, legacy);
+
+    return slots;
+  }
+
+  /** Where slot `slot`'s task dir and its cgroup are: a slotted vessel's own under `slots`, else `TASK`'s. */
+  private dirs(spec: VesselSpec, slot: number): { readonly dir: string; readonly group: string } {
+    return (spec.slots ?? 1) > 1 ? { dir: slotTask(slot), group: taskGroup(slot) } : { dir: TASK, group: TASK_GROUP };
+  }
+
+  /** One slot's slice: pull a task while free, block on `waitOn` while one runs, finish it, repeat — all slots' loops
+   *  run beside each other, so one slot's store never idles another's launch. A null claim ends this loop retired; a
+   *  `waitMs` parks only this slot; a fatal error fails the vessel once through `abort`. */
+  private async slotLoop(spec: VesselSpec, slot: number, until: number, abort: { failed: boolean }): Promise<'reslice' | 'retired' | number> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
-
-    this.watch(container);
-    const until = Date.now() + SLICE_MS;
+    const { dir, group } = this.dirs(spec, slot);
     let lost = 0;
 
-    while (Date.now() < until) {
-      const current = await this.ctx.storage.get<Current>('current');
+    while (Date.now() < until && !abort.failed) {
+      let current = await this.current(slot);
 
       if (current === undefined) {
         // A container the platform is stopping takes no new task: the vessel fails, and the job replaces it.
         const stopping = (await must(container, 'the stop check', ['/bin/sh', '-c', STOPPED], { ms: EXEC_MS })).stdout.trim();
 
         if (stopping !== '') throw new Error(`the platform asked the container to stop at ${stopping}`);
-        const claim = await job.claim(spec.name);
+        const claim = await job.claim(spec.name, slot);
 
-        if (claim === null) return await this.retire(spec);
+        if (claim === null) return 'retired';
 
-        // The tasks left wait out a retry's backoff: the container waits with them.
-        if ('waitMs' in claim) {
-          await this.ctx.storage.setAlarm(Date.now() + claim.waitMs);
-
-          return false;
-        }
-        // The values the task gets are the ones its log is masked with, kept as root in the container: a secret set
-        // again or deleted while the task runs changes neither.
-        if (claim.secrets.length > 0) {
-          await must(container, 'keeping the secrets to mask', ['node', '-e', KEEP_MASK, MASK_VALUES], { env: { ...claim.env, ARMADA_MASK: claim.secrets.join(' ') }, ms: EXEC_MS });
-        }
-        await this.network(container, claim.gang);
-        await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
+        // The tasks left wait out a retry's backoff: this slot waits with them; the others run on.
+        if ('waitMs' in claim) return claim.waitMs;
         const { env, ...kept } = claim;
 
-        await this.ctx.storage.put('current', { claim: kept, startedAt: Date.now() } satisfies Current);
-        continue;
+        await this.launch(spec, container, claim, slot);
+        current = { claim: kept, startedAt: Date.now() };
+        await this.putCurrent(slot, current);
       }
-
       const seconds = Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
-      const [waited] = await Promise.allSettled([run(container, ['/bin/sh', '-c', WAIT, 'wait', String(seconds)], { ms: (seconds + 30) * 1000 })]);
+      const [waited] = await Promise.allSettled([run(container, ['/bin/sh', '-c', waitOn(dir), 'wait', String(seconds)], { ms: (seconds + 30) * 1000 })]);
 
       if (waited.status === 'rejected') {
         lost += 1;
@@ -252,23 +291,84 @@ export class ArmadaVessel extends DurableObject<Env> {
       const exit = waited.value.stdout.trim();
 
       if (exit !== '') {
-        await this.finish(spec, current, Number(exit));
+        await this.finish(spec, slot, current, Number(exit));
         continue;
       }
 
       if (Date.now() - current.startedAt > spec.timeout * 1000) {
-        await must(container, 'the kill', ['/bin/sh', '-c', KILL], { ms: EXEC_MS });
-        await this.finish(spec, current, 124, 'timeout');
+        await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+        await this.finish(spec, slot, current, 124, 'timeout');
         continue;
       }
 
       if (!(await job.still(spec.name, current.claim.index))) {
-        await must(container, 'the kill', ['/bin/sh', '-c', KILL], { ms: EXEC_MS });
-        await this.ctx.storage.delete('current');
+        await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+        await this.dropCurrent(slot);
+      }
+    }
+
+    return 'reslice';
+  }
+
+  private async work(spec: VesselSpec): Promise<boolean> {
+    const container = this.container();
+    const slots = spec.slots ?? 1;
+
+    this.watch(container);
+    const until = Date.now() + SLICE_MS;
+    const abort = { failed: false };
+    const loops = Array.from({ length: slots }, (_, slot) => this.slotLoop(spec, slot, until, abort));
+
+    // The loops keep answering after the first of them fails; the flag stops their next step, and their late
+    // rejections are swallowed — the alarm's catch fails the vessel once.
+    for (const loop of loops) void loop.catch(() => undefined);
+    const ended: ('reslice' | 'retired' | number)[] = [];
+
+    try {
+      ended.push(...await Promise.all(loops));
+    } catch (cause) {
+      abort.failed = true;
+
+      throw cause;
+    }
+
+    if (ended.every((each) => each === 'retired')) return await this.retire(spec);
+
+    if (ended.every((each) => each !== 'reslice')) {
+      const at = Math.min(...ended.filter((each): each is number => typeof each === 'number'));
+
+      if (Number.isFinite(at)) {
+        await this.ctx.storage.setAlarm(Date.now() + at);
+
+        return false;
       }
     }
 
     return true;
+  }
+
+  /** One claim launched into `slot`: the values its secrets started with kept for the log's mask, its gang's
+   *  network joined (a plain task leaves any), the launch detached. A slotted launch recreates the slot's root where
+   *  the file lives, so the keeping goes last there; a plain one keeps today's order. */
+  private async launch(spec: VesselSpec, container: Container, claim: Claim, slot: number): Promise<void> {
+    const keep = async () => {
+      // The values the task gets are the ones its log is masked with, kept as root in the container: a secret set
+      // again or deleted while the task runs changes neither.
+      if (claim.secrets.length > 0) {
+        await must(container, 'keeping the secrets to mask', ['node', '-e', KEEP_MASK, (spec.slots ?? 1) > 1 ? maskValuesOf(slot) : MASK_VALUES], { env: { ...claim.env, ARMADA_MASK: claim.secrets.join(' ') }, ms: EXEC_MS });
+      }
+    };
+
+    if ((spec.slots ?? 1) <= 1) await keep();
+    await this.network(container, claim.gang);
+
+    if ((spec.slots ?? 1) > 1) {
+      // Its own cgroup too, so a task's group reads and caps reach the slot's, not the single task group.
+      await must(container, 'the launch', ['/bin/sh', '-c', launchSlot(spec.workdir, slot, spec.slotMemoryBytes ?? 0, spec.tmpfs), 'launch', ...claim.argv], { env: { ...claim.env, ARMADA_CGROUP: taskGroup(slot) }, ms: EXEC_MS });
+      await keep();
+    } else {
+      await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
+    }
   }
 
   /** The container on `gang`'s network as its rank, or off any gang's for a task that is none's. */
@@ -291,7 +391,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token: a connection into
    *  this container's relay, which connects `port` on this rank's address. */
   override async fetch(request: Request): Promise<Response> {
-    const token = (await this.ctx.storage.get<Current>('current'))?.claim.gang?.token;
+    const token = [...(await this.currents()).values()].map((current) => current.claim.gang?.token).find((gang) => gang !== undefined);
     const expected = new TextEncoder().encode(token ?? '');
     const supplied = new TextEncoder().encode(request.headers.get(RELAY_HEADER) ?? '');
 
@@ -335,36 +435,37 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
-  private async finish(spec: VesselSpec, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
+  private async finish(spec: VesselSpec, slot: number, current: Current, exitCode: number, reason?: 'timeout'): Promise<void> {
     const container = this.container();
+    const { dir, group } = this.dirs(spec, slot);
     const { index, attempt } = current.claim;
     const rank = current.claim.gang?.rank ?? 0;
     const job = this.env.JOB.getByName(spec.jobId);
 
-    await this.ctx.storage.delete('current');
+    await this.dropCurrent(slot);
 
     if (!(await job.accept(spec.name, index))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
-    await this.mask(current.claim.secrets);
-    const tail = await run(container, ['/bin/sh', '-c', tailOf(TASK)], { ms: EXEC_MS });
+    await this.mask(current.claim.secrets, (spec.slots ?? 1) > 1 ? maskValuesOf(slot) : MASK_VALUES, `${dir}/log`);
+    const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
-    const usage = usageFrom(await run(container, ['/bin/sh', '-c', USAGE], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
+    const usage = usageFrom(await run(container, ['/bin/sh', '-c', usageOf(group)], { ms: EXEC_MS }).then((ran) => ran.stdout, () => ''));
 
-    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${TASK}/log > ${TASK}/log.gz 2>/dev/null || : > ${TASK}/log.gz
-if [ -n "$(find ${ARTIFACTS_PATH} -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${TASK}/artifacts.tar.gz -C ${ARTIFACTS_PATH} .; fi`], { ms: EXEC_MS });
-    await this.store(`${TASK}/log.gz`, taskKey(spec.jobId, index, 'log', rank), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+    await must(container, 'packing the log', ['/bin/sh', '-c', `gzip -c ${dir}/log > ${dir}/log.gz 2>/dev/null || : > ${dir}/log.gz
+if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts .; fi`], { ms: EXEC_MS });
+    await this.store(`${dir}/log.gz`, taskKey(spec.jobId, index, 'log', rank), { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
-    const out = spec.output || spec.bundle !== null ? await this.store(OUT_PATH, taskKey(spec.jobId, index, 'output', rank), {}) : null;
+    const out = spec.output || spec.bundle !== null ? await this.store(`${dir}/out`, taskKey(spec.jobId, index, 'output', rank), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
-    const packed = rank === 0 ? await this.store(`${TASK}/artifacts.tar.gz`, taskKey(spec.jobId, index, 'artifacts'), { contentType: 'application/gzip' }) : null;
+    const packed = rank === 0 ? await this.store(`${dir}/artifacts.tar.gz`, taskKey(spec.jobId, index, 'artifacts'), { contentType: 'application/gzip' }) : null;
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
-    const said = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', ANSWER_PATH], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
+    const said = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS }).then((ran) => ran.stdout.trim(), () => ''));
     const [kind = '', error] = said.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
     const outcome: Outcome = {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, ...(spec.slots ?? 1) > 1 ? { slot } : {}, tail: tail.stdout, output: out !== null, value, answer, ...packed === null ? {} : { artifacts: true }, ...error === undefined ? {} : { error }, ...usage,
     };
 
     if (exitCode === 0 && out !== null && current.claim.cache !== undefined) await this.keepInCache(taskKey(spec.jobId, index, 'output'), current.claim.cache, answer);
@@ -387,9 +488,9 @@ if [ -n "$(find ${ARTIFACTS_PATH} -mindepth 1 -print -quit 2>/dev/null)" ]; then
 
   /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
    *  read again: one set anew or deleted meanwhile would leave the value the task had unmasked. */
-  private async mask(names: readonly string[] | undefined): Promise<void> {
+  private async mask(names: readonly string[] | undefined, kept: string, log: string): Promise<void> {
     if (names === undefined || names.length === 0) return;
-    await must(this.container(), 'masking the secrets', ['node', '-e', MASK, `${TASK}/log`, MASK_VALUES], { ms: EXEC_MS });
+    await must(this.container(), 'masking the secrets', ['node', '-e', MASK, log, kept], { ms: EXEC_MS });
   }
 
   /**

@@ -196,8 +196,11 @@ With two 10-second test videos in `videos.txt`, `bun encode.ts` printed `2 video
   `Map`, `any` or `unknown` is a type error.
 - An output can be up to 4.995 GiB, R2's limit for one upload, and `job.outputStream(i)` streams it. A 336 MB tarball
   built as one task came back as one output in 41 s, start to file.
-- `map(items, { pool, label, env, files, tmpfs })` sets a job's options. A task takes `timeout`, and `speculative` to
-  let an idle container rerun a straggler.
+- `map(items, { pool, slots, label, env, files, tmpfs })` sets a job's options. `slots` runs that many tasks at once
+  in each container, each in its own mount namespace: the slot's task dir over `{out}`, `{artifacts}` and the answer,
+  a fresh tmpfs, overlays over the checkout and `$HOME`, and a cgroup with a fair share of the size's memory. Network
+  is shared, so two tasks cannot bind one fixed port, and a gang task cannot share a container at all. A task takes
+  `timeout`, and `speculative` to let an idle container rerun a straggler.
 - `retries` reruns an item only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
   exitCodes: [75], errors: ['FetchError'] }`, an item that exits 75 or throws a `FetchError` runs up to three times,
   waiting 5 s, then 10 s. Any other failure is final.
@@ -273,6 +276,7 @@ way, under `<dir>/<index>`.
 | `task.name` | `name` | The entry key that names a task. |
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
+| `task.slots` | `1` | The tasks one container runs at once, each in its own slot. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 | `task.secrets` | `[]` | The secrets each task gets in its environment, by name (`armada secret set <name>`). |
 
@@ -292,7 +296,7 @@ in peak memory and average busy cores. A new size prepares its own environment o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

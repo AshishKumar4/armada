@@ -299,6 +299,15 @@ export function poolFor(estimates: readonly number[], most: number): number {
   return most;
 }
 
+/** A run's lanes and the containers that carry them: `poolFor` sizes the lanes, and each container carries `slots`
+ *  of them. */
+export function lanesFor(estimates: readonly (number | undefined)[], tasks: number, containers: number, slots: number): { readonly lanes: number; readonly pool: number } {
+  const most = Math.min(containers * slots, tasks);
+  const lanes = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates.map((seconds) => seconds ?? 0), most) : most;
+
+  return { lanes, pool: Math.ceil(lanes / slots) };
+}
+
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. With `json` the progress goes to stderr and the run's answer
  *  is the one JSON object on stdout: its verdict, problems, rows and report path. */
@@ -317,7 +326,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
   if (uploaded !== null) note(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
-  const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada };
+  const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots };
   const here = config.plan.local ? localPlan(repo, sha, [...config.plan.command, ...planArgs], config.target, timings, config.env) : undefined;
   let planId = 'local';
   let printed: string;
@@ -351,9 +360,10 @@ export async function runCI(armada: Armada, target: string, label: string, planA
 
   const plan = v.parse(PlanSchema, JSON.parse(printed));
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
-  const most = Math.min(config.pool, plan.include.length);
+  const slots = config.task.slots;
+  const most = Math.min(config.pool * slots, plan.include.length);
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
-  const pool = estimates.every((seconds) => seconds !== undefined) ? poolFor(estimates, most) : most;
+  const { lanes, pool } = lanesFor(estimates, plan.include.length, config.pool, slots);
   // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
   // whole tier never sees them.
   const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, secrets: [...new Set([...config.task.secrets, ...secrets])] };
@@ -363,7 +373,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
   const jobId = await job.id;
 
-  note(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${pool < most ? `, which the plan's estimates say finish as soon as ${String(most)} would` : ''}`);
+  note(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${slots > 1 ? ` of ${String(slots)} slots` : ''}${lanes < most ? `, which the plan's estimates say finish as soon as ${String(Math.ceil(most / slots))} would` : ''}`);
   const nameOf = (index: number) => names[index] ?? String(index);
   // Each task's rows, read from its verdict file as its result lands, and graded as read: a task that reports many rows
   // exits 0 with red ones among them, so its exit alone would say green. Null for a file missing or malformed.

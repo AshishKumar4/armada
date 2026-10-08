@@ -121,6 +121,57 @@ describe('a vessel that found no task', () => {
   });
 });
 
+describe('a slotted job', () => {
+  test('starts a container for each full share of lanes its tasks fill, not one per task', async () => {
+    const items = Array.from({ length: 8 }, () => ({ item: 'a', argv: ['true'] }));
+    const { begun } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 8, slots: 4 });
+
+    expect(begun).toEqual(['j1/v1', 'j1/v2']);
+  });
+
+  test('gives one vessel a claim for each of its slots, and says the slot a running task is in', async () => {
+    const items = Array.from({ length: 3 }, () => ({ item: 'a', argv: ['true'] }));
+    const { job: slotted } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 8, slots: 4 });
+    const claims = await Promise.all([slotted.claim('v1', 0), slotted.claim('v1', 1), slotted.claim('v1', 2)]);
+    const status = await slotted.status();
+
+    expect({ indexes: claims.map((claim) => claim === null || 'waitMs' in claim ? -1 : claim.index), running: status?.running }).toEqual({
+      indexes: [0, 1, 2],
+      running: [{ index: 0, vessel: 'v1', started: status?.running?.[0]?.started ?? 0, slot: 0 }, { index: 1, vessel: 'v1', started: status?.running?.[1]?.started ?? 0, slot: 1 }, { index: 2, vessel: 'v1', started: status?.running?.[2]?.started ?? 0, slot: 2 }],
+    });
+  });
+
+  test('keeps a vessel whose slots are busy counted alive while the queue is empty, so it grows no more', async () => {
+    const task = { item: 'a', argv: ['true'] };
+    const { job: open, begun } = await job({ recipe: {}, items: [], open: true, run: { kind: 'command' }, pool: 1, slots: 2 });
+
+    await open.add([task, task]);
+    await open.claim('v1', 0);
+    await open.claim('v1', 1);
+    const idle = await open.claim('v1', 0);
+    await open.add([task]);
+
+    expect({ idle, begun }).toEqual({ idle: null, begun: ['j1/v1'] });
+  });
+
+  test('requeues every one of a lost vessel\'s tasks, not just one', async () => {
+    const items = Array.from({ length: 3 }, () => ({ item: 'a', argv: ['true'] }));
+    const { job: slotted } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 8, slots: 3 });
+    const claims = await Promise.all([slotted.claim('v1', 0), slotted.claim('v1', 1), slotted.claim('v1', 2)]);
+
+    await slotted.vesselFailed('v1', 'the container ended');
+    const again = await Promise.all([slotted.claim('v2', 0), slotted.claim('v2', 1), slotted.claim('v2', 2)]);
+
+    expect([claims, again].map((each) => each.map((claim) => claim === null || 'waitMs' in claim ? -1 : claim.index))).toEqual([[0, 1, 2], [0, 1, 2]]);
+  });
+
+  test('refuses a gang: a gang takes a whole container, which a slotted job\'s containers cannot give it', async () => {
+    const { job: open } = await job({ recipe: {}, items: [], open: true, run: { kind: 'command' }, slots: 2 });
+
+    expect(await open.add([{ item: { gang: 4 }, argv: ['true'] }])).toBe('item 0\'s gang takes a whole container to itself: a slotted job\'s containers share each slot\'s view, so a gang runs only with 1 slot');
+  });
+});
+
 describe('a job none of whose containers starts', () => {
   test('says so once, naming its environment and why, however many vessels failed', async () => {
     const { job: broken, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2 });

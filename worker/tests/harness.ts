@@ -163,7 +163,7 @@ export function world(bindings: Partial<Record<keyof Env, unknown>>): Env {
 }
 
 /** What a container's exec answers: its exit code and output, or a throw for an exec the platform lost. */
-export type Answer = (argv: readonly string[], options?: ContainerExecOptions) => { readonly exitCode: number; readonly stdout: string } | Error;
+export type Answer = (argv: readonly string[], options?: ContainerExecOptions) => { readonly exitCode: number; readonly stdout: string } | Error | Promise<{ readonly exitCode: number; readonly stdout: string }>;
 
 /** A container that has started, whose every exec `answer` decides. */
 export function container(answer: Answer): Container {
@@ -174,7 +174,7 @@ export function container(answer: Answer): Container {
     monitor: () => new Promise<void>(() => undefined),
     setInactivityTimeout: async () => undefined,
     exec: async (argv: string[], options?: ContainerExecOptions) => {
-      const answered = answer(argv, options);
+      const answered = await answer(argv, options);
 
       if (answered instanceof Error) throw answered;
 

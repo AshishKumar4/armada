@@ -17,6 +17,17 @@ export const STATE = '/armada';
 
 export const TASK = `${STATE}/task`;
 
+/** Where slot `slot` of a slotted container lives: its task dir (bound over `TASK` inside the slot's namespace), its
+ *  overlays' upper and work dirs, its secrets file. Recreated at each launch, so nothing survives its last task. */
+export const slotRoot = (slot: number): string => `${STATE}/slots/${String(slot)}`;
+
+/** The slot's own task dir, as the root side reaches it; inside the slot's namespace it is `TASK` exactly. */
+export const slotTask = (slot: number): string => `${slotRoot(slot)}/task`;
+
+/** Where the values of a slotted task's secrets wait for its log's mask: each slot's own, where two slots' tasks
+ *  could end together. */
+export const maskValuesOf = (slot: number): string => `${slotRoot(slot)}/mask.json`;
+
 /** Where the container's main process marks that the platform asked the container to stop (`hold`). */
 export const STOPPING = `${STATE}/stopping`;
 
@@ -33,19 +44,25 @@ const PARENT_GROUP = '/sys/fs/cgroup/armada';
  *  controllers holds no process. Everything in it ends with the task, daemons it detached with `setsid` included. */
 export const TASK_GROUP = `${PARENT_GROUP}/task`;
 
+/** Slot `slot`'s `TASK_GROUP`: a slotted container gives each slot its own, memory capped at the slot's share, so an
+ *  over-using slot is OOM-killed inside its own group. */
+export const taskGroup = (slot: number): string => `${PARENT_GROUP}/task-${String(slot)}`;
+
 /** Controllers a task's groups get: CPU and memory to read and to cap, pids to bound. */
 const CONTROLLERS = '+cpu +memory +pids';
 
-/** As root: ends everything in the task's group, the user's nested groups included, and removes them. */
-const END_GROUP = String.raw`if [ -d ${TASK_GROUP} ]; then
-  echo 1 > ${TASK_GROUP}/cgroup.kill
+/** As root: ends everything in `group`, a task's, the user's nested groups included, and removes them. */
+const endGroup = (group: string): string => String.raw`if [ -d ${group} ]; then
+  echo 1 > ${group}/cgroup.kill
   n=0
-  while grep -q '^populated 1' ${TASK_GROUP}/cgroup.events; do
-    n=$((n + 1)); [ "$n" -lt 100 ] || { echo "${TASK_GROUP} would not empty" >&2; exit 1; }
+  while grep -q '^populated 1' ${group}/cgroup.events; do
+    n=$((n + 1)); [ "$n" -lt 100 ] || { echo "${group} would not empty" >&2; exit 1; }
     sleep 0.05
   done
-  find ${TASK_GROUP} -depth -type d -exec rmdir {} +
+  find ${group} -depth -type d -exec rmdir {} +
 fi`;
+
+const END_GROUP = endGroup(TASK_GROUP);
 
 /** git as a GitHub runner has it: Debian trixie's 2.47 prints no `path=` records for `rev-list --objects -z`. Built
  *  from kernel.org's release, pinned by digest. */
@@ -123,6 +140,44 @@ cd ${workdir}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
+/** `launchTask` for one slot of a slotted container: the same task, inside a private mount namespace where the
+ *  slot's task dir is bound over `TASK`, each tmpfs path is fresh, and the checkout and the user's home are overlays
+ *  whose writes land under the slot's root — so no slot reads another's files or writes the real checkout, slot 0
+ *  included. The `cd` is inside the namespace or it would pin the checkout below the overlay. Its cgroup caps at
+ *  `memoryBytes`, the container's memory split evenly across slots. Network is shared: two tasks binding one fixed
+ *  port collide. */
+export function launchSlot(workdir: string, slot: number, memoryBytes: number, tmpfs: readonly string[]): string {
+  const root = slotRoot(slot);
+  const dir = slotTask(slot);
+  const group = taskGroup(slot);
+  const fresh = tmpfs.map((path) => `mount -t tmpfs -o mode=1777,size=6g tmpfs ${path}`).join('\n');
+
+  return String.raw`set -eu
+if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
+mkdir -p ${PARENT_GROUP}
+echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
+${endGroup(group)}
+mkdir -p ${group}/runner
+echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
+echo ${String(memoryBytes)} > ${group}/memory.max
+for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done
+rm -rf ${root}
+mkdir -p ${dir} ${dir}/artifacts ${root}/upper ${root}/work ${root}/home-upper ${root}/home-work
+chown -R ci:ci ${root}
+setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${group}/runner/cgroup.procs
+"$@" 2>${root}/launch.err || true
+[ -f ${dir}/exit ] || { cat ${root}/launch.err > ${dir}/log 2>/dev/null; echo 70 > ${dir}/exit; }' launch unshare --mount --propagation private sh -c '
+set -eu
+mkdir -p ${TASK}
+mount --bind ${dir} ${TASK}
+${fresh}
+mount -t overlay overlay -o userxattr,lowerdir=${workdir},upperdir=${root}/upper,workdir=${root}/work ${workdir}
+mount -t overlay overlay -o userxattr,lowerdir=${USER_HOME},upperdir=${root}/home-upper,workdir=${root}/home-work ${USER_HOME}
+mount -t tmpfs -o mode=0755,size=1m tmpfs ${STATE}/slots
+cd ${workdir}
+exec "$@"' ns ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
+}
+
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
  *  nothing while it runs. */
 export function waitOn(dir: string): string {
@@ -142,8 +197,10 @@ mkdir -p ${STATE}/phases
 mkdir "$dir" 2>/dev/null || exit 0
 setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
-/** The task's cgroup after it exited: its peak memory in bytes, then its CPU time in microseconds. */
-export const USAGE = String.raw`cat ${TASK_GROUP}/memory.peak; sed -n 's/^usage_usec //p' ${TASK_GROUP}/cpu.stat`;
+/** `group`'s task's cgroup after it exited: its peak memory in bytes, then its CPU time in microseconds. */
+export const usageOf = (group: string): string => String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat`;
+
+export const USAGE = usageOf(TASK_GROUP);
 
 /** `USAGE`'s answer, or nothing for a group already gone. */
 export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: number } {
@@ -206,15 +263,18 @@ fs.closeSync(output);
 fs.renameSync(file + '.masked', file);
 fs.rmSync(kept, { force: true });`;
 
-/** Ends the task and everything it started: its session a TERM, then 2 s later a KILL, then its whole group. */
-export const KILL = String.raw`set -eu
-pid="$(cat ${TASK}/pid 2>/dev/null || true)"
+/** Ends the task in `dir` and everything it started: its session a TERM, then 2 s later a KILL, then its whole
+ *  `group`. */
+export const killOf = (dir: string, group: string): string => String.raw`set -eu
+pid="$(cat ${dir}/pid 2>/dev/null || true)"
 if [ -n "$pid" ]; then
   kill -TERM -- "-$pid" 2>/dev/null || true
   sleep 2
   kill -KILL -- "-$pid" 2>/dev/null || true
 fi
-${END_GROUP}`;
+${endGroup(group)}`;
+
+export const KILL = killOf(TASK, TASK_GROUP);
 
 /** A size's instance type, as a start takes it. */
 export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => SIZES[size].instance;
@@ -231,7 +291,14 @@ stop=
 while [ -z "$stop" ]; do sleep 5 & wait $!; done
 date -u +%Y-%m-%dT%H:%M:%SZ > ${state}/stopping
 end=$(( $(date +%s) + ${String(graceSeconds)} ))
-while [ -f ${state}/task/pid ] && [ ! -f ${state}/task/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 1; done
+while :; do
+  running=
+  for dir in ${state}/task ${state}/slots/*/task; do
+    [ -f "$dir/pid" ] && [ ! -f "$dir/exit" ] && running=1
+  done
+  [ -z "$running" ] || [ "$(date +%s)" -ge "$end" ] && break
+  sleep 1
+done
 sleep ${String(lingerSeconds)}`;
 }
 

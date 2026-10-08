@@ -141,7 +141,7 @@ const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
   const spec = v.parse(JobSpecSchema, await request.json());
-  const refused = refusal(spec.run, spec.items, spec.pool);
+  const refused = refusal(spec.run, spec.items, spec.pool, spec.slots);
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 

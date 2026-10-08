@@ -3,10 +3,10 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argvOf, extractTar, packBase, packOf, poolFor } from '../src/ci';
+import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { capOf, environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, servedFloor, shareOf, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
+import { capOf, environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, refusal, servedFloor, shareOf, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 
 describe('a task\'s command', () => {
@@ -284,6 +284,21 @@ describe('a CI run\'s pool', () => {
       capped: poolFor(Array.from({ length: 30 }, () => 300), 12),
       pairs: poolFor([100, 40, 40, 40, 40], 5),
     }).toEqual({ oneLong: 10, even: 30, capped: 12, pairs: 3 });
+  });
+
+  test('sizes lanes for a slotted run and rounds them up into containers', () => {
+    expect({
+      even: lanesFor(Array.from({ length: 60 }, () => 300), 60, 40, 4),
+      oneLong: lanesFor([500, ...Array.from({ length: 89 }, (_, index) => 20 + index % 40)], 90, 40, 4),
+      unsized: lanesFor([undefined, 5], 60, 40, 4),
+    }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 60, pool: 15 } });
+  });
+
+  test('refuses a gang under more than one slot: a gang takes a whole container', () => {
+    const gang = [{ item: { gang: 4 }, argv: ['true'] }];
+
+    expect([refusal({ kind: 'command' }, gang, 4, 1), refusal({ kind: 'command' }, gang, 4, 2), refusal({ kind: 'command' }, gang, 4)])
+      .toEqual([null, 'item 0\'s gang takes a whole container to itself: a slotted job\'s containers share each slot\'s view, so a gang runs only with 1 slot', null]);
   });
 });
 

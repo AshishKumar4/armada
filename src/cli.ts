@@ -41,6 +41,7 @@ map options:
   --commit=<rev>       run in the commit's checkout, in the environment its .armada.json names
   --size=<size>        each container's size: micro, mini, small or medium (default medium)
   --pool=N             the most containers at once (default 50)
+  --slots=N            the tasks one container runs at once, each in its own slot (default 1)
   --timeout=S          a task's limit, in seconds (default 3600)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
@@ -69,7 +70,7 @@ prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'output', 'speculative', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
@@ -146,7 +147,7 @@ async function map(): Promise<number> {
   const argv = argvOf(rest, base);
   const taskOptions = { speculative: flag('speculative'), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
-  const options = { armada, pool: whole('pool'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   const id = await job.id;
   let worst = 0;

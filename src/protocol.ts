@@ -142,10 +142,15 @@ export const MAX_GANG = 64;
 
 /** Why a job of at most `pool` containers refuses these tasks: a command's task carries its argv, a pushed task's
  *  carries none, and a gang is a whole number of containers the pool holds. */
-export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], pool: number): string | null {
+export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], pool: number, slots = 1): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
   if (odd >= 0) return `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
+  if (slots > 1) {
+    const ganged = tasks.findIndex((task) => gangOf(task.item) > 1);
+
+    if (ganged >= 0) return `item ${String(ganged)}'s gang takes a whole container to itself: a slotted job's containers share each slot's view, so a gang runs only with 1 slot`;
+  }
   const ganged = tasks.findIndex((task) => !Number.isInteger(gangOf(task.item)) || gangOf(task.item) < 1 || gangOf(task.item) > Math.min(MAX_GANG, pool));
 
   return ganged < 0 ? null : `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
@@ -192,6 +197,8 @@ export const JobSpecSchema = v.object({
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
   /** The most containers this job runs at once; the account's ceiling and the item count bound it too. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 50),
+  /** The tasks one container runs at once, each isolated in its own slot: the job's lanes are pool × slots. */
+  slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** A task's own bound, in seconds. */
@@ -218,6 +225,8 @@ export const OutcomeSchema = v.object({
   seconds: v.number(),
   vessel: v.string(),
   attempt: v.number(),
+  /** The slot of the vessel's container it ran in, only for a job of more than one slot a container. */
+  slot: v.optional(v.number()),
   /** The last lines the task printed. */
   tail: v.string(),
   /** Whether the task's output is stored, at `/jobs/<id>/tasks/<index>/output`, and the output itself when it is text
@@ -269,7 +278,7 @@ export const JobStatusSchema = v.object({
   environment: v.nullable(v.object({ key: v.string(), sha: v.nullable(v.string()), created: v.number(), seconds: v.record(v.string(), v.number()) })),
   /** The tasks running now, one row per container each runs on (every rank of a gang, a straggler's second run), with
    *  when it began there. Absent from an earlier Worker. */
-  running: v.optional(v.array(v.object({ index: v.number(), vessel: v.string(), started: v.number() }))),
+  running: v.optional(v.array(v.object({ index: v.number(), vessel: v.string(), started: v.number(), slot: v.optional(v.number()) }))),
 });
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;

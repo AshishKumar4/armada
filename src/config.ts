@@ -48,6 +48,8 @@ const ConfigSchema = v.object({
     verdict: v.optional(v.boolean(), true),
     /** Whether a straggling task may be run again by an idle container, first answer kept. */
     speculative: v.optional(v.boolean(), false),
+    /** The tasks one container runs at once, each in its own slot. Default 1. */
+    slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
     timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
     /** The deployment's secrets (`armada secret set <name>`) each task gets in its environment, by name. */
     secrets: v.optional(v.array(SecretName), []),

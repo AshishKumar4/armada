@@ -138,6 +138,19 @@ export class ArmadaJob extends DurableObject<Env> {
     this.stampedEvents = true;
   }
 
+  private slottedTasks = false;
+
+  /** The `tasks` table with its `slot`/`dup_slot` columns: added here to the table of a job an earlier Worker
+   *  created. */
+  private slotted(): void {
+    if (this.slottedTasks) return;
+    const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(tasks)').toArray().map((column) => column.name);
+
+    if (!columns.includes('slot')) this.sql.exec('ALTER TABLE tasks ADD COLUMN slot INTEGER');
+    if (!columns.includes('dup_slot')) this.sql.exec('ALTER TABLE tasks ADD COLUMN dup_slot INTEGER');
+    this.slottedTasks = true;
+  }
+
   /** A task's one outcome, onto the stream with when it landed. */
   private append(outcome: Outcome): void {
     this.stamped();
@@ -160,7 +173,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const spec = await this.spec();
 
     if (spec === undefined || (await this.ctx.storage.get<boolean>('open')) !== true || (await this.ctx.storage.get<Phase>('phase')) === 'done') return 'the job takes no more items';
-    const refused = refusal(spec.run, items, spec.pool) ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
+    const refused = refusal(spec.run, items, spec.pool, spec.slots) ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
 
     if (refused !== null) return refused;
     const added = this.insert(items);
@@ -315,7 +328,8 @@ export class ArmadaJob extends DurableObject<Env> {
     if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
     const named = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name LIKE 'v%'`).one()['n']);
-    const wanted = Math.min(spec.pool, Number(this.sql.exec(NEEDED).one()['n'])) - alive;
+    // The open tasks' lanes over the slots each container carries; a gang's rank is a whole slot already.
+    const wanted = Math.min(spec.pool, Math.ceil(Number(this.sql.exec(NEEDED).one()['n']) / spec.slots)) - alive;
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => `v${String(named + index + 1)}`);
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
@@ -328,6 +342,7 @@ export class ArmadaJob extends DurableObject<Env> {
       jobId: id, name, snapshot: generation.snapshot.id, instance: instanceOf(spec.recipe.size), vcpus: SIZES[spec.recipe.size].vcpus,
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
       tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'task' ? spec.run.bundle ?? null : null, output: spec.output, timeout: spec.timeout,
+      slots: spec.slots, slotMemoryBytes: Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
     };
 
     try {
@@ -355,14 +370,23 @@ export class ArmadaJob extends DurableObject<Env> {
     this.beat(name, 'waiting');
   }
 
-  /** The next task for `name`; how long to wait, while the gang it joined gathers its ranks or the only tasks left wait
-   *  out a retry's backoff; or null when there is none left for it: the vessel then stops. */
-  async claim(name: string): Promise<Claim | { readonly waitMs: number } | null> {
+  /** Whether `name` still has a task assigned: a slotted vessel claims its next while the others run, so an empty
+   *  queue retires it only once nothing of its runs. */
+  private busy(name: string): boolean {
+    return this.sql.exec(`SELECT 1 AS n FROM tasks WHERE (vessel = ? OR dup = ?) AND state IN ('running', 'landing')`, name, name).toArray().length > 0
+      || this.sql.exec(`SELECT 1 AS n FROM members WHERE vessel = ? AND state IN ('joined', 'ready', 'running', 'landing')`, name).toArray().length > 0;
+  }
+
+  /** The next task for `name`'s `slot`; how long to wait, while the gang it joined gathers its ranks or the only
+   *  tasks left wait out a retry's backoff; or null when there is none left for it: the vessel stops once its last
+   *  slot is done. */
+  async claim(name: string, slot = 0): Promise<Claim | { readonly waitMs: number } | null> {
     const spec = await this.spec();
 
     if (spec === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return null;
     this.beat(name, 'working');
     this.members();
+    this.slotted();
     const now = Date.now();
     // Secrets are read for each claim and never kept: the job holds only their names.
     const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec) };
@@ -379,7 +403,7 @@ export class ArmadaJob extends DurableObject<Env> {
       return { waitMs: GANG_WAIT_MS };
     }
     const next = first === undefined ? undefined : this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, first.idx,
+      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1 WHERE idx = ? RETURNING idx, item, attempts`, name, now, spec.slots > 1 ? slot : null, first.idx,
     ).toArray()[0];
 
     if (next !== undefined) return await this.cached(spec, this.claimOf(spec, env, next.idx, next.item, next.attempts, false), next.item);
@@ -389,19 +413,20 @@ export class ArmadaJob extends DurableObject<Env> {
     if (later?.at !== null && later?.at !== undefined) return { waitMs: Math.min(60_000, Math.max(1000, later.at - now)) };
 
     if (!spec.speculative) {
-      this.beat(name, 'done');
+      // Marked done only once nothing of this vessel's runs: a slotted one's other slots still can.
+      if (!this.busy(name)) this.beat(name, 'done');
 
       return null;
     }
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members)
-       AND started < ? AND started < ? - weight * 2000 ORDER BY started LIMIT 1) RETURNING idx, item, attempts`, name, name, now - STRAGGLER_MS, now,
+      `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members)
+       AND started < ? AND started < ? - weight * 2000 ORDER BY started LIMIT 1) RETURNING idx, item, attempts`, name, spec.slots > 1 ? slot : null, name, now - STRAGGLER_MS, now,
     ).toArray()[0];
 
     if (straggler !== undefined) return await this.cached(spec, this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true), straggler.item);
     // It retires: marked now, so items an open job takes before its retirement lands get a vessel of their own.
-    this.beat(name, 'done');
+    if (!this.busy(name)) this.beat(name, 'done');
 
     return null;
   }
@@ -510,7 +535,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
       // A gang forms again: its other ranks stop (`still`).
       this.sql.exec('DELETE FROM members WHERE idx = ?', kept.index);
-      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, dup = NULL, retries = retries + 1, not_before = ? WHERE idx = ?`, Date.now() + backoff, kept.index);
+      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, dup = NULL, dup_slot = NULL, retries = retries + 1, not_before = ? WHERE idx = ?`, Date.now() + backoff, kept.index);
     } else if (kept !== null && task !== undefined) {
       // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
       this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ?`, kept.kind, kept.index);
@@ -557,14 +582,15 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (spec === undefined) return;
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
-    this.sql.exec('UPDATE tasks SET dup = NULL WHERE dup = ?', name);
+    this.slotted();
+    this.sql.exec('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ?', name);
     this.lostRank(name, error);
 
     for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null }>(`SELECT idx, infra, dup FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
       if (task.dup !== null) {
-        this.sql.exec('UPDATE tasks SET vessel = dup, dup = NULL WHERE idx = ?', task.idx);
+        this.sql.exec('UPDATE tasks SET vessel = dup, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?', task.idx);
       } else if (task.infra + 1 < INFRA_ATTEMPTS) {
-        this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, infra = infra + 1 WHERE idx = ?`, task.idx);
+        this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, dup_slot = NULL, infra = infra + 1 WHERE idx = ?`, task.idx);
       } else {
         this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
         const outcome: Outcome = { index: task.idx, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: name, attempt: INFRA_ATTEMPTS, tail: error.slice(-4000), output: false };
@@ -702,14 +728,15 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** Each task running now on each container it runs on: a task on its vessel and on the vessel repeating it, a gang
    *  on each rank's. */
-  private running(): { index: number; vessel: string; started: number }[] {
+  private running(): { index: number; vessel: string; started: number; slot?: number }[] {
     this.members();
+    this.slotted();
 
-    return this.sql.exec<{ index: number; vessel: string; started: number }>(`SELECT idx AS "index", vessel, started FROM tasks
+    return this.sql.exec<{ index: number; vessel: string; started: number; slot: number | null }>(`SELECT idx AS "index", vessel, started, slot FROM tasks
       WHERE state IN ('running', 'landing') AND vessel IS NOT NULL AND idx NOT IN (SELECT idx FROM members)
-      UNION ALL SELECT idx, dup, started FROM tasks WHERE state = 'running' AND dup IS NOT NULL
-      UNION ALL SELECT m.idx, m.vessel, t.started FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('running', 'landing') AND m.state IN ('running', 'landing')
-      ORDER BY 1, 2`).toArray();
+      UNION ALL SELECT idx, dup, started, dup_slot FROM tasks WHERE state = 'running' AND dup IS NOT NULL
+      UNION ALL SELECT m.idx, m.vessel, t.started, NULL FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('running', 'landing') AND m.state IN ('running', 'landing')
+      ORDER BY 1, 2`).toArray().map((row) => ({ index: row.index, vessel: row.vessel, started: row.started, ...row.slot === null ? {} : { slot: row.slot } }));
   }
 
   async status(): Promise<JobStatus | null> {
