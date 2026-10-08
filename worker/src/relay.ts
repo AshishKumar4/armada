@@ -61,7 +61,7 @@ export const RELAY_PY = String.raw`import base64, os, socket, ssl, struct, sys, 
 from urllib.parse import urlsplit
 
 OUT, IN = ${String(RELAY_OUT)}, ${String(RELAY_IN)}
-PATIENCE = 60
+PATIENCE, KEEPALIVE = 60, 30
 RANK, ORIGIN, JOB, TOKEN, VESSELS = int(sys.argv[1]), urlsplit(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5:]
 OWN = "127.0.1.%d" % (RANK + 1)
 
@@ -141,8 +141,9 @@ def outbound(local):
         sys.stderr.write("rank %d port %d: %s\n" % (rank, port, status.decode(errors="replace")))
         local.close()
         return
-    lock = threading.Lock()
+    lock, done = threading.Lock(), threading.Event()
     threading.Thread(target=from_ws, args=(ws, lock, local), daemon=True).start()
+    threading.Thread(target=keepalive, args=(ws, lock, done), daemon=True).start()
     try:
         while True:
             data = local.recv(65536)
@@ -152,6 +153,17 @@ def outbound(local):
         frame(ws, lock, 8, struct.pack("!H", 1000))
     except OSError:
         pass
+    done.set()
+
+
+def keepalive(ws, lock, done):
+    """Pings an idle WebSocket, which Cloudflare closes after 100 s without data: a collective
+    library's connections sit idle between collectives, for a compilation, say."""
+    while not done.wait(KEEPALIVE):
+        try:
+            frame(ws, lock, 9, b"")
+        except OSError:
+            return
 
 
 def pipe(source, sink):

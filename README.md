@@ -105,8 +105,9 @@ echo '[{"gang": 2}]' | armada map --items=- -- sh -c 'python3 train.py --rank $A
 
 The gang starts once every rank has a container. A rank lost to the platform loses the whole gang, which runs again
 as one task. The task's outcome is its first failing rank's, else rank 0's. Containers have no inbound address, so
-ranks connect through the Worker: a few milliseconds a round trip and tens of MB/s. That suits tests and coordination,
-not bandwidth-bound training.
+ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a connection, at 2 to 64 ranks. That suits
+tests and coordination, not bandwidth-bound training. A connection to a port nothing listens on yet opens and then
+closes at once, so a client retries it as it would a refused one.
 
 ## From TypeScript
 
