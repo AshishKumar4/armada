@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { argvOf, extractTar, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, failureTail, fill, fitSize, itemValues, medians, recordSamples, usageOf, weightOf, type Outcome, type Recipe } from '../src/protocol';
+import { environmentKey, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, servedFloor, usageOf, weightOf, type Health, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 
 describe('a task\'s command', () => {
@@ -219,6 +219,27 @@ describe('a task\'s stored artifacts', () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a deploy', () => {
+  const health = (protocol: number, oldest?: number, driver = 2): Health => ({ ok: true, driver, protocol, ...oldest === undefined ? {} : { oldest }, vcpus: 0, jobs: 0 });
+
+  test('reads the oldest wire a Worker serves: said, else 3 since protocol 4, else only its own', () => {
+    expect([servedFloor(health(7, 5)), servedFloor(health(6)), servedFloor(health(4)), servedFloor(health(2))]).toEqual([5, 3, 3, 2]);
+  });
+
+  test('drains only what this Worker could not take over: forced, unanswering, newer, below the floor, other driver', () => {
+    expect([
+      mustDrain(health(7, 3), true),
+      mustDrain(null, false),
+      mustDrain(health(8, 3), false),
+      mustDrain(health(6, 2), false),
+      mustDrain(health(6), false),
+      mustDrain(health(7), false),
+      mustDrain(health(7, 3), false),
+      mustDrain(health(6, 3, 1), false),
+    ]).toEqual([true, true, true, true, false, false, false, true]);
   });
 });
 

@@ -9,7 +9,7 @@ import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './d
 import { deleteSnapshot } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, DRIVER, EnvironmentsSchema, OLDEST_CLIENT, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
+import { BaseSchema, describeUsage, EnvironmentsSchema, mustDrain, SizeSchema, usageOf, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -54,8 +54,8 @@ deploy options:
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
-  --drain              wait for the open jobs first; automatic when the deployed version's wire
-                       is too old or newer than this one, or its driver differs
+  --drain              wait for the open jobs first; automatic when this Worker would refuse a
+                       client the deployed one serves, or its driver differs
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
 The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
@@ -283,8 +283,8 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 }
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
- *  version the deployed one still serves — same driver, wire not older than its floor nor newer than this — takes
- *  over the running jobs; `--drain`, an unreachable one, or one outside that is drained first, and a deploy that
+ *  version that still serves every client the deployed one does, on the same driver, takes over the running jobs;
+ *  `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and a deploy that
  *  fails or is interrupted lets the drained one admit jobs again. */
 async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean): Promise<number> {
   const account = accountOf();
@@ -302,16 +302,12 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   process.once('SIGINT', interrupted).once('SIGTERM', interrupted).once('SIGHUP', interrupted);
 
   try {
-    // A version the deployed Worker's objects still answer takes over the running jobs: their containers outlive the
-    // Worker's update, and each object resumes from storage (measured: six deploys in two minutes over 200 one-minute
-    // tasks cut none and refused no job). It is drained first when told to, when it cannot be asked what it serves,
-    // when it speaks a wire too old for this client or newer than this Worker (a downgrade), or when its containers
-    // were made under another driver, whose layout this Worker's execs may not find.
+    // A version whose Worker would still serve every client the deployed one does takes over the running jobs:
+    // their containers outlive the Worker's update, and each object resumes from storage (measured: six deploys in
+    // two minutes over 200 one-minute tasks cut none and refused no job).
     const health = deployed === null ? null : await deployed.health().then((healthy) => healthy, () => null);
 
-    if (deployed !== null && (forceDrain || health === null || health.protocol < OLDEST_CLIENT || health.protocol > PROTOCOL || health.driver !== DRIVER)) {
-      await drain(deployed, () => { drained = true; });
-    }
+    if (deployed !== null && mustDrain(health, forceDrain)) await drain(deployed, () => { drained = true; });
     await install(account, name, vcpus, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;

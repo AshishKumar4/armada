@@ -35,11 +35,11 @@ Each task runs as the user `ci`, in its own cgroup, and anything it leaves runni
 Tasks that run one after another in a container share its `/tmp`. A task the platform loses runs again, up to three attempts. Each task gets exactly one recorded outcome, but a cut-off
 attempt may already have done its work, so a task should be safe to run twice.
 
-A deploy over a running armada keeps its jobs running as long as the new Worker still serves what the old one spoke:
-six deploys in two minutes, over 200 one-minute tasks, cut no task and refused no job. A deploy waits for the open
-jobs first only with `--drain`, when the deployed version answers no health check, when its wire is too old for this
-client or newer than this Worker (a downgrade), or when its driver differs. That pause lapses after 10 minutes if the
-deploy dies.
+A deploy over a running armada keeps its jobs running as long as the new Worker would still serve every client the
+old one does: six deploys in two minutes, over 200 one-minute tasks, cut no task and refused no job. A deploy waits
+for the open jobs first only with `--drain`, when the deployed version answers no health check, when this Worker
+would refuse a client it serves (its wire newer than this one's, or its floor older than this one's), or when its
+driver differs. That pause lapses after 10 minutes if the deploy dies.
 
 ## Measured
 
