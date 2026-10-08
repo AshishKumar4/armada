@@ -232,6 +232,29 @@ outputs. A second run printed 9.7 s and 6.7 s.
   files. An item answered before comes back at once with `meta.cached`, and no container starts. Use it only for a
   task whose answer its item decides.
 
+## From Python
+
+The Python SDK mirrors the TypeScript one — the same tasks, wire and envelopes, so a job's results read identically on either side. Install it with `pip install "git+https://github.com/AshishKumar4/armada#subdirectory=python"`. A `[tool.armada]` table in `pyproject.toml` names the project and its tasks' folder:
+
+```toml
+# pyproject.toml
+[tool.armada]
+project = "media"
+tasks = ["tasks"]
+```
+
+```python
+# tasks/video.py
+from armada import Context, recipe, sh, task
+
+@task(id="transcode", recipe=recipe.debian().apt("ffmpeg").size("small"), output="bytes")
+def transcode(url: str, ctx: Context):
+    # sh quotes each {} itself; ctx.out is the file the task answers with.
+    return sh("ffmpeg -loglevel error -i {} -vf scale=-2:720 -c:v libx264 -preset veryfast -c:a aac -f mp4 {}", url, ctx.out)
+```
+
+`python -m armada push` bundles the tasks and records them; `transcode.map(urls)` runs them, `transcode.stream(urls)` gives a job iterable in completion order, `transcode.run(url)` one item, `transcode.local(url)` this machine. A body that returns a value answers with it; `bytes` comes back as `bytes`. See `examples/python-square/` for validators, secrets, artifacts, retries and caching.
+
 ## CI with `armada run`
 
 <p align="center"><img src=".github/ci.svg" alt="armada run reads .armada.json from the commit, runs the plan, runs one task per matrix entry, and grades every row." width="100%"></p>

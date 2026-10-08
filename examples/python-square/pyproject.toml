@@ -1,0 +1,8 @@
+[project]
+name = "python-square"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.armada]
+project = "python-square"
+tasks = ["tasks"]
