@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
+  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, deadline, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -401,11 +401,17 @@ export class ArmadaVessel extends DurableObject<Env> {
     const size = Number(sized.stdout.trim());
 
     if (size <= INLINE_BYTES) {
-      const read = await (await container.exec(['cat', path], { signal: AbortSignal.timeout(EXEC_MS) })).output();
+      const timer = deadline(EXEC_MS);
 
-      await this.env.ARTIFACTS.put(key, read.stdout, { httpMetadata });
+      try {
+        const read = await (await container.exec(['cat', path], { signal: timer.signal })).output();
 
-      return { small: read.stdout };
+        await this.env.ARTIFACTS.put(key, read.stdout, { httpMetadata });
+
+        return { small: read.stdout };
+      } finally {
+        timer.clear();
+      }
     }
     const reading = await container.exec(['cat', path], { stdout: 'pipe', stderr: 'ignore' });
 

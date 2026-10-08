@@ -247,14 +247,30 @@ export interface Ran {
   readonly stderr: string;
 }
 
+/** An exec's abort signal on a `ms` deadline, disarmed by `clear`. `AbortSignal.timeout` is never disarmed: its timer
+ *  aborts the exec even after the exec answered, and the platform logs that abort as an error on whatever event the
+ *  object is in then. */
+export function deadline(ms: number): { readonly signal: AbortSignal; readonly clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => { controller.abort(new DOMException(`the exec did not answer in ${String(ms)} ms`, 'TimeoutError')); }, ms);
+
+  return { signal: controller.signal, clear: () => { clearTimeout(timer); } };
+}
+
 /** `argv` in the container, as root or as the user, and its whole output. */
 export async function run(container: Container, argv: readonly string[], options: Exec): Promise<Ran> {
   const { ms, asUser = false, ...exec } = options;
-  const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal: AbortSignal.timeout(ms) });
-  const out = await child.output();
-  const decoder = new TextDecoder();
+  const timer = deadline(ms);
 
-  return { exitCode: out.exitCode, stdout: decoder.decode(out.stdout), stderr: decoder.decode(out.stderr) };
+  try {
+    const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal: timer.signal });
+    const out = await child.output();
+    const decoder = new TextDecoder();
+
+    return { exitCode: out.exitCode, stdout: decoder.decode(out.stdout), stderr: decoder.decode(out.stderr) };
+  } finally {
+    timer.clear();
+  }
 }
 
 /** `run`, refused on a non-zero exit with the tail of what it said, and named on any other failure. */
