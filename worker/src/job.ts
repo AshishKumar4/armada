@@ -384,6 +384,11 @@ export class ArmadaJob extends DurableObject<Env> {
     const spec = await this.spec();
 
     if (spec === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return null;
+    // A vessel that failed or retired asks nothing more: a claim racing its last report takes no task, and its row
+    // stays dead — another slot loop's call can land here after `vesselFailed`.
+    const vessel = this.sql.exec<{ state: VesselRow['state'] }>('SELECT state FROM vessels WHERE name = ?', name).toArray()[0];
+
+    if (vessel?.state === 'failed' || vessel?.state === 'done') return null;
     this.beat(name, 'working');
     this.members();
     this.slotted();

@@ -165,6 +165,21 @@ describe('a slotted job', () => {
     expect([claims, again].map((each) => each.map((claim) => claim === null || 'waitMs' in claim ? -1 : claim.index))).toEqual([[0, 1, 2], [0, 1, 2]]);
   });
 
+  test('a failed vessel\'s late claim takes nothing and stays failed', async () => {
+    const { job: slotted } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 8, slots: 3 });
+
+    await slotted.claim('v1', 0);
+    await slotted.vesselFailed('v1', 'the container ended');
+
+    expect(await slotted.claim('v1', 1)).toBeNull();
+    const status = await slotted.status();
+
+    expect({ vessel: status?.vessels?.find((each) => each.name === 'v1')?.state, queued: status?.tasks.queued }).toEqual({ vessel: 'failed', queued: 2 });
+    const again = await slotted.claim('v2', 0);
+
+    expect(again === null || 'waitMs' in again ? null : again.index).toBe(0);
+  });
+
   test('refuses a gang: a gang takes a whole container, which a slotted job\'s containers cannot give it', async () => {
     const { job: open } = await job({ recipe: {}, items: [], open: true, run: { kind: 'command' }, slots: 2 });
 
