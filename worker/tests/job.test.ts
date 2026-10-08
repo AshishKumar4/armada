@@ -236,6 +236,9 @@ describe('a gang task', () => {
       items: [{ item: { weight: 1 }, argv: ['true'] }, { item: { weight: 1 }, argv: ['true'] }] });
     const first = await open.claim('v1');
     if (first === null || 'waitMs' in first) throw new Error('the initial single never started');
+    const before = Date.now();
+    setSystemTime(before + 1000);
+    try {
     await open.add([{ item: { gang: 2 }, argv: ['true'] }]);
     await open.add([{ item: { weight: 1000 }, argv: ['true'] }]);
     const held = await open.claim('v2');
@@ -244,6 +247,7 @@ describe('a gang task', () => {
     await open.complete('v1', exited(first.index, 'v1'), 1000);
     const ranks = await formed(open, ['v1', 'v2']);
     expect(Object.values(ranks).map((claim) => claim.env['ARMADA_WORLD'])).toEqual(['2', '2']);
+    } finally { setSystemTime(); }
   });
   test('is refused unless it is a whole number of containers the pool holds', () => {
     const items = (gang: number) => [{ item: { gang }, argv: ['true'] }];
