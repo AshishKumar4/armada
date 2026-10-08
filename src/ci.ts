@@ -377,6 +377,7 @@ export async function runCI(armada: Armada, target: string, label: string, planA
   if (graded.problems.length > 0) {
     console.log(`\nNOT GRADED:\n${graded.problems.map((problem) => `  ${problem}`).join('\n')}`);
     printReds(graded.reds);
+    console.log(`report: ${report}`);
 
     return 2;
   }
