@@ -9,6 +9,9 @@ import { ARTIFACTS_PATH, failureTail, SIZES, type Size } from '../../src/protoco
  *  a command drops to the user inside. */
 export const AS_USER = ['setpriv', '--reuid=ci', '--regid=ci', '--init-groups', '--'];
 
+/** The user's home: its HOME wherever it runs, or root's would be read instead. */
+export const USER_HOME = '/home/ci';
+
 /** The runner's own state in a container: the pack, the job's files, a function's bundle, the current task. */
 export const STATE = '/armada';
 

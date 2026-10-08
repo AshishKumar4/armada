@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, bounded, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
+  ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, USER_HOME, WAIT, bounded, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -164,7 +164,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (pack === null) throw new Error(`the pack of ${spec.commit.sha} is not in R2`);
       await pipeIn(container, pack.body, `${STATE}/pack`);
       // As the user under its own home, or git warns it cannot read root's, pushing its real error down.
-      await must(container, 'the checkout', ['/bin/sh', '-c', receive(spec.workdir, spec.commit.history), 'receive', spec.commit.sha], { asUser: true, env: { HOME: '/home/ci' }, cwd: spec.workdir, ms: EXEC_MS });
+      await must(container, 'the checkout', ['/bin/sh', '-c', receive(spec.workdir, spec.commit.history), 'receive', spec.commit.sha], { asUser: true, env: { HOME: USER_HOME }, cwd: spec.workdir, ms: EXEC_MS });
     }
 
     for (const [name, text] of Object.entries(spec.files)) await pipeIn(container, text, `${STATE}/files/${name}`);

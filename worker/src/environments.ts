@@ -11,7 +11,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
 import { failureTail, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe } from '../../src/protocol';
-import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, waitOn } from './container';
+import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, USER_HOME, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
 export type Generation = v.InferOutput<typeof GenerationSchema>;
@@ -34,7 +34,7 @@ export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>
   const workdir = workdirOf(recipe);
   const own = Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{workdir}', workdir)]));
 
-  return { HOME: '/home/ci', LANG: 'C.UTF-8', CI: 'true', ARMADA: '1', ARMADA_WORKDIR: workdir, PATH: '/usr/local/bin:/usr/bin:/bin', TMPDIR: '/tmp', ...own };
+  return { HOME: USER_HOME, LANG: 'C.UTF-8', CI: 'true', ARMADA: '1', ARMADA_WORKDIR: workdir, PATH: '/usr/local/bin:/usr/bin:/bin', TMPDIR: '/tmp', ...own };
 }
 
 export class ArmadaEnvironments extends DurableObject<Env> {
