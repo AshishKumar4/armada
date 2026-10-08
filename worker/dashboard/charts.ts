@@ -236,10 +236,14 @@ export interface Segment {
   readonly state: TaskState | 'boot';
 }
 
-/** The time axis's height and the lane names' width, in CSS pixels. */
+/** The time axis's height, and the narrowest the lane names' column is, in CSS pixels. */
 const AXIS = 26;
 
 const GUTTER = 52;
+
+/** The lane names' column: room for the longest name in the 11 px monospace they are drawn in, about 0.6 em a
+ *  character, so a slot's lane (`v12 · 3`) is not cut off. */
+const gutterFor = (lanes: readonly Lane[]): number => Math.max(GUTTER, Math.ceil(Math.max(0, ...lanes.map((lane) => lane.name.length)) * 6.6) + 12);
 
 /** Seconds between the axis's ticks: the first that leaves each label room. */
 const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14_400];
@@ -262,7 +266,7 @@ export class Timeline extends Surface<Segment> {
 
   private span = { from: 0, to: 1, live: false };
 
-  private geometry = { row: 20, bar: 13, plot: 1 };
+  private geometry = { row: 20, bar: 13, plot: 1, gutter: GUTTER };
 
   private hatch: { readonly pattern: CanvasPattern; readonly accent: string } | null = null;
 
@@ -305,19 +309,20 @@ export class Timeline extends Surface<Segment> {
   protected measure(width: number): number {
     const count = this.lanes.length;
     const row = count <= 24 ? 20 : count <= 80 ? 12 : 7;
+    const gutter = gutterFor(this.lanes);
 
-    this.geometry = { row, bar: row >= 12 ? row - 7 : row - 2, plot: Math.max(1, width - GUTTER - 8) };
+    this.geometry = { row, bar: row >= 12 ? row - 7 : row - 2, plot: Math.max(1, width - gutter - 8), gutter };
 
     return AXIS + count * row + 4;
   }
 
   protected draw(context: CanvasRenderingContext2D, _width: number, height: number, colors: Palette, now: number): boolean {
-    const { row, bar, plot } = this.geometry;
+    const { row, bar, plot, gutter } = this.geometry;
     const { from } = this.span;
     const to = this.end();
     const seconds = (to - from) / 1000;
     const step = STEPS.find((each) => (plot / seconds) * each >= 64) ?? 14_400;
-    const x = (at: number): number => GUTTER + ((at - from) / (to - from)) * plot;
+    const x = (at: number): number => gutter + ((at - from) / (to - from)) * plot;
 
     context.font = `11px ${colors.mono}`;
     context.textBaseline = 'middle';
@@ -382,7 +387,7 @@ export class Timeline extends Surface<Segment> {
     if (lane === undefined) return null;
     const { from } = this.span;
     const to = this.end();
-    const time = from + ((px - GUTTER) / this.geometry.plot) * (to - from);
+    const time = from + ((px - this.geometry.gutter) / this.geometry.plot) * (to - from);
     // Two pixels of slack either side, so a bar a few milliseconds wide can still be pointed at.
     const slack = (2 / this.geometry.plot) * (to - from);
     const under = this.segments.filter((segment) => segment.lane === lane.name && time >= segment.start - slack
