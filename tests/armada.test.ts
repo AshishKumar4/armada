@@ -915,7 +915,7 @@ describe('the webhook command', () => {
     }
   });
 
-  test('add without gh refuses to change a hook GitHub already signs for, and prints a new one to add by hand', async () => {
+  test('add without gh, or with an update gh could not make, refuses to change a hook GitHub already signs for; a new one is printed to add by hand', async () => {
     const posted: string[] = [];
     let hooked = false;
 
@@ -959,6 +959,12 @@ describe('the webhook command', () => {
       expect({ exit: fresh.exit, hasUrl: fresh.said.includes('/webhooks/github/armada'), hasSecret: /secret: [0-9a-f]{48}/u.test(fresh.said), steps: fresh.said.includes('add the hook by hand') })
         .toEqual({ exit: 0, hasUrl: true, hasSecret: true, steps: true });
       expect({ exit: refused.exit, said: refused.said.includes('updating its secret needs gh signed in'), posts: posted.length }).toEqual({ exit: 2, said: true, posts: 1 });
+
+      // Signed in, but GitHub refuses the update: the deployment keeps the secret GitHub still signs with.
+      writeFileSync(join(bin, 'gh'), '#!/bin/sh\nif [ "$1" = "auth" ]; then exit 0; fi\necho "HTTP 404: Not Found" >&2\nexit 1\n');
+      const unmade = await add();
+
+      expect({ exit: unmade.exit, said: unmade.said.includes('updating GitHub hook 77 on owner/armada failed'), posts: posted.length }).toEqual({ exit: 2, said: true, posts: 1 });
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });

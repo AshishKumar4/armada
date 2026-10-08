@@ -566,8 +566,10 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
   const made = known === undefined ? ['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'] : ['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id'];
   const answered = signedIn ? ghOut(made) : null;
-
   const hook = answered === null || !/^\d+$/u.test(answered) ? undefined : Number(answered);
+
+  // A hook whose update failed still signs with its old secret: storing the new one would refuse its deliveries.
+  if (known !== undefined && hook === undefined) throw new Error(`updating GitHub hook ${String(known)} on ${repo} failed, as gh said above; the deployment's secret is unchanged`);
   // JSON leaves the options not given out, so the deployment's defaults apply.
   const config = { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret: signing, hook };
 
