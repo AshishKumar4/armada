@@ -526,7 +526,6 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** `name`'s membership of gang task `index`, or undefined for a task that is no gang's or a vessel in none. */
   private member(name: string, index: number): { readonly rank: number; readonly state: string } | undefined {
-
     return this.sql.exec<{ rank: number; state: string }>('SELECT rank, state FROM members WHERE idx = ? AND vessel = ?', index, name).toArray()[0];
   }
 
@@ -539,16 +538,13 @@ export class ArmadaJob extends DurableObject<Env> {
     };
 
     const { run } = spec;
+    // The names its log masks: the job's secrets, and the deployment's bearer a driver job gets.
+    const claim = { index, attempt, secrets: spec.deployToken ? [...spec.secrets, 'ARMADA_TOKEN'] : spec.secrets, duplicate };
 
     // A pushed task's bundle runs under its runtime; a command task runs its own argv.
-    if (run.kind === 'command') return { index, attempt, argv: task.argv ?? ['false'], env: common, secrets: this.secretsOf(spec), duplicate };
+    if (run.kind === 'command') return { ...claim, argv: task.argv ?? ['false'], env: common };
 
-    return { index, attempt, argv: run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH], env: { ...common, ARMADA_TASK: run.id }, secrets: this.secretsOf(spec), duplicate };
-  }
-
-  /** The names a claim's log masks: the job's secrets, and the deployment's bearer a driver job gets. */
-  private secretsOf(spec: Kept): readonly string[] {
-    return spec.deployToken ? [...spec.secrets, 'ARMADA_TOKEN'] : spec.secrets;
+    return { ...claim, argv: run.runtime === 'python' ? ['python3', PY_BUNDLE_PATH] : ['node', BUNDLE_PATH], env: { ...common, ARMADA_TASK: run.id } };
   }
 
   /** `item`'s cached answer as task `index`'s, or null, said in the log, when the cache could not be read: the task then
@@ -636,7 +632,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if (held === undefined) return;
     await this.ctx.storage.delete(heldKey(index));
     this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ? AND state = 'landing'`, held.kind, index);
-    this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(held));
+    this.append(held);
   }
 
   /** The task an answer lands for, with its retries: a plain task landing on `name`, or a gang's, running. */
@@ -761,7 +757,6 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A lost vessel's gangs: a forming one closes its ranks up; a running one is lost whole, queued again as one task,
    *  or failed once the infrastructure lost it INFRA_ATTEMPTS times. Its other ranks stop (`still`). */
   private lostRank(name: string, error: string): void {
-
     for (const { idx, state, infra } of this.sql.exec<{ idx: number; state: string; infra: number }>(
       `SELECT t.idx, t.state, t.infra FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name,
     ).toArray()) {

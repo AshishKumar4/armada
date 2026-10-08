@@ -165,7 +165,8 @@ describe('a hedged job', () => {
       if (!stored) await hedged.complete('v1', exited(0, 'v1', first), 1000);
       const { events } = await hedged.events(0);
 
-      return { told, events: events.map((event) => [event.outcome.vessel, event.outcome.exitCode]) };
+      // Each event says when it landed, a green held for its twin's end as well.
+      return { told, events: events.map((event) => [event.outcome.vessel, event.outcome.exitCode, event.at !== undefined]) };
     };
 
     expect({
@@ -177,13 +178,13 @@ describe('a hedged job', () => {
       greenOnceTheOtherWasLost: await verdict(0, true, 'lost'),
       firstRedBesideAGreen: await verdict(1, true, 0),
     }).toEqual({
-      redFirst: { told: false, events: [['v1', 1]] },
-      redOverALandingGreen: { told: false, events: [['v2', 1]] },
-      redOverAStoredGreen: { told: false, events: [['v2', 1]] },
-      greenOnceTheOtherStopped: { told: false, events: [['v1', 0]] },
-      greenBesideAGreen: { told: false, events: [['v1', 0]] },
-      greenOnceTheOtherWasLost: { told: false, events: [['v1', 0]] },
-      firstRedBesideAGreen: { told: false, events: [['v1', 1]] },
+      redFirst: { told: false, events: [['v1', 1, true]] },
+      redOverALandingGreen: { told: false, events: [['v2', 1, true]] },
+      redOverAStoredGreen: { told: false, events: [['v2', 1, true]] },
+      greenOnceTheOtherStopped: { told: false, events: [['v1', 0, true]] },
+      greenBesideAGreen: { told: false, events: [['v1', 0, true]] },
+      greenOnceTheOtherWasLost: { told: false, events: [['v1', 0, true]] },
+      firstRedBesideAGreen: { told: false, events: [['v1', 1, true]] },
     });
   });
 });
