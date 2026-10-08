@@ -197,7 +197,8 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
   const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
   const files = outcome === undefined ? null : h('div', { class: 'button-row' },
     h('button', { class: 'button', type: 'button', onclick: () => { showLog(job, index); } }, icon('log'), 'Whole log'),
-    outcome.output ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`); } }, icon('download'), 'Output') : null);
+    outcome.output ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`); } }, icon('download'), 'Output') : null,
+    outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: () => { void download(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`); } }, icon('download'), 'Artifacts') : null);
   const backdrop = h('div', { class: 'backdrop', onclick: close });
   const panel = h('aside', { class: 'drawer', label: `Task ${String(index)}` },
     h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}`), h('div', { class: 'button-row' }, pill(tones[state], STATE_WORDS[state]), closer)),
