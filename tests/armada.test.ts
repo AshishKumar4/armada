@@ -612,6 +612,14 @@ describe('armada run', () => {
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
   });
 
+  test('with --json, prints its progress to stderr and one result to stdout, graded as its exit says', async () => {
+    const ran = await run(['--json'], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 1, seconds: 2, output: 'broke' }] });
+    const result = v.parse(v.looseObject({ graded: v.string(), job: v.string(), report: v.string(), rows: v.array(v.looseObject({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, graded: result.graded, job: result.job, report: result.report.endsWith('proj-tasks.json'), rows: result.rows.map((row) => [row.name, row.exitCode]) })
+      .toEqual({ exit: 1, graded: 'fail', job: 'tasks', report: true, rows: [['x.mjs', 1]] });
+  });
+
   test('a task that wrote its verdict and then exited nonzero is graded, its green rows red with its exit', async () => {
     const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] }, 7);
 
