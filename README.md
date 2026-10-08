@@ -2,7 +2,8 @@
 
 armada runs a command or a TypeScript function over many inputs at once, on Cloudflare Containers in your own account.
 
-- 100 videos re-encoded to 720p in 22 s on 100 containers. One container took 12 to 14 minutes for the same 100.
+- 100 videos re-encoded to 720p in 21 to 22 s on 100 containers, 1.3 to 1.4 times the slowest single encode. One
+  container took 12 minutes for the same 100.
 - A 90-row CI suite ran in 7 min 19 s on 13 containers. Its GitHub Actions matrix of 15 jobs took 13 min 2 s.
 - One `true` task came back 2.5 s after it was sent.
 
@@ -43,20 +44,32 @@ driver differs. That pause lapses after 10 minutes if the deploy dies.
 
 ## Measured
 
-Each figure is from one run on 2026-10-07. The command is in the table, so you can run it on your own deployment.
+The video figures are from 2026-10-08, the others from one run each on 2026-10-07. The command is in the table, so you
+can run it on your own deployment.
 
 | Workload | armada | Comparison |
 |---|---|---|
-| 100 videos to 720p ([`examples/video-720p`](examples/video-720p)) | 21.5 s and 22.2 s on 100 `small` containers (`bun bench.ts 100`) | 705 s and 814 s in sequence on one `small` container (`bun bench.ts 100 serial`) |
+| 100 videos to 720p ([`examples/video-720p`](examples/video-720p)) | 21.1 s, 21.8 s and 22.3 s on 100 `small` containers (`bun bench.ts 100`) | 718.7 s in sequence on one `small` container, 7.2 s a video (`bun bench.ts 100 serial`) |
 | A 90-row CI suite ([Kinu](https://github.com/AshishKumar4/kinu) at `0b74ff100`) | 7 min 19 s on 13 `medium` containers (`armada run 0b74ff100`) | 13 min 2 s on its GitHub Actions matrix of 15 jobs ([run 37672204809](https://github.com/AshishKumar4/kinu/actions/runs/37672204809)) |
 | One task from a prepared snapshot | 2.5 s from sending it to its answer (`armada map --times=1 --size=micro -- true`) | |
 | 100 three-second tasks | 9.1 s and 11.4 s on 100 `micro` containers (`armada map --times=100 --pool=100 --size=micro -- sleep 3`) | 300 s of work |
 | 100 cached video answers | 5.6 s and 5.7 s, with no container started (`bun bench.ts 100 cached`) | 24.0 s and 28.3 s computing them |
 
 Each video task makes a 10-second 1080p clip from ffmpeg's test sources, then re-encodes it to 720p H.264. Wall times
-include downloading every result. Asked for 100 containers at once, armada had all 100 started within 3.7 s and 8.7 s
-in two runs of three-second tasks, and within 16 s in the video run. The CI suite ended 2 s after its longest row
-(442 s against 440 s), because its plan weighs each row by its measured seconds.
+run from sending the items to downloading the last result. `bun bench.ts 100` prints where that time goes:
+
+- Each video got its own container, so no run can end before its slowest encode. That is the bound.
+- In the three runs above, the median encode took 7.7 to 7.9 s, but 15 to 22 of the 100 took 12 to 17 s on
+  containers of the same size. The slowest took 16.1 to 17.3 s, so the runs took 1.3 to 1.4 times the bound.
+- The last of the 100 containers answered 0.6 to 0.8 s after the job asked for it. The rest is launching each task,
+  storing its output in R2 and downloading all 100.
+- Two earlier runs that day were slower. The first 100-container run on the snapshot took 40.4 s: its containers
+  answered from 0.2 s to 32.0 s after they were asked for (median 17.4 s). The next took 38.8 s, because one encode
+  took 31.1 s.
+
+Asked for 100 containers at once, armada had all 100 started within 3.7 s and 8.7 s in two runs of three-second tasks.
+The CI suite ended 2 s after its longest row (442 s against 440 s), because its plan weighs each row by its measured
+seconds.
 
 ## Compared with others
 
@@ -162,14 +175,29 @@ const videos = (await Bun.file('videos.txt').text()).split('\n').filter(Boolean)
 const infos = await probe.map(videos); // { seconds, width, height }[], in input order
 console.log(`${videos.length} videos, ${Math.round(infos.reduce((sum, info) => sum + info.seconds, 0))} seconds in all`);
 
-for await (const result of transcode.stream(videos)) { // each file as soon as its container finishes
+const started = Date.now();
+const job = transcode.stream(videos);
+let slowest = 0;
+
+for await (const result of job) { // each file as soon as its container finishes
+  slowest = Math.max(slowest, result.meta.seconds); // how long its encode ran on its container
   if (result.ok) await Bun.write(`720p/${String(result.index)}.mp4`, result.value);
   else console.error(`${result.item}: ${result.kind}`);
 }
+const { vessels } = await job.summary();
+console.log(`encoded in ${((Date.now() - started) / 1000).toFixed(1)} s on ${vessels} containers; the slowest encode took ${slowest.toFixed(1)} s`);
 ```
 
-With two 10-second test videos in `videos.txt`, `bun encode.ts` printed `2 videos, 20 seconds in all` and wrote two
-1280x720 files.
+With two 10-second 1080p test videos in `videos.txt`, `bun encode.ts` printed:
+
+```
+2 videos, 20 seconds in all
+encoded in 9.1 s on 2 containers; the slowest encode took 6.4 s
+```
+
+It wrote two 1280x720 files. Each video had its own container, so the run could not end before its slowest encode,
+6.4 s. The other 2.7 s went to starting both containers, launching each task, and storing and downloading both
+outputs. A second run printed 9.7 s and 6.7 s.
 
 - `.map` returns values in input order and throws a `MapError` if any item fails. `.stream` yields each result as it
   lands. `.run` runs one item on a container, and `.local` runs it on this machine.
