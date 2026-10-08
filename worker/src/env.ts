@@ -23,6 +23,10 @@ export interface Env {
   readonly FLEET_VCPUS: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
+  /** How many of the most recently used environments keep their snapshots (`armada deploy --keep`); unset keeps all. */
+  readonly KEEP_ENVIRONMENTS?: string;
+  /** `user:password` for the account's registry, which deletes the snapshots past them. */
+  readonly REGISTRY_CREDENTIALS?: string;
 }
 
 /** The R2 key of a commit's pack: from the root, or what it adds to an environment's commit, under its packer

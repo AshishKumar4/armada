@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, onCommit, runCI, verdictCI } from './ci';
-import { deleteSnapshot } from './registry';
+import { registryCredentials } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
 import { BaseSchema, describeUsage, PROTOCOL, SizeSchema, usageOf, type Push } from './protocol';
@@ -16,7 +16,7 @@ const ROOT = join(import.meta.dir, '..');
 const USAGE = `armada runs a command over many inputs at once, on Cloudflare Containers.
 
 Usage:
-  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N]
+  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
                                        deploy armada to your Cloudflare account, logging in if needed
   armada map [options] -- <command>    run the command once per item
   armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
@@ -28,7 +28,7 @@ Usage:
   armada status <job-id>               print a job's status as JSON
   armada secret set <NAME>             set a secret from stdin, for the tasks that name it
   armada secret list | delete <NAME>   list the secrets' names, or delete one
-  armada prune [--keep=3]              delete the snapshots of all but the newest environments
+  armada prune [--keep=3]              delete the snapshots of environments no open job uses, past the newest
 
 map options:
   --times=N            the items are 1 to N
@@ -51,18 +51,20 @@ deploy options:
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
   --drain              wait for the open jobs first, as a deploy that changes the wire does
+  --keep=N             keep the snapshots of the environments open jobs use and of the N most recently used
+                       others, deleting the rest after each new one is prepared (the account's snapshots are limited)
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
 The command's {item}, {index}, {out} and {files} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
 verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.
-prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit.`;
+prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit, or \`wrangler auth token\`'s.`;
 
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
-  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain'], words: 0 }],
+  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label='], words: 0 }],
   ['run', { options: ['label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
@@ -267,7 +269,7 @@ async function drain(armada: Armada, drained: () => void): Promise<void> {
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
  *  version of the same wire takes over the running jobs; one of another wire, or with `--drain`, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
-async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean): Promise<number> {
+async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean, keep: number | undefined): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
   const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
@@ -292,12 +294,29 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     install(account, name, vcpus, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
+
+    if (keep !== undefined) await keepEnvironments(account, name, keep);
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted).off('SIGHUP', interrupted);
     await admit();
   }
 
   return 0;
+}
+
+/** How long the registry credentials a `--keep` deploy gives the Worker last; each such deploy mints new ones. */
+const KEEP_CREDENTIALS_DAYS = 365;
+
+/** Has the deployed Worker keep the snapshots of only its `keep` most recently used environments, deleting the rest
+ *  after each preparation, with registry credentials minted through wrangler's login. Both are secrets, which a later
+ *  deploy without `--keep` leaves in place. */
+async function keepEnvironments(account: string, name: string, keep: number): Promise<void> {
+  const token = wrangler(['auth', 'token'], account).trim().split('\n').at(-1)?.trim() ?? '';
+  const credentials = await registryCredentials(account, token, KEEP_CREDENTIALS_DAYS * 24 * 60);
+
+  wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS', '--name', name], account, credentials);
+  wrangler(['secret', 'put', 'KEEP_ENVIRONMENTS', '--name', name], account, String(keep));
+  console.log(`${name} keeps the snapshots of its ${String(keep)} most recently used environments; its registry credentials last ${String(KEEP_CREDENTIALS_DAYS)} days`);
 }
 
 function install(account: string, name: string, vcpus: number | undefined, file: string): void {
@@ -336,24 +355,20 @@ function install(account: string, name: string, vcpus: number | undefined, file:
   }
 }
 
-const EntrySchema = v.object({ key: v.string(), entry: v.looseObject({ state: v.string(), lastUsed: v.optional(v.number()), generation: v.optional(v.object({ snapshot: v.object({ id: v.string() }) })) }) });
-
-/** Deletes the snapshots of all but the `keep` most recently used environments; a later job prepares one again. */
+/** Deletes the snapshots of the environments past every one an open job uses and the `keep` most recently used of the
+ *  rest: the Worker picks them (`ArmadaEnvironments.prune`) with registry credentials minted here; a later job prepares
+ *  one again. */
 async function prune(keep: number): Promise<number> {
   const token = process.env['ARMADA_REGISTRY_TOKEN'] ?? '';
 
-  if (token === '') throw new Error('pruning deletes registry tags: export ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit');
+  if (token === '') throw new Error('pruning deletes registry tags: export ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit, or `wrangler auth token`\'s');
   const armada = connect();
-  const listed = v.parse(v.array(EntrySchema), await (await armada.call('/environments')).json());
-  const ready = listed.filter((each) => each.entry.state === 'ready').sort((left, right) => (right.entry.lastUsed ?? 0) - (left.entry.lastUsed ?? 0));
+  const credentials = await registryCredentials(armada.connection.account, token);
+  const answer = await armada.call('/environments/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep, credentials }) });
+  const { pruned } = v.parse(v.object({ pruned: v.array(v.string()) }), await answer.json());
 
-  for (const { key, entry } of ready.slice(keep)) {
-    const id = entry.generation?.snapshot.id;
-    const deleted = id === undefined ? 'absent' : await deleteSnapshot({ account: armada.connection.account, token, id });
-
-    await armada.call(`/environments/${key}`, { method: 'DELETE' });
-    console.log(`pruned ${key.slice(0, 12)} (${deleted})`);
-  }
+  for (const key of pruned) console.log(`pruned ${key.slice(0, 12)}`);
+  console.log(`${String(pruned.length)} pruned`);
 
   return 0;
 }
@@ -491,7 +506,7 @@ async function main(): Promise<number> {
 
       if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, whole('vcpus'), flag('drain'));
+      return await deploy(name, whole('vcpus'), flag('drain'), whole('keep'));
     }
 
     case 'prune':

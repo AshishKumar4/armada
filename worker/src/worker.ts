@@ -258,8 +258,9 @@ const timings: Handler = async (request, env, [project]) => {
   return Response.json({ recorded: true });
 };
 
-/** `/environments` lists them, `POST /environments/resolve` names a recipe's key and pack base, and
- *  `DELETE /environments/<key>` forgets one whose snapshot was pruned. */
+/** `/environments` lists them, `POST /environments/resolve` names a recipe's key and pack base, `POST
+ *  /environments/prune` deletes the snapshots past those it keeps with the registry credentials it is given (`armada
+ *  prune`), and `DELETE /environments/<key>` forgets one. */
 const environments: Handler = async (request, env, [key]) => {
   const registry = env.ENVIRONMENTS.getByName(SINGLE);
 
@@ -269,6 +270,12 @@ const environments: Handler = async (request, env, [key]) => {
     const resolved = await environmentKey(v.parse(v.object({ recipe: RecipeSchema }), await request.json()).recipe);
 
     return Response.json({ key: resolved, base: await registry.base(resolved) });
+  }
+
+  if (key === 'prune' && request.method === 'POST') {
+    const { keep, credentials } = v.parse(v.object({ keep: v.pipe(v.number(), v.integer(), v.minValue(0)), credentials: v.pipe(v.string(), v.includes(':')) }), await request.json());
+
+    return Response.json({ pruned: await registry.prune(keep, credentials) });
   }
 
   if (request.method !== 'DELETE') return undefined;

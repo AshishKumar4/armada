@@ -780,6 +780,11 @@ export class ArmadaJob extends DurableObject<Env> {
     return { events: rows.map((row) => ({ seq: row.seq, outcome: v.parse(OutcomeSchema, JSON.parse(row.outcome)) })), done: done && !more };
   }
 
+  /** The key of the environment the job's containers start from, which `prune` keeps while the job is open. */
+  async environment(): Promise<string> {
+    return (await this.ctx.storage.get<string>('key')) ?? '';
+  }
+
   async status(): Promise<JobStatus | null> {
     const id = await this.ctx.storage.get<string>('id');
 

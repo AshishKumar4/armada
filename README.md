@@ -271,7 +271,7 @@ in peak memory and average busy cores. A new size prepares its own environment o
 ## Commands
 
 ```
-armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain]
+armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
 armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--timeout=S] [--output] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
@@ -284,6 +284,10 @@ armada prune [--keep=3]
 
 `armada --help` describes every option. `armada deploy --name=<name>` deploys a second armada on the same account and
 prints the file that `--connection=<file>` takes to point any command at it. `--vcpus=N` caps that deployment's fleet.
+`--keep=N` has it keep the snapshots of every environment an open job uses and of the N most recently used of the rest,
+deleting the others after each new one is prepared, since an account's snapshots are limited: the deploy
+mints registry credentials through your wrangler login and gives them to the Worker as a secret, which a later deploy
+without `--keep` leaves in place. `armada prune` does the same once, from your machine.
 A client and a Worker of different versions refuse each other's requests and say which one to update.
 `armada run --json` prints its progress to stderr and, when it ends, one JSON object to stdout: the commit, the plan and
 task jobs, the report's path, `graded` (`pass`, `fail` or `not graded`, as its exit code says), the problems, and the

@@ -1,8 +1,8 @@
 /**
  * Deleting a container snapshot. The Containers API has no delete; a snapshot is a tag in a repository of the
- * account's registry, and a set tag beside it.
+ * account's registry, and a set tag beside it. The CLI (`armada prune`) and the Worker (`armada deploy --keep`) both
+ * delete through the registry, the Worker with credentials the deploy minted.
  */
-import { createHash } from 'node:crypto';
 import * as v from 'valibot';
 
 const Minted = v.object({
@@ -17,18 +17,28 @@ const Catalog = v.object({ repositories: v.record(v.string(), v.nullable(v.array
 
 const ACCEPT = 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json';
 
-const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
+/** WebCrypto, which both Bun and the Workers runtime have. */
+const sha256 = async (value: string): Promise<string> =>
+  [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
-export async function deleteSnapshot(input: { readonly account: string; readonly token: string; readonly id: string }): Promise<'deleted' | 'absent'> {
-  const minted = await fetch(`https://api.cloudflare.com/client/v4/accounts/${input.account}/containers/registries/registry.cloudflare.com/credentials`, {
-    method: 'POST', headers: { authorization: `Bearer ${input.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ expiration_minutes: 5, permissions: ['pull', 'push'] }),
+/** `user:password` for the account's registry, valid `minutes`, minted with `token`: an API token that may edit
+ *  Containers, or wrangler's own login. */
+export async function registryCredentials(account: string, token: string, minutes = 5): Promise<string> {
+  const minted = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/containers/registries/registry.cloudflare.com/credentials`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ expiration_minutes: minutes, permissions: ['pull', 'push'] }),
   });
   const answer = v.parse(Minted, await minted.json());
 
   if (!answer.success || answer.result == null) throw new Error(`minting registry credentials answered ${String(minted.status)}: ${answer.errors.map((error) => error.message).join('; ')}`);
-  const authorization = `Basic ${btoa(`${answer.result.username}:${answer.result.password}`)}`;
-  const snapshot = `rootfs-snapshot-${sha256(input.id)}`;
+
+  return `${answer.result.username}:${answer.result.password}`;
+}
+
+/** Deletes the snapshot `id`'s tags with the registry `credentials` (`user:password`). */
+export async function deleteSnapshotWith(credentials: string, id: string): Promise<'deleted' | 'absent'> {
+  const authorization = `Basic ${btoa(credentials)}`;
+  const snapshot = `rootfs-snapshot-${await sha256(id)}`;
   const catalog = v.parse(Catalog, await (await fetch('https://registry.cloudflare.com/v2/_catalog?tags=true', { headers: { authorization } })).json());
   const repository = Object.entries(catalog.repositories).find(([, tags]) => tags?.includes(snapshot) === true)?.[0];
 
@@ -41,7 +51,7 @@ export async function deleteSnapshot(input: { readonly account: string; readonly
   if (!read.ok) throw new Error(`reading ${snapshot} answered ${String(read.status)}: ${await read.text()}`);
   const set = v.parse(Manifest, await read.json()).annotations['io.cloudflare.cloudchamber.snapshot_set_id'];
 
-  for (const tag of set === undefined ? [snapshot] : [snapshot, `rootfs-set-${sha256(set)}`]) {
+  for (const tag of set === undefined ? [snapshot] : [snapshot, `rootfs-set-${await sha256(set)}`]) {
     const deleted = await fetch(manifest(tag), { method: 'DELETE', headers: { authorization, accept: ACCEPT } });
 
     if (!deleted.ok && deleted.status !== 404) throw new Error(`deleting ${tag} answered ${String(deleted.status)}: ${await deleted.text()}`);
