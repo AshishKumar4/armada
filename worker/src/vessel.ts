@@ -178,7 +178,12 @@ export class ArmadaVessel extends DurableObject<Env> {
     this.watching = true;
     const ended = (how: string) => { void this.ctx.storage.put('ended', `${how} at ${new Date().toISOString()}`); };
 
-    container.monitor().then(() => { ended('exited'); }, (cause: unknown) => { ended(`ended: ${said(cause)}`); });
+    const since = Date.now();
+
+    container.monitor().then(() => { ended('exited'); }, (cause: unknown) => {
+      console.log(JSON.stringify({ probe: 'monitor-rejected', afterMs: Date.now() - since, error: said(cause) }));
+      ended(`ended: ${said(cause)}`);
+    });
   }
 
   /** What a lost container's error says of it: how it ended, if this object saw, and whether this object was

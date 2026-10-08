@@ -249,8 +249,13 @@ export interface Ran {
 /** `argv` in the container, as root or as the user, and its whole output. */
 export async function run(container: Container, argv: readonly string[], options: Exec): Promise<Ran> {
   const { ms, asUser = false, ...exec } = options;
-  const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal: AbortSignal.timeout(ms) });
+  const signal = AbortSignal.timeout(ms);
+  const since = Date.now();
+
+  signal.addEventListener('abort', () => { console.log(JSON.stringify({ probe: 'exec-timeout-fired', argv0: argv[0], argv2: String(argv[2] ?? '').slice(0, 30), afterMs: Date.now() - since })); });
+  const child = await container.exec(asUser ? [...AS_USER, ...argv] : [...argv], { ...exec, signal });
   const out = await child.output();
+  console.log(JSON.stringify({ probe: 'exec-done', argv0: argv[0], argv2: String(argv[2] ?? '').slice(0, 30), afterMs: Date.now() - since }));
   const decoder = new TextDecoder();
 
   return { exitCode: out.exitCode, stdout: decoder.decode(out.stdout), stderr: decoder.decode(out.stderr) };
