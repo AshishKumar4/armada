@@ -343,7 +343,9 @@ export async function runCI(armada: Armada, target: string, label: string, planA
     const written = result.kind === 'ok' ? null : await job.output(result.index);
     const text = result.kind === 'ok' ? result.value : written === null ? null : new TextDecoder().decode(written);
     const parsed = text === null ? null : v.safeParse(VerdictFileSchema, jsonOf(text));
-    const rows = parsed?.success === true ? underExit(parsed.output.rows, result.meta, nameOf(result.index)) : null;
+    // A task that failed before it wrote a verdict reported no row; one that exited 0 without a verdict is ungradable.
+    const reported = parsed?.success === true ? parsed.output.rows : result.meta.exitCode !== 0 ? [] : null;
+    const rows = reported === null ? null : underExit(reported, result.meta, nameOf(result.index), plan.include[result.index]?.rows);
 
     verdicts.set(result.index, rows);
 
