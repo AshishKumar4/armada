@@ -33,6 +33,8 @@ async function answer(job: ArmadaJob, id: string, artifacts: ReturnType<typeof b
 
   if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index))) throw new Error(`${vessel} got no task`);
   await artifacts.put(taskKey(id, claim.index, 'output'), envelope);
+  // What a vessel does with a green answer its claim says to cache (vessel.test.ts holds the vessel to it).
+  if (exitCode === 0 && claim.cache !== undefined) await artifacts.put(claim.cache.key, envelope, { customMetadata: { expires: String(claim.cache.expires), answer: 'value' } });
   const outcome: Outcome = { index: claim.index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: true, value: envelope, answer: 'value' };
 
   await job.complete(vessel, outcome, 1000);

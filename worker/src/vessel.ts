@@ -11,7 +11,7 @@ import { ANSWER_PATH, BUNDLE_PATH, failureTail, INLINE_BYTES, OUT_PATH, type Out
 import {
   ENTRYPOINT, KEEP_MASK, KILL, MASK, MASK_VALUES, TASK, USAGE, WAIT, launchTask, mounts, must, pipeIn, receive, run, startAndAnswer, STATE, STOPPED, usageFrom,
 } from './container';
-import { bundleKey, packKey, said, taskKey, textOf, type Env } from './env';
+import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim } from './job';
 
 export interface VesselSpec {
@@ -285,7 +285,22 @@ export class ArmadaVessel extends DurableObject<Env> {
       index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, tail: tail.stdout, output: out !== null, value, answer, ...error === undefined ? {} : { error }, ...usage,
     };
 
+    if (exitCode === 0 && out !== null && current.claim.cache !== undefined) await this.keepInCache(taskKey(spec.jobId, index, 'output'), current.claim.cache, answer);
+
     await job.complete(spec.name, outcome, seconds * 1000);
+  }
+
+  /** A green answer's output into the job's cache, before its outcome is reported, so a later item like it finds it.
+   *  A cache that cannot be written costs only a later rerun: the task's answer stands. */
+  private async keepInCache(output: string, cache: { readonly key: string; readonly expires: number }, answer: string | undefined): Promise<void> {
+    try {
+      const stored = await this.env.ARTIFACTS.get(output);
+
+      if (stored === null) return;
+      await copyInto(this.env.ARTIFACTS, cache.key, stored, stored.size <= INLINE_BYTES ? await stored.arrayBuffer() : null, { expires: String(cache.expires), answer: answer ?? '' });
+    } catch (cause) {
+      console.error(JSON.stringify({ output, cache: cache.key, error: said(cause) }));
+    }
   }
 
   /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not

@@ -19,7 +19,7 @@ import {
   ANSWER_PATH, BUNDLE_PATH, cacheKey, environmentKey, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
 } from '../../src/protocol';
-import { said, SINGLE, taskKey, textOf, type Env } from './env';
+import { copyInto, said, SINGLE, taskKey, textOf, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { instanceOf, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
@@ -38,6 +38,9 @@ export interface Claim {
   readonly env: Record<string, string>;
   /** The names of the secrets in `env`, whose values the vessel masks in the task's log. */
   readonly secrets: readonly string[];
+  /** Where a green answer is cached, and until when, for a job that keeps a cache: the vessel writes it before it
+   *  reports the outcome, so a later item like this one finds it. */
+  readonly cache?: { readonly key: string; readonly expires: number };
   /** A second run of a straggler: its answer is kept only if it lands first. */
   readonly duplicate: boolean;
 }
@@ -63,18 +66,6 @@ const JOB_DEADLINE_MS = 6 * 60 * 60_000;
 const CACHE_READS = 32;
 
 const DAY_MS = 24 * 60 * 60_000;
-
-/** An R2 object into `key`: `small` when it was read whole, else streamed at its known size. */
-async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, small: ArrayBuffer | null, customMetadata?: Record<string, string>): Promise<void> {
-  if (small !== null) {
-    await bucket.put(key, small, { httpMetadata: source.httpMetadata, customMetadata });
-
-    return;
-  }
-  const known = new FixedLengthStream(source.size);
-
-  await Promise.all([source.body.pipeTo(known.writable), bucket.put(key, known.readable, { httpMetadata: source.httpMetadata, customMetadata })]);
-}
 
 export class ArmadaJob extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
@@ -316,7 +307,7 @@ export class ArmadaJob extends DurableObject<Env> {
     // Secrets are read for each claim and never kept: the job holds only their names.
     const env = { ...(await this.ctx.storage.get<Record<string, string>>('env')) ?? {}, ...await this.secrets(spec) };
 
-    if (next !== undefined) return this.claimOf(spec, env, next.idx, next.item, next.attempts, false);
+    if (next !== undefined) return await this.cached(spec, this.claimOf(spec, env, next.idx, next.item, next.attempts, false), next.item);
     const [later] = this.sql.exec<{ at: number | null }>(`SELECT MIN(not_before) AS at FROM tasks WHERE state = 'queued'`).toArray();
 
     // At most a minute at a time, so a waiting vessel still beats.
@@ -333,7 +324,7 @@ export class ArmadaJob extends DurableObject<Env> {
        AND started < ? AND started < ? - weight * 2000 ORDER BY started LIMIT 1) RETURNING idx, item, attempts`, name, name, now - STRAGGLER_MS, now,
     ).toArray()[0];
 
-    if (straggler !== undefined) return this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true);
+    if (straggler !== undefined) return await this.cached(spec, this.claimOf(spec, env, straggler.idx, straggler.item, straggler.attempts, true), straggler.item);
     // It retires: marked now, so items an open job takes before its retirement lands get a vessel of their own.
     this.beat(name, 'done');
 
@@ -348,6 +339,14 @@ export class ArmadaJob extends DurableObject<Env> {
     };
 
     return { index, attempt, argv: spec.run.kind === 'task' ? ['node', BUNDLE_PATH] : task.argv ?? ['false'], env, secrets: spec.secrets, duplicate };
+  }
+
+  /** `claim` with where its green answer is cached, when the job keeps a cache. */
+  private async cached(spec: Kept, claim: Claim, stored: string): Promise<Claim> {
+    if (spec.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined) return claim;
+    const key = await cacheKey(spec.run.bundle, spec.run.id, (await this.ctx.storage.get<string>('key')) ?? '', v.parse(TaskSchema, JSON.parse(stored)).item);
+
+    return { ...claim, cache: { key, expires: Date.now() + spec.cache.days * DAY_MS } };
   }
 
   /** The values of the secrets the job names that are still set: the runner says which was deleted. */
@@ -380,26 +379,9 @@ export class ArmadaJob extends DurableObject<Env> {
       // A task the job already ended (cancelled, or failed with a lost vessel) keeps the one outcome it has.
       this.sql.exec(`UPDATE tasks SET state = ? WHERE idx = ?`, outcome.kind, outcome.index);
       this.sql.exec('INSERT INTO events (outcome) VALUES (?)', JSON.stringify(outcome));
-      this.ctx.waitUntil(this.keep(outcome));
     }
     this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
     await this.settle();
-  }
-
-  /** A green answer into the cache, when the job keeps one: a later item like it is answered from it. */
-  private async keep(outcome: Outcome): Promise<void> {
-    const spec = await this.spec();
-
-    if (spec?.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || outcome.kind !== 'exited' || outcome.exitCode !== 0 || !outcome.output) return;
-    const id = (await this.ctx.storage.get<string>('id')) ?? '';
-    const [row] = this.sql.exec<{ item: string }>('SELECT item FROM tasks WHERE idx = ?', outcome.index).toArray();
-    const output = await this.env.ARTIFACTS.get(taskKey(id, outcome.index, 'output'));
-
-    if (row === undefined || output === null) return;
-    const key = await cacheKey(spec.run.bundle, spec.run.id, (await this.ctx.storage.get<string>('key')) ?? '', v.parse(TaskSchema, JSON.parse(row.item)).item);
-    const expires = String(Date.now() + spec.cache.days * DAY_MS);
-
-    await copyInto(this.env.ARTIFACTS, key, output, output.size <= INLINE_BYTES ? await output.arrayBuffer() : null, { expires, answer: outcome.answer ?? '' });
   }
 
   /** Whether a vessel should keep running `index`: no, once someone else's answer landed or the job ended. */

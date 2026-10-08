@@ -74,6 +74,9 @@ async function tasksOf(root: string, folders: readonly string[]): Promise<{ read
   return { files, ids: [...owners.keys()].sort() };
 }
 
+/** A line holding only the comment Bun puts above each module it bundles: the module's path. */
+const MODULE_PATH = /^\/\/ [^\s]+\.(?:[cm]?[jt]sx?|json)\n/gmu;
+
 /** The project's task files bundled for node, with the runner as the entry. */
 export async function bundleTasks(root: string, folders: readonly string[]): Promise<{ readonly bytes: Uint8Array<ArrayBuffer>; readonly ids: string[] }> {
   const { files, ids } = await tasksOf(root, folders);
@@ -92,8 +95,12 @@ export async function bundleTasks(root: string, folders: readonly string[]): Pro
     const [output] = built.outputs;
 
     if (!built.success || output === undefined) throw new Error(`bundling the tasks failed:\n${built.logs.map(String).join('\n')}`);
+    // Bun marks each module with a comment of its path from here, the scratch directory's random name and the
+    // checkout's place included. Without them, the same task files bundle to the same bytes from every push and
+    // every checkout, so to the same digest and the same cache keys.
+    const code = (await output.text()).replace(MODULE_PATH, '');
 
-    return { bytes: new Uint8Array(await output.arrayBuffer()), ids };
+    return { bytes: new TextEncoder().encode(code), ids };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

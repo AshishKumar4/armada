@@ -1,11 +1,12 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Result } from '../src/index';
+import { bundleTasks } from '../src/push';
 import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, remembered, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
@@ -217,6 +218,34 @@ describe('a pushed task', () => {
       writeFileSync(join(scratch, 'armada', 'b.ts'), source('b'));
 
       expect(await push(localFleet().armada, scratch).catch((error: unknown) => String(error))).toBe('Error: two tasks have the id same: in armada/a.ts and armada/b.ts');
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a push\'s bundle', () => {
+  test('is the same bytes for the same task files, wherever the project is and whichever push made it', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-bundle-'));
+    const sdk = join(import.meta.dir, '..');
+    const project = (where: string, name: string) => {
+      const root = join(scratch, where);
+
+      mkdirSync(join(root, 'armada'), { recursive: true });
+      mkdirSync(join(root, 'node_modules'), { recursive: true });
+      symlinkSync(sdk, join(root, 'node_modules', 'armada'));
+      writeFileSync(join(root, 'armada.config.ts'), `export default { project: 'same' };\n`);
+      writeFileSync(join(root, 'armada', 'square.ts'), `import { task } from 'armada';\nexport const square = task({ id: ${JSON.stringify(name)}, run: (n: number) => n * n });\n`);
+
+      return root;
+    };
+    const digest = async (root: string) => new Bun.CryptoHasher('sha256').update((await bundleTasks(root, ['armada'])).bytes).digest('hex');
+
+    try {
+      const [near, far, other] = [project('a', 'square'), project('b/c/d', 'square'), project('e', 'cube')];
+
+      expect({ again: await digest(near) === await digest(near), elsewhere: await digest(near) === await digest(far), changed: await digest(near) === await digest(other) })
+        .toEqual({ again: true, elsewhere: true, changed: false });
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

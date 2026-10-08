@@ -140,4 +140,41 @@ describe('a task that names secrets', () => {
     expect({ order: kept !== -1 && kept < launched && launched < masked && masked < tailed, keep: [seen[kept]?.argv[3], seen[kept]?.env], mask: seen[masked]?.argv.slice(3), read })
       .toEqual({ order: true, keep: [MASK_VALUES, { API_KEY: 'sk-launched', ARMADA_MASK: 'API_KEY' }], mask: ['/armada/task/log', MASK_VALUES], read: 0 });
   });
+
+  test('a green answer its claim says to cache is written there before its outcome is reported', async () => {
+    let claimed = false;
+    let cachedAtReport: string | undefined;
+    const artifacts = bucket();
+    const stored = state(container((argv) => {
+      if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
+
+      if (argv[0] === 'stat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? '21' : '0' };
+
+      if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? '{"ok":true,"value":4}' : '' };
+
+      return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+    }));
+    const job = {
+      booted: async () => undefined,
+      waiting: async () => undefined,
+      claim: async () => {
+        if (claimed) return null;
+        claimed = true;
+
+        return { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], cache: { key: 'cache/square-2', expires: 1234 }, duplicate: false };
+      },
+      still: async () => true,
+      accept: async () => true,
+      complete: async () => { cachedAtReport = artifacts.objects.get('cache/square-2'); },
+      retired: async () => undefined,
+      vesselFailed: async () => undefined,
+    };
+    const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
+
+    await vessel.begin({ ...spec, output: true });
+
+    for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
+
+    expect({ cachedAtReport, expires: artifacts.kept.get('cache/square-2')?.customMetadata['expires'] }).toEqual({ cachedAtReport: '{"ok":true,"value":4}', expires: '1234' });
+  });
 });
