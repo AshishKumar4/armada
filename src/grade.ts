@@ -80,6 +80,23 @@ export interface Graded {
   readonly reds: readonly VerdictRow[];
 }
 
+/** Each file's seconds in a run: the sum of the timings its rows report for it, so a file a plan splits over several
+ *  rows is timed whole. A file a red row reports, or a row whose proof was reused, is left out: its other rows hold only
+ *  part of its time. */
+export function fileTimings(rows: readonly VerdictRow[]): Record<string, number> {
+  const files: Record<string, number> = {};
+  const partial = new Set<string>();
+
+  for (const row of rows) {
+    for (const [file, seconds] of Object.entries(row.timings ?? {})) {
+      if (row.exitCode !== 0 || row.cached !== undefined) partial.add(file);
+      files[file] = (files[file] ?? 0) + seconds;
+    }
+  }
+
+  return Object.fromEntries(Object.entries(files).filter(([file]) => !partial.has(file)));
+}
+
 export function grade(answers: readonly TaskAnswer[]): Graded {
   const problems: string[] = [];
   const rows: VerdictRow[] = [];
