@@ -280,13 +280,15 @@ class Link:
     connection in under it (handover); each then sends what the other has not counted and drops what it already
     took. Done once both streams ended and each was counted."""
 
-    def __init__(self, local, name, carrier, reopen=None):
+    def __init__(self, local, name, carrier, reopen=None, held=None):
         self.local, self.name, self.carrier, self.reopen = local, name, None, reopen or self.handed
         self.changed, self.pending = threading.Condition(), None
         self.sent = self.acked = self.taken = self.received = 0
         self.kept, self.incoming = collections.deque(), collections.deque()
         self.ended = self.peer_ended = None
         self.over = self.delivered = False
+        if held is not None:
+            held(self)
         self.attach(carrier)
 
     def log(self, what):
@@ -317,12 +319,14 @@ class Link:
                 pass
 
     def handover(self, carrier):
-        """The vessel's next connection in, for an inbound link: the one before it is closed, which hands over."""
+        """The vessel's next connection in, for an inbound link: the one before it, and one handed over and not yet
+        taken, are closed, which hands over."""
         with self.changed:
-            earlier, self.pending = self.carrier, carrier
+            earlier, unused, self.pending = self.carrier, self.pending, carrier
             self.changed.notify_all()
-        if earlier is not None:
-            earlier.close()
+        for replaced in (earlier, unused):
+            if replaced is not None:
+                replaced.close()
 
     def handed(self):
         with self.changed:
@@ -514,9 +518,13 @@ def inbound(conn):
         carrier.close()
         return
     local.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    held = Link(local, "port %s from link %s" % (port, link), carrier)
-    with LINKED:
-        LINKS[link] = held
+
+    def register(held):
+        # Before its first carrier takes it, so a resume that comes at once finds it.
+        with LINKED:
+            LINKS[link] = held
+
+    held = Link(local, "port %s from link %s" % (port, link), carrier, held=register)
     try:
         held.run()
     finally:
