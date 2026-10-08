@@ -161,7 +161,7 @@ describe('a job\'s env', () => {
     let vessel: ArmadaVessel | undefined;
 
     const job = new ArmadaJob(jobState.ctx, world({
-      VESSEL: namespace((name): unknown => name === 'j1/v1' ? vessel : { begin: async () => undefined, stop: async () => undefined }),
+      VESSEL: namespace((name) => name === 'j1/v1' ? vessel : { begin: async () => undefined, stop: async () => undefined }),
       ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
     }));
 

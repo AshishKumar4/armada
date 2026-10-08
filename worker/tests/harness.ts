@@ -7,6 +7,8 @@
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { mock } from 'bun:test';
 import { timingSafeEqual } from 'node:crypto';
+import * as v from 'valibot';
+import { JsonSchema, type Json } from '../../src/protocol';
 import type { Env } from '../src/env';
 
 // workerd's constant-time comparison, which the Worker checks its bearer with.
@@ -33,11 +35,14 @@ class FixedLengthStream extends TransformStream<Uint8Array, Uint8Array> {
 
 Object.assign(globalThis, { FixedLengthStream });
 
-void mock.module('cloudflare:workers', () => ({
+await mock.module('cloudflare:workers', () => ({
   DurableObject: class {
-    constructor(protected readonly ctx: unknown, protected readonly env: unknown) {}
+    constructor(protected readonly ctx: DurableObjectState, protected readonly env: Env) {}
   },
 }));
+
+/** A key, or the keys, a storage call names. */
+const many = (key: string | readonly string[]): key is readonly string[] => Array.isArray(key);
 
 export interface Stored {
   readonly ctx: DurableObjectState;
@@ -47,19 +52,19 @@ export interface Stored {
   readonly pending: readonly Promise<unknown>[];
 }
 
-/** An in-memory Durable Object state, with `container` as its container. */
-export function state(container?: Container): Stored {
+/** An in-memory Durable Object state, with `held` as its container. */
+export function state(held?: Container): Stored {
   const entries = new Map<string, unknown>();
   let alarm: number | null = null;
   const db = new Database(':memory:');
 
   const storage = {
-    get: async (key: string | readonly string[]) => typeof key === 'string' ? structuredClone(entries.get(key))
-      : new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : [])),
-    put: async (key: string | Record<string, unknown>, value?: unknown) => {
-      for (const [name, each] of typeof key === 'string' ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
+    get: async (key: string | readonly string[]) => many(key) ? new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : []))
+      : structuredClone(entries.get(key)),
+    put: async <T>(key: string | Readonly<Record<string, T>>, value?: T) => {
+      for (const [name, each] of v.is(v.string(), key) ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
     },
-    delete: async (keys: string | readonly string[]) => typeof keys === 'string' ? entries.delete(keys) : keys.filter((key) => entries.delete(key)).length,
+    delete: async (keys: string | readonly string[]) => many(keys) ? keys.filter((key) => entries.delete(key)).length : entries.delete(keys),
     // As the platform lists: in key order, `end` exclusive, `limit` keys from the end `reverse` names.
     list: async ({ prefix = '', end, reverse = false, limit }: { prefix?: string; end?: string; reverse?: boolean; limit?: number } = {}) => {
       const keys = [...entries.keys()].filter((key) => key.startsWith(prefix) && (end === undefined || key < end)).sort();
@@ -69,7 +74,7 @@ export function state(container?: Container): Stored {
     },
     // One alarm an object, as the platform keeps it: set replaces it, delete clears it.
     getAlarm: async () => alarm,
-    setAlarm: async (at: number | Date) => { alarm = typeof at === 'number' ? at : at.getTime(); },
+    setAlarm: async (at: number | Date) => { alarm = at instanceof Date ? at.getTime() : at; },
     deleteAlarm: async () => { alarm = null; },
     sql: {
       exec: (query: string, ...bindings: SQLQueryBindings[]) => {
@@ -96,14 +101,22 @@ export function state(container?: Container): Stored {
   // What an object hands `waitUntil`, for a test to wait on.
   const pending: Promise<unknown>[] = [];
 
-  // The few storage methods the objects call, not the whole DurableObjectState: a test double at the platform's seam.
-  return { ctx: { storage, container, waitUntil: (promise: Promise<unknown>) => { pending.push(promise); } } as unknown as DurableObjectState, dump, pending };
+  const ctx: Partial<DurableObjectState> = {};
+
+  Object.assign(ctx, { storage, container: held, waitUntil: (promise: Promise<unknown>) => { pending.push(promise); } });
+
+  // SAFETY: the objects call only these storage methods, `container` and `waitUntil`, each constructed above.
+  return { ctx: ctx as DurableObjectState, dump, pending };
 }
 
 /** A namespace whose `getByName` answers from `named`. */
-export function namespace<T>(named: (name: string) => T): DurableObjectNamespace {
-  // Only getByName is called; it returns the object itself in place of an RPC stub.
-  return { getByName: named } as unknown as DurableObjectNamespace;
+export function namespace(named: (name: string) => object | undefined): DurableObjectNamespace {
+  const space: Partial<DurableObjectNamespace> = {};
+
+  Object.assign(space, { getByName: named });
+
+  // SAFETY: the objects call only getByName, constructed above to return the object itself in place of an RPC stub.
+  return space as DurableObjectNamespace;
 }
 
 /** An R2 bucket in memory: what a test reads back of what was put, by key. */
@@ -133,10 +146,10 @@ export function bucket(objects = new Map<string, string>()) {
       if (text === undefined) return null;
       const bytes = new TextEncoder().encode(text);
 
-      return { ...object(key), size: bytes.byteLength, body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<unknown> => JSON.parse(text), arrayBuffer: async () => bytes.buffer };
+      return { ...object(key), size: bytes.byteLength, body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<Json> => v.parse(JsonSchema, JSON.parse(text)), arrayBuffer: async () => bytes.buffer };
     },
     put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string>; readonly httpMetadata?: R2HTTPMetadata } = {}) => {
-      objects.set(key, typeof body === 'string' ? body : await new Response(body).text());
+      objects.set(key, await new Response(body).text());
       kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {}, httpMetadata: options.httpMetadata ?? {} });
     },
     delete: async (key: string) => {
@@ -156,17 +169,22 @@ export function bucket(objects = new Map<string, string>()) {
   };
 }
 
+/** A binding a test answers in memory: a namespace, a bucket, a version, or a variable's text. */
+type Fake = DurableObjectNamespace | ReturnType<typeof bucket> | WorkerVersionMetadata | string;
+
 /** The bindings an object reaches, each answered in memory: the fleet always has room. */
-export function world(bindings: Partial<Record<keyof Env, unknown>>): Env {
-  const all = {
+export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
+  const env: Partial<Env> = {};
+
+  Object.assign(env, {
     FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARTIFACTS: bucket(),
     ...bindings,
-  };
+  });
 
-  // Only the bindings these objects reach are present.
-  return all as unknown as Env;
+  // SAFETY: the objects reach only these bindings, each constructed above or by the test with the members they call.
+  return env as Env;
 }
 
 /** What a container's exec answers: its exit code and output, or a throw for an exec the platform lost. */
@@ -194,6 +212,10 @@ export function container(answer: Answer): Container {
     },
   };
 
-  // The calls a vessel makes of its container, answered in memory.
-  return fake as unknown as Container;
+  const machine: Partial<Container> = {};
+
+  Object.assign(machine, fake);
+
+  // SAFETY: a vessel calls only these members of its container, each constructed above in memory.
+  return machine as Container;
 }
