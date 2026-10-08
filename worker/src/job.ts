@@ -424,7 +424,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
       return { waitMs: GANG_WAIT_MS };
     }
-    const hedged = this.hedged(spec, name, first?.weight ?? 0);
+    const hedged = this.hedged(spec, name, slot, first?.weight ?? 0);
 
     if (hedged !== undefined) return await this.cached(spec, this.claimOf(spec, env, hedged.idx, hedged.item, hedged.attempts, true), hedged.item);
     const next = first === undefined ? undefined : this.sql.exec<{ idx: number; item: string; attempts: number }>(
@@ -470,13 +470,13 @@ export class ArmadaJob extends DurableObject<Env> {
   /** One of the job's `hedge` heaviest tasks, running on one vessel, that `name` runs a second copy of: the heaviest no
    *  lighter than the task `waiting` next, so each copy starts as soon as the queue reaches its weight. A gang is not
    *  repeated. The first answer is kept (`accept`), and the other copy stops (`still`). */
-  private hedged(spec: Kept, name: string, waiting: number): { idx: number; item: string; attempts: number } | undefined {
+  private hedged(spec: Kept, name: string, slot: number, waiting: number): { idx: number; item: string; attempts: number } | undefined {
     if (spec.hedge === 0) return undefined;
 
     return this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET dup = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND weight >= ?
+      `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND weight >= ?
        AND idx IN (SELECT idx FROM tasks ORDER BY weight DESC, idx LIMIT ?) AND idx NOT IN (SELECT idx FROM members) ORDER BY weight DESC, idx LIMIT 1)
-       RETURNING idx, item, attempts`, name, name, waiting, spec.hedge,
+       RETURNING idx, item, attempts`, name, spec.slots > 1 ? slot : null, name, waiting, spec.hedge,
     ).toArray()[0];
   }
 
@@ -586,7 +586,8 @@ export class ArmadaJob extends DurableObject<Env> {
       return false;
     }
     await this.ctx.storage.delete(heldKey(index));
-    this.sql.exec('UPDATE tasks SET vessel = ?, dup = NULL WHERE idx = ?', name, index);
+    this.slotted();
+    this.sql.exec('UPDATE tasks SET vessel = ?, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?', name, index);
 
     return true;
   }
@@ -596,7 +597,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', index).toArray()[0];
 
     if (task?.dup !== name) return;
-    this.sql.exec('UPDATE tasks SET dup = NULL WHERE idx = ?', index);
+    this.slotted();
+    this.sql.exec('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE idx = ?', index);
     await this.release(index);
     await this.settle();
   }
