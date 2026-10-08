@@ -35,6 +35,9 @@ export function jobView(id: string, opened: number | null): View {
   let seq = 0;
   let items: Promise<readonly Json[]> | null = null;
   let drawer: (() => void) | null = null;
+  /** The containers that ran tasks in more than one slot, as of the last render. */
+  let split: Split = new Map();
+  const where = (vessel: string, slot: number | undefined): string => laneOf(vessel, slot, split);
 
   const grid = new TaskGrid('every task of the job, as a cell coloured by how it stands', (index) => describeTask(index), (index) => { open(index); });
   const timeline = new Timeline('each container of the job, with the tasks it ran over time', (segment) => describeSegment(segment), (segment) => {
@@ -44,8 +47,8 @@ export function jobView(id: string, opened: number | null): View {
   const describeTask = (index: number): HTMLElement => {
     const landed = outcomes.get(index);
     const running = status?.running?.find((each) => each.index === index);
-    const detail = landed !== undefined ? `${STATE_WORDS[stateOf(landed.outcome)]}${landed.outcome.cached === true ? ', from the cache' : ''} · ${duration(landed.outcome.seconds * 1000)}${landed.outcome.vessel === '' ? '' : ` on ${laneOf(landed.outcome.vessel, landed.outcome.slot)}`}`
-      : running !== undefined ? `running on ${laneOf(running.vessel, running.slot)} for ${duration(Date.now() - running.started)}` : 'queued';
+    const detail = landed !== undefined ? `${STATE_WORDS[stateOf(landed.outcome)]}${landed.outcome.cached === true ? ', from the cache' : ''} · ${duration(landed.outcome.seconds * 1000)}${landed.outcome.vessel === '' ? '' : ` on ${where(landed.outcome.vessel, landed.outcome.slot)}`}`
+      : running !== undefined ? `running on ${where(running.vessel, running.slot)} for ${duration(Date.now() - running.started)}` : 'queued';
 
     return h('div', {}, h('b', {}, `Task ${count(index)}`), h('span', { class: 'muted' }, detail));
   };
@@ -104,7 +107,8 @@ export function jobView(id: string, opened: number | null): View {
 
       return landed !== undefined ? stateOf(landed.outcome) : running.has(index) ? 'running' : 'queued';
     }));
-    const { lanes, placed } = segments(status, outcomes, now);
+    split = splitOf(status, outcomes);
+    const { lanes, placed } = segments(status, outcomes, now, split);
 
     timeline.update(lanes, placed, status.startedAt ?? status.createdAt, status.finishedAt ?? now, status.phase !== 'done');
   };
@@ -113,7 +117,7 @@ export function jobView(id: string, opened: number | null): View {
     drawer?.();
     history.replaceState(null, '', `#/jobs/${id}/${String(index)}`);
     items ??= get(`/jobs/${id}/items`, v.object({ items: v.array(JsonSchema) })).then((answer) => answer.items);
-    drawer = taskDrawer(id, index, outcomes.get(index) ?? null, status?.running?.find((each) => each.index === index) ?? null, items, () => {
+    drawer = taskDrawer(id, index, outcomes.get(index) ?? null, status?.running?.find((each) => each.index === index) ?? null, items, where, () => {
       drawer = null;
       history.replaceState(null, '', `#/jobs/${id}`);
     });
@@ -151,20 +155,29 @@ export function jobView(id: string, opened: number | null): View {
   };
 }
 
-/** A container's lane, or one slot's of a container that runs several tasks at once. */
-const laneOf = (vessel: string, slot: number | undefined): string => slot === undefined ? vessel : `${vessel} · ${String(slot)}`;
+/** The containers that ran tasks in more than one slot, each with those slots in order: each gets a lane a slot. */
+type Split = ReadonlyMap<string, readonly number[]>;
 
-/** Every container's lanes (one, or one a slot it has run a task in), its start and every task it ran or runs, placed
- *  in time. A task answered before this Worker stamped outcomes has no place, nor does one answered from the cache. */
-function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now: number): { readonly lanes: Lane[]; readonly placed: Segment[] } {
-  const tasks: Segment[] = [];
+/** Where a task ran: its container, and its slot where the container ran tasks in more than one. */
+const laneOf = (vessel: string, slot: number | undefined, split: Split): string => split.has(vessel) ? `${vessel} · ${String(slot ?? 0)}` : vessel;
+
+function splitOf(status: JobStatus, outcomes: ReadonlyMap<number, Landed>): Split {
   const slots = new Map<string, Set<number>>();
+
+  for (const { vessel, slot } of [...[...outcomes.values()].map(({ outcome }) => outcome), ...status.running ?? []]) slots.set(vessel, (slots.get(vessel) ?? new Set()).add(slot ?? 0));
+
+  return new Map([...slots].flatMap(([vessel, seen]) => seen.size > 1 ? [[vessel, [...seen].sort((left, right) => left - right)] as const] : []));
+}
+
+/** Every container's lanes, its start and every task it ran or runs, placed in time. A task answered before this
+ *  Worker stamped outcomes has no place, nor does one answered from the cache. */
+function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now: number, split: Split): { readonly lanes: Lane[]; readonly placed: Segment[] } {
+  const tasks: Segment[] = [];
   /** Each container's first task's start, where its start ends. */
   const firsts = new Map<string, number>();
   const place = (vessel: string, slot: number | undefined, segment: Omit<Segment, 'lane'>): void => {
-    if (slot !== undefined) slots.set(vessel, (slots.get(vessel) ?? new Set()).add(slot));
     firsts.set(vessel, Math.min(segment.start, firsts.get(vessel) ?? Infinity));
-    tasks.push({ ...segment, lane: laneOf(vessel, slot) });
+    tasks.push({ ...segment, lane: laneOf(vessel, slot, split) });
   };
 
   for (const [index, { outcome, at }] of outcomes) {
@@ -178,8 +191,7 @@ function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now:
   const starts: Segment[] = [];
 
   for (const vessel of status.vessels) {
-    const names = [...slots.get(vessel.name) ?? []].sort((left, right) => left - right).map((slot) => laneOf(vessel.name, slot));
-    const own = names.length === 0 ? [vessel.name] : names;
+    const own = split.get(vessel.name)?.map((slot) => laneOf(vessel.name, slot, split)) ?? [vessel.name];
     const first = firsts.get(vessel.name);
     const boot = vessel.bootMs;
 
@@ -192,7 +204,8 @@ function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now:
 }
 
 /** A task in a drawer: what it was given, how it ended, and its files. Answers the drawer's close. */
-function taskDrawer(job: string, index: number, landed: Landed | null, running: { readonly vessel: string; readonly started: number; readonly slot?: number } | null, items: Promise<readonly Json[]>, closed: () => void): () => void {
+function taskDrawer(job: string, index: number, landed: Landed | null, running: { readonly vessel: string; readonly started: number; readonly slot?: number } | null, items: Promise<readonly Json[]>,
+  where: (vessel: string, slot: number | undefined) => string, closed: () => void): () => void {
   const previous = document.activeElement;
   const itemSlot = h('pre', { class: 'code' }, '…');
   const close = (): void => {
@@ -220,12 +233,12 @@ function taskDrawer(job: string, index: number, landed: Landed | null, running: 
     h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}`), h('div', { class: 'button-row' }, pill(tones[state], STATE_WORDS[state]), closer)),
     h('div', { class: 'drawer-body' },
       outcome === undefined
-        ? h('dl', { class: 'facts' }, fact('Container', running === null ? null : laneOf(running.vessel, running.slot)), fact('Running for', running === null ? null : duration(Date.now() - running.started)),
+        ? h('dl', { class: 'facts' }, fact('Container', running === null ? null : where(running.vessel, running.slot)), fact('Running for', running === null ? null : duration(Date.now() - running.started)),
           running === null ? fact('State', 'queued: no container has taken it yet') : null)
         : h('dl', { class: 'facts' },
           fact('Exit code', outcome.kind === 'exited' ? String(outcome.exitCode) : null),
           fact('Took', duration(outcome.seconds * 1000)),
-          fact('Container', outcome.vessel === '' ? null : laneOf(outcome.vessel, outcome.slot)),
+          fact('Container', outcome.vessel === '' ? null : where(outcome.vessel, outcome.slot)),
           fact('Attempt', String(outcome.attempt)),
           fact('Landed', landed?.at === undefined ? null : when(landed.at)),
           fact('Peak memory', outcome.peakMemory === undefined ? null : bytes(outcome.peakMemory)),
