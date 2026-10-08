@@ -612,6 +612,13 @@ describe('armada run', () => {
       .toEqual({ exit: 1, line: 'part-1         RED: 1 of 2 rows (y.mjs) in 0:01 on v1', told: true });
   });
 
+  test('a run it cannot grade names its report, which holds the rows that did report', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] });
+    const path = /^report: (.+)$/mu.exec(ran.stdout)?.[1];
+
+    expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), named: path?.endsWith('proj-tasks.json') }).toEqual({ exit: 2, graded: false, named: true });
+  });
+
   test('a task that wrote its verdict and then exited nonzero is graded, its green rows red with its exit', async () => {
     const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] }, 7);
 
