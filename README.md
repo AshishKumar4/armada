@@ -26,27 +26,15 @@ Cloudflare in your browser, or uses `CLOUDFLARE_API_TOKEN`. Containers need the 
 armada is a Worker, a few Durable Objects and an R2 bucket in your account, so your code and data stay there.
 
 1. armada prepares each environment once. It starts a container from the recipe's base image, runs `setup` as root
-   and `install` as the user, and snapshots the result. Preparing the ffmpeg recipe took 5.6 minutes. A changed recipe,
-   or a changed file in `environment.key`, prepares a new one.
-2. Containers start from the snapshot, in as little as 0.2 s, with a fresh tmpfs on `/tmp` and `/dev/shm`.
+   and `install` as the user, and snapshots the result. A changed recipe, or a changed file in `environment.key`,
+   prepares a new one.
+2. Containers start from the snapshot, with a fresh tmpfs on `/tmp` and `/dev/shm`.
 3. Each container pulls task after task from the job's one queue until it is empty, so no container waits behind
    another's slow task. Items with a higher `weight` start first.
 4. Results stream back as they land. A small output rides in the result. A large one, and every log, goes to R2.
 
-Each task runs as the user `ci`, in its own cgroup. armada stops anything a task leaves running before the next task
-starts. Tasks that run one after another in a container share its `/tmp`, unless the job uses slots. A task the
-platform loses runs again, up to three attempts. Each task gets exactly one recorded outcome, but a cut-off attempt
-may already have done its work, so a task should be safe to run twice.
-
-`lean/` holds machine-checked proofs of the scheduling rules. The `proofs` CI row builds them with warnings as errors.
-
-- The list schedule that sizes a run's pool puts every task in exactly one lane. It meets Graham's bound: m times the
-  makespan is at most the total work plus (m - 1) times the longest task.
-- The fleet never holds more vCPUs than its cap.
-- Every task of a finished job has exactly one outcome: its first accepted answer.
-
-The proofs cover a model of these rules. A differential test checks the TypeScript `listSchedule` against that model
-on seeded instances.
+Each task runs as the user `ci`, in its own cgroup, and armada stops anything it leaves running. A task the platform
+loses runs again, up to three attempts, so a task should be safe to run twice.
 
 ## Measured
 
@@ -58,21 +46,7 @@ on seeded instances.
 | 100 three-second tasks | 9.1 s and 11.4 s on 100 `micro` containers (`armada map --times=100 --pool=100 --size=micro -- sleep 3`) | 300 s of work |
 | 100 cached video answers | 5.6 s and 5.7 s, with no container started (`bun bench.ts 100 cached`) | 24.0 s and 28.3 s computing them |
 
-Each video task makes a 10-second 1080p clip from ffmpeg's test sources, then re-encodes it to 720p H.264. Wall times
-run from sending the items to downloading the last result. `bun bench.ts 100` prints where that time goes:
-
-- Each video got its own container, so no run can end before its slowest encode. That is the bound.
-- In the three runs above, the median encode took 7.7 to 7.9 s, but 15 to 22 of the 100 took 12 to 17 s on
-  containers of the same size. The slowest took 16.1 to 17.3 s, so the runs took 1.3 to 1.4 times the bound.
-- The last of the 100 containers answered 0.6 to 0.8 s after the job asked for it. The rest is launching each task,
-  storing its output in R2 and downloading all 100.
-- Two earlier runs that day were slower. The first 100-container run on the snapshot took 40.4 s: its containers
-  answered from 0.2 s to 32.0 s after they were asked for (median 17.4 s). The next took 38.8 s, because one encode
-  took 31.1 s.
-
-Asked for 100 containers at once, armada had all 100 started within 3.7 s and 8.7 s in two runs of three-second tasks.
-The CI suite ended 2 s after its longest row (442 s against 440 s), because its plan weighs each row by its measured
-seconds.
+Each video task makes a 10-second 1080p clip from ffmpeg's test sources, then re-encodes it to 720p H.264.
 
 ## From the command line
 
@@ -109,10 +83,8 @@ The gang starts once every rank has a container. A rank lost to the platform los
 as one task. The task's outcome is its first failing rank's, else rank 0's.
 
 Containers have no inbound address, so ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a
-connection, at 2 to 64 ranks. That is enough for tests and coordination, but too slow for bandwidth-bound training. A
-connection to a port nothing listens on yet opens and then closes at once, so a client retries it as it would a
-refused one. The two ranks' relays hold a connection's bytes. If its WebSocket drops, or the vessel between the ranks
-is reset or redeployed, the program sees nothing of it, as long as both ends come back within a minute.
+connection. That is enough for tests and coordination, but too slow for bandwidth-bound training. A connection made
+before the other rank listens closes at once, so connect with retries.
 
 ## From TypeScript
 
@@ -185,10 +157,6 @@ With two 10-second 1080p test videos in `videos.txt`, `bun encode.ts` printed:
 encoded in 9.1 s on 2 containers; the slowest encode took 6.4 s
 ```
 
-It wrote two 1280x720 files. Each video had its own container, so the run could not end before its slowest encode,
-6.4 s. The other 2.7 s went to starting both containers, launching each task, and storing and downloading both
-outputs. A second run printed 9.7 s and 6.7 s.
-
 - `.map` returns values in input order and throws a `MapError` if any item fails. `.stream` yields each result as it
   lands. `.run` runs one item on a container, and `.local` runs it on this machine.
 - A failed result's `kind` is `error`, `timeout`, `cancelled` or `lost`. Every result's `meta` has its seconds, exit
@@ -203,12 +171,10 @@ outputs. A second run printed 9.7 s and 6.7 s.
   body's answer is JSON and a command's is `null`. An `input` schema checks each item before it's sent.
 - Schemas can be valibot, zod or arktype (any [Standard Schema](https://standardschema.dev)). Items and answers are
   plain JSON, or bytes for an answer. A `Date`, a `Map`, `any` or `unknown` is a type error.
-- An output can be up to 4.995 GiB, R2's limit for one upload, and `job.outputStream(i)` streams it. A 336 MB tarball
-  built as one task came back as one output in 41 s, start to file.
+- An output can be up to 4.995 GiB, R2's limit for one upload, and `job.outputStream(i)` streams it.
 - `map(items, { pool, slots, label, env, files, tmpfs })` sets a job's options.
-- `slots` runs that many tasks at once in each container, each in its own mount namespace. A slot gets its own task
-  directory, a fresh tmpfs, overlays over the checkout and `$HOME`, and a cgroup with an even share of the size's
-  memory. The slots share the network, so two tasks cannot bind one fixed port, and a gang task cannot run in slots.
+- `slots` runs that many tasks at once in each container, each with its own files, `/tmp` and an even share of the
+  memory. Slots share the network, so two tasks cannot bind one fixed port, and a gang cannot run in slots.
 - A task takes a `timeout`. `speculative` lets an idle container rerun a straggler, and `hedge` runs that many of the
   heaviest items twice from the start. Either way the first answer is kept.
 - `retries` reruns an item only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
@@ -285,16 +251,14 @@ every row is green, 1 when a row is red and 2 when the commit has none, so a hoo
 Every run writes its report and prints `report: <path>`, including a run that cannot grade every row.
 
 `armada run --json` prints the progress on stderr and ends with one JSON object on stdout:
-`{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`. Its rows are the same objects
-the report holds, and its exit code is the same as without `--json`. The report file records `graded` too. A row
-that a problem names exits 2 and carries the `problem`, so it never reads green, even if its task reported it green.
+`{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`. The report file holds the same
+`graded` and rows. A row a problem names exits 2 and carries the `problem`, so it never reads green.
 
-A task can keep files beside its verdict. It writes them under `{artifacts}`, also `ARMADA_ARTIFACTS` in its
-environment, and a row names the ones that are its evidence: `"artifacts": ["shots/home.png"]`. `armada run` extracts
-each task's artifacts next to the report, in `~/.local/state/armada/runs/<project>-<job>/<task>/`, and prints each
-named file under a red row. A row that names a file its task did not keep leaves the run ungraded. Artifacts are kept
-as written: they may be binary, and the log's secret mask does not apply to them. `armada map --artifacts=<dir>`
-extracts them the same way, under `<dir>/<index>`.
+A task can keep files beside its verdict. It writes them under `{artifacts}` (`ARMADA_ARTIFACTS`), and a row names
+its evidence: `"artifacts": ["shots/home.png"]`. `armada run` extracts them next to the report and prints each named
+file under a red row. A row naming a file its task did not keep leaves the run ungraded. Artifacts are kept as
+written, so the log's secret mask does not apply to them. `armada map --artifacts=<dir>` extracts them under
+`<dir>/<index>`.
 
 A matrix entry may name the `rows` its task must report. A task that reports other rows leaves the run ungraded.
 
@@ -344,14 +308,9 @@ same repository, starts that commit's whole `armada run` on the deployment itsel
 default branch builds. The run stores its verdict as a local run does, and posts a GitHub commit status, such as
 "88 of 90 rows green", that links to the dashboard's CI page.
 
-`POST /webhooks/github/<project>` is the one route outside the deployment's bearer. GitHub's `X-Hub-Signature-256` is
-its only check. A delivery or a commit seen before is skipped. A pull request from a fork never builds, because its
-code must not get the deployment's secrets.
-
-The run's driver is a task in a `small` container whose environment holds only Bun, so a redeploy prepares no new
-environment. The driver fetches armada at the deployment's own commit, `ARMADA_SHA`, which `armada deploy` sets and
-`/health` reports, so deploy from a pushed commit. It gets the GitHub token and the deployment's bearer when it
-starts, and its log masks both like any secret.
+GitHub's `X-Hub-Signature-256` signs each delivery, and a delivery or a commit seen before is skipped. A pull request
+from a fork never builds, because its code must not get the deployment's secrets. The run uses armada at the
+deployment's own commit, so deploy from a pushed commit.
 
 `armada webhook add` creates or updates the GitHub hook through `gh` when you're signed in. Otherwise it prints the
 settings to add by hand. `armada webhook list` and `armada webhook remove <project>` manage them.
@@ -362,40 +321,22 @@ settings to add by hand. `armada webhook list` and `armada webhook remove <proje
 browser. `armada dashboard --serve=<port>` serves it from your machine instead, which signs each request itself.
 
 It shows the fleet and its recent jobs, each job's tasks and a timeline of its containers, and each task's item,
-output, log and artifacts. It also lists the environments and each project's CI verdicts. A container that ran tasks
-in more than one slot gets one timeline lane for each slot.
+output, log and artifacts. It also lists the environments and each project's CI verdicts.
 
 ## Deploying
 
 `armada deploy --name=<name>` deploys a second armada on the same account and prints the file that
 `--connection=<file>` takes, to point any command at it. `--vcpus=N` caps that deployment's fleet.
 
-A deploy over a running armada keeps its jobs running when the new Worker still serves every client the old one
-does. Six deploys in two minutes, over 200 one-minute tasks, cut no task and refused no job. A deploy waits for the
-open jobs first in four cases:
+A deploy over a running armada keeps its jobs running. It waits for them first only with `--drain`, or when the new
+version cannot take them over.
 
-- with `--drain`;
-- when the deployed version answers no health check;
-- when the new Worker would refuse a client the old one serves;
-- when the container driver changes.
+The Worker deletes the environment snapshots it no longer needs, because an account's snapshots are limited. It keeps
+the ones open jobs use, the 3 most recently used others (`--keep=N` changes the count), and any used in the last hour.
+It prunes when deployed, after each new environment, and every hour. `armada prune` prunes now, and `--keep=0` keeps
+only what open jobs use.
 
-That wait lapses after 10 minutes if the deploy dies.
-
-An account's snapshots are limited, so the Worker deletes environment snapshots it no longer needs. It keeps the
-snapshots of:
-
-- every environment an open job uses;
-- the 3 most recently used others;
-- any environment used in the last hour.
-
-It deletes the rest when it is deployed and after it prepares each new environment, and it looks again each hour. A busy hour's environments
-stay until that hour is quiet, and then the deployment keeps 3. A job's environment counts as used until the job ends.
-`--keep=N` changes the count. Each deploy mints registry credentials through your wrangler login, valid for a year,
-and gives them to the Worker as a secret. `armada prune` deletes now, from your machine, and `armada prune --keep=0`
-keeps only what open jobs use.
-
-A client and a Worker that speak versions of the wire too far apart refuse each other's requests, and say which one to
-update.
+A client and a Worker too far apart in version refuse each other's requests, and say which one to update.
 
 ## Commands
 
