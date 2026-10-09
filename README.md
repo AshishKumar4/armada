@@ -286,7 +286,8 @@ Every run writes its report and prints `report: <path>`, including a run that ca
 
 `armada run --json` prints the progress on stderr and ends with one JSON object on stdout:
 `{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`. Its rows are the same objects
-the report holds, and its exit code is the same as without `--json`.
+the report holds, and its exit code is the same as without `--json`. The report file records `graded` too. A row
+that a problem names exits 2 and carries the `problem`, so it never reads green, even if its task reported it green.
 
 A task can keep files beside its verdict. It writes them under `{artifacts}`, also `ARMADA_ARTIFACTS` in its
 environment, and a row names the ones that are its evidence: `"artifacts": ["shots/home.png"]`. `armada run` extracts

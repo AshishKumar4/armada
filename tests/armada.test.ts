@@ -207,8 +207,10 @@ describe('grading a CI run', () => {
     const withFile = { name: 'a', entry: {}, rows: [{ ...row('x'), artifacts: ['shots/home.png'] }], artifacts: new Set(['shots/home.png']) };
     const without = { name: 'a', entry: {}, rows: [{ ...row('x'), artifacts: ['shots/home.png'] }], artifacts: null };
 
-    expect({ graded: grade([withFile]).problems, missing: grade([without]).problems })
-      .toEqual({ graded: [], missing: ['a: x names evidence shots/home.png its task did not keep'] });
+    const missing = grade([without]);
+
+    expect({ graded: grade([withFile]).problems, missing: missing.problems, row: missing.rows.map((each) => [each.exitCode, each.problem]) })
+      .toEqual({ graded: [], missing: ['a: x names evidence shots/home.png its task did not keep'], row: [[2, 'a: x names evidence shots/home.png its task did not keep']] });
   });
 });
 
@@ -716,7 +718,12 @@ describe('armada run', () => {
         cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
-      return { exit: await cli.exited, stdout: await new Response(cli.stdout).text(), commands, bodies, seen };
+      const exit = await cli.exited;
+      const stdout = await new Response(cli.stdout).text();
+      // The report it names, read before its home goes.
+      const path = /^report: (.+)$/mu.exec(stdout)?.[1];
+
+      return { exit, stdout, commands, bodies, seen, report: path === undefined || !existsSync(path) ? '' : readFileSync(path, 'utf8') };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -773,11 +780,22 @@ describe('armada run', () => {
     expect(ran.bodies.map((body) => v.parse(v.looseObject({ pool: v.optional(v.number()) }), body).pool)).toEqual([1, 5]);
   });
 
-  test('a run it cannot grade names its report, which holds the rows that did report', async () => {
+  test('a run it cannot grade names its report, which says so and holds the rows that did report', async () => {
     const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs', 'y.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] });
-    const path = /^report: (.+)$/mu.exec(ran.stdout)?.[1];
+    const path = /^report: (.+)$/mu.exec(ran.stdout)?.[1] ?? '';
+    const report = v.parse(v.looseObject({ graded: v.string(), verdicts: v.object({ rows: v.array(v.looseObject({ name: v.string(), exitCode: v.number() })) }) }), JSON.parse(ran.report));
 
-    expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), named: path?.endsWith('proj-tasks.json') }).toEqual({ exit: 2, graded: false, named: true });
+    expect({ exit: ran.exit, said: ran.stdout.includes('NOT GRADED'), named: path.endsWith('proj-tasks.json'), graded: report.graded, rows: report.verdicts.rows.map((row) => [row.name, row.exitCode]) })
+      .toEqual({ exit: 2, said: true, named: true, graded: 'not graded', rows: [['x.mjs', 0]] });
+  });
+
+  test('a row a problem names reads red in the report, with the problem, though its task reported it green', async () => {
+    const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }, { name: 'w.mjs', exitCode: 0, seconds: 1 }] });
+    const report = v.parse(v.looseObject({ graded: v.string(), verdicts: v.object({ rows: v.array(v.looseObject({ name: v.string(), exitCode: v.number(), problem: v.optional(v.string()) })) }) }), JSON.parse(ran.report));
+
+    expect({ exit: ran.exit, graded: report.graded, rows: report.verdicts.rows.map((row) => [row.name, row.exitCode, row.problem ?? null]) }).toEqual({
+      exit: 2, graded: 'not graded', rows: [['x.mjs', 0, null], ['w.mjs', 2, 'part-1 reported w.mjs, which its plan entry does not name']],
+    });
   });
 
   test('a task cut off before it wrote a verdict is graded red, each row its entry names with its exit', async () => {

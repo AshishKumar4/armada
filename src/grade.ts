@@ -2,7 +2,8 @@
  * One verdict from a CI run's tasks. A run grades a commit only when every task answered and, where the plan names
  * rows, every named row was reported exactly once by the task that owns it, with a timing for each file it declares.
  * Anything short of that is ungraded (exit 2), never green. Otherwise every red row is listed (exit 1), or none
- * (exit 0). The collected file keeps each row as its task wrote it, under `{sha, part: "all", rows}`.
+ * (exit 0). The collected file keeps each row as its task wrote it, under `{sha, part: "all", rows}`, but for a row a
+ * problem names: that one carries the `problem`, and exits 2 where it reported green, so no reader counts it green.
  */
 import * as v from 'valibot';
 import { JsonSchema } from './protocol';
@@ -32,6 +33,8 @@ const VerdictRowSchema = v.looseObject({
   artifacts: v.optional(v.array(v.string())),
   /** The revision whose proof an unchanged row reused, where a project caches green rows. */
   cached: v.optional(v.string()),
+  /** Why the run could not grade this row, which then reads red. */
+  problem: v.optional(v.string()),
 });
 
 export type VerdictRow = v.InferOutput<typeof VerdictRowSchema>;
@@ -88,9 +91,23 @@ export interface TaskAnswer {
 
 export interface Graded {
   readonly problems: readonly string[];
+  /** Every answer's rows, in order, one for one. */
   readonly rows: readonly VerdictRow[];
   readonly reds: readonly VerdictRow[];
 }
+
+/** How a run ended: not graded when anything was short, else failed when a row is red, else passed. */
+export function outcomeOf({ problems, reds }: Graded): 'pass' | 'fail' | 'not graded' {
+  if (problems.length > 0) return 'not graded';
+
+  return reds.length === 0 ? 'pass' : 'fail';
+}
+
+/** The exit of a row a problem names that reported green: the run's own when it cannot grade. */
+const UNGRADED_EXIT = 2;
+
+/** Records a problem, and the row it names, if any; a row keeps the first that names it. */
+type Flag = (problem: string, row?: VerdictRow) => void;
 
 /** Each file's seconds in a run: the sum of the timings its rows report for it, so a file a plan splits over several
  *  rows is timed whole. A file a red row reports, or a row whose proof was reused, is left out: its other rows hold only
@@ -111,12 +128,19 @@ export function fileTimings(rows: readonly VerdictRow[]): Record<string, number>
 
 export function grade(answers: readonly TaskAnswer[]): Graded {
   const problems: string[] = [];
-  const rows: VerdictRow[] = [];
+  const named = new Map<VerdictRow, string>();
+  const reported: VerdictRow[] = [];
   const seen = new Map<string, string>();
+
+  const flag: Flag = (problem, row) => {
+    problems.push(problem);
+
+    if (row !== undefined && !named.has(row)) named.set(row, problem);
+  };
 
   for (const answer of answers) {
     if (answer.rows === null) {
-      problems.push(`${answer.name} wrote no verdict`);
+      flag(`${answer.name} wrote no verdict`);
       continue;
     }
 
@@ -124,36 +148,41 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       const name = rowName(row);
       const owner = seen.get(name);
 
-      if (name === '') problems.push(`${answer.name} reported a row with no name`);
-      else if (owner !== undefined) problems.push(`${name} was reported by both ${owner} and ${answer.name}`);
+      if (name === '') flag(`${answer.name} reported a row with no name`, row);
+      else if (owner !== undefined) flag(`${name} was reported by both ${owner} and ${answer.name}`, row);
       else seen.set(name, answer.name);
-      rows.push(row);
+      reported.push(row);
 
       for (const path of row.artifacts ?? []) {
-        if (answer.artifacts?.has(path) !== true) problems.push(`${answer.name}: ${rowName(row)} names evidence ${path} its task did not keep`);
+        if (answer.artifacts?.has(path) !== true) flag(`${answer.name}: ${rowName(row)} names evidence ${path} its task did not keep`, row);
       }
     }
 
-    problems.push(...coverage(answer));
+    coverage(answer, flag);
   }
+
+  const rows = reported.map((row) => {
+    const problem = named.get(row);
+
+    return problem === undefined ? row : { ...row, exitCode: row.exitCode === 0 ? UNGRADED_EXIT : row.exitCode, problem };
+  });
 
   return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0) };
 }
 
 /** A task whose plan entry names its rows reported exactly those, each with exactly its declared files' timings. */
-function coverage(answer: TaskAnswer): string[] {
+function coverage(answer: TaskAnswer, flag: Flag): void {
   const expected = answer.entry.rows;
 
-  if (expected === undefined || answer.rows === null) return [];
+  if (expected === undefined || answer.rows === null) return;
   const reported = new Map(answer.rows.map((row) => [rowName(row), row]));
-  const problems: string[] = [];
 
   for (const want of expected.map(expectedOf)) {
     const { name, files } = want;
     const row = reported.get(name);
 
     if (row === undefined) {
-      problems.push(`${answer.name} has no verdict for ${name}; missing is not green`);
+      flag(`${answer.name} has no verdict for ${name}; missing is not green`);
       continue;
     }
 
@@ -161,11 +190,9 @@ function coverage(answer: TaskAnswer): string[] {
     const timed = Object.keys(row.timings ?? {});
 
     if (files !== undefined && (timed.length !== files.length || files.some((file) => !timed.includes(file)))) {
-      problems.push(`${answer.name}: ${name} timed ${String(timed.length)} of its ${String(files.length)} files`);
+      flag(`${answer.name}: ${name} timed ${String(timed.length)} of its ${String(files.length)} files`, row);
     }
   }
 
-  for (const extra of reported.keys()) problems.push(`${answer.name} reported ${extra}, which its plan entry does not name`);
-
-  return problems;
+  for (const [extra, row] of reported) flag(`${answer.name} reported ${extra}, which its plan entry does not name`, row);
 }

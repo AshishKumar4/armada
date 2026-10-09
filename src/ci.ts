@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
 import { listSchedule } from './dispatch';
-import { expectedOf, fileTimings, grade, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
 import type { Armada } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
@@ -531,29 +531,30 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
     kept.set(result.index, { dir, paths: new Set(extractTar(archive, dir)) });
   }
 
-  const evidence = new Map<VerdictRow, string>();
-
   const answers: TaskAnswer[] = plan.include.map((entry, index) => {
     const name = nameOf(index);
     const result = results.find((each) => each.index === index);
-    const artifacts = kept.get(index)?.paths ?? null;
 
-    const answer: TaskAnswer = { name, entry, rows: rowsOf(result, name, config.task.verdict ? verdicts.get(index) ?? null : undefined), artifacts };
-
-    const dir = kept.get(index)?.dir;
-
-    if (dir !== undefined) for (const row of answer.rows ?? []) evidence.set(row, dir);
-
-    return answer;
+    return { name, entry, rows: rowsOf(result, name, config.task.verdict ? verdicts.get(index) ?? null : undefined), artifacts: kept.get(index)?.paths ?? null };
   });
 
   const graded = grade(answers);
+  // `grade` keeps each answer's rows in order, one for one, so each row's evidence is its own task's directory.
+  const dirs = answers.flatMap((answer, index) => (answer.rows ?? []).map(() => kept.get(index)?.dir));
+
+  const evidence = new Map(graded.rows.flatMap((row, at) => {
+    const dir = dirs[at];
+
+    return dir === undefined ? [] : [[row, dir] as const];
+  }));
+
+  const outcome = outcomeOf(graded);
   const file = { sha, part: 'all', rows: graded.rows };
   const report = join(REPORTS, `${config.name}-${jobId}.json`);
   const summary = await job.summary();
 
   mkdirSync(REPORTS, { recursive: true });
-  writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, status, summary, problems: graded.problems, verdicts: file, artifacts: Object.fromEntries([...kept].map(([index, held]) => [nameOf(index), held.dir])) }, null, 2));
+  writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, graded: outcome, status, summary, problems: graded.problems, verdicts: file, artifacts: Object.fromEntries([...kept].map(([index, held]) => [nameOf(index), held.dir])) }, null, 2));
 
   for (const problem of status.problems) note(`problem: ${problem}`);
 
@@ -562,7 +563,7 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
     printReds(graded.reds, evidence, note);
     note(`report: ${report}`);
 
-    return { sha, planJob: planId, job: jobId, report, graded: 'not graded', problems: [...status.problems, ...graded.problems], rows: graded.rows };
+    return { sha, planJob: planId, job: jobId, report, graded: outcome, problems: [...status.problems, ...graded.problems], rows: graded.rows };
   }
 
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
@@ -588,5 +589,5 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
   if (usage !== null) note(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
   note(`report: ${report}`);
 
-  return { sha, planJob: planId, job: jobId, report, graded: graded.reds.length === 0 ? 'pass' : 'fail', problems: status.problems, rows: graded.rows };
+  return { sha, planJob: planId, job: jobId, report, graded: outcome, problems: status.problems, rows: graded.rows };
 }
