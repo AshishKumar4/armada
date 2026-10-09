@@ -220,16 +220,31 @@ async function map(): Promise<number> {
 /** The checkout's wrangler, run by the Bun that runs armada, so it needs no Node.js. */
 const WRANGLER = [process.execPath, join(ROOT, 'node_modules', 'wrangler', 'bin', 'wrangler.js')];
 
-function wrangler(words: readonly string[], account: string, stdin?: string): string {
+/** wrangler's exit and its output, stdout then stderr. */
+function wranglerRan(words: readonly string[], account: string, stdin?: string) {
   const ran = Bun.spawnSync([...WRANGLER, ...words], {
     cwd: ROOT, env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: account }, stdin: stdin === undefined ? 'ignore' : new TextEncoder().encode(stdin), stdout: 'pipe', stderr: 'pipe',
   });
 
-  const output = ran.stdout.toString() + ran.stderr.toString();
+  return { exitCode: ran.exitCode, output: ran.stdout.toString() + ran.stderr.toString() };
+}
 
-  if (ran.exitCode !== 0) throw new Error(`wrangler ${words.slice(0, 3).join(' ')} exited ${String(ran.exitCode)}:\n${output.slice(-3000)}`);
+function wrangler(words: readonly string[], account: string, stdin?: string): string {
+  const { exitCode, output } = wranglerRan(words, account, stdin);
+
+  if (exitCode !== 0) throw new Error(`wrangler ${words.slice(0, 3).join(' ')} exited ${String(exitCode)}:\n${output.slice(-3000)}`);
 
   return output;
+}
+
+/** Whether the account has `bucket`, asked by its name: `r2 bucket list` prints only an account's first 20 buckets. */
+function hasBucket(account: string, bucket: string): boolean {
+  const { exitCode, output } = wranglerRan(['r2', 'bucket', 'info', bucket], account);
+
+  if (exitCode === 0) return true;
+
+  if (output.includes('[code: 10006]')) return false;
+  throw new Error(`wrangler r2 bucket info ${bucket} exited ${String(exitCode)}:\n${output.slice(-3000)}`);
 }
 
 const WhoamiSchema = v.object({ loggedIn: v.boolean(), accounts: v.optional(v.array(v.object({ id: v.string(), name: v.string() })), []) });
@@ -413,7 +428,7 @@ interface Given {
 async function install(account: string, name: string, file: string, { vcpus, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
-  if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
+  if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
   const rules = wrangler(['r2', 'bucket', 'lifecycle', 'list', bucket], account);
 
   for (const prefix of ['packs/', 'jobs/']) {
