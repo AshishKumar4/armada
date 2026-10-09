@@ -1,7 +1,5 @@
 <p align="center"><img src=".github/banner.svg" alt="armada" width="100%"></p>
 
-*An AI assistant maintains this README. It is presented as-is.*
-
 armada runs a command, or a TypeScript or Python function, over many inputs at once on Cloudflare Containers in your own
 account. I run Kinu's and Dew's CI on it.
 
@@ -28,8 +26,8 @@ Cloudflare in your browser, or uses `CLOUDFLARE_API_TOKEN`. Containers need the 
 armada is a Worker, a few Durable Objects and an R2 bucket in your account, so your code and data stay there.
 
 1. armada prepares each environment once. It starts a container from the recipe's base image, runs `setup` as root
-   and `install` as the user, and snapshots the result. The ffmpeg recipe's took 5.6 minutes. A changed recipe, or a
-   changed file in `environment.key`, prepares a new one.
+   and `install` as the user, and snapshots the result. Preparing the ffmpeg recipe took 5.6 minutes. A changed recipe,
+   or a changed file in `environment.key`, prepares a new one.
 2. Containers start from the snapshot, in as little as 0.2 s, with a fresh tmpfs on `/tmp` and `/dev/shm`.
 3. Each container pulls task after task from the job's one queue until it is empty, so no container waits behind
    another's slow task. Items with a higher `weight` start first.
@@ -47,13 +45,10 @@ may already have done its work, so a task should be safe to run twice.
 - The fleet never holds more vCPUs than its cap.
 - Every task of a finished job has exactly one outcome: its first accepted answer.
 
-The proofs model the rules, not the Worker's code. A differential test checks the TypeScript `listSchedule` against
-the Lean model on seeded instances.
+The proofs cover a model of these rules. A differential test checks the TypeScript `listSchedule` against that model
+on seeded instances.
 
 ## Measured
-
-The video figures are from 2026-10-08, the others from one run each on 2026-10-07. Each row names its command, so
-you can run it on your own deployment.
 
 | Workload | armada | Comparison |
 |---|---|---|
@@ -114,10 +109,10 @@ The gang starts once every rank has a container. A rank lost to the platform los
 as one task. The task's outcome is its first failing rank's, else rank 0's.
 
 Containers have no inbound address, so ranks connect through the Worker: about 5 ms a round trip and 40 to 90 MB/s a
-connection, at 2 to 64 ranks. That suits tests and coordination, not bandwidth-bound training. A connection to a port
-nothing listens on yet opens and then closes at once, so a client retries it as it would a refused one. The two ranks'
-relays hold a connection's bytes. If its WebSocket drops, or the vessel between the ranks is reset or redeployed, the
-connection carries on unseen when both ends come back within a minute.
+connection, at 2 to 64 ranks. That is enough for tests and coordination, but too slow for bandwidth-bound training. A
+connection to a port nothing listens on yet opens and then closes at once, so a client retries it as it would a
+refused one. The two ranks' relays hold a connection's bytes. If its WebSocket drops, or the vessel between the ranks
+is reset or redeployed, the program sees nothing of it, as long as both ends come back within a minute.
 
 ## From TypeScript
 

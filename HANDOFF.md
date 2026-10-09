@@ -1,7 +1,5 @@
 # armada handoff, 2026-10-08
 
-*An AI assistant maintains this file. It is presented as-is.*
-
 ## Repository
 - https://github.com/AshishKumar4/armada, public, MIT.
 - `main` is wire 6. The branch `core` holds the work below at wire 7. It lands on `main` after Kinu moves to `armada-v2`.
