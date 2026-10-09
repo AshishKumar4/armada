@@ -176,11 +176,12 @@ const DRIVER = String.raw`set -eu
 github=$(printenv "$ARMADA_GITHUB_SECRET")
 mkdir -p "$HOME/.config/armada" "$HOME/repo" "$HOME/armada"
 printf '{"url":"%s","token":"%s","account":""}\n' "$ARMADA_URL" "$ARMADA_TOKEN" > "$HOME/.config/armada/connection.json"
+# The HTTP code gets a name of its own: a function's variables are the script's, and 'code' holds the run's exit.
 status() {
-  code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
+  answered=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
     -d "{\"state\":\"$1\",\"target_url\":\"$TARGET_URL\",\"description\":\"$2\",\"context\":\"armada\"}" \
-    "https://api.github.com/repos/$ARMADA_REPO/statuses/$ARMADA_COMMIT") || code=000
-  case "$code" in 2*) ;; *) echo "armada: posting the $1 status failed: HTTP $code" >&2 ;; esac
+    "https://api.github.com/repos/$ARMADA_REPO/statuses/$ARMADA_COMMIT") || answered=000
+  case "$answered" in 2*) ;; *) echo "armada: posting the $1 status failed: HTTP $answered" >&2 ;; esac
 }
 status pending 'armada is running'
 git -C "$HOME/armada" init -q

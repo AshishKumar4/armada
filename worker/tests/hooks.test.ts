@@ -1,6 +1,9 @@
 /** The GitHub webhook's checks: its signature gate, the event filter, the two dedupes, and the driver job's spec —
  *  exercised through `webhooked` with the DO's own methods on in-memory storage. */
 import { describe, expect, setSystemTime, test } from 'bun:test';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import worker from '../src/worker';
 import { JobSpecSchema, WebhooksSchema, type Json } from '../../src/protocol';
 import { ArmadaWebhooks, driverSpec, eventOf, type HookConfig } from '../src/hooks';
@@ -219,6 +222,45 @@ describe('the github webhook', () => {
     expect(script).toContain('"$ARMADA_DEPLOYED"');
     expect(script).toContain('src/cli.ts" run "$ARMADA_COMMIT" --json');
     expect(script).not.toContain('bun.sh/install');
+  });
+});
+
+describe('the driver script', () => {
+  /** The driver against stub tools: curl answers each status post `posted`, git does nothing, and `armada run` (bun on
+   *  the CLI) exits `ran`. The driver's exit, and each status it posted. */
+  function drive(ran: number, posted: number) {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-driver-'));
+    const bin = join(scratch, 'bin');
+    const script = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG)).items[0]?.argv?.[2] ?? '';
+
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'curl'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/posted\nprintf '${String(posted)}'\n`);
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\nexit 0\n');
+    writeFileSync(join(bin, 'bun'), `#!/bin/sh\ncase "$1" in -e) echo '6 of 6 rows green'; exit 0 ;; install) exit 0 ;; esac\nexit ${String(ran)}\n`);
+
+    for (const tool of ['curl', 'git', 'bun']) chmodSync(join(bin, tool), 0o755);
+
+    try {
+      const env = {
+        PATH: `${bin}:/usr/bin:/bin`, HOME: scratch, ARMADA_GITHUB_SECRET: 'GITHUB_TOKEN', GITHUB_TOKEN: 'gh', ARMADA_URL: 'https://armada.test', ARMADA_TOKEN: TOKEN,
+        ARMADA_REPO: 'owner/armada', ARMADA_COMMIT: SHA, ARMADA_DEPLOYED: 'b'.repeat(40), TARGET_URL: 'https://armada.test/ui',
+      };
+
+      const exit = Bun.spawnSync(['/bin/sh', '-c', script], { env, stdout: 'pipe', stderr: 'pipe' }).exitCode;
+      const states = readFileSync(join(scratch, 'posted'), 'utf8').match(/"state":"\w+"/gu) ?? [];
+
+      return { exit, states };
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  test('exits as armada run did, whatever GitHub answered its status posts', () => {
+    expect([drive(0, 201), drive(1, 201), drive(0, 500)]).toEqual([
+      { exit: 0, states: ['"state":"pending"', '"state":"success"'] },
+      { exit: 1, states: ['"state":"pending"', '"state":"failure"'] },
+      { exit: 0, states: ['"state":"pending"', '"state":"success"'] },
+    ]);
   });
 });
 
