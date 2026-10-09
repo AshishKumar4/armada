@@ -353,6 +353,40 @@ describe('uploading a pack', () => {
       globalThis.fetch = original;
     }
   });
+
+  test('a part that fails aborts the upload, so its parts don\'t stay, and the failure is the error', async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+
+    globalThis.fetch = fakeFetch(async (request) => {
+      const url = new URL(request.url);
+
+      seen.push(`${request.method} ${url.search}`);
+
+      if (request.method === 'HEAD') return new Response(null, { status: 404 });
+
+      if (url.searchParams.has('uploads')) return Response.json({ upload: 'u1' });
+
+      if (url.searchParams.get('part') === '2') return new Response('the part was cut off', { status: 400 });
+
+      return url.searchParams.has('part') ? Response.json({ partNumber: 1, etag: 'e1' }) : Response.json({ aborted: 'u1' });
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+      let failed = '';
+
+      try {
+        await armada.uploadPack('app', 'c'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]));
+      } catch (cause) {
+        failed = errorOf({ cause }).message;
+      }
+
+      expect({ failed: failed.includes('the part was cut off'), last: seen.at(-1) }).toEqual({ failed: true, last: 'DELETE ?packer=2&upload=u1' });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });
 
 describe('a failed request', () => {

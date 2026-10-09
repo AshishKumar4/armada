@@ -170,7 +170,8 @@ export class Armada {
   }
 
   /** Stores a commit's pack once, under this client's `PACKER`; `pack` is called only when the runner lacks it. One
-   *  larger than a request may carry goes in parts of PACK_PART bytes. */
+   *  larger than a request may carry goes in parts of PACK_PART bytes, and an upload that fails is aborted, so its
+   *  parts don't stay in the bucket; the bucket's lifecycle aborts what a client that died left. */
   async uploadPack(project: string, sha: string, base: string, pack: () => Blob): Promise<number | null> {
     const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}`;
 
@@ -184,16 +185,23 @@ export class Armada {
     }
 
     const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}&uploads`, {}));
+    const uploading = `${path}&upload=${encodeURIComponent(upload)}`;
     const bytes = new Uint8Array(await body.arrayBuffer());
     const parts = [];
 
-    for (let start = 0, partNumber = 1; start < bytes.length; start += PACK_PART, partNumber += 1) {
-      const stored = await (await this.call(`${path}&upload=${encodeURIComponent(upload)}&part=${String(partNumber)}`, { method: 'PUT', body: bytes.subarray(start, start + PACK_PART) })).json();
+    try {
+      for (let start = 0, partNumber = 1; start < bytes.length; start += PACK_PART, partNumber += 1) {
+        const stored = await (await this.call(`${uploading}&part=${String(partNumber)}`, { method: 'PUT', body: bytes.subarray(start, start + PACK_PART) })).json();
 
-      parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
+        parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
+      }
+
+      await this.post(uploading, { parts });
+    } catch (cause) {
+      // The upload's own failure is the error; an abort that fails too leaves the parts to the bucket's lifecycle.
+      await Promise.allSettled([this.call(uploading, { method: 'DELETE' })]);
+      throw cause;
     }
-
-    await this.post(`${path}&upload=${encodeURIComponent(upload)}`, { parts });
 
     return body.size;
   }

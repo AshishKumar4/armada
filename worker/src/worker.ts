@@ -62,7 +62,7 @@ const Parts = v.object({ parts: v.array(v.object({ partNumber: v.pipe(v.number()
 
 /** `/packs/<project>/<sha>/<base>`: a commit's pack, stored once (`packKey`). A pack larger than a request may carry
  *  arrives in parts: `POST ?uploads` opens it, `PUT ?upload=<id>&part=<n>` stores each, `POST ?upload=<id>` with the
- *  parts' etags completes it. */
+ *  parts' etags completes it, and `DELETE ?upload=<id>` aborts one that failed, whose parts would otherwise stay. */
 const packs: Handler = async (request, env, [project, sha, base], url) => {
   if (!v.is(Project, project) || !v.is(Sha, sha) || !v.is(PackBase, base)) return undefined;
   const packer = url.searchParams.get('packer');
@@ -81,6 +81,12 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
     await env.ARTIFACTS.resumeMultipartUpload(key, upload).complete(v.parse(Parts, await request.json()).parts);
 
     return Response.json({ stored: key });
+  }
+
+  if (upload !== null && request.method === 'DELETE') {
+    await env.ARTIFACTS.resumeMultipartUpload(key, upload).abort();
+
+    return Response.json({ aborted: upload });
   }
 
   if (request.method !== 'PUT' || request.body === null) return undefined;

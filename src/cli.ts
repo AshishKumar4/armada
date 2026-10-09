@@ -437,6 +437,10 @@ async function install(account: string, name: string, file: string, { vcpus, sec
     if (!rules.includes(rule)) wrangler(['r2', 'bucket', 'lifecycle', 'add', bucket, rule, prefix, '--expire-days', '7', '--force'], account);
   }
 
+  // A multipart upload whose client died before completing or aborting it: its parts hold storage, and the bucket
+  // cannot be deleted while it is open.
+  if (!rules.includes('abort-uploads')) wrangler(['r2', 'bucket', 'lifecycle', 'add', bucket, 'abort-uploads', '', '--abort-multipart-days', '1', '--force'], account);
+
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
 
   await buildDashboard(DASHBOARD);
