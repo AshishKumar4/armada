@@ -121,7 +121,7 @@ describe('a deployment\'s hourly look at its environments', () => {
 
     open.length = 0;
     await stored.ctx.storage.put('env:fresh', { state: 'ready', generation: generation('fresh'), lastUsed: Date.now() });
-    const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+    const env = world({ ARMADA_TOKEN: token, KEEP_ENVIRONMENTS: '0', REGISTRY_CREDENTIALS: 'user:secret', VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
 
     const answer = await worker.fetch(new Request('https://armada.test/environments/prune', {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: '{}',
@@ -132,6 +132,18 @@ describe('a deployment\'s hourly look at its environments', () => {
       .toEqual({ pruned: ['a'], kept: ['fresh'], looking: true });
   });
 
+  test('refuses a prune in a deployment without registry credentials, saying how to get them', async () => {
+    const { environments } = await deployment();
+    const token = 't'.repeat(32);
+    const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+
+    const answer = await worker.fetch(new Request('https://armada.test/environments/prune', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: '{}',
+    }), env);
+
+    expect({ status: answer.status, said: (await answer.text()).includes('deploy it again') }).toEqual({ status: 409, said: true });
+  });
+
   test('prunes on request through the route: a count of 0 spares only what open jobs use, recent or not', async () => {
     const { stored, environments } = await deployment('user:secret');
     const token = 't'.repeat(32);
@@ -139,7 +151,7 @@ describe('a deployment\'s hourly look at its environments', () => {
     // Used this very millisecond: a count of 0 spares no recent time at all.
     setSystemTime(new Date(Date.now()));
     await stored.ctx.storage.put('env:fresh', { state: 'ready', generation: generation('fresh'), lastUsed: Date.now() });
-    const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+    const env = world({ ARMADA_TOKEN: token, REGISTRY_CREDENTIALS: 'user:secret', VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
 
     const answer = await worker.fetch(new Request('https://armada.test/environments/prune', {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: JSON.stringify({ keep: 0 }),

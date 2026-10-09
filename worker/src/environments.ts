@@ -89,28 +89,30 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     await this.look();
   }
 
-  /** Prunes by the deployment's retention, then looks again in an hour while an environment is ready; `armada deploy`
-   *  makes the first look. A deployment without registry credentials, which the deploy mints, deletes nothing. A prune
-   *  that fails leaves its snapshots for the next look. The keys pruned. */
-  async look(): Promise<string[]> {
-    if (this.env.REGISTRY_CREDENTIALS === undefined) return [];
-    let pruned: string[] = [];
+  /** Prunes by the deployment's retention (`prune`, which looks again in an hour). A deployment without registry
+   *  credentials, which `armada deploy` mints, deletes nothing; a prune that fails leaves its snapshots for the next
+   *  look. */
+  private async look(): Promise<void> {
+    if (this.env.REGISTRY_CREDENTIALS === undefined) return;
 
     try {
-      pruned = await this.prune(retentionOf(this.env));
+      await this.prune(retentionOf(this.env));
     } catch (cause) {
       console.error(JSON.stringify({ prune: said({ cause }) }));
+      await this.lookAgain();
     }
+  }
 
+  /** The next look, in an hour, while an environment is ready. */
+  private async lookAgain(): Promise<void> {
     if ((await this.list()).some(({ entry }) => entry.state === 'ready')) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
-
-    return pruned;
   }
 
   /** Deletes the snapshots of the environments past those `retention` keeps (`expired`) with the deployment's
    *  registry credentials: the account's snapshots are limited, and each change to a project's install makes another
    *  environment. Each record goes first, so a job asking for it after prepares it again rather than start from a
-   *  snapshot being deleted; a snapshot whose deletion fails is logged and left. The keys pruned. */
+   *  snapshot being deleted; a snapshot whose deletion fails is logged and left. Then it looks again in an hour, so
+   *  `armada deploy`'s prune starts the hourly looks. The keys pruned. */
   async prune(retention: Retention): Promise<string[]> {
     const credentials = this.env.REGISTRY_CREDENTIALS;
 
@@ -134,6 +136,8 @@ export class ArmadaEnvironments extends DurableObject<Env> {
         console.error(JSON.stringify({ pruned: key, snapshot, left: said({ cause }) }));
       }
     }
+
+    await this.lookAgain();
 
     return pruned;
   }

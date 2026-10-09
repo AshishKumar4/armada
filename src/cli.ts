@@ -347,12 +347,9 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     const health = deployed === null ? null : await healthOf(name, deployed);
 
     if (deployed !== null && mustDrain(health, forceDrain)) await drain(deployed, () => { drained = true; });
-    await install(account, name, vcpus, file);
+    await install(account, name, file, { vcpus, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
-    wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS', '--name', name], account, registry.credentials);
-    wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS_EXPIRE', '--name', name], account, registry.until);
-    wrangler(['secret', 'put', 'KEEP_ENVIRONMENTS', '--name', name], account, String(keep));
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
     await firstLook(name, file);
   } finally {
@@ -406,7 +403,14 @@ async function mintRegistry(account: string): Promise<{ readonly credentials: st
 /** Where a deploy builds the dashboard the Worker serves (wrangler.jsonc's `assets`). */
 const DASHBOARD = join(ROOT, 'dist', 'dashboard');
 
-async function install(account: string, name: string, vcpus: number | undefined, file: string): Promise<void> {
+/** What a deploy gives the Worker beyond its code: its fleet's vCPUs (the default when undefined), and its secrets
+ *  beside its bearer. */
+interface Given {
+  readonly vcpus: number | undefined;
+  readonly secrets: Readonly<Record<string, string>>;
+}
+
+async function install(account: string, name: string, file: string, { vcpus, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!wrangler(['r2', 'bucket', 'list'], account).includes(bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -429,20 +433,25 @@ async function install(account: string, name: string, vcpus: number | undefined,
     // The deployment knows its own source commit: the webhook's driver installs armada at it.
     .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${Bun.spawnSync(['git', '-C', ROOT, 'rev-parse', 'HEAD']).stdout.toString().trim()}"`));
 
+  const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const secretsFile = join(tmpdir(), `armada-secrets-${String(process.pid)}.json`);
+
+  // Uploaded with the version, so every object that starts on it has them: a secret put after the deploy reached no
+  // Durable Object already running it (armada-probe, 2026-10-09).
+  writeFileSync(secretsFile, JSON.stringify({ ...secrets, ARMADA_TOKEN: token }), { mode: 0o600 });
+
   try {
-    const deployed = wrangler(['deploy', '-c', config], account);
+    const deployed = wrangler(['deploy', '-c', config, '--secrets-file', secretsFile], account);
     const url = new RegExp(`https://${name}\\.[a-z0-9-]+\\.workers\\.dev`, 'u').exec(deployed)?.[0];
 
     if (url === undefined) throw new Error(`the deploy printed no workers.dev URL:\n${deployed.slice(-2000)}`);
-    const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-
-    wrangler(['secret', 'put', 'ARMADA_TOKEN', '-c', config], account, token);
     mkdirSync(CONFIG_DIR, { recursive: true });
     writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n');
     chmodSync(file, 0o600);
     console.log(`${name} is deployed at ${url}\ntry it: armada map${name === 'armada' ? '' : ` --connection=${file}`} --times=3 --json -- echo hello {item}`);
   } finally {
     rmSync(config, { force: true });
+    rmSync(secretsFile, { force: true });
   }
 }
 
