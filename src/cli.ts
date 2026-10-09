@@ -366,7 +366,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
-    await firstLook(name, file);
+    await firstLook(name, file, sourceSha());
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted).off('SIGHUP', interrupted);
     await admit();
@@ -375,33 +375,41 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   return 0;
 }
 
-/** How often, and how far apart, a deploy asks for the first look: for a moment after a deploy, the registry's object
- *  may still run the version before, which answers no look (armada-v2, 2026-10-09). */
-const FIRST_LOOKS = 4;
+/** How long a deploy waits for its first look, asking every FIRST_LOOK_WAIT_MS. For a moment after a deploy, `/health`
+ *  still answers the version before (armada-v2, 2026-10-09), and a deployment's objects may run it, which answers no
+ *  look; a new deployment's first request may throw (#17). */
+const FIRST_LOOK_MS = 90_000;
 
-const FIRST_LOOK_WAIT_MS = 5_000;
+const FIRST_LOOK_WAIT_MS = 2_000;
 
 /** The deployed Worker's first look at its environments, which prunes what an earlier version kept and starts the
- *  hourly ones. The deploy is done either way: a look the new version never answered waits for the next new
- *  environment, which the deploy says. */
-async function firstLook(name: string, file: string): Promise<void> {
+ *  hourly ones, asked once `/health` names the `sha` just deployed. The deploy is done either way: a look the new
+ *  version never answered waits for the next new environment, which the deploy says. */
+async function firstLook(name: string, file: string, sha: string): Promise<void> {
   const armada = new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
+  const deadline = Date.now() + FIRST_LOOK_MS;
+  let why = `it did not serve ${sha.slice(0, 12)}`;
 
-  for (let attempt = 1; ; attempt += 1) {
+  while (Date.now() < deadline) {
     try {
-      await pruneOn(armada, undefined);
-
-      return;
-    } catch (cause) {
-      if (attempt >= FIRST_LOOKS) {
-        console.warn(`armada: ${name}'s first look at its environments did not answer (${errorOf({ cause }).message}); its next new environment makes it`);
+      if ((await armada.health()).sha === sha) {
+        await pruneOn(armada, undefined);
 
         return;
       }
-
-      await Bun.sleep(FIRST_LOOK_WAIT_MS);
+    } catch (cause) {
+      why = errorOf({ cause }).message;
     }
+
+    await Bun.sleep(FIRST_LOOK_WAIT_MS);
   }
+
+  console.warn(`armada: ${name}'s first look at its environments did not answer in ${String(FIRST_LOOK_MS / 1000)} s (${why}); its next new environment makes it`);
+}
+
+/** The commit this armada runs from, which a deploy gives the Worker: the webhook's driver installs armada at it. */
+function sourceSha(): string {
+  return Bun.spawnSync(['git', '-C', ROOT, 'rev-parse', 'HEAD']).stdout.toString().trim();
 }
 
 /** How long the registry credentials a deploy gives the Worker last; each deploy mints new ones. */
@@ -449,8 +457,7 @@ async function install(account: string, name: string, file: string, { vcpus, sec
     .replace('"directory": "../dist/dashboard"', `"directory": "${DASHBOARD}"`)
     .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
     .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`)
-    // The deployment knows its own source commit: the webhook's driver installs armada at it.
-    .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${Bun.spawnSync(['git', '-C', ROOT, 'rev-parse', 'HEAD']).stdout.toString().trim()}"`));
+    .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${sourceSha()}"`));
 
   const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   const secretsFile = join(tmpdir(), `armada-secrets-${String(process.pid)}.json`);

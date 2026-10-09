@@ -8,7 +8,7 @@ import {
   briefOf, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   TaskSchema, TimingsSchema,
 } from '../../src/protocol';
-import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
+import { bundleKey, packKey, said, SINGLE, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
 import { driverSpec, eventOf, HookConfigSchema } from './hooks';
 import type { ArmadaFleet } from './fleet';
@@ -555,7 +555,10 @@ export default {
       return await route(request, env);
     } catch (cause) {
       if (cause instanceof v.ValiError) return Response.json({ error: cause.message }, { status: 400 });
-      throw cause;
+      // Said in the answer and the log alike: a bare "Worker threw exception" names nothing to fix (#17).
+      console.error(JSON.stringify({ route: `${request.method} ${new URL(request.url).pathname}`, error: said({ cause }) }));
+
+      return Response.json({ error: said({ cause }) }, { status: 500 });
     }
   },
 } satisfies ExportedHandler<Env>;

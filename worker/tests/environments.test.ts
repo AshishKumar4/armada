@@ -127,6 +127,17 @@ describe('a deployment\'s hourly look at its environments', () => {
       .toEqual({ pruned: ['a'], kept: ['fresh'], looking: true });
   });
 
+  test('answers a route that threw with its error, as JSON, rather than the platform\'s bare exception page', async () => {
+    const token = 't'.repeat(32);
+    const env = world({ ARMADA_TOKEN: token, REGISTRY_CREDENTIALS: 'user:secret', VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => ({ prune: async () => { throw new Error('the registry object was reset'); } })) });
+
+    const answer = await worker.fetch(new Request('https://armada.test/environments/prune', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: '{}',
+    }), env);
+
+    expect({ status: answer.status, said: v.parse(v.object({ error: v.string() }), await answer.json()).error.includes('the registry object was reset') }).toEqual({ status: 500, said: true });
+  });
+
   test('refuses a prune in a deployment without registry credentials, saying how to get them', async () => {
     const { environments } = await deployment();
     const token = 't'.repeat(32);
