@@ -352,7 +352,7 @@ default branch builds. The run stores its verdict as a local run does, and posts
 its only check. A delivery or a commit seen before is skipped. A pull request from a fork never builds, because its
 code must not get the deployment's secrets.
 
-The run's driver is a task in a `micro` container whose environment holds only Bun, so a redeploy prepares no new
+The run's driver is a task in a `small` container whose environment holds only Bun, so a redeploy prepares no new
 environment. The driver fetches armada at the deployment's own commit, `ARMADA_SHA`, which `armada deploy` sets and
 `/health` reports, so deploy from a pushed commit. It gets the GitHub token and the deployment's bearer when it
 starts, and its log masks both like any secret.

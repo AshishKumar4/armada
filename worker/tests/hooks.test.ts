@@ -196,14 +196,14 @@ describe('the github webhook', () => {
     }
   });
 
-  test('builds the driver spec: micro command, ci label, secrets by name only, the bearer at claim', () => {
+  test('builds the driver spec: small command, ci label, secrets by name only, the bearer at claim', () => {
     const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG));
 
     expect(spec.label).toBe(`ci armada ${SHA.slice(0, 12)}`);
     expect(spec.run).toEqual({ kind: 'command' });
     expect(spec.secrets).toEqual(['GITHUB_TOKEN']);
     expect(spec.deployToken).toBe(true);
-    expect(spec.recipe.size).toBe('micro');
+    expect(spec.recipe.size).toBe('small');
     expect(spec.env['ARMADA_REPO']).toBe('owner/armada');
     expect(spec.env['ARMADA_COMMIT']).toBe(SHA);
     expect(spec.env['TARGET_URL']).toBe(`https://armada.test/ui/#/ci/armada/${SHA}`);
