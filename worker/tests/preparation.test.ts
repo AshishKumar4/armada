@@ -15,10 +15,25 @@ interface Prepared {
 
 /** A preparation of `recipe` at `size` in a container `answer` answers, its alarms run until it ends (or `alarms` run
  *  out). */
-async function prepare(answer: Answer, alarms = 40, size: Size = 'medium'): Promise<Prepared> {
+async function prepare(answer: Answer, alarms = 40, size: Size = 'medium', stops = true): Promise<Prepared> {
   const generations: Generation[] = [];
   const failures: string[] = [];
-  const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+  const box = container(answer);
+  const destroy = box.destroy.bind(box);
+  let snapshotted = false;
+
+  const stored = state(Object.assign(box, {
+    snapshotContainer: async () => {
+      snapshotted = true;
+
+      return { id: 'snapshot', size: 1 };
+    },
+    // `stops` false: the container will not stop once it is snapshotted.
+    destroy: async () => {
+      if (snapshotted && !stops) throw new Error('the container did not stop');
+      await destroy();
+    },
+  }));
 
   const preparer = new ArmadaPreparer(stored.ctx, world({
     ENVIRONMENTS: namespace(() => ({
@@ -111,6 +126,13 @@ describe('preparing an environment', () => {
     } finally {
       setSystemTime();
     }
+  });
+
+  // Failing the phase for it would lose a snapshot already made, with no record of it anywhere.
+  test('publishes a snapshot whose container will not stop', async () => {
+    const prepared = await prepare(answering('setup', 0), 40, 'medium', false);
+
+    expect({ snapshots: prepared.generations.map((each) => each.snapshot.id), failures: prepared.failures }).toEqual({ snapshots: ['snapshot'], failures: [] });
   });
 
   // A snapshot that does not start fails the job's vessels instead, which the job says once (worker/tests/job.test.ts).

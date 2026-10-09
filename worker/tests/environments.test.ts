@@ -51,19 +51,14 @@ describe('a deployment\'s hourly look at its environments', () => {
   });
 
   /** A registry keeping none beyond its open jobs', whose one environment `a` the job `job-1` uses while `open` holds it;
-   *  each snapshot deletion lands in `deleted`. */
+   *  `deleted` is the snapshots whose manifests are gone from the account's registry. */
   const deployment = async (credentials?: string) => {
     const stored = state();
     const open = ['job-1'];
-    const deleted: string[] = [];
+    const fake = await registry(['a', 'fresh']);
+    const deleted = () => ['a', 'fresh'].filter((key) => !fake.left().includes(key));
 
-    globalThis.fetch = fakeFetch(async (request) => {
-      if (request.url.endsWith('/_catalog?tags=true')) return Response.json({ repositories: { 'cloudchamber-snapshots/x': [`rootfs-snapshot-${await hex('snapshot-a')}`] } });
-
-      if (request.method === 'DELETE') deleted.push(request.url.split('/').at(-1) ?? '');
-
-      return request.method === 'DELETE' ? new Response(null, { status: 202 }) : Response.json({ annotations: {} });
-    });
+    globalThis.fetch = fakeFetch(fake.answer);
 
     const environments = new ArmadaEnvironments(stored.ctx, world({
       KEEP_ENVIRONMENTS: '0', REGISTRY_CREDENTIALS: credentials,
@@ -102,8 +97,8 @@ describe('a deployment\'s hourly look at its environments', () => {
     setSystemTime(new Date(start + 2 * HOUR + 1));
     await fire();
 
-    expect({ whileUsed, justAfter, after: (await environments.list()).length, deleted: deleted.length, alarm: await stored.ctx.storage.getAlarm() })
-      .toEqual({ whileUsed: [1, true], justAfter: 1, after: 0, deleted: 1, alarm: null });
+    expect({ whileUsed, justAfter, after: (await environments.list()).length, deleted: deleted(), alarm: await stored.ctx.storage.getAlarm() })
+      .toEqual({ whileUsed: [1, true], justAfter: 1, after: 0, deleted: ['a'], alarm: null });
   });
 
   test('deletes nothing and sets no look in a deployment without registry credentials', async () => {
@@ -112,7 +107,7 @@ describe('a deployment\'s hourly look at its environments', () => {
     open.length = 0;
     await environments.prepared(generation('b'));
 
-    expect({ kept: (await environments.list()).length, deleted, alarm: await stored.ctx.storage.getAlarm() }).toEqual({ kept: 2, deleted: [], alarm: null });
+    expect({ kept: (await environments.list()).length, deleted: deleted(), alarm: await stored.ctx.storage.getAlarm() }).toEqual({ kept: 2, deleted: [], alarm: null });
   });
 
   test('looks on request with no count, as a deploy does: prunes past its retention and starts the hourly looks', async () => {
@@ -162,6 +157,60 @@ describe('a deployment\'s hourly look at its environments', () => {
   });
 });
 
+/**
+ * The registry as measured on 2026-10-09: a snapshot is a manifest a snapshot tag and a set tag name; the catalog pages
+ * its names, tags and digests alike, `pageSize` at a time with a `last` cursor in a link without angle brackets; a DELETE
+ * of a manifest a tag still names answers 204 and keeps it. `refuseDigest` fails the next digest delete.
+ */
+async function registry(keys: readonly string[], options: { readonly pageSize?: number } = {}) {
+  const tags = new Map<string, string>();
+  const manifests = new Map<string, string>();
+  let refuseDigest = false;
+
+  for (const key of keys) {
+    const digest = `sha256:${await hex(`manifest-${key}`)}`;
+
+    manifests.set(digest, key);
+    tags.set(`rootfs-snapshot-${await hex(`snapshot-${key}`)}`, digest);
+    tags.set(`rootfs-set-${await hex(`set-${key}`)}`, digest);
+  }
+
+  const answer = (request: Request): Response => {
+    const url = new URL(request.url);
+
+    if (request.headers.get('authorization') !== `Basic ${btoa('user:secret')}`) return new Response(null, { status: 401 });
+
+    if (url.pathname === '/v2/_catalog') {
+      const names = [...tags.keys(), ...manifests.keys()].sort();
+      const last = url.searchParams.get('last');
+      const from = last === null ? 0 : names.indexOf(last) + 1;
+      const page = names.slice(from, from + (options.pageSize ?? 1000));
+      const headers = from + page.length < names.length ? { link: `https://registry.cloudflare.com/v2/_catalog?n=1000&last=${page.at(-1) ?? ''}&tags=true; rel=next` } : undefined;
+
+      return Response.json({ repositories: { 'a/other': null, 'a/cloudchamber-snapshots/x': page } }, { headers });
+    }
+
+    const ref = url.pathname.split('/manifests/')[1] ?? '';
+    const digest = ref.startsWith('sha256:') ? ref : tags.get(ref);
+    const key = digest === undefined ? undefined : manifests.get(digest);
+
+    if (digest === undefined || key === undefined) return new Response(null, { status: 404 });
+
+    if (request.method === 'GET') return Response.json({ annotations: { 'io.cloudflare.cloudchamber.snapshot_set_id': `set-${key}` } }, { headers: { 'docker-content-digest': digest } });
+
+    if (!ref.startsWith('sha256:')) tags.delete(ref);
+    else if (refuseDigest) {
+      refuseDigest = false;
+
+      return new Response('busy', { status: 503 });
+    } else if (![...tags.values()].includes(ref)) manifests.delete(ref);
+
+    return new Response(null, { status: 204 });
+  };
+
+  return { tags, manifests, answer, left: () => [...manifests.values()].sort(), refuseNextDigest: () => { refuseDigest = true; } };
+}
+
 describe('a deployment that keeps one environment', () => {
   const realFetch = globalThis.fetch;
 
@@ -171,27 +220,22 @@ describe('a deployment that keeps one environment', () => {
 
   const pruning = async (startsOnB: boolean) => {
     const stored = state();
-    // Each snapshot deleted, and whether its environment's record was already gone.
+    // Each snapshot whose last tag went, and whether its environment's record was already gone.
     const deleted: [string, boolean][] = [];
-    const tags = new Map<string, string>();
+    const fake = await registry(['old', 'b', 'c', 'new'], { pageSize: 3 });
 
-    for (const key of ['old', 'b', 'c']) tags.set(`rootfs-snapshot-${await hex(`snapshot-${key}`)}`, key);
     globalThis.fetch = fakeFetch(async (request) => {
-      const { url } = request;
+      const ref = request.url.split('/manifests/')[1] ?? '';
+      const key = request.method === 'DELETE' && ref.startsWith('rootfs-snapshot-') ? fake.manifests.get(fake.tags.get(ref) ?? '') : undefined;
 
-      if (request.headers.get('authorization') !== `Basic ${btoa('user:secret')}`) return new Response(null, { status: 401 });
+      if (key !== undefined) {
+        deleted.push([key, (await stored.ctx.storage.get(`env:${key}`)) === undefined]);
 
-      if (url.endsWith('/_catalog?tags=true')) return Response.json({ repositories: { 'cloudchamber-snapshots/x': [...tags.keys()] } });
+        // While c's snapshot is being deleted, a job starts on b, an environment the prune listed to go next.
+        if (key === 'c' && startsOnB) await environments.ensure('b', v.parse(RecipeSchema, {}), null);
+      }
 
-      if (request.method !== 'DELETE') return Response.json({ annotations: {} });
-      const key = tags.get(url.split('/').at(-1) ?? '') ?? '';
-
-      deleted.push([key, (await stored.ctx.storage.get(`env:${key}`)) === undefined]);
-
-      // While c's snapshot is being deleted, a job starts on b, an environment the prune listed to go next.
-      if (key === 'c' && startsOnB) await environments.ensure('b', v.parse(RecipeSchema, {}), null);
-
-      return new Response(null, { status: 202 });
+      return fake.answer(request);
     });
 
     const environments = new ArmadaEnvironments(stored.ctx, world({
@@ -206,14 +250,73 @@ describe('a deployment that keeps one environment', () => {
 
     await environments.prepared(generation('new'));
 
-    return { deleted, kept: (await environments.list()).map((each) => each.key).sort() };
+    return { deleted, kept: (await environments.list()).map((each) => each.key).sort(), manifests: fake.left() };
   };
 
   test('prunes the older ones once a new one is prepared, forgetting each before its snapshot goes, and spares the one an older job still runs on', async () => {
-    expect(await pruning(false)).toEqual({ deleted: [['c', true], ['b', true]], kept: ['new', 'old'] });
+    expect(await pruning(false)).toEqual({ deleted: [['c', true], ['b', true]], kept: ['new', 'old'], manifests: ['new', 'old'] });
   });
 
   test('keeps one a job asked for while the prune was under way', async () => {
-    expect(await pruning(true)).toEqual({ deleted: [['c', true]], kept: ['b', 'new', 'old'] });
+    expect(await pruning(true)).toEqual({ deleted: [['c', true]], kept: ['b', 'new', 'old'], manifests: ['b', 'new', 'old'] });
+  });
+});
+
+describe('a snapshot no environment records any more', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const deployment = async (open: readonly string[]) => {
+    const stored = state();
+    const fake = await registry(['k-first', 'k-second', 'made']);
+
+    globalThis.fetch = fakeFetch(fake.answer);
+
+    const environments = new ArmadaEnvironments(stored.ctx, world({
+      KEEP_ENVIRONMENTS: '5', REGISTRY_CREDENTIALS: 'user:secret',
+      FLEET: namespace(() => ({ open: async () => [...open] })),
+      JOB: namespace(() => ({ environment: async () => 'k' })),
+    }));
+
+    return { stored, fake, environments };
+  };
+
+  const under = (key: string, id: string): Generation => ({ ...generation(key), snapshot: { id: `snapshot-${id}`, size: 1 } });
+
+  test('a generation its key replaced is deleted at the next prune, once no open job of that key could start from it', async () => {
+    const running = await deployment(['job-1']);
+    await running.environments.prepared(under('k', 'k-first'));
+    await running.environments.prepared(under('k', 'k-second'));
+    const whileOpen = running.fake.left();
+
+    const idle = await deployment([]);
+    await idle.environments.prepared(under('k', 'k-first'));
+    await idle.environments.prepared(under('k', 'k-second'));
+
+    expect({ whileOpen, after: idle.fake.left(), owed: [...(await idle.stored.ctx.storage.list({ prefix: 'debt:' })).keys()] })
+      .toEqual({ whileOpen: ['k-first', 'k-second', 'made'], after: ['k-second', 'made'], owed: [] });
+  });
+
+  test('a preparation\'s snapshot it could not publish is owed and deleted', async () => {
+    const { environments, fake } = await deployment([]);
+    await environments.orphaned('snapshot-made', 'other');
+    await environments.prune({ keep: 5, recentMs: 0 });
+
+    expect(fake.left()).toEqual(['k-first', 'k-second']);
+  });
+
+  test('a digest delete that fails once the tags are gone owes the digest, and the next prune deletes that', async () => {
+    const { environments, fake, stored } = await deployment([]);
+    await environments.orphaned('snapshot-made', 'other');
+    fake.refuseNextDigest();
+    await environments.prune({ keep: 5, recentMs: 0 });
+    const owed = [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()];
+    const tags = fake.tags.size;
+    await environments.prune({ keep: 5, recentMs: 0 });
+
+    expect({ owed: owed.map((name) => name.startsWith('debt:sha256:')), tags, left: fake.left() }).toEqual({ owed: [true], tags: 4, left: ['k-first', 'k-second'] });
   });
 });

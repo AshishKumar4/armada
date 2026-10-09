@@ -1,7 +1,11 @@
 /**
- * Deleting a container snapshot. The Containers API has no delete; a snapshot is a tag in a repository of the
- * account's registry, and a set tag beside it. The Worker deletes through the registry, with credentials each deploy
- * mints here.
+ * Deleting a container snapshot. The Containers API has no delete; a snapshot is a manifest in a repository of the
+ * account's registry, named by a snapshot tag and a set tag beside it. The Worker deletes through the registry, with
+ * credentials each deploy mints here.
+ *
+ * Measured on 2026-10-09: deleting the tags leaves the manifest and its layers in the repository, listed under their
+ * digest, and a DELETE of a manifest a tag still names answers 204 and keeps it. So a delete takes the tags, then the
+ * manifest by digest. The catalog pages its names 1000 at a time across every repository, tags and digests alike.
  */
 import * as v from 'valibot';
 
@@ -11,7 +15,7 @@ const Minted = v.object({
   result: v.optional(v.nullable(v.object({ username: v.string(), password: v.string() }))),
 });
 
-const Manifest = v.object({ annotations: v.optional(v.record(v.string(), v.string()), {}) });
+const Manifest = v.pipe(v.string(), v.parseJson(), v.object({ annotations: v.optional(v.record(v.string(), v.string()), {}) }));
 
 const Catalog = v.object({ repositories: v.record(v.string(), v.nullable(v.array(v.string()))) });
 
@@ -36,27 +40,73 @@ export async function registryCredentials(account: string, token: string, minute
   return `${answer.result.username}:${answer.result.password}`;
 }
 
-/** Deletes the snapshot `id`'s tags with the registry `credentials` (`user:password`). */
-export async function deleteSnapshotWith(credentials: string, id: string): Promise<'deleted' | 'absent'> {
-  const authorization = `Basic ${btoa(credentials)}`;
-  const snapshot = `rootfs-snapshot-${await sha256(id)}`;
-  const catalog = v.parse(Catalog, await (await fetch('https://registry.cloudflare.com/v2/_catalog?tags=true', { headers: { authorization } })).json());
-  const repository = Object.entries(catalog.repositories).find(([, tags]) => tags?.includes(snapshot) === true)?.[0];
+/** What a delete did. `left` is the manifest's digest once its tags are gone and its own delete failed: delete that next. */
+export type Deletion = { readonly kind: 'deleted' | 'absent' } | { readonly kind: 'left'; readonly digest: string; readonly reason: string };
 
-  if (repository === undefined) return 'absent';
-  const manifest = (tag: string) => `https://registry.cloudflare.com/v2/${repository}/manifests/${tag}`;
-  const read = await fetch(manifest(snapshot), { headers: { authorization, accept: ACCEPT } });
+const CATALOG = 'https://registry.cloudflare.com/v2/_catalog?tags=true';
 
-  if (read.status === 404) return 'absent';
+/** A bound on the catalog's pages, past any account's: 100,000 names. */
+const CATALOG_PAGES = 100;
 
-  if (!read.ok) throw new Error(`reading ${snapshot} answered ${String(read.status)}: ${await read.text()}`);
-  const set = v.parse(Manifest, await read.json()).annotations['io.cloudflare.cloudchamber.snapshot_set_id'];
+/** The repository whose catalog entry lists `name`, a tag or a digest. The registry's link names the next page's cursor
+ *  as `last`, without the angle brackets RFC 8288 gives a link. */
+async function repositoryOf(authorization: string, name: string): Promise<string | undefined> {
+  let cursor: string | undefined;
 
-  for (const tag of set === undefined ? [snapshot] : [snapshot, `rootfs-set-${await sha256(set)}`]) {
-    const deleted = await fetch(manifest(tag), { method: 'DELETE', headers: { authorization, accept: ACCEPT } });
+  for (let page = 0; page < CATALOG_PAGES; page += 1) {
+    const listed = await fetch(cursor === undefined ? CATALOG : `${CATALOG}&last=${cursor}`, { headers: { authorization } });
+    const catalog = v.parse(Catalog, await listed.json());
+    const found = Object.entries(catalog.repositories).find(([, names]) => names?.includes(name) === true)?.[0];
+    const next = /[?&]last=([^&;>\s]+)/u.exec(listed.headers.get('link') ?? '')?.[1];
 
-    if (!deleted.ok && deleted.status !== 404) throw new Error(`deleting ${tag} answered ${String(deleted.status)}: ${await deleted.text()}`);
+    if (found !== undefined || next === undefined || next === cursor) return found;
+    cursor = next;
   }
 
-  return 'deleted';
+  throw new Error(`the registry's catalog ran past ${String(CATALOG_PAGES)} pages`);
+}
+
+/** Deletes the snapshot `ref` with the registry `credentials` (`user:password`): a snapshot id, or the digest an earlier
+ *  delete left. The snapshot tag goes last of the tags, so a failure before it leaves the snapshot findable by its id. */
+export async function deleteSnapshotWith(credentials: string, ref: string): Promise<Deletion> {
+  const authorization = `Basic ${btoa(credentials)}`;
+  const name = ref.startsWith('sha256:') ? ref : `rootfs-snapshot-${await sha256(ref)}`;
+  const repository = await repositoryOf(authorization, name);
+
+  if (repository === undefined) return { kind: 'absent' };
+  const manifest = (tag: string) => `https://registry.cloudflare.com/v2/${repository}/manifests/${tag}`;
+
+  const remove = async (tag: string): Promise<string | null> => {
+    const deleted = await fetch(manifest(tag), { method: 'DELETE', headers: { authorization, accept: ACCEPT } });
+
+    return deleted.ok || deleted.status === 404 ? null : `deleting ${tag} answered ${String(deleted.status)}: ${await deleted.text()}`;
+  };
+
+  if (name === ref) {
+    const refused = await remove(ref);
+
+    if (refused !== null) throw new Error(refused);
+
+    return { kind: 'deleted' };
+  }
+
+  const read = await fetch(manifest(name), { headers: { authorization, accept: ACCEPT } });
+
+  if (read.status === 404) return { kind: 'absent' };
+
+  if (!read.ok) throw new Error(`reading ${name} answered ${String(read.status)}: ${await read.text()}`);
+  const body = await read.text();
+  const digest = read.headers.get('docker-content-digest') ?? `sha256:${await sha256(body)}`;
+  const parsed = v.safeParse(Manifest, body);
+  const set = parsed.success ? parsed.output.annotations['io.cloudflare.cloudchamber.snapshot_set_id'] : undefined;
+
+  for (const tag of set === undefined ? [name] : [`rootfs-set-${await sha256(set)}`, name]) {
+    const refused = await remove(tag);
+
+    if (refused !== null) throw new Error(refused);
+  }
+
+  const refused = await remove(digest);
+
+  return refused === null ? { kind: 'deleted' } : { kind: 'left', digest, reason: refused };
 }

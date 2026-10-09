@@ -30,6 +30,14 @@ const LEASE_MS = 60 * 60_000;
 /** A failed preparation is the answer for this long, so the jobs waiting on it end; then it may be asked again. */
 const FAILURE_HOLD_MS = 5 * 60_000;
 
+/** A snapshot no environment records any more and whose delete is still owed, under `debt:<ref>`: one a later
+ *  generation of its key displaced, one a preparation made and could not publish, or one whose delete failed. `ref` is
+ *  its id, or the digest a delete left once the tags were gone. */
+interface Debt {
+  readonly key: string;
+  readonly since: number;
+}
+
 /** The environment every command runs under: the runner's defaults, then the job's own. */
 export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>) {
   const workdir = workdirOf(recipe);
@@ -78,8 +86,13 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     if (entry?.state === 'ready') await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: Date.now() } satisfies Entry);
   }
 
-  /** A new environment is ready, one more than before: the registry prunes now, and then each hour. */
+  /** A new environment is ready, one more than before: the registry prunes now, and then each hour. A generation it
+   *  replaces under the same key, a preparation that outlived its lease finishing after the one that replaced it, is
+   *  owed for deletion. */
   async prepared(generation: Generation): Promise<void> {
+    const held = await this.ctx.storage.get<Entry>(`env:${generation.key}`);
+
+    if (held?.state === 'ready' && held.generation.snapshot.id !== generation.snapshot.id) await this.owe(held.generation.snapshot.id, generation.key);
     await this.ctx.storage.put(`env:${generation.key}`, { state: 'ready', generation, lastUsed: Date.now() } satisfies Entry);
     await this.look();
   }
@@ -121,6 +134,8 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     const used = new Set(await Promise.all(open.map(async (job) => await this.env.JOB.getByName(job).environment())));
     const pruned: string[] = [];
 
+    await this.settle(credentials, used);
+
     for (const { key, snapshot, lastUsed } of expired(await this.list(), used, Date.now(), retention)) {
       // A job that asked for it since the listing, while a call above let other requests in, keeps it: the read and the
       // delete are storage alone, with nothing between them that lets one in.
@@ -130,16 +145,56 @@ export class ArmadaEnvironments extends DurableObject<Env> {
       await this.forget(key);
       pruned.push(key);
 
-      try {
-        console.log(JSON.stringify({ pruned: key, snapshot: await deleteSnapshotWith(credentials, snapshot) }));
-      } catch (cause) {
-        console.error(JSON.stringify({ pruned: key, snapshot, left: said({ cause }) }));
-      }
+      await this.delete(credentials, snapshot, key);
     }
 
     await this.lookAgain();
 
     return pruned;
+  }
+
+  /** A snapshot made for `key` that no environment records: a preparation's that failed after its snapshot. */
+  async orphaned(snapshot: string, key: string): Promise<void> {
+    await this.owe(snapshot, key);
+  }
+
+  /** Deletes the owed snapshots, but those of a key an open job uses: a job holds its generation, so a vessel it starts
+   *  later may start from one its key has since replaced. */
+  private async settle(credentials: string, used: ReadonlySet<string>): Promise<void> {
+    for (const [name, debt] of await this.ctx.storage.list<Debt>({ prefix: 'debt:' })) {
+      if (used.has(debt.key)) continue;
+      const ref = name.slice('debt:'.length);
+      const entry = await this.ctx.storage.get<Entry>(`env:${debt.key}`);
+
+      await this.ctx.storage.delete(name);
+
+      // One its key records after all, a publication whose answer was lost, is that environment's, never a debt.
+      if (entry?.state !== 'ready' || entry.generation.snapshot.id !== ref) await this.delete(credentials, ref, debt.key);
+    }
+  }
+
+  /** Deletes the snapshot `ref`, or owes what is left of it: the snapshot when the delete failed before its tags went,
+   *  the manifest's digest when it failed after. */
+  private async delete(credentials: string, ref: string, key: string): Promise<void> {
+    try {
+      const deleted = await deleteSnapshotWith(credentials, ref);
+
+      if (deleted.kind === 'left') {
+        await this.owe(deleted.digest, key);
+        console.error(JSON.stringify({ snapshot: ref, key, owed: deleted.digest, error: deleted.reason }));
+
+        return;
+      }
+
+      console.log(JSON.stringify({ snapshot: ref, key, deleted: deleted.kind }));
+    } catch (cause) {
+      await this.owe(ref, key);
+      console.error(JSON.stringify({ snapshot: ref, key, owed: ref, error: said({ cause }) }));
+    }
+  }
+
+  private async owe(ref: string, key: string): Promise<void> {
+    await this.ctx.storage.put(`debt:${ref}`, { key, since: Date.now() } satisfies Debt);
   }
 
   /** A failure ends the key's preparation only if it is the attempt begun `since`, not one a later attempt replaced. */
@@ -252,9 +307,13 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
     if (preparation === undefined) return;
     const began = Date.now();
+    // The snapshot once one is made, so a preparation that fails after it owes it rather than lose it.
+    let made = preparation.snapshot;
 
     try {
       const step = await this.step(preparation);
+
+      made = step === 'running' ? made : step.snapshot ?? made;
 
       if (step === 'running') return await this.ctx.storage.setAlarm(Date.now());
       const seconds = { ...preparation.seconds, [preparation.phase]: (Date.now() - (preparation.started ?? began)) / 1000 };
@@ -269,6 +328,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
       // The preparation failed already; a container that will not stop ends at its inactivity timeout.
       await Promise.allSettled([this.ctx.container?.destroy()]);
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
+
+      if (made !== null) await this.registry().orphaned(made.id, preparation.key);
       await this.registry().preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`);
     }
   }
@@ -319,7 +380,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
         await must(container, 'clearing the phases', ['rm', '-rf', `${STATE}/phases`], { ms: EXEC_MS });
         const snapshot = await container.snapshotContainer({ name: `armada-${preparation.key.slice(0, 20)}` });
 
-        await container.destroy();
+        // Made, the snapshot is the environment: a container that will not stop ends at its inactivity timeout, and
+        // failing the phase for it would lose the snapshot unrecorded.
+        await Promise.allSettled([container.destroy()]);
 
         return { snapshot: { id: snapshot.id, size: snapshot.size } };
       }
