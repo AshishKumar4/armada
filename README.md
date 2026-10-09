@@ -385,11 +385,18 @@ open jobs first in four cases:
 
 That wait lapses after 10 minutes if the deploy dies.
 
-An account's snapshots are limited. With `--keep=N`, the Worker deletes old environment snapshots after it prepares
-each new one. It keeps the snapshot of every environment an open job uses, and of the N most recently used of the
-rest. The deploy mints registry credentials through your wrangler login and gives them to the Worker as a secret. A
-later deploy without `--keep` leaves them in place, and warns once they are within 30 days of expiring.
-`armada prune` does the same pruning once, from your machine.
+An account's snapshots are limited, so the Worker deletes environment snapshots it no longer needs. It keeps the
+snapshots of:
+
+- every environment an open job uses;
+- the 3 most recently used others;
+- any environment used in the last hour.
+
+It deletes the rest after it prepares each new environment, and it looks again each hour. A busy hour's environments
+stay until that hour is quiet, and then the deployment keeps 3. A job's environment counts as used until the job ends.
+`--keep=N` changes the count. Each deploy mints registry credentials through your wrangler login, valid for a year,
+and gives them to the Worker as a secret. `armada prune` deletes now, from your machine, and `armada prune --keep=0`
+keeps only what open jobs use.
 
 A client and a Worker that speak versions of the wire too far apart refuse each other's requests, and say which one to
 update.
@@ -409,7 +416,7 @@ armada secret set <NAME> | list | delete <NAME>
 armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]
 armada webhook list
 armada webhook remove <project>
-armada prune [--keep=3]
+armada prune [--keep=N]
 ```
 
 `armada --help` describes every option.

@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { failureTail, SIZES, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
+import { failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, USER_HOME, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
@@ -71,32 +71,52 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     return { kind: 'preparing', since: now };
   }
 
-  /** With `armada deploy --keep=N`, a new environment prunes the ones past it (`prune`). */
-  async prepared(generation: Generation): Promise<void> {
-    await this.ctx.storage.put(`env:${generation.key}`, { state: 'ready', generation, lastUsed: Date.now() } satisfies Entry);
-    const keep = Number(this.env.KEEP_ENVIRONMENTS ?? 0);
+  /** A job that ran on the key's environment ended: its recent hour starts now. */
+  async used(key: string): Promise<void> {
+    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
-    if (keep > 0 && this.env.REGISTRY_CREDENTIALS !== undefined) {
-      try {
-        await this.prune(keep, this.env.REGISTRY_CREDENTIALS);
-      } catch (cause) {
-        // A prune that fails leaves snapshots for the next one: the environment just made is ready either way.
-        console.error(JSON.stringify({ prune: said({ cause }) }));
-      }
-    }
+    if (entry?.state === 'ready') await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: Date.now() } satisfies Entry);
   }
 
-  /** Deletes the snapshots of the ready environments past every one an open job uses and the `keep` most recently
-   *  used of the rest, with the registry `credentials`: the account's snapshots are limited, and each change to a
-   *  project's install makes another environment. Each record goes first, so a job asking for it after prepares it
-   *  again rather than start from a snapshot being deleted; a snapshot whose deletion fails is logged and left. The keys
-   *  pruned. */
-  async prune(keep: number, credentials: string): Promise<string[]> {
+  /** A new environment is ready, one more than before: the registry prunes now, and then each hour. */
+  async prepared(generation: Generation): Promise<void> {
+    await this.ctx.storage.put(`env:${generation.key}`, { state: 'ready', generation, lastUsed: Date.now() } satisfies Entry);
+    await this.look();
+  }
+
+  /** Each hour while an environment is ready, the snapshots past those the deployment keeps go. */
+  override async alarm(): Promise<void> {
+    await this.look();
+  }
+
+  /** Prunes by the deployment's retention, then looks again in an hour while an environment is ready. A deployment
+   *  without registry credentials, which `armada deploy` mints, deletes nothing. A prune that fails leaves its snapshots
+   *  for the next look. */
+  private async look(): Promise<void> {
+    if (this.env.REGISTRY_CREDENTIALS === undefined) return;
+
+    try {
+      await this.prune(retentionOf(this.env));
+    } catch (cause) {
+      console.error(JSON.stringify({ prune: said({ cause }) }));
+    }
+
+    if ((await this.list()).some(({ entry }) => entry.state === 'ready')) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
+  }
+
+  /** Deletes the snapshots of the environments past those `retention` keeps (`expired`) with the deployment's
+   *  registry credentials: the account's snapshots are limited, and each change to a project's install makes another
+   *  environment. Each record goes first, so a job asking for it after prepares it again rather than start from a
+   *  snapshot being deleted; a snapshot whose deletion fails is logged and left. The keys pruned. */
+  async prune(retention: Retention): Promise<string[]> {
+    const credentials = this.env.REGISTRY_CREDENTIALS;
+
+    if (credentials === undefined) throw new Error('this deployment has no registry credentials to delete snapshots with; armada deploy mints them');
     const open = await this.env.FLEET.getByName(SINGLE).open();
     const used = new Set(await Promise.all(open.map(async (job) => await this.env.JOB.getByName(job).environment())));
     const pruned: string[] = [];
 
-    for (const { key, snapshot, lastUsed } of superseded(await this.list(), keep, used)) {
+    for (const { key, snapshot, lastUsed } of expired(await this.list(), used, Date.now(), retention)) {
       // A job that asked for it since the listing, while a call above let other requests in, keeps it: the read and the
       // delete are storage alone, with nothing between them that lets one in.
       const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
@@ -135,11 +155,31 @@ export class ArmadaEnvironments extends DurableObject<Env> {
   }
 }
 
-/** The ready environments that no open job `used` and that are past the `keep` most recently used of those, oldest
- *  last: an open job's vessels, a replacement's included, start from its environment until it ends. */
-export function superseded(entries: readonly { readonly key: string; readonly entry: Entry }[], keep: number, used: ReadonlySet<string>): { key: string; snapshot: string; lastUsed: number }[] {
+/** What a prune keeps beyond the environments open jobs use: the `keep` most recently used of the rest, and each used
+ *  within `recentMs`. */
+export interface Retention {
+  readonly keep: number;
+  readonly recentMs: number;
+}
+
+/** An environment used this recently stays beyond the kept count: a busy hour's working set, larger than the count, is
+ *  not prepared again for each job, and it shrinks back to the count once that hour is quiet. */
+const RECENT_MS = 60 * 60_000;
+
+/** How often the registry looks for snapshots past those it keeps. */
+const LOOK_MS = 60 * 60_000;
+
+/** The deployment's retention: its deploy's `--keep`, and the recent hour. */
+export function retentionOf({ KEEP_ENVIRONMENTS }: Pick<Env, 'KEEP_ENVIRONMENTS'>): Retention {
+  return { keep: KEEP_ENVIRONMENTS === undefined ? KEPT_ENVIRONMENTS : Number(KEEP_ENVIRONMENTS), recentMs: RECENT_MS };
+}
+
+/** The ready environments a prune deletes, most recently used first: past the `keep` most recently used of those no
+ *  open job `used`, each not used within `recentMs`. An open job's vessels, a replacement's included, start from its
+ *  environment until it ends, so that one stays. */
+export function expired(entries: readonly { readonly key: string; readonly entry: Entry }[], used: ReadonlySet<string>, now: number, { keep, recentMs }: Retention) {
   return entries.flatMap(({ key, entry }) => entry.state === 'ready' && !used.has(key) ? [{ key, snapshot: entry.generation.snapshot.id, lastUsed: entry.lastUsed }] : [])
-    .sort((left, right) => right.lastUsed - left.lastUsed).slice(keep);
+    .toSorted((left, right) => right.lastUsed - left.lastUsed).slice(keep).filter(({ lastUsed }) => now - lastUsed >= recentMs);
 }
 
 type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot';

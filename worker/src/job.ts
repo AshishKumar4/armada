@@ -824,6 +824,8 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now() });
     await this.ctx.storage.deleteAlarm();
     await this.env.FLEET.getByName(SINGLE).closed((await this.ctx.storage.get<string>('id')) ?? '');
+    // The environment was in use until now: its recent hour starts here (`ArmadaEnvironments.used`).
+    await this.env.ENVIRONMENTS.getByName(SINGLE).used(await this.environment());
   }
 
   /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */

@@ -14,6 +14,9 @@ const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot'
 
 afterEach(() => { setSystemTime(); });
 
+/** A registry whose every environment is ready, and which takes a job's end. */
+const registry = namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) }));
+
 /** A deployment whose jobs start on a ready environment and whose vessels only record that they began, and a request
  *  into its Worker under its bearer. */
 function deployment() {
@@ -25,7 +28,7 @@ function deployment() {
     ARMADA_TOKEN: TOKEN, FLEET: namespace(() => fleet), ARTIFACTS: artifacts,
     JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name)),
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
+    ENVIRONMENTS: registry,
   });
 
   const ask = async (path: string, init: RequestInit = {}) => {
@@ -47,7 +50,7 @@ const exited = (index: number, vessel: string, exitCode = 0): Outcome => ({ inde
 async function started(spec: v.InferInput<typeof JobSpecSchema>, stored = state()) {
   const job = new ArmadaJob(stored.ctx, world({
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
+    ENVIRONMENTS: registry,
   }));
 
   await job.create('j1', v.parse(JobSpecSchema, spec));

@@ -292,7 +292,7 @@ describe('a driver job at claim', () => {
     const open = new ArmadaJob(state().ctx, world({
       ARMADA_TOKEN: TOKEN,
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
-      ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation: { key: 'k', snapshot: { id: 's', size: 1 }, sha: null, created: 0, seconds: {} } }) })),
+      ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation: { key: 'k', snapshot: { id: 's', size: 1 }, sha: null, created: 0, seconds: {} } }) })),
       SECRETS: namespace(() => ({ values: async () => ({ GITHUB_TOKEN: 'gh-token-value' }) })),
     }));
 

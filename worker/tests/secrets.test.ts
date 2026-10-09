@@ -26,7 +26,7 @@ function deployment() {
   const env = world({
     ARMADA_TOKEN: TOKEN, SECRETS: namespace(() => secrets), JOB: namespace(() => job),
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
+    ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
   });
 
   const job = new ArmadaJob(kept.ctx, env);

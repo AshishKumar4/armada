@@ -19,7 +19,7 @@ async function cachedJob(id: string, items: readonly Json[], artifacts: ReturnTy
   const job = new ArmadaJob(stored.ctx, world({
     ARTIFACTS: artifacts,
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
+    ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
   }));
 
   await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: task, bundle }, cache: { days: 7 }, open }));

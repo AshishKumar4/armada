@@ -28,11 +28,13 @@ export interface Env {
   readonly ARMADA_SHA?: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
-  /** How many of the most recently used environments keep their snapshots (`armada deploy --keep`); unset keeps all. */
+  /** How many of the most recently used environments keep their snapshots beyond those open jobs use
+   *  (`armada deploy --keep`, 3 by default). */
   readonly KEEP_ENVIRONMENTS?: string;
-  /** `user:password` for the account's registry, which deletes the snapshots past them. */
+  /** `user:password` for the account's registry, which deletes the snapshots past those kept; `armada deploy` mints
+   *  it. */
   readonly REGISTRY_CREDENTIALS?: string;
-  /** When those credentials expire, an ISO date, which `/health` reports so a deploy can warn ahead of it. */
+  /** When those credentials expire, an ISO date, which `/health` reports. */
   readonly REGISTRY_CREDENTIALS_EXPIRE?: string;
 }
 

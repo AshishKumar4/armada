@@ -387,6 +387,10 @@ export type Webhook = v.InferOutput<typeof WebhookSchema>;
 
 export const WebhooksSchema = v.object({ webhooks: v.array(WebhookSchema) });
 
+/** The environments a deployment keeps the snapshots of beyond those its open jobs use, unless its deploy names another
+ *  count (`armada deploy --keep`): the most recently used ones. */
+export const KEPT_ENVIRONMENTS = 3;
+
 /** A deployment's state: its runner layer, its wire, the oldest wire it still serves (absent from a Worker that
  *  predates the field), the vCPUs its fleet holds, and the jobs not yet done, those waiting for an environment or
  *  for a container included. */

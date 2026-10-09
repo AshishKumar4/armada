@@ -1,11 +1,14 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { RecipeSchema } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
-import { ArmadaEnvironments, superseded, type Generation } from '../src/environments';
+import { ArmadaEnvironments, expired, retentionOf, type Generation } from '../src/environments';
+import worker from '../src/worker';
 import { namespace, state, world } from './harness';
 
-const HOUR = 60 * 60_000;
+const MINUTE = 60_000;
+
+const HOUR = 60 * MINUTE;
 
 const generation = (key: string): Generation => ({ key, snapshot: { id: `snapshot-${key}`, size: 1 }, sha: null, created: 0, seconds: {} });
 
@@ -13,18 +16,120 @@ const ready = (key: string, lastUsed: number) => ({ key, entry: { state: 'ready'
 
 const hex = async (value: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
-describe('the environments past those an armada keeps', () => {
-  test('are the ready ones no open job uses, past the most recently used of those', () => {
-    const now = Date.now();
+describe('the environments a prune deletes', () => {
+  const now = Date.now();
 
-    const entries = [
-      ready('newest', now - HOUR), ready('second', now - 2 * HOUR), ready('third', now - 3 * HOUR), ready('fourth', now - 4 * HOUR),
-      ready('running', now - 9 * HOUR), { key: 'building', entry: { state: 'preparing' as const, sha: null, since: now } },
-      { key: 'broken', entry: { state: 'failed' as const, at: now, reason: 'no' } },
-    ];
+  const entries = [
+    ready('newest', now - 5 * MINUTE), ready('busy', now - 20 * MINUTE), ready('second', now - 2 * HOUR), ready('third', now - 3 * HOUR),
+    ready('running', now - 9 * HOUR), { key: 'building', entry: { state: 'preparing' as const, sha: null, since: now } },
+    { key: 'broken', entry: { state: 'failed' as const, at: now, reason: 'no' } },
+  ];
 
-    // 'running' is the oldest, but an open job's containers start from it.
-    expect(superseded(entries, 2, new Set(['running'])).map(({ key, snapshot }) => [key, snapshot])).toEqual([['third', 'snapshot-third'], ['fourth', 'snapshot-fourth']]);
+  const keys = (keep: number, recentMs: number) => expired(entries, new Set(['running']), now, { keep, recentMs }).map(({ key, snapshot }) => [key, snapshot]);
+
+  test('are the ready ones past the most recently used of those no open job uses, but for any used in the last hour', () => {
+    // 'running' is the oldest, but an open job's containers start from it; 'busy' is past the one kept, but was used
+    // 20 minutes ago.
+    expect(keys(1, HOUR)).toEqual([['second', 'snapshot-second'], ['third', 'snapshot-third']]);
+  });
+
+  test('spare no recent hour when a prune is asked with a count: every one no open job uses goes at 0', () => {
+    expect(keys(0, 0).map(([key]) => key)).toEqual(['newest', 'busy', 'second', 'third']);
+  });
+
+  test('keep three by default, or the count the deploy set', () => {
+    expect([retentionOf({}).keep, retentionOf({ KEEP_ENVIRONMENTS: '5' }).keep]).toEqual([3, 5]);
+  });
+});
+
+describe('a deployment\'s hourly look at its environments', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    setSystemTime();
+  });
+
+  /** A registry keeping none beyond its open jobs', whose one environment `a` the job `job-1` uses while `open` holds it;
+   *  each snapshot deletion lands in `deleted`. */
+  const deployment = async (credentials?: string) => {
+    const stored = state();
+    const open = ['job-1'];
+    const deleted: string[] = [];
+
+    globalThis.fetch = fakeFetch(async (request) => {
+      if (request.url.endsWith('/_catalog?tags=true')) return Response.json({ repositories: { 'cloudchamber-snapshots/x': [`rootfs-snapshot-${await hex('snapshot-a')}`] } });
+
+      if (request.method === 'DELETE') deleted.push(request.url.split('/').at(-1) ?? '');
+
+      return request.method === 'DELETE' ? new Response(null, { status: 202 }) : Response.json({ annotations: {} });
+    });
+
+    const environments = new ArmadaEnvironments(stored.ctx, world({
+      KEEP_ENVIRONMENTS: '0', REGISTRY_CREDENTIALS: credentials,
+      FLEET: namespace(() => ({ open: async () => open })),
+      JOB: namespace(() => ({ environment: async () => 'a' })),
+    }));
+
+    await stored.ctx.storage.put('env:a', { state: 'ready', generation: generation('a'), lastUsed: Date.now() - 5 * HOUR });
+
+    return { stored, open, deleted, environments };
+  };
+
+  test('keeps an environment while a job uses it and for the hour after the job ends, then deletes it and stops looking', async () => {
+    const start = Date.now();
+
+    setSystemTime(new Date(start));
+    const { stored, open, deleted, environments } = await deployment('user:secret');
+
+    // As the platform runs an alarm: cleared, then handled.
+    const fire = async () => {
+      await stored.ctx.storage.deleteAlarm();
+      await environments.alarm();
+    };
+
+    await fire();
+    const whileUsed = [(await environments.list()).length, (await stored.ctx.storage.getAlarm()) === start + HOUR];
+
+    // The job ends 50 minutes in, just before the next look.
+    setSystemTime(new Date(start + 50 * MINUTE));
+    open.length = 0;
+    await environments.used('a');
+    setSystemTime(new Date(start + HOUR + 1));
+    await fire();
+    const justAfter = (await environments.list()).length;
+
+    setSystemTime(new Date(start + 2 * HOUR + 1));
+    await fire();
+
+    expect({ whileUsed, justAfter, after: (await environments.list()).length, deleted: deleted.length, alarm: await stored.ctx.storage.getAlarm() })
+      .toEqual({ whileUsed: [1, true], justAfter: 1, after: 0, deleted: 1, alarm: null });
+  });
+
+  test('deletes nothing and sets no look in a deployment without registry credentials', async () => {
+    const { stored, open, deleted, environments } = await deployment();
+
+    open.length = 0;
+    await environments.prepared(generation('b'));
+
+    expect({ kept: (await environments.list()).length, deleted, alarm: await stored.ctx.storage.getAlarm() }).toEqual({ kept: 2, deleted: [], alarm: null });
+  });
+
+  test('prunes on request through the route: a count of 0 spares only what open jobs use, recent or not', async () => {
+    const { stored, environments } = await deployment('user:secret');
+    const token = 't'.repeat(32);
+
+    // Used this very millisecond: a count of 0 spares no recent time at all.
+    setSystemTime(new Date(Date.now()));
+    await stored.ctx.storage.put('env:fresh', { state: 'ready', generation: generation('fresh'), lastUsed: Date.now() });
+    const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+
+    const answer = await worker.fetch(new Request('https://armada.test/environments/prune', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: JSON.stringify({ keep: 0 }),
+    }), env);
+
+    expect({ pruned: v.parse(v.object({ pruned: v.array(v.string()) }), await answer.json()).pruned, kept: (await environments.list()).map(({ key }) => key) })
+      .toEqual({ pruned: ['fresh'], kept: ['a'] });
   });
 });
 

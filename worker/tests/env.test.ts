@@ -21,7 +21,7 @@ async function running(readiness: Readiness = { kind: 'ready', generation }): Pr
 
   const job = new ArmadaJob(stored.ctx, world({
     VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ ensure: async () => readiness })),
+    ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => readiness })),
   }));
 
   await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } }));
@@ -162,7 +162,7 @@ describe('a job\'s env', () => {
 
     const job = new ArmadaJob(jobState.ctx, world({
       VESSEL: namespace((name) => name === 'j1/v1' ? vessel : { begin: async () => undefined, stop: async () => undefined }),
-      ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
+      ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
     }));
 
     vessel = new ArmadaVessel(vesselState.ctx, world({ JOB: namespace(() => job) }));

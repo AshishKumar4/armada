@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
-import { expiryWarning, registryCredentials } from './registry';
+import { registryCredentials } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, errorOf, jsonOf, JsonSchema, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, describeUsage, errorOf, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -36,7 +36,8 @@ Usage:
                                        run pushes and pull requests through the deployment's own armada run
   armada webhook list                  list the configured projects
   armada webhook remove <project>      remove one, and its GitHub hook when the CLI made it
-  armada prune [--keep=3]              delete the snapshots of environments no open job uses, past the newest
+  armada prune [--keep=N]              delete now the snapshots past the N most recently used environments
+                                       (default the deployment's own); an open job's environment stays
 
 map options:
   --times=N            the items are 1 to N
@@ -62,15 +63,14 @@ deploy options:
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
                        client the deployed one serves, or its driver differs
-  --keep=N             keep the snapshots of the environments open jobs use and of the N most recently used
-                       others, deleting the rest after each new one is prepared (the account's snapshots are limited)
+  --keep=N             the environments whose snapshots stay beyond those open jobs use: the N most recently
+                       used (default 3), and any used in the last hour; the rest are deleted
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
 The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
-verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.
-prune needs ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit, or \`wrangler auth token\`'s.`;
+verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.`;
 
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
  *  command also takes `--connection=`. */
@@ -310,13 +310,14 @@ async function healthOf(name: string, deployed: Armada): Promise<Health | null> 
   }
 }
 
-/** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, and the connection file. A
- *  version that still serves every client the deployed one does, on the same driver, takes over the running jobs;
- *  `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and a deploy that
- *  fails or is interrupted lets the drained one admit jobs again. With `keep`, the Worker then prunes its environments'
- *  snapshots (`keepEnvironments`). */
-async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean, keep: number | undefined): Promise<number> {
+/** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, its registry credentials, and
+ *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
+ *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
+ *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
+async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean, keep: number): Promise<number> {
   const account = accountOf();
+  // Minted before anything changes, so a login that cannot mint them fails the deploy with the deployment as it was.
+  const registry = await mintRegistry(account);
   const file = connectionFile(name);
   const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
   let drained = false;
@@ -344,16 +345,15 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     // their containers outlive the Worker's update, and each object resumes from storage (measured: six deploys in
     // two minutes over 200 one-minute tasks cut none and refused no job).
     const health = deployed === null ? null : await healthOf(name, deployed);
-    const warning = keep === undefined ? expiryWarning(name, health) : null;
-
-    if (warning !== null) console.warn(warning);
 
     if (deployed !== null && mustDrain(health, forceDrain)) await drain(deployed, () => { drained = true; });
     await install(account, name, vcpus, file);
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
-
-    if (keep !== undefined) await keepEnvironments(account, name, keep);
+    wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS', '--name', name], account, registry.credentials);
+    wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS_EXPIRE', '--name', name], account, registry.until);
+    wrangler(['secret', 'put', 'KEEP_ENVIRONMENTS', '--name', name], account, String(keep));
+    console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted).off('SIGHUP', interrupted);
     await admit();
@@ -362,21 +362,15 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   return 0;
 }
 
-/** How long the registry credentials a `--keep` deploy gives the Worker last; each such deploy mints new ones. */
-const KEEP_CREDENTIALS_DAYS = 365;
+/** How long the registry credentials a deploy gives the Worker last; each deploy mints new ones. */
+const REGISTRY_DAYS = 365;
 
-/** Has the deployed Worker keep the snapshots of only its `keep` most recently used environments, deleting the rest
- *  after each preparation, with registry credentials minted through wrangler's login. Both are secrets, which a later
- *  deploy without `--keep` leaves in place. */
-async function keepEnvironments(account: string, name: string, keep: number): Promise<void> {
+/** Registry credentials for the Worker to delete snapshots with, minted through wrangler's login, and when they end. */
+async function mintRegistry(account: string): Promise<{ readonly credentials: string; readonly until: string }> {
   const token = wrangler(['auth', 'token'], account).trim().split('\n').at(-1)?.trim() ?? '';
-  const credentials = await registryCredentials(account, token, KEEP_CREDENTIALS_DAYS * 24 * 60);
-  const until = new Date(Date.now() + KEEP_CREDENTIALS_DAYS * 24 * 60 * 60_000).toISOString();
+  const credentials = await registryCredentials(account, token, REGISTRY_DAYS * 24 * 60);
 
-  wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS', '--name', name], account, credentials);
-  wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS_EXPIRE', '--name', name], account, until);
-  wrangler(['secret', 'put', 'KEEP_ENVIRONMENTS', '--name', name], account, String(keep));
-  console.log(`${name} keeps the snapshots of the environments open jobs use and of its ${String(keep)} most recently used others; its registry credentials last until ${until}`);
+  return { credentials, until: new Date(Date.now() + REGISTRY_DAYS * 24 * 60 * 60_000).toISOString() };
 }
 
 /** Where a deploy builds the dashboard the Worker serves (wrangler.jsonc's `assets`). */
@@ -422,16 +416,11 @@ async function install(account: string, name: string, vcpus: number | undefined,
   }
 }
 
-/** Deletes the snapshots of the environments past every one an open job uses and the `keep` most recently used of the
- *  rest: the Worker picks them (`ArmadaEnvironments.prune`) with registry credentials minted here; a later job prepares
- *  one again. */
-async function prune(keep: number): Promise<number> {
-  const token = process.env['ARMADA_REGISTRY_TOKEN'] ?? '';
-
-  if (token === '') throw new Error('pruning deletes registry tags: export ARMADA_REGISTRY_TOKEN, an API token with Containers: Edit, or `wrangler auth token`\'s');
-  const armada = connect();
-  const credentials = await registryCredentials(armada.connection.account, token);
-  const answer = await armada.call('/environments/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep, credentials }) });
+/** Has the Worker delete now, with the registry credentials its deploy minted, the snapshots past those it keeps, or
+ *  past the `keep` most recently used with no recent hour spared; an open job's environment stays
+ *  (`ArmadaEnvironments.prune`). A later job prepares one again. */
+async function prune(keep: number | undefined): Promise<number> {
+  const answer = await connect().call('/environments/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep }) });
   const { pruned } = v.parse(v.object({ pruned: v.array(v.string()) }), await answer.json());
 
   for (const key of pruned) console.log(`pruned ${key.slice(0, 12)}`);
@@ -670,11 +659,11 @@ async function main(): Promise<number> {
 
       if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, whole('vcpus'), flag('drain'), whole('keep'));
+      return await deploy(name, whole('vcpus'), flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
     }
 
     case 'prune':
-      return await prune(whole('keep', 0) ?? 3);
+      return await prune(whole('keep', 0));
 
     default:
       throw new Error(`no command ${command}`);

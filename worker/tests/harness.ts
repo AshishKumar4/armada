@@ -172,7 +172,8 @@ export function bucket(objects = new Map<string, string>()) {
 /** A binding a test answers in memory: a namespace, a bucket, a version, or a variable's text. */
 type Fake = DurableObjectNamespace | ReturnType<typeof bucket> | WorkerVersionMetadata | string;
 
-/** The bindings an object reaches, each answered in memory: the fleet always has room. */
+/** The bindings an object reaches, each answered in memory: the fleet always has room, and the registry takes a job's
+ *  end. */
 export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   const env: Partial<Env> = {};
 
@@ -180,6 +181,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
     FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARTIFACTS: bucket(),
+    ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
     ...bindings,
   });
 

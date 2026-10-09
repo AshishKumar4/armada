@@ -7,7 +7,6 @@ import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/
 import { matches, parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
-import { expiryWarning } from '../src/registry';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, gitEnv } from './fakes';
 
@@ -967,18 +966,5 @@ describe('the webhook command', () => {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
     }
-  });
-});
-
-describe('a deploy without --keep', () => {
-  test('warns once the registry credentials an earlier --keep deploy gave the Worker are within 30 days of expiring', () => {
-    const now = Date.parse('2026-10-08T00:00:00Z');
-    const health = (keepUntil?: string) => ({ ok: true, driver: 2, protocol: 6, vcpus: 0, jobs: 0, keepUntil });
-    const said = (until: string) => `armada-dew's registry credentials ${until}, and its environments are no longer pruned after that: deploy with --keep=N to renew them`;
-
-    expect([
-      expiryWarning('armada-dew', health('2027-10-08T00:00:00.000Z'), now), expiryWarning('armada-dew', health(), now), expiryWarning('armada-dew', null, now),
-      expiryWarning('armada-dew', health('2026-10-20T00:00:00.000Z'), now), expiryWarning('armada-dew', health('2026-10-01T00:00:00.000Z'), now),
-    ]).toEqual([null, null, null, said('expire at 2026-10-20T00:00:00.000Z'), said('expired at 2026-10-01T00:00:00.000Z')]);
   });
 });

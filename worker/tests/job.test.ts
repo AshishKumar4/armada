@@ -8,19 +8,21 @@ import { namespace, state, world } from './harness';
 
 const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
 
-/** A job on a ready environment whose vessels only record that they began. */
+/** A job on a ready environment whose vessels only record that they began, and whose registry records each environment
+ *  a job's end says it used. */
 async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   const begun: string[] = [];
+  const used: string[] = [];
 
   const created = new ArmadaJob(state().ctx, world({
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }) })),
+    ENVIRONMENTS: namespace(() => ({ used: async (key: string) => { used.push(key); }, ensure: async () => ({ kind: 'ready', generation }) })),
   }));
 
   await created.create('j1', v.parse(JobSpecSchema, spec));
   await created.alarm();
 
-  return { job: created, begun };
+  return { job: created, begun, used };
 }
 
 const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
@@ -34,6 +36,17 @@ async function finish(open: ArmadaJob, vessel: string, exitCode = 0, error?: str
   if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
   await open.complete(vessel, exited(claim.index, vessel, exitCode, error), 1000);
 }
+
+describe('a job that ends', () => {
+  test('tells the registry it used its environment until then, so the environment\'s recent hour starts at its end', async () => {
+    const { job: ending, used } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
+    const during = [...used];
+
+    await finish(ending, 'v1');
+
+    expect({ during, after: used, key: used[0] === await ending.environment() }).toEqual({ during: [], after: [await ending.environment()], key: true });
+  });
+});
 
 describe('an open job', () => {
   test('starts vessels for items as they come beside those still alive, takes none once closed, and settles once closed and drained', async () => {
