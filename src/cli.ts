@@ -363,14 +363,32 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   return 0;
 }
 
+/** How often, and how far apart, a deploy asks for the first look: for a moment after a deploy, the registry's object
+ *  may still run the version before, which answers no look (armada-v2, 2026-10-09). */
+const FIRST_LOOKS = 4;
+
+const FIRST_LOOK_WAIT_MS = 5_000;
+
 /** The deployed Worker's first look at its environments, which prunes what an earlier version kept and starts the
- *  hourly ones. The deploy is done either way: a look the new version did not answer yet waits for the next new
+ *  hourly ones. The deploy is done either way: a look the new version never answered waits for the next new
  *  environment, which the deploy says. */
 async function firstLook(name: string, file: string): Promise<void> {
-  try {
-    await pruneOn(new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))), undefined);
-  } catch (cause) {
-    console.warn(`armada: ${name}'s first look at its environments did not answer (${errorOf({ cause }).message}); its next new environment makes it`);
+  const armada = new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
+
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await pruneOn(armada, undefined);
+
+      return;
+    } catch (cause) {
+      if (attempt >= FIRST_LOOKS) {
+        console.warn(`armada: ${name}'s first look at its environments did not answer (${errorOf({ cause }).message}); its next new environment makes it`);
+
+        return;
+      }
+
+      await Bun.sleep(FIRST_LOOK_WAIT_MS);
+    }
   }
 }
 
