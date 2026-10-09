@@ -1,8 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Recipe } from '../../src/protocol';
+import type { Recipe, Size } from '../../src/protocol';
 import { ArmadaPreparer, type Generation } from '../src/environments';
 import { container, namespace, state, world, type Answer } from './harness';
 
@@ -13,8 +13,9 @@ interface Prepared {
   readonly failures: string[];
 }
 
-/** A preparation of `recipe` in a container `answer` answers, its alarms run until it ends (or `alarms` run out). */
-async function prepare(answer: Answer, alarms = 40): Promise<Prepared> {
+/** A preparation of `recipe` at `size` in a container `answer` answers, its alarms run until it ends (or `alarms` run
+ *  out). */
+async function prepare(answer: Answer, alarms = 40, size: Size = 'medium'): Promise<Prepared> {
   const generations: Generation[] = [];
   const failures: string[] = [];
   const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
@@ -26,7 +27,7 @@ async function prepare(answer: Answer, alarms = 40): Promise<Prepared> {
     })),
   }));
 
-  await preparer.begin('k'.repeat(64), 0, { recipe, sha: null });
+  await preparer.begin('k'.repeat(64), 0, { recipe: { ...recipe, size }, sha: null });
 
   for (let alarm = 0; alarm < alarms && generations.length + failures.length === 0; alarm += 1) await preparer.alarm();
 
@@ -81,6 +82,35 @@ describe('preparing an environment', () => {
       twice: [1, []],
       thrice: [0, ['setup: the wait failed to run: Network connection lost.']],
     });
+  });
+
+  test('bounds a phase by its size\'s vCPUs: a base phase of 20 minutes is too long on medium, and not on micro', async () => {
+    /** The base phase runs `minutes`, the clock moving 2 minutes a wait; every other command answers at once. */
+    const slow = (minutes: number): Answer => {
+      const quick = answering('setup', 0);
+      let now = Date.now();
+      const end = now + minutes * 60_000;
+
+      return (argv, options) => {
+        const answered = quick(argv, options);
+
+        if (argv[3] !== 'wait' || !(argv[2] ?? '').includes('/phases/base/')) return answered;
+        now += 120_000;
+        setSystemTime(new Date(now));
+
+        return { exitCode: 0, stdout: now >= end ? '0\n' : '' };
+      };
+    };
+
+    try {
+      const medium = await prepare(slow(20), 100, 'medium');
+      const micro = await prepare(slow(20), 100, 'micro');
+
+      expect({ medium: medium.failures, micro: [micro.generations.length, micro.failures] })
+        .toEqual({ medium: ['base: the runner layer ran longer than 12 min'], micro: [1, []] });
+    } finally {
+      setSystemTime();
+    }
   });
 
   // A snapshot that does not start fails the job's vessels instead, which the job says once (worker/tests/job.test.ts).

@@ -154,9 +154,9 @@ const BUN = { version: '1.4.0', sha256: '2d03fb5fb83ac8b567aca0a281b2ce1a1a19d48
 const ARMADA_REPO = 'https://github.com/AshishKumar4/armada.git';
 
 /** The driver task's environment: bun alone, the same for every deployment, so a redeploy prepares no new one and
- *  takes no new snapshot. The driver fetches armada at the deployment's commit when it runs. It is `small`: the runner
- *  layer under it builds git, which took 9.5 min on `micro`'s half vCPU (armada-lab, 2026-10-08) against the 12 min a
- *  preparation phase may run. */
+ *  takes no new snapshot. The driver fetches armada at the deployment's commit when it runs. It is `small`, so a new
+ *  deployment's first push waits about 2 min for it: the runner layer under it builds git, which took 9.5 min on
+ *  `micro`'s half vCPU (armada-lab, 2026-10-08). */
 const DRIVER_RECIPE = {
   base: 'cloudflare/debian-trixie',
   setup: String.raw`set -eu

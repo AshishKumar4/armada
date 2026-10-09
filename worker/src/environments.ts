@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { failureTail, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe } from '../../src/protocol';
+import { failureTail, SIZES, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, USER_HOME, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
@@ -165,8 +165,11 @@ interface Preparation {
  *  sbin, which the user's commands do without. */
 const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-/** A phase's bound. */
+/** A phase's bound on `medium`, and on a smaller size in proportion to its vCPUs: the runner layer builds git, which
+ *  is CPU-bound. It took 82 s on `medium` and ran past 12 min on `micro`'s half vCPU (armada-v2, 2026-10-09). */
 const STEP_MS = 12 * 60_000;
+
+const stepMs = (size: Size): number => STEP_MS * SIZES.medium.vcpus / SIZES[size].vcpus;
 
 const EXEC_MS = 90_000;
 
@@ -321,7 +324,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       if (exit !== '') throw new Error(`${doing} exited ${exit}: ${(await run(container, ['tail', '-c', '3000', `${dir}/log`], { ms: EXEC_MS })).stdout}`);
 
-      if (Date.now() - started > STEP_MS) throw new Error(`${doing} ran longer than ${String(STEP_MS / 60_000)} min`);
+      if (Date.now() - started > stepMs(preparation.recipe.size)) throw new Error(`${doing} ran longer than ${String(stepMs(preparation.recipe.size) / 60_000)} min`);
     }
 
     return 'running';
