@@ -10,7 +10,6 @@ import {
 } from '../../src/protocol';
 import { bundleKey, packKey, SINGLE, taskKey, type Env } from './env';
 import { driverSpec, eventOf, HookConfigSchema } from './hooks';
-import { retentionOf } from './environments';
 import type { ArmadaFleet } from './fleet';
 
 export { ArmadaJob } from './job';
@@ -336,8 +335,8 @@ const timings: Handler = async (request, env, [project]) => {
 };
 
 /** `/environments` lists them, `POST /environments/resolve` names a recipe's key and pack base, `POST
- *  /environments/prune` deletes now the snapshots past those the deployment keeps, or past `keep` with no recent hour
- *  spared when given (`armada prune`), and `DELETE /environments/<key>` forgets one. */
+ *  /environments/prune` looks now, deleting the snapshots past those the deployment keeps (`armada deploy`, `armada
+ *  prune`), or once past `keep` with no recent hour spared, and `DELETE /environments/<key>` forgets one. */
 const environments: Handler = async (request, env, [key]) => {
   const registry = env.ENVIRONMENTS.getByName(SINGLE);
 
@@ -352,7 +351,7 @@ const environments: Handler = async (request, env, [key]) => {
   if (key === 'prune' && request.method === 'POST') {
     const { keep } = v.parse(v.object({ keep: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0))) }), await request.json());
 
-    return Response.json({ pruned: await registry.prune(keep === undefined ? retentionOf(env) : { keep, recentMs: 0 }) });
+    return Response.json({ pruned: keep === undefined ? await registry.look() : await registry.prune({ keep, recentMs: 0 }) });
   }
 
   if (request.method !== 'DELETE') return undefined;

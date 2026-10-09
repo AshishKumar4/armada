@@ -354,12 +354,24 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     wrangler(['secret', 'put', 'REGISTRY_CREDENTIALS_EXPIRE', '--name', name], account, registry.until);
     wrangler(['secret', 'put', 'KEEP_ENVIRONMENTS', '--name', name], account, String(keep));
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
+    await firstLook(name, file);
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted).off('SIGHUP', interrupted);
     await admit();
   }
 
   return 0;
+}
+
+/** The deployed Worker's first look at its environments, which prunes what an earlier version kept and starts the
+ *  hourly ones. The deploy is done either way: a look the new version did not answer yet waits for the next new
+ *  environment, which the deploy says. */
+async function firstLook(name: string, file: string): Promise<void> {
+  try {
+    await pruneOn(new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))), undefined);
+  } catch (cause) {
+    console.warn(`armada: ${name}'s first look at its environments did not answer (${errorOf({ cause }).message}); its next new environment makes it`);
+  }
 }
 
 /** How long the registry credentials a deploy gives the Worker last; each deploy mints new ones. */
@@ -419,8 +431,8 @@ async function install(account: string, name: string, vcpus: number | undefined,
 /** Has the Worker delete now, with the registry credentials its deploy minted, the snapshots past those it keeps, or
  *  past the `keep` most recently used with no recent hour spared; an open job's environment stays
  *  (`ArmadaEnvironments.prune`). A later job prepares one again. */
-async function prune(keep: number | undefined): Promise<number> {
-  const answer = await connect().call('/environments/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep }) });
+async function pruneOn(armada: Armada, keep: number | undefined): Promise<number> {
+  const answer = await armada.call('/environments/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep }) });
   const { pruned } = v.parse(v.object({ pruned: v.array(v.string()) }), await answer.json());
 
   for (const key of pruned) console.log(`pruned ${key.slice(0, 12)}`);
@@ -663,7 +675,7 @@ async function main(): Promise<number> {
     }
 
     case 'prune':
-      return await prune(whole('keep', 0));
+      return await pruneOn(connect(), whole('keep', 0));
 
     default:
       throw new Error(`no command ${command}`);

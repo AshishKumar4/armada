@@ -115,6 +115,23 @@ describe('a deployment\'s hourly look at its environments', () => {
     expect({ kept: (await environments.list()).length, deleted, alarm: await stored.ctx.storage.getAlarm() }).toEqual({ kept: 2, deleted: [], alarm: null });
   });
 
+  test('looks on request with no count, as a deploy does: prunes past its retention and starts the hourly looks', async () => {
+    const { stored, open, environments } = await deployment('user:secret');
+    const token = 't'.repeat(32);
+
+    open.length = 0;
+    await stored.ctx.storage.put('env:fresh', { state: 'ready', generation: generation('fresh'), lastUsed: Date.now() });
+    const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+
+    const answer = await worker.fetch(new Request('https://armada.test/environments/prune', {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7', 'content-type': 'application/json' }, body: '{}',
+    }), env);
+
+    // It keeps none past the open jobs': 'a', idle 5 hours, goes, and 'fresh', used this hour, stays.
+    expect({ pruned: v.parse(v.object({ pruned: v.array(v.string()) }), await answer.json()).pruned, kept: (await environments.list()).map(({ key }) => key), looking: (await stored.ctx.storage.getAlarm()) !== null })
+      .toEqual({ pruned: ['a'], kept: ['fresh'], looking: true });
+  });
+
   test('prunes on request through the route: a count of 0 spares only what open jobs use, recent or not', async () => {
     const { stored, environments } = await deployment('user:secret');
     const token = 't'.repeat(32);

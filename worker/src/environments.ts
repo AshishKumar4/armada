@@ -89,19 +89,22 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     await this.look();
   }
 
-  /** Prunes by the deployment's retention, then looks again in an hour while an environment is ready. A deployment
-   *  without registry credentials, which `armada deploy` mints, deletes nothing. A prune that fails leaves its snapshots
-   *  for the next look. */
-  private async look(): Promise<void> {
-    if (this.env.REGISTRY_CREDENTIALS === undefined) return;
+  /** Prunes by the deployment's retention, then looks again in an hour while an environment is ready; `armada deploy`
+   *  makes the first look. A deployment without registry credentials, which the deploy mints, deletes nothing. A prune
+   *  that fails leaves its snapshots for the next look. The keys pruned. */
+  async look(): Promise<string[]> {
+    if (this.env.REGISTRY_CREDENTIALS === undefined) return [];
+    let pruned: string[] = [];
 
     try {
-      await this.prune(retentionOf(this.env));
+      pruned = await this.prune(retentionOf(this.env));
     } catch (cause) {
       console.error(JSON.stringify({ prune: said({ cause }) }));
     }
 
     if ((await this.list()).some(({ entry }) => entry.state === 'ready')) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
+
+    return pruned;
   }
 
   /** Deletes the snapshots of the environments past those `retention` keeps (`expired`) with the deployment's

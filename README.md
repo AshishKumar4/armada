@@ -392,7 +392,7 @@ snapshots of:
 - the 3 most recently used others;
 - any environment used in the last hour.
 
-It deletes the rest after it prepares each new environment, and it looks again each hour. A busy hour's environments
+It deletes the rest when it is deployed and after it prepares each new environment, and it looks again each hour. A busy hour's environments
 stay until that hour is quiet, and then the deployment keeps 3. A job's environment counts as used until the job ends.
 `--keep=N` changes the count. Each deploy mints registry credentials through your wrangler login, valid for a year,
 and gives them to the Worker as a secret. `armada prune` deletes now, from your machine, and `armada prune --keep=0`
