@@ -2,7 +2,8 @@
 
 ## Repository
 - https://github.com/AshishKumar4/armada, public, MIT.
-- `main` is wire 6. The branch `core` holds the work below at wire 7. It lands on `main` after Kinu moves to `armada-v2`.
+- `main` is wire 7 and holds all the work below. Pruned snapshots now free their manifests (#14), and every deployment
+  prunes on its own (#13).
 - Worktrees are under `/mnt/local/armada-wt/`. `/mnt/local/armada` is a shared checkout other agents use; don't edit it.
 - `core` replaces the remote branches `sched-v2`, `wip/concurrency-slots` and `probe/alarm-noise`. PRs #10, #11 and #12
   landed on `main`.
@@ -44,9 +45,8 @@
 - `armada`: Kinu's production CI, at wire 6. Its files are `connection.json` and `armada-kinu.json`.
   - Don't deploy to it, roll it back, or change its secrets.
   - Don't read or write its two connection files.
-- `armada-v2`: the new version, for Kinu to move to.
+- `armada-v2`: the new version, at `main`, for Kinu to move to.
 - `armada-dew` belongs to Dew. `nimbus-armada` belongs to Nimbus. Both are the owner's.
-- `armada-lab` and `armada-probe` are test deployments from this work.
 
 ## What Kinu depends on
 - Kinu pins armada by commit in its `package.json`. Its pre-push gate calls `armada verdict` and `armada run`.
