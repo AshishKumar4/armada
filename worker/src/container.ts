@@ -29,19 +29,26 @@ export const slotTask = (slot: number): string => `${slotRoot(slot)}/task`;
  *  could end together. */
 export const maskValuesOf = (slot: number): string => `${slotRoot(slot)}/mask.json`;
 
-/** Where slot `slot`'s next task's argv waits for its launch (`launchArgv`), outside the dirs the launch recreates. */
+/** Where slot `slot`'s next task's argv and environment wait for its launch (`launchArgv`), outside the dirs the
+ *  launch recreates. */
 export const argvOf = (slot: number): string => `${STATE}/argv/${String(slot)}`;
 
-/** A launch's script that takes its task's argv from `path` and goes on as `script`: the argv set as the positional
- *  parameters `script` reads, from the words `positional` wrote there. An exec's own arguments ride in its request,
- *  which the runtime fails as an `internal error` past about 128 KiB in one argument or 1 MB in all; a file `pipeIn`
+/** A launch's script that takes its task's argv and environment from `path`, removes it, and goes on as `script`: the
+ *  argv set as the positional parameters `script` reads and the environment exported, as `positional` wrote them there.
+ *  An exec's own arguments and environment ride in its request, which the runtime fails as an `internal error` past
+ *  about 128 KiB in one string or 1 MB in all, and an item's `ARMADA_ITEM` alone can be that large; a file `pipeIn`
  *  writes takes any size. */
-export const launchArgv = (path: string, script: string): string => `. ${path}\n${script}`;
+export const launchArgv = (path: string, script: string): string => `. ${path}\nrm -f ${path}\n${script}`;
 
-/** `argv` as the shell line that makes it the positional parameters: each word single-quoted, a quote inside one closed,
- *  escaped and reopened, so every byte a word holds reaches the command unchanged. */
-export function positional(argv: readonly string[]): string {
-  return `set -- ${argv.map((word) => `'${word.replaceAll("'", String.raw`'\''`)}'`).join(' ')}\n`;
+/** A word single-quoted for the shell: a quote inside it closed, escaped and reopened, so every byte reaches the
+ *  command unchanged. */
+const quoted = (word: string): string => `'${word.replaceAll("'", String.raw`'\''`)}'`;
+
+/** `argv` as the shell line that makes it the positional parameters, and `env` as the lines that export it. */
+export function positional(argv: readonly string[], env: Readonly<Record<string, string>> = {}): string {
+  const exported = Object.entries(env).map(([name, value]) => `export ${name}=${quoted(value)}\n`).join('');
+
+  return `set -- ${argv.map(quoted).join(' ')}\n${exported}`;
 }
 
 /** Where the container's main process marks that the platform asked the container to stop (`hold`). */

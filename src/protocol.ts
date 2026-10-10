@@ -176,18 +176,30 @@ export const MAX_GANG = 64;
  *  MAX_ARG_STRLEN, 128 KiB with its terminating NUL. */
 export const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 
+/** `text`'s size in UTF-8. A UTF-16 unit is at most 3 bytes of it, so a short text needs no encoding. */
+function bytesOf(text: string): number {
+  return text.length * 3 <= MAX_ARGUMENT_BYTES ? text.length : new TextEncoder().encode(text).byteLength;
+}
+
 /** Why a command's `argv` cannot start, or null: its first argument longer than `MAX_ARGUMENT_BYTES`. */
 export function argumentRefusal(argv: readonly string[]): string | null {
-  const encoder = new TextEncoder();
-  // A UTF-16 unit is at most 3 bytes of UTF-8, so a shorter argument needs no encoding.
-  const sizes = argv.map((word) => word.length * 3 <= MAX_ARGUMENT_BYTES ? word.length : encoder.encode(word).byteLength);
+  const sizes = argv.map(bytesOf);
   const long = sizes.findIndex((size) => size > MAX_ARGUMENT_BYTES);
 
   return long < 0 ? null : `argument ${String(long)} is ${String(sizes[long])} bytes, and Linux starts no process with one over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the command reads`;
 }
 
+/** Why a task cannot start with `item`, or null: every task's environment holds it as `ARMADA_ITEM=<its JSON>`, one
+ *  string Linux bounds as it bounds an argument. */
+export function itemRefusal(item: unknown): string | null {
+  const size = bytesOf(`ARMADA_ITEM=${JSON.stringify(item) ?? 'null'}`);
+
+  return size > MAX_ARGUMENT_BYTES ? `item is ${String(size)} bytes as ARMADA_ITEM, and Linux starts no process with an environment string over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the task reads` : null;
+}
+
 /** Why a job of at most `pool` containers refuses these tasks: a command's task carries its argv, each argument short
- *  enough to start, a pushed task's carries none, and a gang is a whole number of containers the pool holds. */
+ *  enough to start, a pushed task's carries none, every item fits its `ARMADA_ITEM`, and a gang is a whole number of
+ *  containers the pool holds. */
 export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], pool: number, slots = 1): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
@@ -197,6 +209,9 @@ export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: reado
     const long = argumentRefusal(task.argv ?? []);
 
     if (long !== null) return `item ${String(index)}'s ${long}`;
+    const large = itemRefusal(task.item);
+
+    if (large !== null) return `item ${String(index)} ${large.slice('item '.length)}`;
   }
 
   if (slots > 1) {

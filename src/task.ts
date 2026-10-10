@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, detach, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -554,6 +554,9 @@ class PushedTask<O> extends Base<Json, O> implements Task<Json, O>, Runnable {
 
   protected async wire(item: Json, index: number): Promise<WireTask> {
     if (this.config.input !== undefined) await check(this.config.input, item, `item ${String(index)}`);
+    const large = itemRefusal(item);
+
+    if (large !== null) throw new Error(`item ${String(index)} ${large.slice('item '.length)}`);
 
     return { item };
   }
@@ -645,6 +648,9 @@ class CommandTask<I extends Json, O> extends Base<I, O> {
     const long = argumentRefusal(argv);
 
     if (long !== null) throw new Error(`item ${String(index)}'s ${long}`);
+    const large = itemRefusal(item);
+
+    if (large !== null) throw new Error(`item ${String(index)} ${large.slice('item '.length)}`);
 
     return await Promise.resolve({ item, argv: [...argv] });
   }
