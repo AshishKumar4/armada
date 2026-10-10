@@ -1,6 +1,8 @@
 <p align="center"><img src=".github/banner.svg" alt="armada" width="100%"></p>
 
-<video src="https://raw.githubusercontent.com/AshishKumar4/armada/core/.github/armada.mp4" poster="https://raw.githubusercontent.com/AshishKumar4/armada/core/.github/armada-poster.jpg" controls muted playsinline width="100%"></video>
+<video src="https://github.com/AshishKumar4/armada/raw/core/.github/armada.mp4" controls muted playsinline width="100%"></video>
+
+https://github.com/AshishKumar4/armada/raw/core/.github/armada.mp4
 
 armada runs a command, or a TypeScript or Python function, over many inputs at once on Cloudflare Containers in your own
 account. I run Kinu's and Dew's CI on it.
