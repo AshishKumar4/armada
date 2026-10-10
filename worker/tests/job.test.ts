@@ -461,6 +461,67 @@ describe('a job whose environment\'s snapshot the platform no longer has', () =>
   });
 });
 
+describe('a job whose snapshot is lost while its vessels start', () => {
+  const generation = (id: string): Generation => ({ key: 'k'.repeat(64), snapshot: { id, size: 1 }, sha: null, created: 0, seconds: {} });
+
+  test('refills its pool from the new snapshot for each late start from the old one, spending no replacement', async () => {
+    let ready: Generation | undefined = generation('gone');
+    const begun: [string, string][] = [];
+
+    const gang = new ArmadaJob(state().ctx, world({
+      VESSEL: namespace((name) => ({ begin: async (spec: VesselSpec) => { begun.push([name.split('/')[1] ?? '', spec.snapshot]); }, stop: async () => undefined })),
+      ENVIRONMENTS: namespace(() => ({
+        ensure: async () => (ready === undefined ? { kind: 'preparing', since: 0 } : { kind: 'ready', generation: ready }),
+        lost: async () => { ready = undefined; },
+        used: async () => undefined,
+      })),
+    }));
+
+    await gang.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: { gang: 4 }, argv: ['true'] }], run: { kind: 'command' }, pool: 4 }));
+    await gang.alarm();
+    await gang.vesselFailed('v1', 'the start ended', 'gone');
+    ready = generation('fresh');
+    await gang.alarm();
+
+    for (const late of ['v2', 'v3', 'v4']) await gang.vesselFailed(late, 'the start ended', 'gone');
+    const status = await gang.status();
+
+    expect({ begun, alive: status?.vessels.filter((each) => each.state === 'waiting').map((each) => each.name), phase: status?.phase }).toEqual({
+      begun: [['v1', 'gone'], ['v2', 'gone'], ['v3', 'gone'], ['v4', 'gone'], ['v5', 'fresh'], ['v6', 'fresh'], ['v7', 'fresh'], ['v8', 'fresh']],
+      alive: ['v5', 'v6', 'v7', 'v8'],
+      phase: 'running',
+    });
+  });
+
+  test('asks for no environment once it ended while the registry was told', async () => {
+    const told = Promise.withResolvers<undefined>();
+    let asked = 0;
+
+    const ending = new ArmadaJob(state().ctx, world({
+      VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
+      ENVIRONMENTS: namespace(() => ({
+        ensure: async () => {
+          asked += 1;
+
+          return { kind: 'ready', generation: generation('gone') };
+        },
+        lost: async () => await told.promise,
+        used: async () => undefined,
+      })),
+    }));
+
+    await ending.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }));
+    await ending.alarm();
+    const failing = ending.vesselFailed('v1', 'the start ended', 'gone');
+
+    await ending.cancel('cancelled by its client', 'cancelled');
+    told.resolve(undefined);
+    await failing;
+
+    expect({ asked, phase: (await ending.status())?.phase }).toEqual({ asked: 1, phase: 'done' });
+  });
+});
+
 describe('a task that failed by itself', () => {
   test('runs again on an exit code or a thrown error its job names, after a doubling backoff, up to its attempts', async () => {
     const task = { item: 'a', argv: ['true'] };

@@ -240,6 +240,7 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The job's environment, once it is ready: before the job's first vessel, and again after the snapshot its vessels
    *  started from was lost (`vesselFailed`). */
   private async awaitEnvironment(spec: Kept): Promise<void> {
+    if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return;
     const key = (await this.ctx.storage.get<string>('key')) ?? '';
     const readiness = await this.env.ENVIRONMENTS.getByName(SINGLE).ensure(key, spec.recipe, spec.commit ?? null);
     const phase = await this.ctx.storage.get<Phase>('phase');
@@ -718,8 +719,8 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** A vessel was lost: its task goes back on the queue (or is failed after its second loss), and a vessel replaces it
-   *  while there is work it could take. A vessel whose start found the job's snapshot `missing` is replaced by none:
-   *  every start from it would fail, so the job waits for its environment prepared again. */
+   *  while there is work it could take. A vessel whose start found its snapshot `missing` is not replaced from it:
+   *  every start from it would fail alike, so the pool refills from the job's environment, prepared again. */
   async vesselFailed(name: string, error: string, missing?: string): Promise<void> {
     const spec = await this.spec();
 
@@ -754,10 +755,16 @@ export class ArmadaJob extends DurableObject<Env> {
     const replaced = (await this.ctx.storage.get<number>('replaced')) ?? 0;
     const generation = await this.ctx.storage.get<Generation>('environment');
 
-    if (missing !== undefined && generation?.snapshot.id === missing) {
-      await this.ctx.storage.delete('environment');
-      await this.env.ENVIRONMENTS.getByName(SINGLE).lost(generation.key, missing);
+    if (missing !== undefined) {
+      // No replacement is spent on it. The job's own snapshot is prepared again; a start from one it already moved
+      // on from leaves the pool to refill from the new one.
+      if (generation?.snapshot.id === missing) {
+        await this.ctx.storage.delete('environment');
+        await this.env.ENVIRONMENTS.getByName(SINGLE).lost(generation.key, missing);
+      }
+
       await this.awaitEnvironment(spec);
+      await this.grow();
     } else if (this.count(`state IN ('queued', 'forming')`) > 0 && replaced < REPLACEMENTS && generation !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running') {
       const next = `r${String(replaced + 1)}`;
 
