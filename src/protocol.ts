@@ -191,7 +191,7 @@ export function argumentRefusal(argv: readonly string[]): string | null {
 
 /** Why a task cannot start with `item`, or null: every task's environment holds it as `ARMADA_ITEM=<its JSON>`, one
  *  string Linux bounds as it bounds an argument. */
-export function itemRefusal(item: unknown): string | null {
+export function itemRefusal(item: Json): string | null {
   const size = bytesOf(`ARMADA_ITEM=${JSON.stringify(item) ?? 'null'}`);
 
   return size > MAX_ARGUMENT_BYTES ? `item is ${String(size)} bytes as ARMADA_ITEM, and Linux starts no process with an environment string over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the task reads` : null;

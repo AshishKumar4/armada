@@ -158,8 +158,9 @@ export class ArmadaJob extends DurableObject<Env> {
 
     this.insert(items);
     await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
-    await this.ctx.storage.setAlarm(Date.now());
+    // Counted open before it can run, so its conclusion, which counts it closed, comes after.
     await this.env.FLEET.getByName(SINGLE).opened(id);
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   /** A task's one outcome, onto the stream with when it landed. */

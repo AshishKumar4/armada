@@ -145,7 +145,10 @@ describe('a job\'s env', () => {
   test('reaches a vessel\'s task but never its storage, before or after the vessel is lost mid-task', async () => {
     const waits: string[] = [];
     const launched: (string | undefined)[] = [];
+    const piped: string[] = [];
 
+    // The task's variables ride in the launch file the vessel pipes into its container, which the launch removes once
+    // read; the exec itself carries none of them.
     const vesselState = state(container((argv, options) => {
       if (argv[3] === 'launch') launched.push(options?.env?.['TOKEN']);
 
@@ -156,7 +159,7 @@ describe('a job\'s env', () => {
       }
 
       return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
-    }));
+    }, (argv, body) => { if (argv[3] === 'pipe-in') piped.push(body); }));
 
     const jobState = state();
     let vessel: ArmadaVessel | undefined;
@@ -173,11 +176,12 @@ describe('a job\'s env', () => {
 
     expect({
       launchedWith: launched,
+      piped: piped.filter((body) => body.includes(`export TOKEN='${SECRET}'`)).length,
       waits: waits.length,
       keptMidTask: waits[0]?.includes(SECRET),
       running: waits[0]?.includes('"slots"'),
       keptAfter: vesselState.dump().includes(SECRET),
       requeued: (await job.status())?.tasks.queued,
-    }).toEqual({ launchedWith: [SECRET], waits: 4, keptMidTask: false, running: true, keptAfter: false, requeued: 1 });
+    }).toEqual({ launchedWith: [undefined], piped: 1, waits: 4, keptMidTask: false, running: true, keptAfter: false, requeued: 1 });
   });
 });

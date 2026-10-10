@@ -376,9 +376,11 @@ export async function must(container: Container, doing: string, argv: readonly s
 
 /** `body` written to `path` for the user, through a pipe: an exec's `stdin` given a stream fails on large bodies
  *  (`internal error`), the pipe does not. `path` is replaced whole once written, so a script already reading it reads
- *  it as it was. */
-export async function pipeIn(container: Container, body: ReadableStream | string, path: string): Promise<void> {
-  const writer = await container.exec(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && part="$(mktemp "$1.XXXXXX")" && cat > "$part" && chmod 644 "$part" && chown ci:ci "$part" && mv -f "$part" "$1"', 'pipe-in', path], { stdin: 'pipe' });
+ *  it as it was. `secret` keeps it root's alone (mode 600), for a body only the launch reads, which holds the task's
+ *  secrets. */
+export async function pipeIn(container: Container, body: ReadableStream | string, path: string, { secret = false } = {}): Promise<void> {
+  const owned = secret ? '' : ' && chmod 644 "$part" && chown ci:ci "$part"';
+  const writer = await container.exec(['/bin/sh', '-c', `mkdir -p "$(dirname "$1")" && part="$(mktemp "$1.XXXXXX")" && cat > "$part"${owned} && mv -f "$part" "$1"`, 'pipe-in', path], { stdin: 'pipe' });
 
   if (writer.stdin === null) throw new Error(`writing ${path}: the exec took no stdin`);
   const source = body instanceof ReadableStream ? body : new Blob([body]).stream();

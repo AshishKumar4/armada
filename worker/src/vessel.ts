@@ -416,7 +416,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const exported = Object.fromEntries(Object.entries(claim.env).filter(([name]) => SHELL_NAME.test(name)));
     const rest = Object.fromEntries(Object.entries(claim.env).filter(([name]) => !SHELL_NAME.test(name)));
 
-    await pipeIn(container, positional(claim.argv, exported), argv);
+    await pipeIn(container, positional(claim.argv, exported), argv, { secret: true });
 
     if (layout.isolated) {
       // Its own cgroup too, so a task's group reads and caps reach the slot's, not the single task group.

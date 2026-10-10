@@ -81,7 +81,11 @@ describe('a drained version', () => {
       JOB: namespace((name: string) => {
         const job = jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name);
 
-        return { create: async (id: string, given: Parameters<ArmadaJob['create']>[1]) => { making.resolve(); await held.promise; await job?.create(id, given); } };
+        return {
+          create: async (id: string, given: Parameters<ArmadaJob['create']>[1]) => { making.resolve(); await held.promise; await job?.create(id, given); },
+          // No record until it is made, as a job being made has none.
+          status: async () => await job?.status() ?? null,
+        };
       }),
     });
 
@@ -102,6 +106,28 @@ describe('a drained version', () => {
     const refused = await settled(armada.create({ ...spec, items: [] }), 'admitted');
 
     expect({ refused, open: await fleet.jobs() }).toEqual({ refused: 'RequestError: POST /jobs: 400 a job that is not open needs an item', open: 0 });
+  });
+
+  test('counts closed a job its own record says is done, and one never made long after it was admitted', async () => {
+    const { armada, fleet } = deployment();
+    const done = await armada.create(spec);
+
+    await armada.cancel(done);
+    // Each leaked: counted open with no job behind it to close it, as a race or an older version left them.
+    await fleet.opened(done);
+    await fleet.reserve('a', 'never-made');
+    const making = await armada.create({ ...spec, open: true });
+    const before = await armada.drain();
+
+    setSystemTime(new Date(Date.now() + 11 * 60_000));
+
+    try {
+      const after = await armada.drain();
+
+      expect({ before, after, open: await fleet.open() }).toEqual({ before: 2, after: 1, open: [making] });
+    } finally {
+      setSystemTime();
+    }
   });
 
   test('lapses by itself when the deploy that drained it stops asking, as one killed mid-deploy does', async () => {
