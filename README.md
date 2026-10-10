@@ -69,6 +69,17 @@ armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 An unknown placeholder is an error. An object item's numeric `weight` moves it up the queue. `map` exits 1 if a task
 exits nonzero and 2 if a task could not run.
 
+Each task's environment names its run: `ARMADA_JOB_ID`, `ARMADA_INDEX`, `ARMADA_ATTEMPT`, and `ARMADA_VESSEL` for its
+container. `ARMADA_STATUS_TOKEN` reads its job's tasks and nothing else:
+
+```sh
+curl -H "Authorization: Bearer $ARMADA_STATUS_TOKEN" "$ARMADA_STATUS_URL/$ARMADA_INDEX"
+```
+
+The answer gives the job's phase, the task's state and attempt, the containers it runs on now, and its exit code once
+it ends. A task that leaves something behind, such as a test fixture, can record these, the URL and the token. A
+later task can then check that the run is over before it cleans up.
+
 ### Gangs
 
 An object item's `gang` runs it on that many containers at once, for a program that spans hosts, such as a multi-host

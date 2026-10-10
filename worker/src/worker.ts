@@ -8,7 +8,7 @@ import {
   briefOf, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   TaskSchema, TimingsSchema,
 } from '../../src/protocol';
-import { bundleKey, packKey, said, SINGLE, taskKey, type Env } from './env';
+import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
 import { driverSpec, eventOf, HookConfigSchema } from './hooks';
 import type { ArmadaFleet } from './fleet';
@@ -31,15 +31,14 @@ export { ArmadaWebhooks } from './hooks';
 
 /** The bearer, compared in constant time. */
 function authorized(request: Request, env: Env): boolean {
-  const expected = new TextEncoder().encode(`Bearer ${env.ARMADA_TOKEN}`);
-  const supplied = new TextEncoder().encode(request.headers.get('authorization') ?? '');
-
-  return env.ARMADA_TOKEN.length >= 32 && expected.length === supplied.length && crypto.subtle.timingSafeEqual(expected, supplied);
+  return env.ARMADA_TOKEN.length >= 32 && equal(`Bearer ${env.ARMADA_TOKEN}`, request.headers.get('authorization') ?? '');
 }
 
 function jobId(): string {
   return `${new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
 }
+
+const JOB_ID = /^\d{14}-[0-9a-f]{8}$/u;
 
 const notFound = (): Response => Response.json({ error: 'not found' }, { status: 404 });
 
@@ -452,12 +451,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
 /** Whether `signature` is GitHub's `X-Hub-Signature-256` for `body` under `secret`, timed-safe. */
 export async function signed(secret: string, signature: string, body: string): Promise<boolean> {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const mac = [...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-  const expected = new TextEncoder().encode(`sha256=${mac}`);
-  const supplied = new TextEncoder().encode(signature);
-
-  return expected.length === supplied.length && crypto.subtle.timingSafeEqual(expected, supplied);
+  return equal(`sha256=${await hmac(secret, body)}`, signature);
 }
 
 /** `POST /webhooks/github/<project>`: outside the bearer, checked only by GitHub's signature. A valid push to a
@@ -519,9 +513,23 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
 /** `/relay/<job>/<vessel>?port=n`: a gang rank's relay, reaching the rank `vessel` runs. No container holds the
  *  deployment's bearer, so the relay presents its gang's token instead, which the vessel checks. */
 async function relayed(request: Request, env: Env, [job, vessel]: readonly string[]): Promise<Response> {
-  if (job === undefined || vessel === undefined || !/^\d{14}-[0-9a-f]{8}$/u.test(job) || !/^[vr]\d{1,4}$/u.test(vessel)) return notFound();
+  if (job === undefined || vessel === undefined || !JOB_ID.test(job) || !/^[vr]\d{1,4}$/u.test(vessel)) return notFound();
 
   return await env.VESSEL.getByName(`${job}/${vessel}`).fetch(request);
+}
+
+/** `GET /status/<job>/<index>`: a task's status, outside the bearer, read with its job's status token alone, which each
+ *  of the job's tasks gets as ARMADA_STATUS_TOKEN (`statusToken`). It answers nothing else. */
+async function statused(request: Request, env: Env, [job, index, ...extra]: readonly string[]): Promise<Response> {
+  if (request.method !== 'GET' || job === undefined || index === undefined || extra.length > 0 || !JOB_ID.test(job) || !/^\d+$/u.test(index)) return notFound();
+
+  if (env.ARMADA_TOKEN.length < 32 || !equal(`Bearer ${await statusToken(env.ARMADA_TOKEN, job)}`, request.headers.get('authorization') ?? '')) {
+    return Response.json({ error: 'forbidden' }, { status: 403 });
+  }
+
+  const status = await env.JOB.getByName(job).taskStatus(Number(index));
+
+  return status === null ? notFound() : Response.json(status);
 }
 
 export default {
@@ -529,6 +537,8 @@ export default {
     const [first, ...rest] = new URL(request.url).pathname.split('/').filter((segment) => segment !== '');
 
     if (first === 'relay') return await relayed(request, env, rest);
+
+    if (first === 'status') return await statused(request, env, rest);
 
     // The webhook endpoint is outside the bearer: the project's own GitHub-signing secret is the only check.
     const [service, hooked, ...extra] = rest;

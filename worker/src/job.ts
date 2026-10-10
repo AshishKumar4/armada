@@ -25,9 +25,9 @@ import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
   ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, cacheKey, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, INLINE_BYTES, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
-  type JobSpec, type JobStatus, type Json, type Outcome, type Task, type VesselRow,
+  type JobSpec, type JobStatus, type Json, type Outcome, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
-import { said, SINGLE, textOf, type Env } from './env';
+import { said, SINGLE, statusToken, textOf, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { instanceOf, TASK_GROUP } from './container';
 import type { VesselSpec } from './vessel';
@@ -153,9 +153,12 @@ export class ArmadaJob extends DurableObject<Env> {
   async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     const { items, env, open, ...kept } = spec;
+    // Each task gets the job's id, where its job's tasks are read and the token that reads them, and its container's
+    // name (`claim`): a task can then tell whether the run that left something behind still runs.
+    const identity = { ARMADA_JOB_ID: id, ARMADA_STATUS_URL: `${origin}/status/${id}`, ARMADA_STATUS_TOKEN: await statusToken(this.env.ARMADA_TOKEN, id) };
 
     this.insert(items);
-    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env: { ...env, ...identity }, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
     await this.env.FLEET.getByName(SINGLE).opened(id);
   }
@@ -413,7 +416,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const now = Date.now();
     // Secrets are read for each claim and never kept: the job holds only their names. A driver job's deployToken
     // adds the deployment's bearer at claim, masked as one more secret and stored nowhere.
-    const own = { ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec) };
+    const own = { ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec), ARMADA_VESSEL: name };
     const env = spec.deployToken ? { ...own, ARMADA_TOKEN: this.env.ARMADA_TOKEN } : own;
     const ganged = await this.rank(spec, env, name);
 
@@ -898,6 +901,26 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The key of the environment the job's containers start from, which `prune` keeps while the job is open. */
   async environment(): Promise<string> {
     return (await this.ctx.storage.get<string>('key')) ?? '';
+  }
+
+  /** Task `index`'s status for its job's status token (`GET /status/<job>/<index>`), or null for a task the job has
+   *  not. A task in no container now has no run that can still act: a copy the job stopped is gone within its next
+   *  wait. */
+  async taskStatus(index: number): Promise<TaskStatus | null> {
+    const id = await this.ctx.storage.get<string>('id');
+    const task = this.sql.exec<{ state: string; attempts: number }>('SELECT state, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
+
+    if (id === undefined || task === undefined) return null;
+    const [last] = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM events WHERE json_extract(outcome, '$.index') = ? ORDER BY seq DESC LIMIT 1`, index).toArray();
+    const ended = task.state === 'exited' || task.state === 'failed' ? task.state : undefined;
+    const outcome = ended === undefined || last === undefined ? undefined : v.parse(OutcomeSchema, JSON.parse(last.outcome));
+
+    return {
+      job: id, phase: (await this.ctx.storage.get<Phase>('phase')) ?? 'done', index, attempt: task.attempts,
+      state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
+      running: this.running().filter((each) => each.index === index).map(({ vessel, slot, started }) => ({ vessel, slot, started })),
+      exitCode: outcome?.exitCode, reason: outcome?.reason,
+    };
   }
 
   async status(): Promise<JobStatus | null> {

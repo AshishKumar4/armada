@@ -344,6 +344,22 @@ export const JobStatusSchema = v.object({
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
 
+/** A task's status, as `GET /status/<job>/<index>` answers its job's status token: the job's phase, the task's state and
+ *  attempt, each container it runs on now by the name its tasks get as ARMADA_VESSEL (every rank of a gang, both copies
+ *  of a repeated one), and once it ended, its last outcome's exit code and reason. */
+export const TaskStatusSchema = v.object({
+  job: v.string(),
+  phase: JobStatusSchema.entries.phase,
+  index: v.number(),
+  state: v.picklist(['queued', 'running', 'exited', 'failed']),
+  attempt: v.number(),
+  running: v.array(v.object({ vessel: v.string(), slot: v.number(), started: v.number() })),
+  exitCode: v.optional(v.number()),
+  reason: OutcomeSchema.entries.reason,
+});
+
+export type TaskStatus = v.InferOutput<typeof TaskStatusSchema>;
+
 /** A job in its deployment's list of recent ones: its status less each container's and task's own rows. */
 export const JobBriefSchema = v.object({
   ...v.pick(JobStatusSchema, ['id', 'label', 'phase', 'createdAt', 'startedAt', 'finishedAt', 'tasks']).entries,

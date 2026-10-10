@@ -91,3 +91,22 @@ function chain(error: Error): string {
 
 /** A caught value on one line, its causes after it. */
 export const said = ({ cause }: { readonly cause: unknown }): string => chain(errorOf({ cause }));
+
+/** Whether `supplied` is `expected`, compared in constant time. */
+export function equal(expected: string, supplied: string): boolean {
+  const want = new TextEncoder().encode(expected);
+  const got = new TextEncoder().encode(supplied);
+
+  return want.length === got.length && crypto.subtle.timingSafeEqual(want, got);
+}
+
+/** HMAC-SHA256 of `message` under `key`, in hex. */
+export async function hmac(key: string, message: string): Promise<string> {
+  const imported = await crypto.subtle.importKey('raw', new TextEncoder().encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+
+  return [...new Uint8Array(await crypto.subtle.sign('HMAC', imported, new TextEncoder().encode(message)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/** What a job's tasks get as ARMADA_STATUS_TOKEN: it reads that job's tasks at `/status/<job>/<index>` and nothing else.
+ *  Derived from the bearer, so no object stores it, and a fixture that keeps it keeps no deployment-wide secret. */
+export const statusToken = async (bearer: string, job: string): Promise<string> => await hmac(bearer, `status/${job}`);
