@@ -127,6 +127,9 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
 
+  /** The job's status token (`statusToken`), derived once an object: claims made at once all wait on the one. */
+  private token: Promise<string> | undefined;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // The whole schema, once per object: created for a new job's, and an earlier Worker's tables get the columns
@@ -153,12 +156,9 @@ export class ArmadaJob extends DurableObject<Env> {
   async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     const { items, env, open, ...kept } = spec;
-    // Each task gets the job's id, where its job's tasks are read and the token that reads them, and its container's
-    // name (`claim`): a task can then tell whether the run that left something behind still runs.
-    const identity = { ARMADA_JOB_ID: id, ARMADA_STATUS_URL: `${origin}/status/${id}`, ARMADA_STATUS_TOKEN: await statusToken(this.env.ARMADA_TOKEN, id) };
 
     this.insert(items);
-    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env: { ...env, ...identity }, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
     await this.env.FLEET.getByName(SINGLE).opened(id);
   }
@@ -416,8 +416,19 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     const now = Date.now();
     // Secrets are read for each claim and never kept: the job holds only their names. A driver job's deployToken
-    // adds the deployment's bearer at claim, masked as one more secret and stored nowhere.
-    const own = { ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec), ARMADA_VESSEL: name };
+    // adds the deployment's bearer at claim, masked as one more secret and stored nowhere. Every task gets its job's
+    // id, its container's name, and where and with what it reads its job's tasks: a task can then tell whether the
+    // run that left something behind still runs.
+    const id = (await this.ctx.storage.get<string>('id')) ?? '';
+    const origin = (await this.ctx.storage.get<string>('origin')) ?? '';
+
+    this.token ??= statusToken(this.env.ARMADA_TOKEN, id);
+
+    const own = {
+      ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec),
+      ARMADA_JOB_ID: id, ARMADA_VESSEL: name, ARMADA_STATUS_URL: `${origin}/status/${id}`, ARMADA_STATUS_TOKEN: await this.token,
+    };
+
     const env = spec.deployToken ? { ...own, ARMADA_TOKEN: this.env.ARMADA_TOKEN } : own;
     const ganged = await this.rank(spec, env, name);
 
@@ -911,22 +922,29 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** Task `index`'s status for its job's status token (`GET /status/<job>/<index>`), or null for a task the job has
-   *  not. A task in no container now has no run that can still act: a copy the job stopped is gone within its next
-   *  wait. */
+   *  not. Its runs are every one that may still be going: each the job has handed out and not yet taken back, and
+   *  each a vessel still holds, which it lets go only once the task's process exited or was killed, or its container
+   *  was destroyed. A vessel that cannot be asked fails the answer, never shortens it. */
   async taskStatus(index: number): Promise<TaskStatus | null> {
     const id = await this.ctx.storage.get<string>('id');
     const task = this.sql.exec<{ state: string; attempts: number }>('SELECT state, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
 
     if (id === undefined || task === undefined) return null;
+    const phase = (await this.ctx.storage.get<Phase>('phase')) ?? 'done';
     const [last] = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM events WHERE json_extract(outcome, '$.index') = ? ORDER BY seq DESC LIMIT 1`, index).toArray();
     const ended = task.state === 'exited' || task.state === 'failed' ? task.state : undefined;
     const outcome = ended === undefined || last === undefined ? undefined : v.parse(OutcomeSchema, JSON.parse(last.outcome));
+    const handed = this.running().filter((each) => each.index === index).map(({ vessel, slot, started }) => ({ vessel, slot, attempt: task.attempts, started }));
+    const names = this.sql.exec<{ name: string }>('SELECT name FROM vessels').toArray().map((row) => row.name);
+
+    const held = await Promise.all(names.map(async (name) => (await this.env.VESSEL.getByName(`${id}/${name}`).runs())
+      .filter((run) => run.index === index).map(({ slot, attempt, started }) => ({ vessel: name, slot, attempt, started }))));
+
+    const runs = new Map([...handed, ...held.flat()].map((run) => [`${run.vessel}/${String(run.slot)}/${String(run.attempt)}`, run]));
 
     return {
-      job: id, phase: (await this.ctx.storage.get<Phase>('phase')) ?? 'done', index, attempt: task.attempts,
-      state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
-      running: this.running().filter((each) => each.index === index).map(({ vessel, slot, started }) => ({ vessel, slot, started })),
-      exitCode: outcome?.exitCode, reason: outcome?.reason,
+      job: id, phase, index, attempt: task.attempts, state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
+      running: [...runs.values()], exitCode: outcome?.exitCode, reason: outcome?.reason,
     };
   }
 

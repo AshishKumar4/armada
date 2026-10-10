@@ -76,9 +76,10 @@ container. `ARMADA_STATUS_TOKEN` reads its job's tasks and nothing else:
 curl -H "Authorization: Bearer $ARMADA_STATUS_TOKEN" "$ARMADA_STATUS_URL/$ARMADA_INDEX"
 ```
 
-The answer gives the job's phase, the task's state and attempt, the containers it runs on now, and its exit code once
-it ends. A task that leaves something behind, such as a test fixture, can record these, the URL and the token. A
-later task can then check that the run is over before it cleans up.
+The answer gives the job's phase, the task's state and attempt, and its exit code once it ends. It also lists every
+run of the task that may still be going, by container, slot and attempt. A run stays listed until its process has
+exited or been killed, even after the job has moved on. A task that leaves something behind, such as a test fixture,
+can record these names, the URL and the token. A later task can then check that the run is gone before it cleans up.
 
 ### Gangs
 

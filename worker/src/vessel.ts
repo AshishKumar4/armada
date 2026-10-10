@@ -166,14 +166,22 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** The vessel ended as `state`: it takes up no task again, its container goes, and its capacity returns. A container
-   *  that will not stop ends at its inactivity timeout. */
+   *  that will not stop ends at its inactivity timeout, and its tasks stay held (`runs`) until then. */
   private async end(state: 'stopped' | 'failed' | 'done', spec: VesselSpec | undefined): Promise<void> {
     await this.ctx.storage.put('state', state);
     // A claim an earlier Worker stored under `current` kept its env.
-    await this.ctx.storage.delete(['current', ...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
-    await Promise.allSettled([this.ctx.container?.destroy()]);
+    await this.ctx.storage.delete('current');
+    const [destroyed] = await Promise.allSettled([this.ctx.container?.destroy()]);
+
+    if (destroyed.status === 'fulfilled') await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
 
     if (spec !== undefined) await this.fleet().release(this.holder(spec));
+  }
+
+  /** The tasks this vessel's container may still be running, by slot: each from its launch until its process exited
+   *  or was killed, or until the container was destroyed (`/status`). */
+  async runs(): Promise<{ slot: number; index: number; attempt: number; started: number }[]> {
+    return [...await this.currents()].map(([slot, { claim, startedAt }]) => ({ slot, index: claim.index, attempt: claim.attempt, started: startedAt }));
   }
 
   private holder(spec: VesselSpec): string {
