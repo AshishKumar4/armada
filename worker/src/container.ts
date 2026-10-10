@@ -419,15 +419,18 @@ export async function startAndAnswer(container: Container, options: ContainerSta
 
     if (first.status === 'fulfilled') return;
     const refused = first.reason instanceof Error ? `${first.reason.message} ${String(first.reason.cause)}` : String(first.reason);
+    // The runtime killed the container as it came up: a restored snapshot's first exec exits 137 (146 of a suite's 208
+    // containers at once on 2026-10-10). It is started again, as one whose start ended is.
+    const killed = refused.startsWith('the first exec exited 137');
 
-    if (!/has not been started|is not running/u.test(refused) || Date.now() > deadline) {
+    if (!(killed || /has not been started|is not running/u.test(refused)) || Date.now() > deadline) {
       throw ended === '' ? first.reason : new Error(`the container's start ended: ${ended}`, { cause: first.reason });
     }
 
     await scheduler.wait(1_000);
 
-    // A container still starting is not running either; only one whose start ended is started again.
-    if (ended !== '') {
+    // A container still starting is not running either; only one whose start ended, or was killed, is started again.
+    if (ended !== '' || killed) {
       ended = '';
       await startFresh(container, options);
       watch();

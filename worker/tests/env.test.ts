@@ -60,13 +60,14 @@ describe('a job\'s env', () => {
     },
     'its vessels lost, past their replacements': async ({ job, stored }) => {
       await job.claim('v1');
-      await stored.ctx.storage.put('replaced', 8);
+      // Both budgets spent: v1's loss under a task, and v2's before it took one.
+      await stored.ctx.storage.put({ replaced: 8, rebooted: 1000 });
       await job.vesselFailed('v1', 'the wait failed to run');
       await job.vesselFailed('v2', 'could not start');
     },
     'its vessels silent, reaped by its watchdog': async ({ job, stored }) => {
       await job.claim('v1');
-      await stored.ctx.storage.put('replaced', 8);
+      await stored.ctx.storage.put({ replaced: 8, rebooted: 1000 });
       stored.ctx.storage.sql.exec('UPDATE vessels SET beat = 0');
       await job.alarm();
     },
