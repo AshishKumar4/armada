@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -161,7 +161,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
       console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said({ cause }) }));
       await this.end('failed', spec);
-      await job.vesselFailed(spec.name, said({ cause }));
+      await job.vesselFailed(spec.name, said({ cause }), cause instanceof MissingSnapshot ? cause.snapshot : undefined);
     }
   }
 

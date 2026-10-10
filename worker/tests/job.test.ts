@@ -1,10 +1,11 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { JobSpecSchema, refusal, type Outcome } from '../../src/protocol';
-import type { Generation } from '../src/environments';
+import { environmentKey, JobSpecSchema, RecipeSchema, refusal, type Outcome } from '../../src/protocol';
+import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
+import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { listSchedule } from '../../src/dispatch';
-import { namespace, state, world } from './harness';
+import { container, namespace, state, world, type Stored } from './harness';
 
 const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
 
@@ -395,6 +396,68 @@ describe('a job none of whose containers starts', () => {
     const { events } = await broken.events(0);
 
     expect(events.map((event) => event.outcome.tail)).toEqual(['no vessel was left to run it\nthe last way\nthe fourth way\nthe third way']);
+  });
+});
+
+describe('a job whose environment\'s snapshot the platform no longer has', () => {
+  test('prepares the environment again and starts its vessels from the new snapshot, its task still queued', async () => {
+    const recipe = v.parse(RecipeSchema, {});
+    const key = await environmentKey(recipe);
+    const registry = state();
+    let preparations = 0;
+    const environments = new ArmadaEnvironments(registry.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { preparations += 1; } })) }));
+    const vessels = new Map<string, { readonly vessel: ArmadaVessel; readonly stored: Stored }>();
+
+    // As armada-v2 saw on 2026-10-09: an exec is refused as not started, and the start ends with the snapshot not found.
+    const machine = (): Container => {
+      let started = '';
+      const refusing = container(() => (started === 'gone' ? new Error('The container has not been started') : { exitCode: 0, stdout: 'ready' }));
+
+      Object.assign(refusing, {
+        start: (options: ContainerStartupOptions) => { started = options.containerSnapshot?.id ?? ''; },
+        monitor: async () => { if (started === 'gone') throw new Error('Snapshot "gone" was not found.'); await Promise.withResolvers<void>().promise; },
+      });
+
+      return refusing;
+    };
+
+    const env = world({
+      ENVIRONMENTS: namespace(() => environments),
+      JOB: namespace(() => missing),
+      VESSEL: namespace((name) => {
+        const held = vessels.get(name) ?? (() => {
+          const stored = state(machine());
+
+          return { vessel: new ArmadaVessel(stored.ctx, env), stored };
+        })();
+
+        vessels.set(name, held);
+
+        return held.vessel;
+      }),
+    });
+
+    await registry.ctx.storage.put(`env:${key}`, { state: 'ready', generation: { key, snapshot: { id: 'gone', size: 1 }, sha: null, created: 0, seconds: {} }, lastUsed: 0 });
+    const missing = new ArmadaJob(state().ctx, env);
+
+    await missing.create('missing', v.parse(JobSpecSchema, { recipe, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }));
+    await missing.alarm();
+    await vessels.get('missing/v1')?.vessel.alarm();
+    const lost = await missing.status();
+
+    await environments.prepared({ key, snapshot: { id: 'fresh', size: 1 }, sha: null, created: 1, seconds: {} });
+    // A late start from the lost snapshot cannot undo the environment that replaced it.
+    await environments.lost(key, 'gone');
+    await missing.alarm();
+    const snapshots = await Promise.all([...vessels].map(async ([name, { stored }]) => [name, (await stored.ctx.storage.get<VesselSpec>('spec'))?.snapshot]));
+
+    expect({
+      preparations, phase: lost?.phase, queued: lost?.tasks.queued, failed: lost?.tasks.failed, vessels: lost?.vessels.map((each) => [each.name, each.state]),
+      owed: await registry.ctx.storage.get('debt:gone') !== undefined, snapshots, ready: (await environments.ensure(key, recipe, null)).kind,
+    }).toEqual({
+      preparations: 1, phase: 'running', queued: 1, failed: 0, vessels: [['v1', 'failed']],
+      owed: true, snapshots: [['missing/v1', 'gone'], ['missing/v2', 'fresh']], ready: 'ready',
+    });
   });
 });
 

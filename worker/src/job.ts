@@ -227,17 +227,21 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_DEADLINE_MS) return await this.cancel('the job passed its deadline', 'cancelled');
 
-    if (phase === 'preparing') await this.awaitEnvironment(spec);
-    else await this.watch();
+    if (phase === 'running') await this.watch();
+
+    if ((await this.ctx.storage.get<Generation>('environment')) === undefined) await this.awaitEnvironment(spec);
 
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'done') await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
   }
 
+  /** The job's environment, once it is ready: before the job's first vessel, and again after the snapshot its vessels
+   *  started from was lost (`vesselFailed`). */
   private async awaitEnvironment(spec: Kept): Promise<void> {
     const key = (await this.ctx.storage.get<string>('key')) ?? '';
     const readiness = await this.env.ENVIRONMENTS.getByName(SINGLE).ensure(key, spec.recipe, spec.commit ?? null);
+    const phase = await this.ctx.storage.get<Phase>('phase');
 
-    if ((await this.ctx.storage.get<Phase>('phase')) !== 'preparing') return;
+    if (phase === 'done' || (await this.ctx.storage.get<Generation>('environment')) !== undefined) return;
 
     if (readiness.kind === 'failed') return await this.cancel(`the environment ${key.slice(0, 12)} could not be prepared: ${readiness.reason}`, 'lost');
 
@@ -247,10 +251,14 @@ export class ArmadaJob extends DurableObject<Env> {
       return await this.cancel(`the environment was rebuilt from ${String(readiness.generation.sha).slice(0, 10)} after this job was packed against ${spec.commit.base.slice(0, 10)}; run again`, 'lost');
     }
 
-    await this.answerFromCache(spec, this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'queued' AND attempts = 0`).toArray().map((row) => row.idx));
+    if (phase === 'preparing') {
+      await this.answerFromCache(spec, this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'queued' AND attempts = 0`).toArray().map((row) => row.idx));
 
-    if ((await this.ctx.storage.get<Phase>('phase')) !== 'preparing') return;
-    await this.ctx.storage.put({ phase: 'running' satisfies Phase, environment: readiness.generation, startedAt: Date.now() });
+      if ((await this.ctx.storage.get<Phase>('phase')) !== 'preparing') return;
+      await this.ctx.storage.put({ phase: 'running' satisfies Phase, startedAt: Date.now() });
+    }
+
+    await this.ctx.storage.put('environment', readiness.generation);
     await this.grow();
     await this.settle();
   }
@@ -707,8 +715,9 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** A vessel was lost: its task goes back on the queue (or is failed after its second loss), and a vessel replaces it
-   *  while there is work it could take. */
-  async vesselFailed(name: string, error: string): Promise<void> {
+   *  while there is work it could take. A vessel whose start found the job's snapshot `missing` is replaced by none:
+   *  every start from it would fail, so the job waits for its environment prepared again. */
+  async vesselFailed(name: string, error: string, missing?: string): Promise<void> {
     const spec = await this.spec();
 
     if (spec === undefined) return;
@@ -742,7 +751,11 @@ export class ArmadaJob extends DurableObject<Env> {
     const replaced = (await this.ctx.storage.get<number>('replaced')) ?? 0;
     const generation = await this.ctx.storage.get<Generation>('environment');
 
-    if (this.count(`state IN ('queued', 'forming')`) > 0 && replaced < REPLACEMENTS && generation !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running') {
+    if (missing !== undefined && generation?.snapshot.id === missing) {
+      await this.ctx.storage.delete('environment');
+      await this.env.ENVIRONMENTS.getByName(SINGLE).lost(generation.key, missing);
+      await this.awaitEnvironment(spec);
+    } else if (this.count(`state IN ('queued', 'forming')`) > 0 && replaced < REPLACEMENTS && generation !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running') {
       const next = `r${String(replaced + 1)}`;
 
       await this.ctx.storage.put('replaced', replaced + 1);
@@ -787,8 +800,10 @@ export class ArmadaJob extends DurableObject<Env> {
     if (this.count(`state = 'checking'`) > 0) return;
     const open = this.count(OPEN);
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
+    // A job without its environment is waiting for it prepared again, and vessels for its open tasks with it.
+    const awaiting = (await this.ctx.storage.get<Generation>('environment')) === undefined;
 
-    if (open > 0 && alive > 0) return;
+    if (open > 0 && (alive > 0 || awaiting)) return;
 
     if (open > 0) {
       // Why no vessel is left, in the vessels' own last distinct failures, most recent first.

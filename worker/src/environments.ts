@@ -86,6 +86,17 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     if (entry?.state === 'ready') await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: Date.now() } satisfies Entry);
   }
 
+  /** No container starts from `snapshot` any more: the platform lost it, or it was deleted under the key. The key's
+   *  environment goes, so the next job prepares it again, unless the key has moved on to another snapshot since. The
+   *  snapshot is owed for deletion, since its registry tags can outlive it (#20). */
+  async lost(key: string, snapshot: string): Promise<void> {
+    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+
+    if (entry?.state !== 'ready' || entry.generation.snapshot.id !== snapshot) return;
+    await this.forget(key);
+    await this.owe(snapshot, key);
+  }
+
   /** A new environment is ready, one more than before: the registry prunes now, and then each hour. A generation it
    *  replaces under the same key, a preparation that outlived its lease finishing after the one that replaced it, is
    *  owed for deletion. */
