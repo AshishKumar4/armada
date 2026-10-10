@@ -395,6 +395,10 @@ async function startFresh(container: Container, options: ContainerStartupOptions
   }
 }
 
+/** How soon a start that is not answering yet is asked again. At a second, a start was used only on the next ask:
+ *  1,256 starts of Kinu's CI (armada-v2, 2026-10-10) peaked at 0.2, 0.75, 1.7 and 2.8 s, a second apart. */
+const START_POLL_MS = 100;
+
 /** A start from a snapshot the platform no longer has. Every start from it ends the same way, so the start ends at once:
  *  the environment that recorded it is prepared again (`ArmadaEnvironments.lost`). */
 export class MissingSnapshot extends Error {
@@ -439,7 +443,7 @@ export async function startAndAnswer(container: Container, options: ContainerSta
       throw ended === '' ? first.reason : new Error(`the container's start ended: ${ended}`, { cause: first.reason });
     }
 
-    await scheduler.wait(1_000);
+    await scheduler.wait(START_POLL_MS);
 
     // A container still starting is not running either; only one whose start ended is started again, and one whose
     // snapshot is gone never is.
