@@ -462,10 +462,10 @@ describe('a job whose environment\'s snapshot the platform no longer has', () =>
 });
 
 describe('a job whose snapshot is lost while its vessels start', () => {
-  const generation = (id: string): Generation => ({ key: 'k'.repeat(64), snapshot: { id, size: 1 }, sha: null, created: 0, seconds: {} });
+  const snapshotOf = (id: string): Generation => ({ key: 'k'.repeat(64), snapshot: { id, size: 1 }, sha: null, created: 0, seconds: {} });
 
   test('refills its pool from the new snapshot for each late start from the old one, spending no replacement', async () => {
-    let ready: Generation | undefined = generation('gone');
+    let ready: Generation | undefined = snapshotOf('gone');
     const begun: [string, string][] = [];
 
     const gang = new ArmadaJob(state().ctx, world({
@@ -480,7 +480,7 @@ describe('a job whose snapshot is lost while its vessels start', () => {
     await gang.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: { gang: 4 }, argv: ['true'] }], run: { kind: 'command' }, pool: 4 }));
     await gang.alarm();
     await gang.vesselFailed('v1', 'the start ended', 'gone');
-    ready = generation('fresh');
+    ready = snapshotOf('fresh');
     await gang.alarm();
 
     for (const late of ['v2', 'v3', 'v4']) await gang.vesselFailed(late, 'the start ended', 'gone');
@@ -503,7 +503,7 @@ describe('a job whose snapshot is lost while its vessels start', () => {
         ensure: async () => {
           asked += 1;
 
-          return { kind: 'ready', generation: generation('gone') };
+          return { kind: 'ready', generation: snapshotOf('gone') };
         },
         lost: async () => await told.promise,
         used: async () => undefined,
