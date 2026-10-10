@@ -1,8 +1,7 @@
 <p align="center"><img src=".github/banner.svg" alt="armada" width="100%"></p>
 
-<video src="https://github.com/AshishKumar4/armada/raw/core/.github/armada.mp4" controls muted playsinline width="100%"></video>
-
-https://github.com/AshishKumar4/armada/raw/core/.github/armada.mp4
+<p align="center"><img src=".github/armada.webp" alt="armada in 80 seconds: 100 videos encoded on 100 containers in 21 s, live in armada's dashboard, against 11 minutes on one container; then how it works, its CI, and what else it runs" width="100%"></p>
+<p align="center"><a href=".github/armada.mp4">The same video as an MP4</a></p>
 
 armada runs a command, or a TypeScript or Python function, over many inputs at once on Cloudflare Containers in your own
 account. I run Kinu's and Dew's CI on it.
