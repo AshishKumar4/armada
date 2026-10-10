@@ -172,12 +172,32 @@ export const MAX_TASKS = 100_000;
 /** The most containers one task runs on: rank r is reachable from the others at 127.0.1.<r + 1>. */
 export const MAX_GANG = 64;
 
-/** Why a job of at most `pool` containers refuses these tasks: a command's task carries its argv, a pushed task's
- *  carries none, and a gang is a whole number of containers the pool holds. */
+/** The most bytes one argument of a task's command holds: Linux starts no process given an argument longer than
+ *  MAX_ARG_STRLEN, 128 KiB with its terminating NUL. */
+export const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
+
+/** Why a command's `argv` cannot start, or null: its first argument longer than `MAX_ARGUMENT_BYTES`. */
+export function argumentRefusal(argv: readonly string[]): string | null {
+  const encoder = new TextEncoder();
+  // A UTF-16 unit is at most 3 bytes of UTF-8, so a shorter argument needs no encoding.
+  const sizes = argv.map((word) => word.length * 3 <= MAX_ARGUMENT_BYTES ? word.length : encoder.encode(word).byteLength);
+  const long = sizes.findIndex((size) => size > MAX_ARGUMENT_BYTES);
+
+  return long < 0 ? null : `argument ${String(long)} is ${String(sizes[long])} bytes, and Linux starts no process with one over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the command reads`;
+}
+
+/** Why a job of at most `pool` containers refuses these tasks: a command's task carries its argv, each argument short
+ *  enough to start, a pushed task's carries none, and a gang is a whole number of containers the pool holds. */
 export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], pool: number, slots = 1): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
   if (odd >= 0) return `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
+
+  for (const [index, task] of tasks.entries()) {
+    const long = argumentRefusal(task.argv ?? []);
+
+    if (long !== null) return `item ${String(index)}'s ${long}`;
+  }
 
   if (slots > 1) {
     const ganged = tasks.findIndex((task) => gangOf(task.item) > 1);

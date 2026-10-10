@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, gitEnv } from './fakes';
 
@@ -305,6 +305,15 @@ describe('a CI run\'s pool', () => {
       unsized: lanesFor([undefined, 5], ones(2), 40, 4),
       gang: lanesFor([5, 5], [1, 4], 4, 1),
     }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 2, pool: 1 }, gang: { lanes: 4, pool: 4 } });
+  });
+
+  test('refuses a command with an argument longer than Linux starts a process with, counted in bytes', () => {
+    const job = (word: string) => [{ item: 0, argv: ['true'] }, { item: 1, argv: ['sh', '-c', word] }];
+    const said = (bytes: number) => `item 1's argument 2 is ${String(bytes)} bytes, and Linux starts no process with one over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the command reads`;
+
+    expect([refusal({ kind: 'command' }, job('x'.repeat(MAX_ARGUMENT_BYTES)), 4), refusal({ kind: 'command' }, job('x'.repeat(MAX_ARGUMENT_BYTES + 1)), 4),
+      refusal({ kind: 'command' }, job('é'.repeat(65_536)), 4)])
+      .toEqual([null, said(MAX_ARGUMENT_BYTES + 1), said(131_072)]);
   });
 
   test('refuses a gang under more than one slot: a gang takes a whole container', () => {

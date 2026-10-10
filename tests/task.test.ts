@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { INLINE_BYTES, JobSpecSchema, PushSchema, type Outcome } from '../src/protocol';
+import { INLINE_BYTES, JobSpecSchema, MAX_ARGUMENT_BYTES, PushSchema, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Json, type Result } from '../src/index';
+import { commandTask } from '../src/task';
 import { bundleTasks } from '../src/push';
 import { failureOf, settled } from './fakes';
 import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, remembered, shout, square, touch, twoBytes, write } from './fixtures/armada/tasks';
@@ -289,6 +290,19 @@ describe('a command task', () => {
       bytes: [255, 254],
       none: null,
       shouted: 'HI THERE',
+    });
+  });
+});
+
+describe('a command\'s argument', () => {
+  test('longer than Linux starts a process with is refused by name before anything is sent', async () => {
+    const { armada, seen } = await fleet();
+    const command = commandTask(recipe().spec, (item: string) => ['sh', '-c', item]);
+    const refused = await settled(command.map(['true', 'é'.repeat(65_536)], { armada }));
+
+    expect({ refused, jobs: seen.filter((each) => each === 'POST /jobs') }).toEqual({
+      refused: `Error: item 1's argument 2 is 131072 bytes, and Linux starts no process with one over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the command reads`,
+      jobs: [],
     });
   });
 });

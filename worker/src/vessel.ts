@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, bounded, killOf, launchSlot, launchTask, maskValuesOf, mounts, must, pipeIn, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  ENTRYPOINT, KEEP_MASK, MASK, MASK_VALUES, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, copyInto, packKey, said, taskKey, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -407,13 +407,16 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     if (!layout.isolated) await keep();
     await this.network(container, claim.gang);
+    const argv = argvOf(slot);
+
+    await pipeIn(container, positional(claim.argv), argv);
 
     if (layout.isolated) {
       // Its own cgroup too, so a task's group reads and caps reach the slot's, not the single task group.
-      await must(container, 'the launch', ['/bin/sh', '-c', launchSlot(spec.workdir, slot, spec.slotMemoryBytes, spec.tmpfs), 'launch', ...claim.argv], { env: { ...claim.env, ARMADA_CGROUP: layout.group }, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, spec.slotMemoryBytes, spec.tmpfs)), 'launch'], { env: { ...claim.env, ARMADA_CGROUP: layout.group }, ms: EXEC_MS });
       await keep();
     } else {
-      await must(container, 'the launch', ['/bin/sh', '-c', launchTask(spec.workdir), 'launch', ...claim.argv], { env: claim.env, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir)), 'launch'], { env: claim.env, ms: EXEC_MS });
     }
   }
 

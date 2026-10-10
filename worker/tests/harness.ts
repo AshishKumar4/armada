@@ -192,8 +192,9 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
 /** What a container's exec answers: its exit code and output, or a throw for an exec the platform lost. */
 export type Answer = (argv: readonly string[], options?: ContainerExecOptions) => { readonly exitCode: number; readonly stdout: string } | Error | Promise<{ readonly exitCode: number; readonly stdout: string }>;
 
-/** A container that has started, whose every exec `answer` decides. */
-export function container(answer: Answer): Container {
+/** A container that has started, whose every exec `answer` decides; `received` is told what each exec's stdin was
+ *  given, once it closes. */
+export function container(answer: Answer, received?: (argv: readonly string[], body: string) => void): Container {
   const fake = {
     running: true,
     start: () => undefined,
@@ -206,9 +207,15 @@ export function container(answer: Answer): Container {
       if (answered instanceof Error) throw answered;
 
       const stdout = new TextEncoder().encode(answered.stdout);
+      const given: Uint8Array[] = [];
+
+      const stdin = new WritableStream<Uint8Array>({
+        write: (chunk) => { given.push(chunk); },
+        close: () => { received?.(argv, new TextDecoder().decode(Buffer.concat(given))); },
+      });
 
       return {
-        stdin: new WritableStream(), stdout: new Blob([stdout]).stream(), exitCode: Promise.resolve(answered.exitCode),
+        stdin, stdout: new Blob([stdout]).stream(), exitCode: Promise.resolve(answered.exitCode),
         output: async () => ({ exitCode: answered.exitCode, stdout: stdout.buffer, stderr: new ArrayBuffer(0) }),
       };
     },

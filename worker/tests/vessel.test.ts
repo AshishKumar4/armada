@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Outcome } from '../../src/protocol';
-import { KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
+import { argvOf, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
@@ -34,6 +34,7 @@ function once(claim: Claim) {
  *  outputs, when the platform says it stops the container, how long before the object started the task was launched
  *  when the runtime restarted it, whether its artifacts packed, and its claim's gang rank. */
 interface Run {
+  readonly argv?: readonly string[];
   readonly usage?: { readonly exitCode: number; readonly stdout: string } | Error;
   readonly out?: string;
   readonly stopping?: string;
@@ -43,13 +44,17 @@ interface Run {
 }
 
 /** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
-async function run(lost: number, { usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang }: Run = {}) {
+async function run(lost: number, { argv: words = ['true'], usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
-  const task = once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang });
+  const execs: (readonly string[])[] = [];
+  const piped = new Map<string, string>();
+  const task = once({ index: 0, attempt: 1, argv: [...words], env: {}, secrets: [], duplicate: false, gang });
   let waits = 0;
 
   const stored = state(container((argv) => {
+    execs.push(argv);
+
     if (argv[2] === usageOf(TASK_GROUP)) return usage;
 
     if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
@@ -66,7 +71,7 @@ async function run(lost: number, { usage = { exitCode: 0, stdout: '' }, out, sto
     waits += 1;
 
     return waits <= lost ? new Error('Network connection lost.') : { exitCode: 0, stdout: '0\n' };
-  }));
+  }, (argv, body) => { if (argv[3] === 'pipe-in') piped.set(argv[4] ?? '', body); }));
 
   const job = {
     booted: async () => undefined,
@@ -93,8 +98,29 @@ async function run(lost: number, { usage = { exitCode: 0, stdout: '' }, out, sto
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects, execs, piped };
 }
+
+describe('a task\'s argv', () => {
+  test('reaches its launch in a file, not in the exec, which the runtime fails past 128 KiB an argument, and keeps every byte', async () => {
+    const argv = ['sh', '-c', `it's "q" $HOME \`id\` \\ \n`, '', 'é', 'a'.repeat(200_000)];
+    const { exits, execs, piped } = await run(0, { argv });
+    const launch = execs.find((exec) => exec[3] === 'launch') ?? [];
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-argv-'));
+
+    try {
+      const path = join(scratch, 'argv');
+
+      writeFileSync(path, piped.get(argvOf(0)) ?? '');
+      const read = Bun.spawnSync(['/bin/sh', '-c', `. ${path}; printf '%s\\0' "$@"`]).stdout.toString().split('\0').slice(0, -1);
+
+      expect({ exits, words: launch.slice(3), sourced: (launch[2] ?? '').startsWith(`. ${argvOf(0)}\n`), read: read.length === argv.length && read.every((word, index) => word === argv[index]) })
+        .toEqual({ exits: [0], words: ['launch'], sourced: true, read: true });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('a vessel waiting on its task', () => {
   test('waits again where the platform lost a wait, and counts the container lost after three in a row', async () => {

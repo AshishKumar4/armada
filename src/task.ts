@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { detach, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, detach, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -642,6 +642,9 @@ class CommandTask<I extends Json, O> extends Base<I, O> {
     const argv = this.argv(item, { index });
 
     if (argv.length === 0) throw new Error(`item ${String(index)}'s argv is empty`);
+    const long = argumentRefusal(argv);
+
+    if (long !== null) throw new Error(`item ${String(index)}'s ${long}`);
 
     return await Promise.resolve({ item, argv: [...argv] });
   }

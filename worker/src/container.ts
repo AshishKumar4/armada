@@ -29,6 +29,21 @@ export const slotTask = (slot: number): string => `${slotRoot(slot)}/task`;
  *  could end together. */
 export const maskValuesOf = (slot: number): string => `${slotRoot(slot)}/mask.json`;
 
+/** Where slot `slot`'s next task's argv waits for its launch (`launchArgv`), outside the dirs the launch recreates. */
+export const argvOf = (slot: number): string => `${STATE}/argv/${String(slot)}`;
+
+/** A launch's script that takes its task's argv from `path` and goes on as `script`: the argv set as the positional
+ *  parameters `script` reads, from the words `positional` wrote there. An exec's own arguments ride in its request,
+ *  which the runtime fails as an `internal error` past about 128 KiB in one argument or 1 MB in all; a file `pipeIn`
+ *  writes takes any size. */
+export const launchArgv = (path: string, script: string): string => `. ${path}\n${script}`;
+
+/** `argv` as the shell line that makes it the positional parameters: each word single-quoted, a quote inside one closed,
+ *  escaped and reopened, so every byte a word holds reaches the command unchanged. */
+export function positional(argv: readonly string[]): string {
+  return `set -- ${argv.map((word) => `'${word.replaceAll("'", String.raw`'\''`)}'`).join(' ')}\n`;
+}
+
 /** Where the container's main process marks that the platform asked the container to stop (`hold`). */
 export const STOPPING = `${STATE}/stopping`;
 
