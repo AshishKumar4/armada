@@ -303,12 +303,9 @@ interface Preparation {
 }
 
 /** root's PATH, which the recipe's setup runs under: the tools it reaches for (locale-gen, update-alternatives) are in
- *  sbin, which the user's commands do without. */
+ *  sbin, which the user's commands do without. Its HOME is root's too: what root writes in the user's home is root's, and
+ *  the user's install then can't write there (#28). */
 const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
-
-/** The recipe's setup, then the user's home handed back: setup runs as root with the user's HOME, so what it installs
- *  there for the user (uv's installer writes `~/.local`) would be root's, and the user's install could not write it. */
-const SETUP = `/bin/sh "$0" && chown -R ci:ci ${USER_HOME}`;
 
 /** A phase's bound on `medium`, and on a smaller size in proportion to its vCPUs: the runner layer builds git, which
  *  is CPU-bound. It took 82 s on `medium` and ran past 12 min on `micro`'s half vCPU (armada-v2, 2026-10-09). */
@@ -386,7 +383,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       case 'setup':
         return recipe.setup === '' ? {} : await this.command(preparation, {
-          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH }, cwd: workdir, argv: ['/bin/sh', '-c', SETUP, `${STATE}/setup.sh`],
+          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH, HOME: '/root' }, cwd: workdir, argv: ['/bin/sh', `${STATE}/setup.sh`],
           inputs: async () => { await pipeIn(container, recipe.setup, `${STATE}/setup.sh`); },
         });
 

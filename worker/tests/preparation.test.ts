@@ -54,9 +54,9 @@ async function prepare(answer: Answer, alarms = 40, size: Size = 'medium', stops
 /** A container where every phase's command exits 0 at once, and the waits for `phase` the platform loses `lost` times.
  *  As on the platform, an exec whose working directory the container lacks finds no command: the work directory exists
  *  once the base phase (the runner's layer) has run. */
-function answering(phase: string, lost: number): Answer & { readonly launched: string[]; readonly paths: (string | undefined)[] } {
+function answering(phase: string, lost: number): Answer & { readonly launched: string[]; readonly envs: (Record<string, string> | undefined)[] } {
   const launched: string[] = [];
-  const paths: (string | undefined)[] = [];
+  const envs: (Record<string, string> | undefined)[] = [];
   let waits = 0;
   let layered = false;
 
@@ -67,7 +67,7 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
 
     if (argv[3] === 'launch') {
       launched.push(argv[4] ?? '');
-      paths.push(options?.env?.['PATH']);
+      envs.push(options?.env);
     }
 
     if (argv[3] === 'wait' && (argv[2] ?? '').includes(`/phases/${phase}/`)) {
@@ -79,16 +79,17 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
     if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
 
     return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
-  }, { launched, paths });
+  }, { launched, envs });
 }
 
 describe('preparing an environment', () => {
-  test('runs the recipe\'s setup as root with root\'s PATH, where locale-gen and its kin are', async () => {
+  test('runs the recipe\'s setup as root with root\'s PATH, where locale-gen and its kin are, and root\'s HOME (#28)', async () => {
     const machine = answering('setup', 0);
     const prepared = await prepare(machine);
+    const env = machine.envs[machine.launched.indexOf('setup')];
 
-    expect({ failures: prepared.failures, path: machine.paths[machine.launched.indexOf('setup')]?.split(':') })
-      .toEqual({ failures: [], path: expect.arrayContaining(['/usr/sbin', '/sbin', '/usr/bin']) });
+    expect({ failures: prepared.failures, path: env?.['PATH']?.split(':'), home: env?.['HOME'] })
+      .toEqual({ failures: [], path: expect.arrayContaining(['/usr/sbin', '/sbin', '/usr/bin']), home: '/root' });
   });
 
   test('waits again where the platform lost a wait, and counts the container lost after three in a row', async () => {

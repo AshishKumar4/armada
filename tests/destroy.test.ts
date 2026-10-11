@@ -139,9 +139,11 @@ class Fleet implements DestroyIO {
       return this.envelope(this.scripts);
     }
 
-    if (path === `${base}/workers/durable_objects/namespaces`) return this.envelope(this.namespaces);
+    // As the live API answers it (#29): `errors: null`, not `[]`.
+    if (path === `${base}/workers/durable_objects/namespaces`) return Response.json({ success: true, errors: null, messages: [], result: this.namespaces });
 
-    if (path === `${base}/containers/applications`) return Response.json(this.applications);
+    // The shape armada-dew2's account answered (#27): the v4 envelope, as every other endpoint.
+    if (path === `${base}/containers/applications`) return Response.json({ success: true, result: this.applications, errors: [], messages: [], result_info: {} });
 
     if (path.startsWith(`${base}/containers/applications/`) && request.method === 'DELETE') {
       const id = path.split('/').at(-1);
