@@ -126,6 +126,8 @@ describe('a job\'s status', () => {
     await gang.claim('v1');
     await gang.claim('v2');
     await gang.claim('v1');
+    await gang.started('v1', 0, 1);
+    await gang.started('v2', 0, 1);
     const [one, two] = [v.parse(JobStatusSchema, await plain.status()), v.parse(JobStatusSchema, await gang.status())];
 
     expect({ plain: one.running, gang: two.running }).toEqual({

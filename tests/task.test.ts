@@ -326,6 +326,18 @@ describe('a task\'s retries', () => {
   });
 });
 
+describe('a job\'s deadlines', () => {
+  test('the whole-job and gang-start bounds travel with an array submission and a streamed submission', async () => {
+    const { armada, jobs } = await fleet();
+    const options = { armada, deadline: 120, gangStartTimeout: 15 };
+
+    await echo.stream(['a'], options).settled();
+    await echo.stream((function* items() { yield 'b'; })(), options).settled();
+
+    expect([...jobs.values()].map(({ spec }) => [spec.deadline, spec.gangStartTimeout])).toEqual([[120, 15], [120, 15]]);
+  });
+});
+
 describe('a task\'s cache', () => {
   test('travels with its job, and a result says whether it ran', async () => {
     const { armada, jobs } = await fleet();

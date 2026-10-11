@@ -14,16 +14,22 @@ const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot'
 async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   const begun: string[] = [];
   const used: string[] = [];
+  const stopped: string[] = [];
+  const stored = state();
 
-  const created = new ArmadaJob(state().ctx, world({
-    VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
+  const created = new ArmadaJob(stored.ctx, world({
+    VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => {
+      stopped.push(name);
+
+      return true;
+    } })),
     ENVIRONMENTS: namespace(() => ({ used: async (key: string) => { used.push(key); }, ensure: async () => ({ kind: 'ready', generation }) })),
   }));
 
   await created.create('j1', v.parse(JobSpecSchema, spec));
   await created.alarm();
 
-  return { job: created, begun, used };
+  return { job: created, begun, used, stopped, stored };
 }
 
 const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
@@ -558,7 +564,7 @@ describe('a task that failed by itself', () => {
 const gang = (size: number) => ({ recipe: {}, items: [{ item: { gang: size }, argv: ['true'] }], run: { kind: 'command' as const }, pool: 4 });
 
 /** `vessels` ask in turn until each holds its rank of the gang: their claims, by vessel. */
-async function formed(open: ArmadaJob, vessels: readonly string[]): Promise<Record<string, Claim>> {
+async function formed(open: ArmadaJob, vessels: readonly string[], start = true): Promise<Record<string, Claim>> {
   const held: Record<string, Claim> = {};
 
   for (let round = 0; round < 3; round += 1) {
@@ -566,6 +572,12 @@ async function formed(open: ArmadaJob, vessels: readonly string[]): Promise<Reco
       const claim = held[vessel] === undefined ? await open.claim(vessel) : null;
 
       if (claim !== null && !('waitMs' in claim)) held[vessel] = claim;
+    }
+  }
+
+  if (start) {
+    for (const [name, claim] of Object.entries(held)) {
+      if (!(await open.started(name, claim.index, claim.attempt))) throw new Error(`${name}'s launch was refused`);
     }
   }
 
@@ -579,6 +591,169 @@ async function land(open: ArmadaJob, vessel: string, index: number, landed: Part
 }
 
 describe('a gang task', () => {
+  test('a boot loss before joining is replaced before the start bound, and every rank gets the replacement in its rendezvous', async () => {
+    const { job: open, begun } = await job({ ...gang(4), gangStartTimeout: 30 });
+
+    expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
+    expect(await open.claim('v2')).toEqual({ waitMs: 1000 });
+    await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
+    const ranks = ['v1', 'v2', 'v4', 'r1'];
+    const held = await formed(open, ranks);
+
+    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/r1']);
+    expect(ranks.map((name) => [held[name]?.gang?.rank, held[name]?.gang?.vessels])).toEqual(ranks.map((_, rank) => [rank, ranks]));
+    expect(new Set(Object.values(held).map((claim) => claim.gang?.token)).size).toBe(1);
+
+    for (const name of ranks) await land(open, name, 0, { exitCode: 0 });
+
+    expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { kind: 'exited', exitCode: 0 } }] });
+  });
+
+  test('simultaneous first claims and a boot loss do not retire the gang\'s surviving ranks before the replacement joins', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open } = await job({ ...gang(4), gangStartTimeout: 10 });
+
+      expect(await Promise.all(['v1', 'v2', 'v4'].map(async (name) => await open.claim(name)))).toEqual(Array.from({ length: 3 }, () => ({ waitMs: 1000 })));
+      await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
+      setSystemTime(began + 1000);
+      const ranks = ['v1', 'v2', 'v4', 'r1'];
+      const held = await formed(open, ranks);
+
+      expect(Object.keys(held).sort()).toEqual([...ranks].sort());
+      expect(ranks.map((name) => held[name]?.gang?.vessels)).toEqual(ranks.map(() => ranks));
+
+      for (const name of ranks) await land(open, name, 0, { exitCode: 0 });
+
+      expect((await open.events(0)).done).toBe(true);
+      expect((await open.status())?.finishedAt).toBeLessThan(began + 10_000);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('a joined member lost before start fails immediately by rank, not a partial rebuild with stale claims', async () => {
+    const { job: open, begun, stopped } = await job(gang(4));
+    const held = await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
+    const began = Date.now();
+
+    await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
+    await open.vesselFailed('v3', 'a duplicate failure report', { gone: true });
+    const events = await open.events(0);
+
+    expect(Date.now() - began).toBeLessThan(1000);
+    expect(events).toMatchObject({ done: true, events: [{ outcome: { kind: 'failed', error: 'GangMemberLostBeforeStart', tail: 'gang member rank 2 lost before start: internal error; reference = boot-loss' } }] });
+    expect(events.events).toHaveLength(1);
+    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4']);
+    expect(stopped).toEqual(['j1/v1', 'j1/v2', 'j1/v4']);
+    expect(await open.started('v1', 0, held['v1']?.attempt ?? 0)).toBe(false);
+    expect(await open.still('v1', 0)).toBe(false);
+    expect(await open.claim('v1')).toBeNull();
+  });
+
+  test('a forming gang loses a joined member before start by name rather than polling forever', async () => {
+    const { job: open } = await job(gang(4));
+
+    await open.claim('v1');
+    await open.claim('v2');
+    await open.vesselFailed('v2', 'container lost before launch', { gone: true });
+
+    expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { error: 'GangMemberLostBeforeStart', tail: 'gang member rank 1 lost before start: container lost before launch' } }] });
+  });
+
+  test('failing a partial gang refills the pool for the next task without starting an extra replacement', async () => {
+    const spec = gang(4);
+    const { job: open, begun } = await job({ ...spec, items: [...spec.items, ...spec.items] });
+
+    await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
+    await open.vesselFailed('v3', 'lost before launch', { gone: true });
+    expect(begun).toEqual(Array.from({ length: 8 }, (_, index) => `j1/v${String(index + 1)}`));
+    expect((await open.status())?.vessels.filter((vessel) => vessel.state === 'working' || vessel.state === 'waiting')).toHaveLength(4);
+
+    const names = ['v5', 'v6', 'v7', 'v8'];
+
+    await formed(open, names);
+
+    for (const name of names) await land(open, name, 1, { exitCode: 0 });
+
+    const events = await open.events(0);
+
+    expect(events.done).toBe(true);
+    expect(events.events.map(({ outcome }) => [outcome.index, outcome.kind])).toEqual([[0, 'failed'], [1, 'exited']]);
+  });
+
+  test('heartbeating ranks cannot extend the formation deadline', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open, stopped, stored } = await job({ ...gang(4), gangStartTimeout: 10 });
+
+      await open.claim('v1');
+      await open.claim('v2');
+      expect(await stored.ctx.storage.getAlarm()).toBe(began + 10_000);
+      setSystemTime(began + 9_999);
+      expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
+      await open.alarm();
+      expect((await open.events(0)).events).toHaveLength(0);
+      setSystemTime(began + 10_000);
+      await open.claim('v1');
+      await open.alarm();
+
+      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { kind: 'failed', error: 'GangStartDeadlineExceeded' } }] });
+      expect(stopped).toEqual(['j1/v1', 'j1/v2']);
+      expect(await open.claim('v1')).toBeNull();
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('all claims handed out still have a deadline until every actual launch is acknowledged', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open, stopped } = await job({ ...gang(4), gangStartTimeout: 10 });
+
+      await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
+
+      for (const name of ['v1', 'v2', 'v3']) expect(await open.started(name, 0, 1)).toBe(true);
+      setSystemTime(began + 10_000);
+      await open.alarm();
+
+      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { error: 'GangStartDeadlineExceeded', tail: 'gang start deadline exceeded after 10 s: not every rank launched (pending ranks 3)' } }] });
+      expect(stopped).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4']);
+      expect(await open.started('v4', 0, 1)).toBe(false);
+      expect(await open.accept('v1', 0, 0)).toBe(false);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('a fully launched gang outlives its start deadline, and stale attempts cannot acknowledge a new launch', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open } = await job({ ...gang(2), gangStartTimeout: 10 });
+
+      await formed(open, ['v1', 'v2']);
+      setSystemTime(began + 11_000);
+      await open.alarm();
+      expect((await open.events(0)).events).toHaveLength(0);
+      await open.vesselFailed('v2', 'container lost while running', { gone: true });
+      await formed(open, ['v1', 'r1'], false);
+
+      expect(await open.started('v1', 0, 1)).toBe(false);
+      expect(await open.started('v1', 0, 2)).toBe(true);
+      expect(await open.still('v1', 0, 1)).toBe(false);
+    } finally {
+      setSystemTime();
+    }
+  });
+
   test('is refused unless it is a whole number of containers the pool holds', () => {
     const items = (size: number) => [{ item: { gang: size }, argv: ['true'] }];
 
@@ -624,5 +799,29 @@ describe('a gang task', () => {
 
     expect({ stopped, begun, again: ['v1', 'r1'].map((vessel) => [again[vessel]?.gang?.rank, again[vessel]?.attempt]), events: (await lossy.events(0)).events })
       .toEqual({ stopped: false, begun: ['j1/v1', 'j1/v2', 'j1/r1'], again: [[0, 2], [1, 2]], events: [] });
+  });
+});
+
+describe('a job deadline', () => {
+  test('bounds an unfinished job from its creation, independently of its task timeout', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open, stopped, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, deadline: 20, timeout: 3600 });
+
+      await open.claim('v1');
+      setSystemTime(began + 19_999);
+      await open.alarm();
+      expect((await open.events(0)).events).toHaveLength(0);
+      expect(await stored.ctx.storage.getAlarm()).toBe(began + 20_000);
+      setSystemTime(began + 20_000);
+      await open.alarm();
+
+      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { kind: 'failed', reason: 'lost', tail: 'JobDeadlineExceeded: the job did not finish within 20 s' } }] });
+      expect(stopped).toEqual(['j1/v1']);
+    } finally {
+      setSystemTime();
+    }
   });
 });

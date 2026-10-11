@@ -105,6 +105,10 @@ export interface MapOptions {
   readonly pool?: number;
   /** The tasks one container runs at once, each in its own slot. Default 1. */
   readonly slots?: number;
+  /** The whole job's limit, including preparation and starts, in seconds. Default 1800. */
+  readonly deadline?: number;
+  /** The limit for a gang to gather and launch all its ranks, in seconds. Default 300. */
+  readonly gangStartTimeout?: number;
   readonly label?: string;
   readonly env?: Readonly<Record<string, string>>;
   /** Small files every container gets under `context.files`. */
@@ -398,6 +402,7 @@ abstract class Base<I extends Json, O> {
 
     const spec = {
       recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      deadline: options.deadline, gangStartTimeout: options.gangStartTimeout,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };

@@ -326,6 +326,13 @@ export class ArmadaVessel extends DurableObject<Env> {
         await this.launch(spec, container, claim, slot);
         current = { claim: kept, startedAt: Date.now() };
         await this.putCurrent(slot, current);
+
+        if (claim.gang !== undefined && !(await job.started(spec.name, claim.index, claim.attempt))) {
+          await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+          await this.dropCurrent(slot);
+          await job.stopped(spec.name, claim.index, { slot, attempt: claim.attempt });
+          continue;
+        }
       }
 
       const seconds = Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
@@ -354,7 +361,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
-      if (!(await job.still(spec.name, current.claim.index))) {
+      if (!(await job.still(spec.name, current.claim.index, current.claim.attempt))) {
         await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
 
         if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);

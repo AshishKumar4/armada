@@ -20,7 +20,7 @@ Usage:
   armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
                                        deploy armada to your Cloudflare account, logging in if needed
   armada map [options] -- <command>    run the command once per item
-  armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
+  armada run <commit|worktree> [--deadline=S] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json; --json prints the
                                        progress to stderr and one JSON verdict object to stdout
   armada verdict <commit|worktree> [--json]
@@ -48,6 +48,8 @@ map options:
   --pool=N             the most containers at once (default 50)
   --slots=N            the tasks one container runs at once, each in its own slot (default 1)
   --timeout=S          a task's limit, in seconds (default 3600)
+  --deadline=S         the whole job's limit, including starts, in seconds (default 1800)
+  --gang-start-timeout=S  all gang ranks must launch within this many seconds (default 300)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
   --speculative        let an idle container run a straggler again
@@ -66,6 +68,10 @@ deploy options:
   --keep=N             the environments whose snapshots stay beyond those open jobs use: the N most recently
                        used (default 3), and any used in the last hour; the rest are deleted
 
+run options:
+  --deadline=S         the whole CI run's limit, plan and tasks together, in seconds
+                       (default .armada.json's deadline, or 1800)
+
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
 The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
@@ -76,8 +82,8 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
-  ['run', { options: ['label=', 'secrets=', 'json'], words: 1 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['run', { options: ['deadline=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
@@ -155,7 +161,7 @@ async function map(): Promise<number> {
   const argv = argvOf(rest, base);
   const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), deadline: whole('deadline'), gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   const id = await job.id;
   let worst = 0;
@@ -679,7 +685,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, { label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
+      return await runCI(connect(), target, { deadline: whole('deadline'), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');

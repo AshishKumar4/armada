@@ -43,11 +43,11 @@ describe('a client and a Worker', () => {
       return [answer.status, v.parse(v.object({ error: v.optional(v.string()) }), await answer.json()).error];
     };
 
-    expect({ older: await asked('2'), served: await asked('3'), newer: await asked('8'), same: (await armada.health()).protocol }).toEqual({
+    expect({ older: await asked('2'), served: await asked('3'), newer: await asked('9'), same: (await armada.health()).protocol }).toEqual({
       older: [426, 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin'],
       served: [200, 'no such job'],
       newer: [426, 'the deployed Worker is older than this armada client: run `armada deploy` to update it'],
-      same: 7,
+      same: 8,
     });
   });
 });
@@ -174,7 +174,7 @@ describe('a drained version', () => {
       const old = new Armada({ url: server.url.href, token: TOKEN, account: 'a' });
 
       expect({ jobs: await old.drain(), after: (await old.health()).jobs, admitted: await old.admit(), asked })
-        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 7', 'POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
+        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 8', 'POST /drain 7', 'POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
     } finally {
       await server.stop(true);
     }

@@ -60,12 +60,22 @@ interface LocalPlan {
   readonly target: number;
   readonly timings: Timings;
   readonly env: Readonly<Record<string, string>>;
+  readonly deadlineAt?: number;
+}
+
+/** Each job gets only what remains of the CI run's deadline: a slow plan must not reset the task job's clock. */
+export function remainingDeadline(deadlineAt: number): number {
+  const remaining = Math.ceil((deadlineAt - Date.now()) / 1000);
+
+  if (remaining <= 0) throw new Error('CiDeadlineExceeded: the CI run passed its deadline before the next job could start');
+
+  return remaining;
 }
 
 /** The plan's stdout, run in `repo` where its checkout is `sha` and clean, with `{target}` and `{timings}` filled here;
  *  undefined where it is not that commit, and the plan runs in a container. A container's start, cold on a new machine,
  *  was 61 of the 70 seconds Dew's plan took. */
-export function localPlan({ repo, sha, command, target, timings, env }: LocalPlan): string | undefined {
+export function localPlan({ repo, sha, command, target, timings, env, deadlineAt }: LocalPlan): string | undefined {
   if (git(repo, ['rev-parse', 'HEAD']).toString().trim() !== sha || git(repo, ['status', '--porcelain']).toString().trim() !== '') return undefined;
   const scratch = mkdtempSync(join(tmpdir(), 'armada-plan-'));
 
@@ -73,7 +83,9 @@ export function localPlan({ repo, sha, command, target, timings, env }: LocalPla
     writeFileSync(join(scratch, TIMINGS_FILE), JSON.stringify(timings));
     const argv = command.map((word) => word.replaceAll('{target}', String(target)).replaceAll('{timings}', join(scratch, TIMINGS_FILE)));
     const filled = Object.fromEntries(Object.entries(env).map(([name, value]) => [name, value.replaceAll('{workdir}', repo)]));
-    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...process.env, ...filled }, stdout: 'pipe', stderr: 'pipe' });
+    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...process.env, ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt) * 1000, killSignal: 'SIGKILL' });
+
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new Error('CiDeadlineExceeded: the local plan passed the CI run\'s deadline');
 
     if (ran.exitCode !== 0) throw new Error(`the plan exited ${String(ran.exitCode)}: ${ran.stderr.toString().slice(-2000)}`);
 
@@ -369,6 +381,8 @@ export function lanesFor(estimates: readonly (number | undefined)[], weights: re
 
 /** What `armada run` was asked: its label, the plan's narrowing args, its own secrets, and whether it answers as JSON. */
 export interface RunOptions {
+  /** The whole run's bound in seconds; the commit's config (1800 by default) when absent. */
+  readonly deadline?: number;
   readonly label: string;
   readonly planArgs: readonly string[];
   readonly secrets: readonly string[];
@@ -417,9 +431,10 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
-async function runGraded(armada: Armada, target: string, { label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
+async function runGraded(armada: Armada, target: string, { deadline, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, environment, spec, upload } = await commitOf(armada, target);
+  const deadlineAt = began + (deadline ?? config.deadline) * 1000;
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 
@@ -432,7 +447,7 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
   if (uploaded !== null) note(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots };
-  const here = config.plan.local ? localPlan({ repo, sha, command: [...config.plan.command, ...planArgs], target: config.target, timings, env: config.env }) : undefined;
+  const here = config.plan.local ? localPlan({ repo, sha, command: [...config.plan.command, ...planArgs], target: config.target, timings, env: config.env, deadlineAt }) : undefined;
   let planId = 'local';
   let printed: string;
   // The plan's own usage, which a container's plan reports and a local one does not.
@@ -441,7 +456,7 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
   if (here === undefined) {
     // The plan's stdout is its output; its stderr stays in its log.
     const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
-    const planJob = planTask.stream([{}], { ...options, pool: 1 });
+    const planJob = planTask.stream([{}], { ...options, deadline: remainingDeadline(deadlineAt), pool: 1 });
 
     planId = await planJob.id;
     note(`plan job ${planId}`);
@@ -489,7 +504,8 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
     return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry;
   });
 
-  const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, { ...options, pool }) : commandTask(spec.recipe, argv, taskOptions).stream(entries, { ...options, pool });
+  const jobOptions = { ...options, deadline: remainingDeadline(deadlineAt), pool };
+  const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(spec.recipe, argv, taskOptions).stream(entries, jobOptions);
   const jobId = await job.id;
 
   note(`task job ${jobId}: ${String(plan.include.length)} tasks on ${String(pool)} containers${slots > 1 ? ` of ${String(slots)} slots` : ''}${lanes < most ? `, which the plan's estimates say finish as soon as ${String(Math.ceil(most / slots))} would` : ''}`);

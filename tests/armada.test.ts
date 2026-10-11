@@ -1,9 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/ci';
+import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor, remainingDeadline } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
@@ -79,8 +79,10 @@ describe('a project\'s CI config', () => {
     const base = { name: 'app', environment: { setup: 'ci/setup.sh' }, plan: { command: ['plan'] }, task: { command: ['run', '{row}'] } };
     const config = parseConfig(JSON.stringify(base));
 
-    expect({ base: config.environment.base, history: config.history, pool: config.pool, verdict: config.task.verdict, speculative: config.task.speculative })
-      .toEqual({ base: 'cloudflare/debian-trixie', history: 'full', pool: 40, verdict: true, speculative: false });
+    expect({ base: config.environment.base, history: config.history, pool: config.pool, deadline: config.deadline, verdict: config.task.verdict, speculative: config.task.speculative })
+      .toEqual({ base: 'cloudflare/debian-trixie', history: 'full', pool: 40, deadline: 1800, verdict: true, speculative: false });
+    expect(parseConfig(JSON.stringify({ ...base, deadline: 600 })).deadline).toBe(600);
+    expect(() => parseConfig(JSON.stringify({ ...base, deadline: 0 }))).toThrow();
     expect(() => parseConfig(JSON.stringify({ ...base, environment: { setup: '../outside.sh' } }))).toThrow('a path inside the commit');
   });
 
@@ -255,7 +257,7 @@ describe('a deploy', () => {
     expect([
       mustDrain(health(7, 3), true),
       mustDrain(null, false),
-      mustDrain(health(8, 3), false),
+      mustDrain(health(9, 3), false),
       mustDrain(health(6, 2), false),
       mustDrain(health(6), false),
       mustDrain(health(7), false),
@@ -707,6 +709,8 @@ describe('armada verdict', () => {
 /** How a test's runner answers `armada run` beyond its plan and verdict: the task's exit, the plan and task
  *  configuration, and the timings it holds. */
 interface Runner {
+  readonly deadline?: number;
+  readonly planDelayMs?: number;
   readonly taskExit?: number;
   readonly planConfig?: Json;
   readonly taskConfig?: Readonly<Record<string, Json>>;
@@ -716,7 +720,7 @@ interface Runner {
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: Json, verdict: Json, { taskExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} } }: Runner = {}) {
+  async function run(args: readonly string[], plan: Json, verdict: Json, { deadline, planDelayMs = 0, taskExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} } }: Runner = {}) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -751,7 +755,11 @@ describe('armada run', () => {
 
         if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: pathname.startsWith('/jobs/tasks/') ? { ...outcome, exitCode: taskExit } : outcome }], done: true });
 
-        if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify(plan));
+        if (pathname === '/jobs/plan/tasks/0/output') {
+          if (planDelayMs > 0) await Bun.sleep(planDelayMs);
+
+          return new Response(JSON.stringify(plan));
+        }
 
         if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify(verdict));
 
@@ -764,7 +772,7 @@ describe('armada run', () => {
     try {
       mkdirSync(repo);
       git(repo, 'init', '-q');
-      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig } }));
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', deadline, environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig } }));
       git(repo, 'add', '.');
       git(repo, 'commit', '-qm', 'one');
 
@@ -774,15 +782,61 @@ describe('armada run', () => {
 
       const exit = await cli.exited;
       const stdout = await new Response(cli.stdout).text();
+      const stderr = await new Response(cli.stderr).text();
       // The report it names, read before its home goes.
       const path = /^report: (.+)$/mu.exec(stdout)?.[1];
 
-      return { exit, stdout, commands, bodies, seen, report: path === undefined || !existsSync(path) ? '' : readFileSync(path, 'utf8') };
+      return { exit, stdout, stderr, commands, bodies, seen, report: path === undefined || !existsSync(path) ? '' : readFileSync(path, 'utf8') };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
     }
   }
+
+  test('defaults below GitHub\'s 40-minute timeout, and a CLI deadline overrides the commit\'s config', async () => {
+    const plan = { include: [{ name: 'a', rows: ['x'] }] };
+    const verdict = { rows: [{ name: 'x', exitCode: 0 }] };
+    const defaults = await run([], plan, verdict);
+    const override = await run(['--deadline=60'], plan, verdict, { deadline: 2100 });
+
+    for (const [ran, most] of [[defaults, 1800], [override, 60]] as const) {
+      expect(ran.exit).toBe(0);
+      expect(ran.bodies).toHaveLength(2);
+
+      for (const body of ran.bodies) {
+        const bound = v.parse(v.object({ deadline: v.number() }), body).deadline;
+
+        expect(bound).toBeGreaterThan(0);
+        expect(bound).toBeLessThanOrEqual(most);
+      }
+    }
+  });
+
+  test('the plan and task jobs share one CI deadline rather than each getting a fresh one', async () => {
+    const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0 }] }, { deadline: 30, planDelayMs: 1100 });
+    const bounds = ran.bodies.map((body) => v.parse(v.object({ deadline: v.number() }), body).deadline);
+
+    expect(ran.exit).toBe(0);
+    expect(bounds).toHaveLength(2);
+    expect(bounds[0]).toBeLessThanOrEqual(30);
+    expect(bounds[1]).toBeLessThan(bounds[0] ?? 0);
+  });
+
+  test('a local plan is bounded by the same CI deadline', async () => {
+    const ran = await run(['--deadline=1'], null, null, { planConfig: { command: [process.execPath, '-e', 'await Bun.sleep(10000)'], local: true } });
+
+    expect(ran.exit).toBe(2);
+    expect(ran.commands).toHaveLength(0);
+    expect(ran.stderr).toContain('CiDeadlineExceeded: the local plan passed the CI run\'s deadline');
+  });
+
+  test('an invalid deadline is refused before submitting anything', async () => {
+    const ran = await run(['--deadline=0'], null, null);
+
+    expect(ran.exit).toBe(2);
+    expect(ran.seen).toHaveLength(0);
+    expect(ran.stderr).toContain('--deadline takes a positive whole number');
+  });
 
   test('words after -- reach the plan, and a narrowed run stores neither the verdict nor its timings; a full one both', async () => {
     const full = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] });
@@ -871,6 +925,23 @@ describe('armada run', () => {
     const ran = await run([], { include: [{ name: 'part-1', rows: ['x.mjs'] }] }, { rows: [{ name: 'x.mjs', exitCode: 0, seconds: 2 }] }, { taskExit: 7 });
 
     expect({ exit: ran.exit, graded: !ran.stdout.includes('NOT GRADED'), red: ran.stdout.includes('RED  x.mjs  (exit 7') }).toEqual({ exit: 1, graded: true, red: true });
+  });
+});
+
+describe('a CI deadline', () => {
+  test('each later job gets only the remaining time, and none can start at or after the deadline', () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      expect(remainingDeadline(began + 1800_000)).toBe(1800);
+      setSystemTime(began + 300_000);
+      expect(remainingDeadline(began + 1800_000)).toBe(1500);
+      setSystemTime(began + 1800_000);
+      expect(() => remainingDeadline(began + 1800_000)).toThrow('CiDeadlineExceeded');
+    } finally {
+      setSystemTime();
+    }
   });
 });
 
