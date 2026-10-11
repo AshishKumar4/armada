@@ -83,16 +83,7 @@ class Cloudflare {
     const answer = await this.request(path);
 
     if (answer.status === 404) return null;
-    const body = v.parse(JsonSchema, await answer.json());
-
-    // Containers' API returns the result directly, unlike the other v4 APIs.
-    if (path.startsWith('/containers/')) {
-      if (!answer.ok) throw new Error(`Cloudflare GET ${path} answered ${String(answer.status)}: ${JSON.stringify(body)}`);
-
-      return body;
-    }
-
-    const decoded = v.parse(Envelope, body);
+    const decoded = v.parse(Envelope, await answer.json());
 
     if (!answer.ok || !decoded.success) throw new Error(`Cloudflare GET ${path} answered ${String(answer.status)}: ${decoded.errors.map((error) => error.message).join('; ')}`);
 
