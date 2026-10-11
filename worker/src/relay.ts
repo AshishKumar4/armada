@@ -220,7 +220,7 @@ done`;
  *  a `Link`: a thread taking the far end's messages and one each way to and from the program. A WebSocket frame carries
  *  at most 64 KiB and its offset, under the Workers runtime's message limit. A vessel that refuses (it has not taken up
  *  the gang yet) is asked again for up to RELAY_GRACE seconds, as is one whose WebSocket dropped. */
-export const RELAY_PY = String.raw`import base64, collections, os, socket, ssl, struct, sys, threading, time
+export const RELAY_PY = String.raw`import base64, collections, hashlib, os, socket, ssl, struct, sys, threading, time
 from urllib.parse import urlsplit
 
 OUT, IN = ${String(RELAY_OUT)}, ${String(RELAY_IN)}
@@ -265,15 +265,19 @@ class Frames:
             self.put(False, b"", 9)
 
     def take(self):
-        """The next message, (text, data); EOFError or ConnectionError once the WebSocket is gone."""
+        """The next message, (text, data), its fragments joined; EOFError or ConnectionError once the WebSocket is gone."""
+        text, parts = False, []
         while True:
             head, length = exact(self.ws, 2)
             n = length & 0x7F
             n = struct.unpack("!H", exact(self.ws, 2))[0] if n == 126 else struct.unpack("!Q", exact(self.ws, 8))[0] if n == 127 else n
             data, opcode = exact(self.ws, n), head & 0x0F
             if opcode in (0, 1, 2):
-                return opcode == 1, data
-            if opcode == 9:
+                text = opcode == 1 if opcode else text
+                parts.append(data)
+                if head & 0x80:
+                    return text, b"".join(parts)
+            elif opcode == 9:
                 with self.lock:
                     self.put(False, data, 10)
             elif opcode == 8:
@@ -315,15 +319,17 @@ def opened(rank, port, link, resume):
     host, secure = ORIGIN.hostname, ORIGIN.scheme == "https"
     raw = socket.create_connection((host, ORIGIN.port or (443 if secure else 80)), timeout=30)
     ws = ssl.create_default_context().wrap_socket(raw, server_hostname=host) if secure else raw
+    key = base64.b64encode(os.urandom(16)).decode()
     ws.sendall(("GET /relay/%s/%s?port=%d&id=%s%s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                 "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n${RELAY_HEADER}: %s\r\n\r\n"
-                % (JOB, VESSELS[rank], port, link, "&resume=1" if resume else "", host,
-                   base64.b64encode(os.urandom(16)).decode(), TOKEN)).encode())
+                % (JOB, VESSELS[rank], port, link, "&resume=1" if resume else "", host, key, TOKEN)).encode())
     answer = b""
     while not answer.endswith(b"\r\n\r\n"):
         answer += exact(ws, 1)
-    status = answer.split(b"\r\n", 1)[0]
-    if b" 101 " in status:
+    status, *headers = answer.split(b"\r\n")
+    # RFC 6455's proof that the far end took this handshake, not some other upgrade.
+    accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+    if status.split(b" ")[1:2] == [b"101"] and any(line.partition(b":")[0].strip().lower() == b"sec-websocket-accept" and line.partition(b":")[2].strip() == accept for line in headers):
         ws.settimeout(None)
         return Frames(ws), status
     ws.close()

@@ -6,22 +6,8 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
-import type { JobSpecSchema, Json, Webhook } from '../../src/protocol';
+import type { HookConfig, JobSpecSchema, Json, Webhook } from '../../src/protocol';
 import type { Env } from './env';
-
-/** A project's webhook: its GitHub repo, the branches that build (absent: the repo's default branch), whether
- *  same-repo pull requests do, the deployment secret holding a GitHub token, the secret GitHub signs deliveries with
- *  (kept only here, never answered back), and the GitHub hook's id when the CLI made it, so `remove` deletes it too. */
-export const HookConfigSchema = v.object({
-  repo: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u, 'a repo is owner/name')),
-  branches: v.optional(v.array(v.pipe(v.string(), v.minLength(1)))),
-  pullRequests: v.optional(v.boolean(), false),
-  tokenSecret: v.optional(v.pipe(v.string(), v.regex(/^[A-Z_][A-Z0-9_]{0,63}$/u)), 'GITHUB_TOKEN'),
-  secret: v.pipe(v.string(), v.minLength(16)),
-  hook: v.optional(v.number()),
-});
-
-export type HookConfig = v.InferOutput<typeof HookConfigSchema>;
 
 /** What a delivery asks for, once the event and the config decide it. */
 export type Ask =
@@ -109,7 +95,7 @@ export class ArmadaWebhooks extends DurableObject<Env> {
     return { repo: config.repo, hook: config.hook };
   }
 
-  /** Whether this delivery was answered in the last day, recording it when it was not. */
+  /** Whether a delivery was answered in the last day, recording it: a delivery GitHub sends again is answered once. */
   async seen(delivery: string): Promise<boolean> {
     if ((await this.ctx.storage.get<number>(`del:${delivery}`)) !== undefined) return true;
     await this.ctx.storage.put(`del:${delivery}`, Date.now());
@@ -118,14 +104,26 @@ export class ArmadaWebhooks extends DurableObject<Env> {
     return false;
   }
 
-  /** The driver job a commit got in the last week, if any. */
-  async driving(project: string, sha: string): Promise<string | undefined> {
-    return (await this.ctx.storage.get<{ readonly job: string }>(`driver:${project}/${sha}`))?.job;
+  /** Forgets a delivery that started nothing, so GitHub's redelivery is taken. */
+  async unseen(delivery: string): Promise<void> {
+    await this.ctx.storage.delete(`del:${delivery}`);
   }
 
-  async drove(project: string, sha: string, job: string): Promise<void> {
+  /** Reserves the commit's driver for job `job` and answers null, or answers the job it already has. Storage alone, so
+   *  two deliveries of one commit never both get it. */
+  async claim(project: string, sha: string, job: string): Promise<string | null> {
+    const held = (await this.ctx.storage.get<{ readonly job: string }>(`driver:${project}/${sha}`))?.job;
+
+    if (held !== undefined) return held;
     await this.ctx.storage.put(`driver:${project}/${sha}`, { job, at: Date.now() });
     await this.prunes();
+
+    return null;
+  }
+
+  /** Gives up job `job`'s reservation of the commit's driver, if it still holds it. */
+  async unclaim(project: string, sha: string, job: string): Promise<void> {
+    if ((await this.ctx.storage.get<{ readonly job: string }>(`driver:${project}/${sha}`))?.job === job) await this.ctx.storage.delete(`driver:${project}/${sha}`);
   }
 
   /** Forgets deliveries and drivers past their windows, then sleeps until the next one is due. */
@@ -174,8 +172,7 @@ rm -rf /tmp/bun.zip /tmp/bun-linux-x64`,
  *  added at claim) are read only from the environment, so the job's log keeps them masked. */
 const DRIVER = String.raw`set -eu
 github=$(printenv "$ARMADA_GITHUB_SECRET")
-mkdir -p "$HOME/.config/armada" "$HOME/repo" "$HOME/armada"
-printf '{"url":"%s","token":"%s","account":""}\n' "$ARMADA_URL" "$ARMADA_TOKEN" > "$HOME/.config/armada/connection.json"
+mkdir -p "$HOME/repo" "$HOME/armada"
 # The HTTP code gets a name of its own: a function's variables are the script's, and 'code' holds the run's exit.
 status() {
   answered=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
@@ -190,8 +187,8 @@ git -C "$HOME/armada" fetch -q --depth 1 ${ARMADA_REPO} "$ARMADA_DEPLOYED" \
 git -C "$HOME/armada" checkout -q FETCH_HEAD
 (cd "$HOME/armada" && bun install --frozen-lockfile --production --silent)
 git -C "$HOME/repo" init -q
-git -C "$HOME/repo" fetch -q --depth 1 "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
-  || git -C "$HOME/repo" fetch -q --depth 1 "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
+git -C "$HOME/repo" fetch -q "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
+  || git -C "$HOME/repo" fetch -q "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
 git -C "$HOME/repo" checkout -q FETCH_HEAD
 cd "$HOME/repo"
 set +e

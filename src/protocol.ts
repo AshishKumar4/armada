@@ -440,6 +440,20 @@ export const WebhookSchema = v.object({
 
 export type Webhook = v.InferOutput<typeof WebhookSchema>;
 
+/** A project's webhook: its GitHub repo, the branches that build (absent: the repo's default branch), whether
+ *  same-repo pull requests do, the deployment secret holding a GitHub token, the secret GitHub signs deliveries with
+ *  (kept only here, never answered back), and the GitHub hook's id when the CLI made it, so `remove` deletes it too. */
+export const HookConfigSchema = v.object({
+  repo: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u, 'a repo is owner/name')),
+  branches: v.optional(v.array(v.pipe(v.string(), v.minLength(1)))),
+  pullRequests: v.optional(v.boolean(), false),
+  tokenSecret: v.optional(v.pipe(v.string(), v.regex(/^[A-Z_][A-Z0-9_]{0,63}$/u)), 'GITHUB_TOKEN'),
+  secret: v.pipe(v.string(), v.minLength(16)),
+  hook: v.optional(v.number()),
+});
+
+export type HookConfig = v.InferOutput<typeof HookConfigSchema>;
+
 export const WebhooksSchema = v.object({ webhooks: v.array(WebhookSchema) });
 
 /** The environments a deployment keeps the snapshots of beyond those its open jobs use, unless its deploy names another

@@ -9,7 +9,7 @@ import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './d
 import { registryCredentials } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, errorOf, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -278,11 +278,11 @@ function accounts(): readonly { readonly id: string; readonly name: string }[] {
 
 /** `--account`, else the login's one account. */
 function accountOf(): string {
-  const all = accounts();
   const named = option('account');
-  const [only] = all;
 
   if (named !== undefined) return named;
+  const all = accounts();
+  const [only] = all;
 
   if (only !== undefined && all.length === 1) return only.id;
 
@@ -331,10 +331,18 @@ async function healthOf(name: string, deployed: Armada): Promise<Health | null> 
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
 async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean, keep: number): Promise<number> {
   const account = accountOf();
+  const file = connectionFile(name);
+  // One read of the deployment as this machine knows it, for both its preflight and its bearer: a connection of another
+  // account would drain that deployment and lend its bearer to this one.
+  const known = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))) : null;
+
+  if (known !== null && known.account !== '' && known.account !== account) {
+    throw new Error(`${file} is ${name} in account ${known.account}, not ${account}; deploy this one under another --name`);
+  }
+
   // Minted before anything changes, so a login that cannot mint them fails the deploy with the deployment as it was.
   const registry = await mintRegistry(account);
-  const file = connectionFile(name);
-  const deployed = existsSync(file) ? new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8')))) : null;
+  const deployed = known === null ? null : new Armada(known);
   let drained = false;
 
   const admit = async () => {
@@ -362,7 +370,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     const health = deployed === null ? null : await healthOf(name, deployed);
 
     if (deployed !== null && mustDrain(health, forceDrain)) await drain(deployed, () => { drained = true; });
-    await install(account, name, file, { vcpus, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    await install(account, name, file, { vcpus, token: known?.token, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
@@ -426,14 +434,15 @@ async function mintRegistry(account: string): Promise<{ readonly credentials: st
 /** Where a deploy builds the dashboard the Worker serves (wrangler.jsonc's `assets`). */
 const DASHBOARD = join(ROOT, 'dist', 'dashboard');
 
-/** What a deploy gives the Worker beyond its code: its fleet's vCPUs (the default when undefined), and its secrets
- *  beside its bearer. */
+/** What a deploy gives the Worker beyond its code: its fleet's vCPUs (the default when undefined), its bearer (a new
+ *  one when undefined), and its secrets. */
 interface Given {
   readonly vcpus: number | undefined;
+  readonly token: string | undefined;
   readonly secrets: Readonly<Record<string, string>>;
 }
 
-async function install(account: string, name: string, file: string, { vcpus, secrets }: Given): Promise<void> {
+async function install(account: string, name: string, file: string, { vcpus, token: kept, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -459,7 +468,7 @@ async function install(account: string, name: string, file: string, { vcpus, sec
     .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`)
     .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${sourceSha()}"`));
 
-  const token = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))).token : [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const token = kept ?? [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   const secretsFile = join(tmpdir(), `armada-secrets-${String(process.pid)}.json`);
 
   // Uploaded with the version, so every object that starts on it has them: a secret put after the deploy reached no
@@ -472,8 +481,10 @@ async function install(account: string, name: string, file: string, { vcpus, sec
 
     if (url === undefined) throw new Error(`the deploy printed no workers.dev URL:\n${deployed.slice(-2000)}`);
     mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n');
-    chmodSync(file, 0o600);
+
+    // Private before it holds the bearer.
+    if (existsSync(file)) chmodSync(file, 0o600);
+    writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n', { mode: 0o600 });
     console.log(`${name} is deployed at ${url}\ntry it: armada map${name === 'armada' ? '' : ` --connection=${file}`} --times=3 --json -- echo hello {item}`);
   } finally {
     rmSync(config, { force: true });
@@ -596,9 +607,18 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   if (project === undefined || (verb !== 'add' && verb !== 'remove')) throw new Error('webhook takes add <project>, list or remove <project>; see armada --help');
 
   if (verb === 'remove') {
-    const removed = v.parse(v.object({ removed: v.string(), repo: v.optional(v.string()), hook: v.optional(v.number()) }), await (await armada.call(`/webhooks/${project}`, { method: 'DELETE' })).json());
+    // GitHub's hook goes first: the deployment's config is the only record of which hook it is.
+    const held = (await listed()).find((each) => each.project === project);
 
-    if (removed.hook !== undefined && removed.repo !== undefined && ghOut(['api', `repos/${removed.repo}/hooks/${String(removed.hook)}`, '-X', 'DELETE']) !== null) console.log(`deleted GitHub hook ${String(removed.hook)} on ${removed.repo}`);
+    if (held?.hook !== undefined) {
+      if (ghOut(['api', `repos/${held.repo}/hooks/${String(held.hook)}`, '-X', 'DELETE']) === null) {
+        throw new Error(`deleting GitHub hook ${String(held.hook)} on ${held.repo} failed, as gh said above; ${project} is kept so you can try again`);
+      }
+
+      console.log(`deleted GitHub hook ${String(held.hook)} on ${held.repo}`);
+    }
+
+    await armada.call(`/webhooks/${project}`, { method: 'DELETE' });
     console.log(`removed ${project}`);
 
     return 0;
@@ -606,12 +626,15 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
   const repo = option('repo');
 
-  if (repo === undefined || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repo)) throw new Error('webhook add needs --repo=<owner/name>');
+  if (repo === undefined) throw new Error('webhook add needs --repo=<owner/name>');
+  v.parse(Project, project);
   const signing = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   const url = `${new URL(armada.connection.url).origin}/webhooks/github/${project}`;
   const pullRequests = flag('pull-requests');
   const events = pullRequests ? ['push', 'pull_request'] : ['push'];
   const settings = ['-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${url}`, '-F', `config[secret]=${signing}`, ...events.flatMap((event) => ['-f', `events[]=${event}`])];
+  // Checked as the deployment will, before GitHub signs with a secret the deployment might then refuse.
+  const proposed = v.parse(HookConfigSchema, { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret: signing });
   const known = (await listed()).find((each) => each.project === project && each.repo === repo)?.hook;
   const signedIn = ghOut(['auth', 'status']) !== null;
 
@@ -624,10 +647,7 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
   // A hook whose update failed still signs with its old secret: storing the new one would refuse its deliveries.
   if (known !== undefined && hook === undefined) throw new Error(`updating GitHub hook ${String(known)} on ${repo} failed, as gh said above; the deployment's secret is unchanged`);
-  // JSON leaves the options not given out, so the deployment's defaults apply.
-  const config = { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret: signing, hook };
-
-  await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config) });
+  await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...proposed, hook }) });
   console.log(`configured ${project}: ${repo} builds ${pullRequests ? 'pushes and pull requests' : 'pushes'} at ${url}`);
 
   if (hook !== undefined) {
@@ -647,7 +667,10 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
 /** What `gh <args>` printed, trimmed, or null when it failed (its error said) or is not installed. */
 function ghOut(argv: readonly string[]): string | null {
-  const ran = Bun.spawnSync(['gh', ...argv], { stdout: 'pipe', stderr: 'pipe' });
+  const gh = Bun.which('gh');
+
+  if (gh === null) return null;
+  const ran = Bun.spawnSync([gh, ...argv], { stdout: 'pipe', stderr: 'pipe' });
 
   if (ran.exitCode === 0) return ran.stdout.toString().trim();
 

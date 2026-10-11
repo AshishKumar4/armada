@@ -6,11 +6,11 @@
 import * as v from 'valibot';
 import {
   briefOf, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
-  TaskSchema, TimingsSchema,
+  HookConfigSchema, TaskSchema, TimingsSchema, type HookConfig, type Json,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
-import { driverSpec, eventOf, HookConfigSchema } from './hooks';
+import { driverSpec, eventOf } from './hooks';
 import type { ArmadaFleet } from './fleet';
 import { fleetRefusal } from './job';
 
@@ -498,7 +498,30 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
 
   if (delivery !== '' && await hooks.seen(delivery)) return ignored('duplicate');
 
-  const asked = eventOf(request.headers.get('X-GitHub-Event') ?? '', jsonOf(body), config);
+  // A delivery that starts no job is forgotten, so GitHub's redelivery, once the cause is fixed, is taken.
+  try {
+    return await drive(request, env, { project, config, payload: jsonOf(body) });
+  } catch (cause) {
+    if (delivery !== '') await hooks.unseen(delivery);
+
+    if (cause instanceof Refused) return Response.json({ error: cause.message }, { status: cause.status });
+
+    throw cause;
+  }
+}
+
+/** A delivery the deployment cannot start a job for yet, with the status GitHub is answered. */
+class Refused extends Error {
+  constructor(readonly status: 409 | 503, message: string) {
+    super(message);
+  }
+}
+
+/** A valid delivery's driver job, started once per commit; a refusal throws, so its delivery is forgotten. */
+async function drive(request: Request, env: Env, { project, config, payload }: { readonly project: string; readonly config: HookConfig; readonly payload: Json }): Promise<Response> {
+  const ignored = (note: string) => Response.json({ note });
+  const hooks = env.WEBHOOKS.getByName(SINGLE);
+  const asked = eventOf(request.headers.get('X-GitHub-Event') ?? '', payload, config);
 
   if (asked.kind === 'ping') return ignored('pong');
 
@@ -509,28 +532,36 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
   const sha = asked.sha;
 
   if ((await env.ARTIFACTS.head(`verdicts/${project}/${sha}.json`)) !== null) return ignored('already');
-  const open = await hooks.driving(project, sha);
-
-  if (open !== undefined) {
-    const prior = await env.JOB.getByName(open).status();
-
-    if (prior !== null && prior.phase !== 'done') return ignored('already');
-  }
 
   // The driver installs armada at the commit this Worker was deployed from, which `armada deploy` records.
-  if (env.ARMADA_SHA === undefined || env.ARMADA_SHA === '') return Response.json({ error: 'this Worker does not know its commit; deploy it with armada deploy' }, { status: 503 });
+  if (env.ARMADA_SHA === undefined || env.ARMADA_SHA === '') throw new Refused(503, 'this Worker does not know its commit; deploy it with armada deploy');
   const spec = v.parse(JobSpecSchema, driverSpec(project, sha, { origin: new URL(request.url).origin, sha: env.ARMADA_SHA }, config));
   const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
   const unset = spec.secrets.find((name) => !(name in held));
 
-  if (unset !== undefined) return Response.json({ error: `no secret ${unset} is set; run armada secret set ${unset}` }, { status: 409 });
-  // Counted open only once nothing above can refuse it, so a drain never waits on a job that was never made.
+  if (unset !== undefined) throw new Refused(409, `no secret ${unset} is set; run armada secret set ${unset}`);
   const created = jobId();
-  const fleet = env.FLEET.getByName(SINGLE);
+  const prior = await hooks.claim(project, sha, created);
 
-  if (!(await fleet.reserve(env.VERSION.id, created))) return Response.json({ error: 'armada is being redeployed and takes no new job until that is done' }, { status: 503 });
-  await closedOnFailure(fleet, created, async () => { await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin); });
-  await hooks.drove(project, sha, created);
+  // A commit's driver that ended without a verdict may run again.
+  if (prior !== null) {
+    if ((await env.JOB.getByName(prior).status())?.phase !== 'done') return ignored('already');
+    await hooks.unclaim(project, sha, prior);
+
+    if ((await hooks.claim(project, sha, created)) !== null) return ignored('already');
+  }
+
+  try {
+    const fleet = env.FLEET.getByName(SINGLE);
+
+    // Counted open only once nothing above can refuse it, so a drain never waits on a job that was never made.
+    if (!(await fleet.reserve(env.VERSION.id, created))) throw new Refused(503, 'armada is being redeployed and takes no new job until that is done');
+    await closedOnFailure(fleet, created, async () => { await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin); });
+  } catch (cause) {
+    await hooks.unclaim(project, sha, created);
+
+    throw cause;
+  }
 
   return Response.json({ started: created });
 }
