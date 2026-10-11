@@ -95,7 +95,9 @@ interface Attempt {
   readonly duplicate: boolean;
 }
 
-/** Lost vessels a job replaces before it stops replacing them. */
+/** Vessels lost under a task that a job replaces before it stops replacing them. One lost before it took any task
+ *  was lost to its container's start, which says nothing of the job's tasks: those are replaced apart, as many as the
+ *  job's pool and at least as many as these (`vesselFailed`). */
 const REPLACEMENTS = 8;
 
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
@@ -162,8 +164,9 @@ export class ArmadaJob extends DurableObject<Env> {
 
     this.insert(items);
     await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
-    await this.ctx.storage.setAlarm(Date.now());
+    // Counted open before it can run, so its conclusion, which counts it closed, comes after.
     await this.env.FLEET.getByName(SINGLE).opened(id);
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   /** A task's one outcome, onto the stream with when it landed. */
@@ -759,6 +762,11 @@ export class ArmadaJob extends DurableObject<Env> {
 
     // A container that may still be up may still run its tasks.
     if (gone) this.runs.gone(name);
+
+    const took = Number(this.sql.exec('SELECT tasks FROM vessels WHERE name = ?', name).toArray()[0]?.['tasks'] ?? 0) > 0
+      || Number(this.sql.exec(`SELECT COUNT(*) AS n FROM tasks WHERE (vessel = ? OR dup = ?) AND state IN ('running', 'landing')`, name, name).one()['n']) > 0
+      || Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE vessel = ?', name).one()['n']) > 0;
+
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
@@ -787,6 +795,8 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     const replaced = (await this.ctx.storage.get<number>('replaced')) ?? 0;
+    const rebooted = (await this.ctx.storage.get<number>('rebooted')) ?? 0;
+    const allowed = took ? replaced < REPLACEMENTS : rebooted < Math.max(REPLACEMENTS, spec.pool);
     const generation = await this.ctx.storage.get<Generation>('environment');
 
     if (missing !== undefined) {
@@ -799,10 +809,10 @@ export class ArmadaJob extends DurableObject<Env> {
 
       await this.awaitEnvironment(spec);
       await this.grow();
-    } else if (this.count(`state IN ('queued', 'forming')`) > 0 && replaced < REPLACEMENTS && generation !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running') {
-      const next = `r${String(replaced + 1)}`;
+    } else if (this.count(`state IN ('queued', 'forming')`) > 0 && allowed && generation !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running') {
+      const next = `r${String(replaced + rebooted + 1)}`;
 
-      await this.ctx.storage.put('replaced', replaced + 1);
+      await this.ctx.storage.put(took ? 'replaced' : 'rebooted', (took ? replaced : rebooted) + 1);
       this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', next, 'waiting', Date.now());
       await this.launch(spec, generation, next);
     }

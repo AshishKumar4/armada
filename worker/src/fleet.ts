@@ -109,6 +109,11 @@ export class ArmadaFleet extends DurableObject<Env> {
     return [...(await this.ctx.storage.list({ prefix: 'job:' })).keys()].map((name) => name.slice('job:'.length));
   }
 
+  /** The jobs not yet done, each with when it was admitted or made. */
+  async openSince(): Promise<{ id: string; at: number }[]> {
+    return [...(await this.ctx.storage.list<number>({ prefix: 'job:' }))].map(([name, at]) => ({ id: name.slice('job:'.length), at }));
+  }
+
   async jobs(): Promise<number> {
     return (await this.ctx.storage.list({ prefix: 'job:' })).size;
   }

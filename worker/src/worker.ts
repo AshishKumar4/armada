@@ -422,7 +422,9 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
-  if (head === 'drain' && request.method === 'POST') return Response.json({ jobs: await fleet.drain(env.VERSION.id) });
+  if (head === 'drain' && request.method === 'POST') {
+    return Response.json({ jobs: (await fleet.drain(env.VERSION.id)) === 0 ? 0 : await stillOpen(env, fleet) });
+  }
 
   if (head === 'drain' && request.method === 'DELETE') {
     await fleet.admit();
@@ -447,6 +449,27 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
 
   return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
+}
+
+/** How long a job admitted but not yet made is counted open on the word of its admission alone. */
+const MAKING_MS = 10 * 60_000;
+
+/** How many of the fleet's open jobs are still running by their own record. One whose record is done, or that has
+ *  none `MAKING_MS` after it was admitted, concluded or was never made without being counted closed, by a version that
+ *  leaked it or a race, and a drain would wait on it for ever (three held armada-dew2's on 2026-10-10): it is counted
+ *  closed here. */
+async function stillOpen(env: Env, fleet: DurableObjectStub<ArmadaFleet>): Promise<number> {
+  const now = Date.now();
+  let left = 0;
+
+  for (const { id, at } of await fleet.openSince()) {
+    const status = await env.JOB.getByName(id).status();
+
+    if (status?.phase === 'done' || (status === null && now - at > MAKING_MS)) await fleet.closed(id);
+    else left += 1;
+  }
+
+  return left;
 }
 
 /** Whether `signature` is GitHub's `X-Hub-Signature-256` for `body` under `secret`, timed-safe. */

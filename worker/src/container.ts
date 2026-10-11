@@ -29,19 +29,26 @@ export const slotTask = (slot: number): string => `${slotRoot(slot)}/task`;
  *  could end together. */
 export const maskValuesOf = (slot: number): string => `${slotRoot(slot)}/mask.json`;
 
-/** Where slot `slot`'s next task's argv waits for its launch (`launchArgv`), outside the dirs the launch recreates. */
+/** Where slot `slot`'s next task's argv and environment wait for its launch (`launchArgv`), outside the dirs the
+ *  launch recreates. */
 export const argvOf = (slot: number): string => `${STATE}/argv/${String(slot)}`;
 
-/** A launch's script that takes its task's argv from `path` and goes on as `script`: the argv set as the positional
- *  parameters `script` reads, from the words `positional` wrote there. An exec's own arguments ride in its request,
- *  which the runtime fails as an `internal error` past about 128 KiB in one argument or 1 MB in all; a file `pipeIn`
+/** A launch's script that takes its task's argv and environment from `path`, removes it, and goes on as `script`: the
+ *  argv set as the positional parameters `script` reads and the environment exported, as `positional` wrote them there.
+ *  An exec's own arguments and environment ride in its request, which the runtime fails as an `internal error` past
+ *  about 128 KiB in one string or 1 MB in all, and an item's `ARMADA_ITEM` alone can be that large; a file `pipeIn`
  *  writes takes any size. */
-export const launchArgv = (path: string, script: string): string => `. ${path}\n${script}`;
+export const launchArgv = (path: string, script: string): string => `. ${path}\nrm -f ${path}\n${script}`;
 
-/** `argv` as the shell line that makes it the positional parameters: each word single-quoted, a quote inside one closed,
- *  escaped and reopened, so every byte a word holds reaches the command unchanged. */
-export function positional(argv: readonly string[]): string {
-  return `set -- ${argv.map((word) => `'${word.replaceAll("'", String.raw`'\''`)}'`).join(' ')}\n`;
+/** A word single-quoted for the shell: a quote inside it closed, escaped and reopened, so every byte reaches the
+ *  command unchanged. */
+const quoted = (word: string): string => `'${word.replaceAll("'", String.raw`'\''`)}'`;
+
+/** `argv` as the shell line that makes it the positional parameters, and `env` as the lines that export it. */
+export function positional(argv: readonly string[], env: Readonly<Record<string, string>> = {}): string {
+  const exported = Object.entries(env).map(([name, value]) => `export ${name}=${quoted(value)}\n`).join('');
+
+  return `set -- ${argv.map(quoted).join(' ')}\n${exported}`;
 }
 
 /** Where the container's main process marks that the platform asked the container to stop (`hold`). */
@@ -369,9 +376,11 @@ export async function must(container: Container, doing: string, argv: readonly s
 
 /** `body` written to `path` for the user, through a pipe: an exec's `stdin` given a stream fails on large bodies
  *  (`internal error`), the pipe does not. `path` is replaced whole once written, so a script already reading it reads
- *  it as it was. */
-export async function pipeIn(container: Container, body: ReadableStream | string, path: string): Promise<void> {
-  const writer = await container.exec(['/bin/sh', '-c', 'mkdir -p "$(dirname "$1")" && part="$(mktemp "$1.XXXXXX")" && cat > "$part" && chmod 644 "$part" && chown ci:ci "$part" && mv -f "$part" "$1"', 'pipe-in', path], { stdin: 'pipe' });
+ *  it as it was. `secret` keeps it root's alone (mode 600), for a body only the launch reads, which holds the task's
+ *  secrets. */
+export async function pipeIn(container: Container, body: ReadableStream | string, path: string, { secret = false } = {}): Promise<void> {
+  const owned = secret ? '' : ' && chmod 644 "$part" && chown ci:ci "$part"';
+  const writer = await container.exec(['/bin/sh', '-c', `mkdir -p "$(dirname "$1")" && part="$(mktemp "$1.XXXXXX")" && cat > "$part"${owned} && mv -f "$part" "$1"`, 'pipe-in', path], { stdin: 'pipe' });
 
   if (writer.stdin === null) throw new Error(`writing ${path}: the exec took no stdin`);
   const source = body instanceof ReadableStream ? body : new Blob([body]).stream();
@@ -438,16 +447,19 @@ export async function startAndAnswer(container: Container, options: ContainerSta
 
     if (gone()) throw new MissingSnapshot(snapshot, ended, { cause: first.reason });
     const refused = first.reason instanceof Error ? `${first.reason.message} ${String(first.reason.cause)}` : String(first.reason);
+    // The runtime killed the container as it came up: a restored snapshot's first exec exits 137 (146 of a suite's 208
+    // containers at once on 2026-10-10). It is started again, as one whose start ended is.
+    const killed = refused.startsWith('the first exec exited 137');
 
-    if (!/has not been started|is not running/u.test(refused) || Date.now() > deadline) {
+    if (!(killed || /has not been started|is not running/u.test(refused)) || Date.now() > deadline) {
       throw ended === '' ? first.reason : new Error(`the container's start ended: ${ended}`, { cause: first.reason });
     }
 
     await scheduler.wait(START_POLL_MS);
 
-    // A container still starting is not running either; only one whose start ended is started again, and one whose
-    // snapshot is gone never is.
-    if (ended !== '' && !gone()) {
+    // A container still starting is not running either; only one whose start ended, or was killed, is started again,
+    // and one whose snapshot is gone never is.
+    if (!gone() && (ended !== '' || killed)) {
       ended = '';
       await startFresh(container, options);
       watch();

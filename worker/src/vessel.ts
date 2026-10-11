@@ -91,6 +91,9 @@ const START_MS = 240_000;
 
 const EXEC_MS = 90_000;
 
+/** A name `export` takes: the task's variables named so reach it through its launch file (`positional`). */
+const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
 /** One alarm's share of the loop; the next alarm takes it up at once. */
 const SLICE_MS = 50_000;
 
@@ -416,14 +419,18 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.network(container, claim.gang);
     const argv = argvOf(slot);
 
-    await pipeIn(container, positional(claim.argv), argv);
+    // Names a shell can export go in the file; any other stays in the exec, as before.
+    const exported = Object.fromEntries(Object.entries(claim.env).filter(([name]) => SHELL_NAME.test(name)));
+    const rest = Object.fromEntries(Object.entries(claim.env).filter(([name]) => !SHELL_NAME.test(name)));
+
+    await pipeIn(container, positional(claim.argv, exported), argv, { secret: true });
 
     if (layout.isolated) {
       // Its own cgroup too, so a task's group reads and caps reach the slot's, not the single task group.
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, spec.slotMemoryBytes, spec.tmpfs)), 'launch'], { env: { ...claim.env, ARMADA_CGROUP: layout.group }, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, spec.slotMemoryBytes, spec.tmpfs)), 'launch'], { env: { ...rest, ARMADA_CGROUP: layout.group }, ms: EXEC_MS });
       await keep();
     } else {
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir)), 'launch'], { env: claim.env, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir)), 'launch'], { env: rest, ms: EXEC_MS });
     }
   }
 

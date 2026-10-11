@@ -316,6 +316,17 @@ describe('a CI run\'s pool', () => {
       .toEqual([null, said(MAX_ARGUMENT_BYTES + 1), said(131_072)]);
   });
 
+  test('refuses an item whose JSON is longer than ARMADA_ITEM can hold, for a command and a pushed task', () => {
+    const items = (size: number) => [{ item: 'x'.repeat(size) }];
+    const said = (bytes: number) => `item 0 is ${String(bytes)} bytes as ARMADA_ITEM, and Linux starts no process with an environment string over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the task reads`;
+    // `ARMADA_ITEM=` and the JSON string's two quotes.
+    const fits = MAX_ARGUMENT_BYTES - 'ARMADA_ITEM='.length - 2;
+
+    expect([refusal({ kind: 'task' }, items(fits), 4), refusal({ kind: 'task' }, items(fits + 1), 4),
+      refusal({ kind: 'command' }, items(fits + 1).map((task) => ({ ...task, argv: ['true'] })), 4)])
+      .toEqual([null, said(MAX_ARGUMENT_BYTES + 1), said(MAX_ARGUMENT_BYTES + 1)]);
+  });
+
   test('refuses a gang under more than one slot: a gang takes a whole container', () => {
     const gang = [{ item: { gang: 4 }, argv: ['true'] }];
 

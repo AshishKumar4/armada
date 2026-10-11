@@ -263,6 +263,17 @@ describe('a task whose container stopped under it', () => {
   });
 });
 
+describe('a vessel lost before it took a task', () => {
+  test('is replaced apart from the losses under a task, as many as the job\'s pool', async () => {
+    const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });
+    const replacements = Array.from({ length: 12 }, (_, index) => `r${String(index + 1)}`);
+
+    for (const vessel of ['v1', ...replacements]) await booting.vesselFailed(vessel, 'the first exec exited 137: ');
+
+    expect(begun).toEqual(['j1/v1', ...replacements.map((vessel) => `j1/${vessel}`)]);
+  });
+});
+
 describe('a vessel that found no task', () => {
   test('no longer counts toward the pool, so an item an open job takes before the vessel retires gets a vessel', async () => {
     const task = { item: 'a', argv: ['true'] };

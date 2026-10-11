@@ -35,6 +35,7 @@ function once(claim: Claim) {
  *  when the runtime restarted it, whether its artifacts packed, and its claim's gang rank. */
 interface Run {
   readonly argv?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
   readonly usage?: { readonly exitCode: number; readonly stdout: string } | Error;
   readonly out?: string;
   readonly stopping?: string;
@@ -44,16 +45,18 @@ interface Run {
 }
 
 /** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
-async function run(lost: number, { argv: words = ['true'], usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang }: Run = {}) {
+async function run(lost: number, { argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   const execs: (readonly string[])[] = [];
+  const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
-  const task = once({ index: 0, attempt: 1, argv: [...words], env: {}, secrets: [], duplicate: false, gang });
+  const task = once({ index: 0, attempt: 1, argv: [...words], env: { ...env }, secrets: [], duplicate: false, gang });
   let waits = 0;
 
-  const stored = state(container((argv) => {
+  const stored = state(container((argv, options) => {
     execs.push(argv);
+    envs.push(options?.env);
 
     if (argv[2] === usageOf(TASK_GROUP)) return usage;
 
@@ -98,24 +101,27 @@ async function run(lost: number, { argv: words = ['true'], usage = { exitCode: 0
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects, execs, piped };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects, execs, envs, piped };
 }
 
-describe('a task\'s argv', () => {
-  test('reaches its launch in a file, not in the exec, which the runtime fails past 128 KiB an argument, and keeps every byte', async () => {
+describe('a task\'s argv and environment', () => {
+  test('reach its launch in a file, not in the exec, which the runtime fails past 128 KiB a string, and keep every byte', async () => {
     const argv = ['sh', '-c', `it's "q" $HOME \`id\` \\ \n`, '', 'é', 'a'.repeat(200_000)];
-    const { exits, execs, piped } = await run(0, { argv });
-    const launch = execs.find((exec) => exec[3] === 'launch') ?? [];
+    const env = { ARMADA_ITEM: JSON.stringify({ payload: 'b'.repeat(120_000), quote: "it's" }), PLAIN: 'x y' };
+    const { exits, execs, envs, piped } = await run(0, { argv, env });
+    const at = execs.findIndex((exec) => exec[3] === 'launch');
+    const launch = execs[at] ?? [];
     const scratch = mkdtempSync(join(tmpdir(), 'armada-argv-'));
 
     try {
       const path = join(scratch, 'argv');
 
       writeFileSync(path, piped.get(argvOf(0)) ?? '');
-      const read = Bun.spawnSync(['/bin/sh', '-c', `. ${path}; printf '%s\\0' "$@"`]).stdout.toString().split('\0').slice(0, -1);
+      const read = Bun.spawnSync(['/bin/sh', '-c', `. ${path}; printf '%s\\0' "$@" "$ARMADA_ITEM" "$PLAIN"`]).stdout.toString().split('\0').slice(0, -1);
 
-      expect({ exits, words: launch.slice(3), sourced: (launch[2] ?? '').startsWith(`. ${argvOf(0)}\n`), read: read.length === argv.length && read.every((word, index) => word === argv[index]) })
-        .toEqual({ exits: [0], words: ['launch'], sourced: true, read: true });
+      expect({ exits, words: launch.slice(3), env: envs[at], sourced: (launch[2] ?? '').startsWith(`. ${argvOf(0)}\nrm -f ${argvOf(0)}\n`),
+        read: read.length === argv.length + 2 && read.every((word, index) => word === [...argv, env.ARMADA_ITEM, env.PLAIN][index]) })
+        .toEqual({ exits: [0], words: ['launch'], env: {}, sourced: true, read: true });
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
