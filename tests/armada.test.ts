@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor, remainingDeadline } from '../src/ci';
 import { matches, parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, gitEnv } from './fakes';
 
@@ -595,6 +595,31 @@ describe('the CLI\'s arguments', () => {
       const argv = ['tool', '--output', '--items=x'];
 
       expect({ exit: await cli.exited, jobs }).toMatchObject({ exit: 0, jobs: [{ items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false }] });
+      expect(v.parse(JobSpecSchema, jobs[0]).deadline).toBe(21600);
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
+describe('a map deadline', () => {
+  test('a deadline shorter than an explicit task timeout is refused by name before any request', async () => {
+    const requests: string[] = [];
+
+    const server = Bun.serve({ port: 0, fetch: (request) => {
+      requests.push(new URL(request.url).pathname);
+
+      return Response.json({});
+    } });
+
+    try {
+      const cli = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=1', '--timeout=1800', '--deadline=1799', '--', 'true'], {
+        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+
+      expect(await cli.exited).toBe(2);
+      expect(await new Response(cli.stderr).text()).toContain('JobDeadlineTooShort: job deadline 1799 s is shorter than the task timeout 1800 s');
+      expect(requests).toHaveLength(0);
     } finally {
       await server.stop(true);
     }
@@ -804,10 +829,11 @@ describe('armada run', () => {
       expect(ran.bodies).toHaveLength(2);
 
       for (const body of ran.bodies) {
-        const bound = v.parse(v.object({ deadline: v.number() }), body).deadline;
+        const { deadline: bound, timeout } = v.parse(v.object({ deadline: v.number(), timeout: v.number() }), body);
 
         expect(bound).toBeGreaterThan(0);
         expect(bound).toBeLessThanOrEqual(most);
+        expect(timeout).toBeLessThanOrEqual(bound);
       }
     }
   });

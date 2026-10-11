@@ -808,7 +808,7 @@ describe('a job deadline', () => {
 
     try {
       setSystemTime(began);
-      const { job: open, stopped, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, deadline: 20, timeout: 3600 });
+      const { job: open, stopped, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, deadline: 20 });
 
       await open.claim('v1');
       setSystemTime(began + 19_999);

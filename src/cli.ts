@@ -9,7 +9,7 @@ import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './d
 import { registryCredentials } from './registry';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, errorOf, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, deadlineRefusal, describeUsage, errorOf, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -48,7 +48,7 @@ map options:
   --pool=N             the most containers at once (default 50)
   --slots=N            the tasks one container runs at once, each in its own slot (default 1)
   --timeout=S          a task's limit, in seconds (default 3600)
-  --deadline=S         the whole job's limit, including starts, in seconds (default 1800)
+  --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
   --gang-start-timeout=S  all gang ranks must launch within this many seconds (default 300)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
@@ -152,6 +152,12 @@ async function map(): Promise<number> {
     throw new Error('map needs one of --times=N and --items=<file|->, and a command after --, as in: armada map --times=3 -- echo {item}');
   }
 
+  const timeout = whole('timeout');
+  const deadline = whole('deadline');
+  const refused = deadlineRefusal(timeout, deadline);
+
+  if (refused !== null) throw new Error(refused);
+
   const armada = connect();
   const began = Date.now();
   const target = option('commit');
@@ -159,9 +165,9 @@ async function map(): Promise<number> {
   const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target);
   const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
   const argv = argvOf(rest, base);
-  const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
+  const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), deadline: whole('deadline'), gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   const id = await job.id;
   let worst = 0;

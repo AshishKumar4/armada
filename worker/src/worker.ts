@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, deadlineRefusal, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   TaskSchema, TimingsSchema,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -150,8 +150,10 @@ const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
 /** `POST /jobs`: the job `created`, which the fleet has already admitted and counts open, made from the request's spec,
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
-  const spec = v.parse(JobSpecSchema, await request.json());
-  const refused = refusal(spec.run, spec.items, spec.pool, spec.slots);
+  const body: unknown = await request.json();
+  const spec = v.parse(JobSpecSchema, body);
+  const requested = v.parse(v.object({ timeout: v.optional(v.number()) }), body);
+  const refused = deadlineRefusal(requested.timeout, spec.deadline) ?? refusal(spec.run, spec.items, spec.pool, spec.slots);
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 

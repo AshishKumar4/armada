@@ -251,12 +251,22 @@ export const SecretName = v.pipe(v.string(), v.regex(/^[A-Z_][A-Z0-9_]{0,63}$/u,
 /** The most a secret's value may hold, in bytes: it rides in a task's environment. */
 export const SECRET_BYTES = 32 * 1024;
 
-/** Below a typical CI runner's 40-minute job timeout, leaving time to report and clean up. Long jobs can opt in to
- *  a larger bound explicitly. */
-export const JOB_DEADLINE_SECONDS = 30 * 60;
+/** General map jobs retain their six-hour limit: wheel builds and preflight runs can legitimately take hours. */
+export const JOB_DEADLINE_SECONDS = 6 * 60 * 60;
+
+/** CI reports its own deadline below a typical runner's 40-minute timeout, leaving time to report and clean up. */
+export const CI_DEADLINE_SECONDS = 30 * 60;
 
 /** The time a gang gets to gather and launch all its ranks, even while those ranks keep heartbeating. */
 export const GANG_START_SECONDS = 5 * 60;
+
+/** A task timeout explicitly requested must fit the whole job's limit. An implicit task timeout does not prevent a
+ *  client from choosing a shorter whole-job bound, as CI does. */
+export function deadlineRefusal(timeout: number | undefined, deadline: number | undefined): string | null {
+  const bound = deadline ?? JOB_DEADLINE_SECONDS;
+
+  return timeout !== undefined && bound < timeout ? `JobDeadlineTooShort: job deadline ${String(bound)} s is shorter than the task timeout ${String(timeout)} s` : null;
+}
 
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,

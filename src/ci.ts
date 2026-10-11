@@ -455,8 +455,9 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
 
   if (here === undefined) {
     // The plan's stdout is its output; its stderr stays in its log.
-    const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: 900 });
-    const planJob = planTask.stream([{}], { ...options, deadline: remainingDeadline(deadlineAt), pool: 1 });
+    const planDeadline = remainingDeadline(deadlineAt);
+    const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: Math.min(900, planDeadline) });
+    const planJob = planTask.stream([{}], { ...options, deadline: planDeadline, pool: 1 });
 
     planId = await planJob.id;
     note(`plan job ${planId}`);
@@ -492,9 +493,6 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   const most = Math.min(config.pool * slots, ranks.reduce((sum, each) => sum + each, 0));
   const estimates = plan.include.map((entry, index) => estimateOf(entry, names[index] ?? '', timings));
   const { lanes, pool } = lanesFor(estimates, ranks, config.pool, slots);
-  // This run's own secrets beside the config's: a deploy's narrowed run passes what its rows read, and the config's
-  // whole tier never sees them.
-  const taskOptions = { timeout: config.task.timeout, speculative: config.task.speculative, hedge: config.task.hedge, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const argv = argvOf(config.task.command.map(placed), spec.recipe);
 
   // An entry with no weight of its own dispatches by its estimate.
@@ -505,6 +503,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   });
 
   const jobOptions = { ...options, deadline: remainingDeadline(deadlineAt), pool };
+  // CI's remaining whole-run budget also bounds its tasks. Its own secrets join the config's only for this run.
+  const taskOptions = { timeout: Math.min(config.task.timeout, jobOptions.deadline), speculative: config.task.speculative, hedge: config.task.hedge, secrets: [...new Set([...config.task.secrets, ...secrets])] };
   const job = config.task.verdict ? commandTask(spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(spec.recipe, argv, taskOptions).stream(entries, jobOptions);
   const jobId = await job.id;
 

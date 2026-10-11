@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { Armada } from '../../src/sdk';
+import { PROTOCOL } from '../../src/protocol';
 import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
@@ -31,6 +32,21 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
 
 describe('a client and a Worker', () => {
+  test('refuses an explicit task timeout beyond its job deadline before making or retaining the job', async () => {
+    const { armada, env, fleet } = deployment();
+    const short = { ...spec, timeout: 1800, deadline: 1799 };
+
+    expect(await settled(armada.create(short))).toBe('Error: JobDeadlineTooShort: job deadline 1799 s is shorter than the task timeout 1800 s');
+    const request = new Request('https://armada.test/jobs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'armada-protocol': String(PROTOCOL) }, body: JSON.stringify(short) });
+    const answer = await worker.fetch(request, env);
+
+    expect(answer.status).toBe(400);
+    expect(v.parse(v.object({ error: v.string() }), await answer.json()).error).toBe('JobDeadlineTooShort: job deadline 1799 s is shorter than the task timeout 1800 s');
+    expect(await fleet.jobs()).toBe(0);
+    // A shorter job bound is still valid when no task timeout was explicitly requested.
+    expect(await settled(armada.create({ ...spec, deadline: 1799 }))).toBe('fulfilled');
+  });
+
   test('that speak versions of the wire too far apart say which one to update, and an older client the wire still fits is served', async () => {
     const { env, armada } = deployment();
 

@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -105,7 +105,7 @@ export interface MapOptions {
   readonly pool?: number;
   /** The tasks one container runs at once, each in its own slot. Default 1. */
   readonly slots?: number;
-  /** The whole job's limit, including preparation and starts, in seconds. Default 1800. */
+  /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
   readonly deadline?: number;
   /** The limit for a gang to gather and launch all its ranks, in seconds. Default 300. */
   readonly gangStartTimeout?: number;
@@ -397,6 +397,9 @@ abstract class Base<I extends Json, O> {
 
   /** Creates the job, all at once for an array and open for an iterable, whose items then follow in batches. */
   private async submit(armada: Armada, items: Iterable<I> | AsyncIterable<I>, submission: Submission<I>, options: MapOptions): Promise<string> {
+    const refused = deadlineRefusal(this.options.timeout, options.deadline);
+
+    if (refused !== null) throw new Error(refused);
     const { run, output } = await this.runOf(armada);
     const { commit, ...environment } = this.recipe;
 
