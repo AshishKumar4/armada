@@ -283,7 +283,8 @@ interface Preparation {
 }
 
 /** root's PATH, which the recipe's setup runs under: the tools it reaches for (locale-gen, update-alternatives) are in
- *  sbin, which the user's commands do without. */
+ *  sbin, which the user's commands do without. Its HOME is root's too: what root writes in the user's home is root's, and
+ *  the user's install then can't write there (#28). */
 const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
 /** A phase's bound on `medium`, and on a smaller size in proportion to its vCPUs: the runner layer builds git, which
@@ -369,7 +370,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       case 'setup':
         return recipe.setup === '' ? {} : await this.command(preparation, {
-          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH }, cwd: workdir, argv: ['/bin/sh', `${STATE}/setup.sh`],
+          doing: 'the recipe\'s setup', asUser: false, env: { ...env, PATH: ROOT_PATH, HOME: '/root' }, cwd: workdir, argv: ['/bin/sh', `${STATE}/setup.sh`],
           inputs: async () => { await pipeIn(container, recipe.setup, `${STATE}/setup.sh`); },
         });
 
