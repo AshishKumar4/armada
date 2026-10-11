@@ -660,11 +660,14 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
     const held = (await listed()).find((each) => each.project === project);
 
     if (held?.hook !== undefined) {
-      if (ghOut(['api', `repos/${held.repo}/hooks/${String(held.hook)}`, '-X', 'DELETE']) === null) {
+      const deleted = gh(['api', `repos/${held.repo}/hooks/${String(held.hook)}`, '-X', 'DELETE']);
+
+      // A hook GitHub no longer has (404) was deleted by an earlier remove that stopped before the deployment's config went.
+      if (deleted.out === null && deleted.status !== 404) {
         throw new Error(`deleting GitHub hook ${String(held.hook)} on ${held.repo} failed, as gh said above; ${project} is kept so you can try again`);
       }
 
-      console.log(`deleted GitHub hook ${String(held.hook)} on ${held.repo}`);
+      console.log(deleted.out === null ? `GitHub hook ${String(held.hook)} on ${held.repo} was already gone` : `deleted GitHub hook ${String(held.hook)} on ${held.repo}`);
     }
 
     await armada.call(`/webhooks/${project}`, { method: 'DELETE' });
@@ -685,13 +688,13 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   // Checked as the deployment will, before GitHub signs with a secret the deployment might then refuse.
   const proposed = v.parse(HookConfigSchema, { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret: signing });
   const known = (await listed()).find((each) => each.project === project && each.repo === repo)?.hook;
-  const signedIn = ghOut(['auth', 'status']) !== null;
+  const signedIn = gh(['auth', 'status']).out !== null;
 
   // A hook GitHub already signs with another secret is updated first, or the deployment would refuse its deliveries.
   if (known !== undefined && !signedIn) throw new Error(`${project} has GitHub hook ${String(known)} on ${repo}: updating its secret needs gh signed in for ${repo} (gh auth login)`);
 
   const made = known === undefined ? ['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'] : ['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id'];
-  const answered = signedIn ? ghOut(made) : null;
+  const answered = signedIn ? gh(made).out : null;
   const hook = answered === null || !/^\d+$/u.test(answered) ? undefined : Number(answered);
 
   // A hook whose update failed still signs with its old secret: storing the new one would refuse its deliveries.
@@ -714,18 +717,26 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   return 0;
 }
 
-/** What `gh <args>` printed, trimmed, or null when it failed (its error said) or is not installed. */
-function ghOut(argv: readonly string[]): string | null {
-  const gh = Bun.which('gh');
+/** What a `gh` run gave: its output, or null and, for a refused `api` call, GitHub's HTTP status. */
+interface GhRun {
+  readonly out: string | null;
+  readonly status?: number;
+}
 
-  if (gh === null) return null;
-  const ran = Bun.spawnSync([gh, ...argv], { stdout: 'pipe', stderr: 'pipe' });
+/** Runs `gh <args>`: its output trimmed, or null when it failed (its error said) or is not installed. */
+function gh(argv: readonly string[]): GhRun {
+  const path = Bun.which('gh');
 
-  if (ran.exitCode === 0) return ran.stdout.toString().trim();
+  if (path === null) return { out: null };
+  const ran = Bun.spawnSync([path, ...argv], { stdout: 'pipe', stderr: 'pipe' });
 
-  if (argv[0] !== 'auth') console.error(`gh ${argv.slice(0, 2).join(' ')} failed: ${ran.stderr.toString().trim()}`);
+  if (ran.exitCode === 0) return { out: ran.stdout.toString().trim() };
+  const said = ran.stderr.toString().trim();
+  const status = Number(/HTTP (\d{3})/u.exec(said)?.[1] ?? Number.NaN);
 
-  return null;
+  if (argv[0] !== 'auth') console.error(`gh ${argv.slice(0, 2).join(' ')} failed: ${said}`);
+
+  return Number.isNaN(status) ? { out: null } : { out: null, status };
 }
 
 async function main(): Promise<number> {

@@ -711,7 +711,7 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** `outcome` as its task's final one, if the task is still `from`: appended, and a green answer of a cached task kept
-   *  in the cache, now that no other copy can end it red. */
+   *  in the cache, now that no other copy can end it red. A gang's is not: its answer is rank 0's alone. */
   private async land(outcome: Outcome, from: 'running' | 'landing'): Promise<void> {
     const task = this.sql.exec<{ item: string }>(`UPDATE tasks SET state = ? WHERE idx = ? AND state = ? RETURNING item`, outcome.kind, outcome.index, from).toArray()[0];
 
@@ -720,10 +720,13 @@ export class ArmadaJob extends DurableObject<Env> {
     const spec = await this.spec();
 
     if (spec?.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || outcome.kind !== 'exited' || outcome.exitCode !== 0 || !outcome.output) return;
+    const { item } = v.parse(TaskSchema, JSON.parse(task.item));
+
+    if (gangOf(item) > 1) return;
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const scope = { bundle: spec.run.bundle, task: spec.run.id, environment: (await this.ctx.storage.get<string>('key')) ?? '' };
 
-    await keep(this.env.ARTIFACTS, scope, { item: v.parse(TaskSchema, JSON.parse(task.item)).item, days: spec.cache.days, output: runKey(id, outcome.index, outcome, 'output'), marker: outcome.answer });
+    await keep(this.env.ARTIFACTS, scope, { item, days: spec.cache.days, output: runKey(id, outcome.index, outcome, 'output'), marker: outcome.answer });
   }
 
   /** The task an answer lands for, with its retries: a plain task landing on `name`, or a gang's, running. */

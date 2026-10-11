@@ -10,6 +10,12 @@ const MINUTE = 60_000;
 
 const HOUR = 60 * MINUTE;
 
+/** `environments`' alarm, run as the platform runs one: cleared, then handled. */
+async function fire(stored: ReturnType<typeof state>, environments: ArmadaEnvironments): Promise<void> {
+  await stored.ctx.storage.deleteAlarm();
+  await environments.alarm();
+}
+
 const generation = (key: string): Generation => ({ key, snapshot: { id: `snapshot-${key}`, size: 1 }, sha: null, created: 0, seconds: {} });
 
 const ready = (key: string, lastUsed: number) => ({ key, entry: { state: 'ready' as const, generation: generation(key), lastUsed } });
@@ -100,13 +106,7 @@ describe('a deployment\'s hourly look at its environments', () => {
     setSystemTime(new Date(start));
     const { stored, open, deleted, environments } = await deployment('user:secret');
 
-    // As the platform runs an alarm: cleared, then handled.
-    const fire = async () => {
-      await stored.ctx.storage.deleteAlarm();
-      await environments.alarm();
-    };
-
-    await fire();
+    await fire(stored, environments);
     const whileUsed = [(await environments.list()).length, (await stored.ctx.storage.getAlarm()) === start + HOUR];
 
     // The job ends 50 minutes in, just before the next look.
@@ -114,11 +114,11 @@ describe('a deployment\'s hourly look at its environments', () => {
     open.length = 0;
     await environments.used('a');
     setSystemTime(new Date(start + HOUR + 1));
-    await fire();
+    await fire(stored, environments);
     const justAfter = (await environments.list()).length;
 
     setSystemTime(new Date(start + 2 * HOUR + 1));
-    await fire();
+    await fire(stored, environments);
 
     expect({ whileUsed, justAfter, after: (await environments.list()).length, deleted: deleted(), alarm: await stored.ctx.storage.getAlarm() })
       .toEqual({ whileUsed: [1, true], justAfter: 1, after: 0, deleted: ['a'], alarm: null });
@@ -373,15 +373,14 @@ describe('a snapshot no environment records any more', () => {
     fake.refuseNextDigest();
     await environments.orphaned('snapshot-made', 'other');
     const first = await stored.ctx.storage.getAlarm();
-
-    await environments.alarm();
+    await fire(stored, environments);
     const owed = (await stored.ctx.storage.list({ prefix: 'debt:' })).size;
     const again = await stored.ctx.storage.getAlarm();
 
-    await environments.alarm();
+    await fire(stored, environments);
 
-    expect({ first: first !== null, owed, again: again !== null, left: fake.left(), after: (await stored.ctx.storage.list({ prefix: 'debt:' })).size })
-      .toEqual({ first: true, owed: 1, again: true, left: ['k-first', 'k-second'], after: 0 });
+    expect({ first: first !== null, owed, again: again !== null, left: fake.left(), after: (await stored.ctx.storage.list({ prefix: 'debt:' })).size, last: await stored.ctx.storage.getAlarm() })
+      .toEqual({ first: true, owed: 1, again: true, left: ['k-first', 'k-second'], after: 0, last: null });
   });
 
   test('a digest delete that fails once the tags are gone owes the digest, and the next prune deletes that', async () => {

@@ -112,11 +112,19 @@ function context(script: string): 'quotes' | 'heredoc' | null {
       at += 1;
     } else if (open === '' && char === '\n' && pending.length > 0) {
       body = pending.shift();
+    } else if (open === '' && arithmetic === 0 && char === '#' && (at === 0 || /[\s;&|()<>]/u.test(script[at - 1] ?? ''))) {
+      // A comment, to its line's end: a `<<` in it opens nothing.
+      const end = script.indexOf('\n', at);
+
+      at = end === -1 ? script.length : end - 1;
     } else if (open === '' && arithmetic === 0 && script.startsWith('<<', at) && !script.startsWith('<<<', at)) {
-      const heredoc = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/u.exec(script.slice(at));
+      const heredoc = /^<<(-?)[ \t]*((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"\\])+)/u.exec(script.slice(at));
 
       if (heredoc !== null) {
-        pending.push({ word: heredoc[2] ?? heredoc[3] ?? heredoc[4] ?? '', strip: heredoc[1] === '-' });
+        // The delimiter is the word with its quoting removed: `'E'OF` and `\EOF` both end at a line `EOF`.
+        const word = (heredoc[2] ?? '').replace(/'([^']*)'|"([^"]*)"|\\(.)/gu, (_, single?: string, double?: string, escaped?: string) => single ?? double ?? escaped ?? '');
+
+        pending.push({ word, strip: heredoc[1] === '-' });
         at += heredoc[0].length - 1;
       }
     }

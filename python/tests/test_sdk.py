@@ -131,11 +131,11 @@ class TestBundle(unittest.TestCase):
             twice, loud, odd, nan = (_ran(root, name, 20) for name in ("twice", "loud", "odd", "nan"))
 
             got = {
-                "twice": (twice[0], twice[3]), "loud": (loud[0], "diagnostic" in loud[1], loud[2]),
+                "twice": (twice[0], json.loads(twice[3])), "loud": (loud[0], "diagnostic" in loud[1], loud[2]),
                 "odd": (odd[0], odd[2]), "nan": (nan[0], nan[2]),
             }
             self.assertEqual(got, {
-                "twice": (0, '{"ok":true,"value":41}'), "loud": (3, True, "command"),
+                "twice": (0, {"ok": True, "value": 41}), "loud": (3, True, "command"),
                 "odd": (1, "value\nSchemaError"), "nan": (1, "value\nValueError"),
             })
 
@@ -155,15 +155,51 @@ class TestBundle(unittest.TestCase):
             self.assertEqual(one, two)
             self.assertEqual(ids, ["square"])
 
-    def test_refuses_two_tasks_sharing_an_id(self) -> None:
+    def test_bundles_each_project_its_own_helpers_and_the_imports_a_task_makes_only_when_it_runs(self) -> None:
+        def project(root: Path, factor: int, lazy: bool) -> None:
+            Path(root, "pyproject.toml").write_text('[tool.armada]\nproject="p"\n')
+            for folder in ("tasks", "helpers"):
+                Path(root, folder).mkdir()
+            Path(root, "helpers", "__init__.py").write_text("")
+            Path(root, "helpers", "compute.py").write_text(f"def scale(n):\n    return n * {factor}\n")
+            body = "    from helpers.compute import scale\n" if lazy else ""
+            head = "" if lazy else "from helpers.compute import scale\n"
+            Path(root, "tasks", "jobs.py").write_text(
+                f"from armada import task\n{head}\n@task(id='scaled')\ndef scaled(n, ctx):\n{body}    return scale(n)\n"
+            )
+            # A test beside the tasks, which discovery never imports.
+            Path(root, "tasks", "jobs.test.py").write_text("raise SystemExit('a test was imported')\n")
+
+        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
+            project(Path(one), 2, lazy=True)
+            project(Path(two), 3, lazy=False)
+            first, second = _ran(Path(one), "scaled", 10), _ran(Path(two), "scaled", 10)
+            # The first project's sources change; bundled again in this process, the bundle has the change.
+            Path(one, "helpers", "compute.py").write_text("def scale(n):\n    return n * 5\n")
+            again = _ran(Path(one), "scaled", 10)
+
+        self.assertEqual([json.loads(ran[3]) for ran in (first, second, again)], [{"ok": True, "value": value} for value in (20, 30, 50)])
+        self.assertEqual([name for name in sys.modules if name.split(".")[0] in ("tasks", "helpers")], [])
+
+    def test_refuses_two_tasks_sharing_an_id_in_two_files_or_one_and_takes_one_task_under_two_names(self) -> None:
+        refused: list[str] = []
+        for more in (
+            "from armada import task\n\n@task(id='square')\ndef again(n, ctx):\n    return n\n",
+            "from armada import task\n\n@task(id='cube')\ndef a(n, ctx):\n    return n\n\n@task(id='cube')\ndef b(n, ctx):\n    return n\n",
+        ):
+            with tempfile.TemporaryDirectory() as scratch:
+                self._project(scratch)
+                Path(scratch, "tasks", "more.py").write_text(more)
+                with self.assertRaises(PushError) as raised:
+                    bundle_tasks(Path(scratch), ["tasks"])
+                refused.append(str(raised.exception).split(":")[0])
         with tempfile.TemporaryDirectory() as scratch:
             self._project(scratch)
-            Path(scratch, "tasks", "more.py").write_text(
-                "from armada import task\n\n@task(id='square')\ndef again(n, ctx):\n    return n\n"
-            )
-            with self.assertRaises(Exception) as raised:
-                bundle_tasks(Path(scratch), ["tasks"])
-            self.assertIn("two tasks have the id square", str(raised.exception))
+            Path(scratch, "tasks", "alias.py").write_text("from .jobs import square as squared\n")
+            _, ids = bundle_tasks(Path(scratch), ["tasks"])
+        self.assertEqual(
+            {"refused": refused, "ids": ids}, {"refused": ["two tasks have the id square", "two tasks have the id cube"], "ids": ["square"]}
+        )
 
 
 class TestClient(unittest.TestCase):

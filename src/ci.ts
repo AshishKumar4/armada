@@ -468,7 +468,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots };
 
   let planId = 'local';
-  let planStatus: JobStatus | null = null;
+  // The plan's job, when it ran in a container: an ungraded run reports its status.
+  let planJob: Job<Json, string> | null = null;
   let printed: string;
 
   /** Writes the report, named by the task job, or by the plan when no task job started, and says where. */
@@ -483,8 +484,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   };
 
   /** A run that ended before it had tasks to grade: its plan failed, or printed no plan. */
-  const ungraded = (problem: string): RunResult => {
-    const report = writeReport({ planJob: planId, job: null, graded: 'not graded', status: planStatus, summary: null, problems: [problem], rows: [], artifacts: {} });
+  const ungraded = async (problem: string): Promise<RunResult> => {
+    const report = writeReport({ planJob: planId, job: null, graded: 'not graded', status: planJob === null ? null : await planJob.status(), summary: null, problems: [problem], rows: [], artifacts: {} });
 
     note(`\nNOT GRADED: ${problem}`);
     note(`report: ${report}`);
@@ -497,7 +498,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   try {
     here = config.plan.local ? localPlan({ repo, sha, command: [...config.plan.command, ...planArgs], target: config.target, timings, env: config.env, deadlineAt }) : undefined;
   } catch (cause) {
-    return ungraded(`the plan command failed here: ${errorOf({ cause }).message}`);
+    return await ungraded(`the plan command failed here: ${errorOf({ cause }).message}`);
   }
 
   // The plan's own usage, which a container's plan reports and a local one does not.
@@ -507,15 +508,14 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     // The plan's stdout is its output; its stderr stays in its log.
     const planDeadline = remainingDeadline(deadlineAt);
     const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: Math.min(900, planDeadline) });
-    const planJob = planTask.stream([{}], { ...options, deadline: planDeadline, pool: 1 });
+    const remote = planTask.stream([{}], { ...options, deadline: planDeadline, pool: 1 });
 
-    planId = await planJob.id;
+    planJob = remote;
+    planId = await remote.id;
     note(`plan job ${planId}`);
-    const [planned] = await follow(planJob, began, { name: () => 'plan', say: exitWord, note });
+    const [planned] = await follow(remote, began, { name: () => 'plan', say: exitWord, note });
 
-    planStatus = await planJob.status();
-
-    if (planned?.kind !== 'ok') return ungraded(`the plan command did not print a plan\n${planned === undefined ? planStatus.problems.join('\n') : planned.meta.tail}`);
+    if (planned?.kind !== 'ok') return await ungraded(`the plan command did not print a plan\n${planned === undefined ? (await remote.status()).problems.join('\n') : planned.meta.tail}`);
 
     printed = planned.value;
     planRun.push(planned);
@@ -526,7 +526,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
 
   const printedPlan = v.safeParse(PlanSchema, jsonOf(printed));
 
-  if (!printedPlan.success) return ungraded(`the plan printed no plan: ${v.summarize(printedPlan.issues)}`);
+  if (!printedPlan.success) return await ungraded(`the plan printed no plan: ${v.summarize(printedPlan.issues)}`);
   const plan = printedPlan.output;
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const slots = config.task.slots;

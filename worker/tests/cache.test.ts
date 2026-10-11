@@ -154,6 +154,31 @@ describe('a cached task', () => {
     expect({ red, green }).toEqual({ red: [], green: [{ index: 0, cached: true, value: '{"ok":true,"value":49}' }] });
   });
 
+  test('keeps no gang\'s answer: a gang item runs its ranks again', async () => {
+    const artifacts = bucket();
+    const first = await cachedJob('g1', [{ gang: 2 }], artifacts);
+    const ranks: Record<string, Claim> = {};
+
+    for (let round = 0; round < 3; round += 1) {
+      for (const vessel of ['v1', 'v2']) {
+        const claim = ranks[vessel] === undefined ? await first.job.claim(vessel) : null;
+
+        if (claim !== null && !('waitMs' in claim)) ranks[vessel] = claim;
+      }
+    }
+
+    for (const [vessel, claim] of Object.entries(ranks)) {
+      await first.job.started(vessel, claim.index, claim.attempt);
+      await finish(first, { vessel, claim, exitCode: 0, envelope: '{"ok":true,"value":1}' });
+    }
+
+    await Promise.all(first.pending);
+    const again = await cachedJob('g2', [{ gang: 2 }], artifacts);
+
+    expect({ landed: (await first.job.events(0)).events.length, cached: (await again.job.events(0)).events.length, begun: again.begun })
+      .toEqual({ landed: 1, cached: 0, begun: ['g2/v1', 'g2/v2'] });
+  });
+
   test('gives a task back to the queue when its cache read fails', async () => {
     const artifacts = bucket();
     const first = await cachedJob('f1', [6], artifacts);

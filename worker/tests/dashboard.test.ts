@@ -137,17 +137,30 @@ describe('a job\'s status', () => {
 
 describe('the fleet', () => {
   test('says each job\'s share of the vCPUs it holds, largest first, under its cap, and the tasks of every open job', async () => {
-    const { fleet, json, ask } = deployment();
+    const { fleet, jobs, json, ask } = deployment();
 
     await fleet.acquire('20261008120000-aaaaaaaa/v1', 4, { deadlineAt: Date.now() + 60 * 60_000 });
     await fleet.acquire('20261008120000-aaaaaaaa/v2', 4, { deadlineAt: Date.now() + 60 * 60_000 });
     await fleet.acquire('20261008120001-bbbbbbbb/v1', 2, { deadlineAt: Date.now() + 60 * 60_000 });
-    // An open job of three tasks, counted whatever page of the list it is on.
-    await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }, { item: 'c', argv: ['true'] }], run: { kind: 'command' } }) });
+    // An open job of three tasks, one of them running, and two newer jobs: the oldest is past a first page of two.
+    const post = async (items: string[]) => v.parse(v.object({ id: v.string() }), await (await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: {}, items: items.map((item) => ({ item, argv: ['true'] })), run: { kind: 'command' } }) })).json()).id;
 
-    expect(await json('/fleet', FleetSchema)).toEqual({
-      cap: 64, jobs: [{ id: '20261008120000-aaaaaaaa', vcpus: 8, containers: 2 }, { id: '20261008120001-bbbbbbbb', vcpus: 2, containers: 1 }],
-      tasks: { running: 0, queued: 3 },
+    setSystemTime(new Date(Date.UTC(2026, 9, 8, 12, 0, 1)));
+    const oldest = await post(['a', 'b', 'c']);
+
+    setSystemTime(new Date(Date.UTC(2026, 9, 8, 12, 0, 2)));
+    await post(['d']);
+    setSystemTime(new Date(Date.UTC(2026, 9, 8, 12, 0, 3)));
+    await post(['e']);
+    const job = jobs.get(oldest);
+
+    await job?.alarm();
+    await job?.claim('v1');
+    const firstPage = (await json('/jobs?limit=2', JobsSchema)).jobs.map((each) => each.id);
+
+    expect({ paged: firstPage.includes(oldest), fleet: await json('/fleet', FleetSchema) }).toEqual({
+      paged: false,
+      fleet: { cap: 64, jobs: [{ id: '20261008120000-aaaaaaaa', vcpus: 8, containers: 2 }, { id: '20261008120001-bbbbbbbb', vcpus: 2, containers: 1 }], tasks: { running: 1, queued: 4 } },
     });
   });
 });

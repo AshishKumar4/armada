@@ -15,22 +15,23 @@ function asked(input: string | URL | Request, init?: RequestInit): Request {
   return new Request(input instanceof URL ? input.href : input, init);
 }
 
-/** This process's environment without git's own variables. A git hook exports GIT_DIR, GIT_INDEX_FILE and others, and
- *  each outranks `cwd`, so a test's git run under a hook would act on the checkout running it. They are removed, not
- *  blanked: an empty GIT_DIR is still a GIT_DIR. */
-export function gitEnv() {
+/** This process's environment without git's or armada's own variables, for a CLI a test runs. A git hook exports
+ *  GIT_DIR, GIT_INDEX_FILE and others, and each outranks `cwd`, so a test's git run under a hook would act on the
+ *  checkout running it; an ARMADA_CONNECTION outranks the test's ARMADA_URL, so its CLI would reach a real deployment.
+ *  They are removed, not blanked: an empty GIT_DIR is still a GIT_DIR. */
+export function scratchEnv() {
   const env: Record<string, string> = {};
 
   for (const [name, value] of Object.entries(process.env)) {
-    if (!name.startsWith('GIT_') && v.is(v.string(), value)) env[name] = value;
+    if (!name.startsWith('GIT_') && !name.startsWith('ARMADA_') && v.is(v.string(), value)) env[name] = value;
   }
 
   return env;
 }
 
-/** `git` in `cwd` as a test's author, with `gitEnv`, and what it printed; a git that fails throws what it said. */
+/** `git` in `cwd` as a test's author, with `scratchEnv`, and what it printed; a git that fails throws what it said. */
 export function git(cwd: string, ...args: string[]): string {
-  const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, env: gitEnv(), stdout: 'pipe', stderr: 'pipe' });
+  const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, env: scratchEnv(), stdout: 'pipe', stderr: 'pipe' });
 
   if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString()}`);
 

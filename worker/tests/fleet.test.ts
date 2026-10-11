@@ -34,6 +34,19 @@ describe('the fleet', () => {
     expect({ whileRunning, later }).toEqual({ whileRunning: false, later: true });
   });
 
+  test('frees an ended gang\'s reserve while one container that would not stop still holds its own vCPUs', async () => {
+    const fleet = fleetOf(2);
+
+    for (const rank of ['v1', 'v2', 'v3', 'v4']) await fleet.acquire(`a/${rank}`, 0.5, { reserve: 2, deadlineAt });
+    await fleet.release('a/v1', INACTIVITY_MS);
+
+    for (const rank of ['v2', 'v3', 'v4']) await fleet.release(`a/${rank}`);
+    await fleet.closed('a');
+
+    expect({ used: await fleet.used(), granted: await fleet.acquire('b/v1', 1.5, { deadlineAt }), more: await fleet.acquire('b/v2', 0.5, { deadlineAt }) })
+      .toEqual({ used: 0.5, granted: true, more: false });
+  });
+
   test('lets a holder\'s vCPUs lapse only after its job\'s deadline and a container\'s idle timeout', async () => {
     const fleet = fleetOf(4);
     const ends = Date.now() + 10 * 60 * 60_000;

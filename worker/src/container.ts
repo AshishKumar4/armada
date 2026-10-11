@@ -262,7 +262,7 @@ const names = (process.env.ARMADA_MASK || '').split(' ').filter(Boolean);
 fs.writeFileSync(process.argv[1], JSON.stringify(names.map((name) => process.env[name] || '')), { mode: 0o600 });`;
 
 /** A node program that replaces, in the log it is given first, every value in the `KEEP_MASK` file it is given second
- *  with `***`, longest first, streamed in 1 MiB reads that carry a secret's length less one byte across each boundary,
+ *  with `***`, overlapping ones as one span, streamed in 1 MiB reads that carry a secret's length less one byte across each boundary,
  *  then deletes that file. */
 export const MASK = String.raw`const fs = require('fs');
 const [file, kept] = process.argv.slice(1);
@@ -280,7 +280,7 @@ for (;;) {
   const read = fs.readSync(input, chunk, 0, chunk.length, null);
   const text = Buffer.concat([carry, chunk.subarray(0, read)]);
   // A secret starting before the limit ends within this read; one starting past it waits for the next.
-  const limit = read === 0 ? text.length : Math.max(0, text.length - keep);
+  let limit = read === 0 ? text.length : Math.max(0, text.length - keep);
   const next = secrets.map((secret) => text.indexOf(secret));
   const parts = [];
   let at = 0;
@@ -296,8 +296,27 @@ for (;;) {
       }
     }
     if (found === -1) break;
+    // Every match that starts inside the masked span widens it, so overlapping secrets mask as one span and none of
+    // them shows past another's end.
+    let end = found + hit;
+    for (let widened = true; widened;) {
+      widened = false;
+      for (const secret of secrets) {
+        for (let from = text.indexOf(secret, found); from !== -1 && from < end; from = text.indexOf(secret, from + 1)) {
+          if (from + secret.length > end) {
+            end = from + secret.length;
+            widened = true;
+          }
+        }
+      }
+    }
+    // A span reaching past what this read resolves may widen again in the next one: it waits for it whole.
+    if (read !== 0 && end > limit) {
+      limit = found;
+      break;
+    }
     parts.push(text.subarray(at, found), mask);
-    at = found + hit;
+    at = end;
   }
   if (at < limit) {
     parts.push(text.subarray(at, limit));

@@ -66,12 +66,14 @@ export class ArmadaFleet extends DurableObject<Env> {
     return granted;
   }
 
-  /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. */
+  /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. A
+   *  holder kept that way has ended: it keeps only its own vCPUs, not its job's reserve, which is for holders still
+   *  to be granted. */
   async release(holder: string, afterMs = 0): Promise<void> {
     const holds = { ...await this.ctx.storage.get<Record<string, Hold>>('holds') };
     const held = holds[holder];
 
-    if (held !== undefined && afterMs > 0) holds[holder] = { ...held, until: Math.min(held.until, Date.now() + afterMs) };
+    if (held !== undefined && afterMs > 0) holds[holder] = { vcpus: held.vcpus, until: Math.min(held.until, Date.now() + afterMs) };
     else delete holds[holder];
     await this.ctx.storage.put('holds', holds);
   }

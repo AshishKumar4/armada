@@ -1,14 +1,14 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import * as v from 'valibot';
 import { extractTar, lanesFor, manifestOf, packBase, packOf, poolFor, remainingDeadline } from '../src/ci';
 import { parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
-import { fakeFetch, git, gitEnv } from './fakes';
+import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
   test('fills from the item: a string as itself, an object\'s scalar keys, its JSON as {item}', () => {
@@ -87,7 +87,7 @@ describe('a project\'s CI config', () => {
       writeFileSync(join(scratch, 'recipe.json'), JSON.stringify({ base: 'ubuntu:26.04@sha256:' + 'f'.repeat(64) }));
 
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', `--env=${join(scratch, 'recipe.json')}`, '--times=1', '--', 'true'], {
-        env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       expect({ exit: await cli.exited, said: (await new Response(cli.stderr).text()).includes('Cloudflare-managed image'), requests }).toEqual({ exit: 2, said: true, requests: [] });
@@ -275,7 +275,7 @@ describe('armada deploy', () => {
     try {
       mkdirSync(join(home, '.config', 'armada'), { recursive: true });
       writeFileSync(join(home, '.config', 'armada', 'lab.json'), JSON.stringify({ url: 'https://lab.test', token: 't', account: 'A' }));
-      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'deploy', '--name=lab', '--account=B'], { env: { ...gitEnv(), HOME: home }, stdout: 'pipe', stderr: 'pipe' });
+      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'deploy', '--name=lab', '--account=B'], { env: { ...scratchEnv(), HOME: home }, stdout: 'pipe', stderr: 'pipe' });
 
       expect({ exit: await ran.exited, said: (await new Response(ran.stderr).text()).includes('account A, not B') }).toEqual({ exit: 2, said: true });
     } finally {
@@ -488,7 +488,7 @@ describe('packing a commit', () => {
       for (const { sha, from, base } of [{ sha: environment, from: origin, base: 'root' }, { sha: head, from: shallow, base: packBase(shallow, environment) }]) {
         const pack = new Uint8Array(await packOf(from, sha, base, 'commit').arrayBuffer());
 
-        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: gitEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
+        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: scratchEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
         appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
         git(checkout, 'checkout', '-q', '-f', '-B', 'armada', sha);
       }
@@ -532,7 +532,7 @@ describe('a commit checkout', () => {
       for (const [sha, base] of [[environment, 'root'], [environment, environment], [head, environment]] as const) {
         const pack = new Uint8Array(await packOf(origin, sha, base, 'commit').arrayBuffer());
 
-        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: gitEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
+        expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: scratchEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
         appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
         git(checkout, 'checkout', '-q', '-f', '-B', 'armada', sha);
       }
@@ -546,19 +546,40 @@ describe('a commit checkout', () => {
 
 describe('the CLI\'s arguments', () => {
   test('with no command, or with --help, are answered with the usage; a wrong option says what to give instead', async () => {
+    const requests: string[] = [];
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        requests.push(new URL(request.url).pathname);
+
+        return Response.json({ error: 'no route' }, { status: 404 });
+      },
+    });
+
     const cli = async (...words: string[]) => {
-      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: process.env, stdout: 'pipe', stderr: 'pipe' });
+      const ran = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32) }, stdout: 'pipe', stderr: 'pipe' });
 
       return { exit: await ran.exited, said: await new Response(ran.stdout).text() + await new Response(ran.stderr).text() };
     };
 
-    expect([await cli(), await cli('map', '--help')].map(({ exit, said }) => [exit, said.includes('\nUsage:\n')])).toEqual([[0, true], [0, true]]);
+    try {
+      expect([await cli(), await cli('map', '--help')].map(({ exit, said }) => [exit, said.includes('\nUsage:\n')])).toEqual([[0, true], [0, true]]);
 
-    // Each refused before anything runs: no fleet answers here.
-    const wrong = await Promise.all([['map', '--times', '3', '--', 'true'], ['map', '--time=3', '--', 'true'], ['map', '-pool=1', '--times=3', '--', 'true'],
-      ['map', '--times=0', '--', 'true'], ['deploy', 'garbage'], ['toString'], ['--pool=1']].map(async (words) => (await cli(...words)).exit));
+      // Each otherwise a valid map but for the word it names, refused before any request reaches the deployment.
+      const wrong = await Promise.all(([
+        [['map', '--times', '3', '--', 'true'], '--times'], [['map', '--times=3', '--time=3', '--', 'true'], '--time'], [['map', '-pool=1', '--times=3', '--', 'true'], '-pool'],
+        [['map', '--times=0', '--', 'true'], '--times'], [['deploy', 'garbage'], 'garbage'], [['toString'], 'toString'], [['--pool=1'], 'no command'],
+      ] as const).map(async ([words, named]) => {
+        const ran = await cli(...words);
 
-    expect(wrong).toEqual([2, 2, 2, 2, 2, 2, 2]);
+        return [ran.exit, ran.said.includes(named)];
+      }));
+
+      expect({ wrong, requests }).toEqual({ wrong: Array.from({ length: 7 }, () => [2, true]), requests: [] });
+    } finally {
+      await server.stop(true);
+    }
   });
 
   test('are its own before --, every word after -- is the command\'s, and --connection wins over ARMADA_URL', async () => {
@@ -591,7 +612,7 @@ describe('the CLI\'s arguments', () => {
 
     try {
       const map = async (args: readonly string[], url: string) => await Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', ...args, '--times=2', '--', 'tool', '--output', '--items=x'], {
-        env: { ...gitEnv(), ARMADA_URL: url, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...scratchEnv(), ARMADA_URL: url, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       }).exited;
 
       const argv = ['tool', '--output', '--items=x'];
@@ -620,7 +641,7 @@ describe('a map deadline', () => {
 
     try {
       const cli = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=1', '--timeout=1800', '--deadline=1799', '--', 'true'], {
-        env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       expect({ exit: await cli.exited, requests }).toEqual({ exit: 2, requests: [] });
@@ -669,7 +690,7 @@ describe('the CLI following a job', () => {
 
     try {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=1', '--', 'true'], {
-        env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       await polling;
@@ -698,7 +719,7 @@ describe('armada verdict', () => {
 
     const verdict = async (...words: string[]) => {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'verdict', 'HEAD', ...words], {
-        cwd: repo, env: { ...gitEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       return { exit: await cli.exited, said: (await new Response(cli.stdout).text() + await new Response(cli.stderr).text()).trim() };
@@ -817,16 +838,19 @@ describe('armada run', () => {
       git(repo, 'commit', '-qm', 'one');
 
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
-        cwd: repo, env: { ...gitEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       const exit = await cli.exited;
       const stdout = await new Response(cli.stdout).text();
       const stderr = await new Response(cli.stderr).text();
-      // The report it names, read before its home goes.
+      // The report it names, and the evidence each artifact directory holds, read before its home goes.
       const path = /^report: (.+)$/mu.exec(stdout)?.[1];
+      const report = path === undefined || !existsSync(path) ? '' : readFileSync(path, 'utf8');
+      const directories = report === '' ? {} : v.parse(v.looseObject({ artifacts: v.optional(v.record(v.string(), v.string()), {}) }), JSON.parse(report)).artifacts;
+      const evidence = Object.fromEntries(Object.entries(directories).map(([index, dir]) => [index, { dir, files: Object.fromEntries(readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), 'utf8')])) }]));
 
-      return { exit, stdout, stderr, commands, bodies, seen, report: path === undefined || !existsSync(path) ? '' : readFileSync(path, 'utf8') };
+      return { exit, stdout, stderr, commands, bodies, seen, report, evidence };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -954,22 +978,28 @@ describe('armada run', () => {
   });
 
   test('two tasks of one name each keep their own evidence, under their index', async () => {
+    const made: string[] = [];
+
     const tar = (file: string, text: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'armada-evidence-'));
 
+      made.push(dir);
       writeFileSync(join(dir, file), text);
 
       return Bun.spawnSync(['tar', '-czf', '-', '-C', dir, file]).stdout;
     };
 
-    const ran = await run([], { include: [{ name: 'unit', rows: ['x'] }, { name: 'unit', rows: ['y'] }] }, '', {
-      taskConfig: { verdict: false },
-      artifacts: [tar('evidence.txt', 'first'), tar('evidence.txt', 'second')],
-    });
+    try {
+      const ran = await run([], { include: [{ name: 'unit', rows: ['x'] }, { name: 'unit', rows: ['y'] }] }, '', {
+        taskConfig: { verdict: false },
+        artifacts: [tar('evidence.txt', 'first'), tar('evidence.txt', 'second')],
+      });
 
-    const report = v.parse(v.looseObject({ artifacts: v.record(v.string(), v.string()) }), JSON.parse(ran.report));
-
-    expect(Object.keys(report.artifacts).toSorted()).toEqual(['0', '1']);
+      expect({ apart: ran.evidence['0']?.dir !== ran.evidence['1']?.dir, files: [ran.evidence['0']?.files, ran.evidence['1']?.files] })
+        .toEqual({ apart: true, files: [{ 'evidence.txt': 'first' }, { 'evidence.txt': 'second' }] });
+    } finally {
+      for (const dir of made) rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('a row a problem names reads red in the report, with the problem, though its task reported it green', async () => {
@@ -1097,7 +1127,7 @@ describe('the webhook command', () => {
     chmodSync(join(bin, 'gh'), 0o755);
 
     try {
-      const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
+      const env = { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
 
       const cli = async (...words: string[]) => {
         const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env, stdout: 'pipe', stderr: 'pipe' });
@@ -1155,20 +1185,24 @@ describe('the webhook command', () => {
 
     try {
       const cli = async (path: string, ...words: string[]) => {
-        const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: path }, stdout: 'pipe', stderr: 'pipe' });
+        const ran = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: path }, stdout: 'pipe', stderr: 'pipe' });
 
         return await ran.exited;
       };
 
-      const withGh = `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`;
+      const withGh = bin;
       const badSecret = await cli(withGh, 'webhook', 'add', 'armada', '--repo=owner/armada', '--token-secret=github-token');
       const ghAfterBadSecret = existsSync(join(scratch, 'gh-calls')) ? readFileSync(join(scratch, 'gh-calls'), 'utf8').includes('PATCH') : false;
       const removed = await cli(withGh, 'webhook', 'remove', 'armada');
       const deletedHere = calls.includes('DELETE /webhooks/armada');
-      // No gh on the PATH: a new project's hook is printed to add by hand.
-      const noGh = await cli(`${dirname(process.execPath)}:/usr/bin:/bin`, 'webhook', 'add', 'other', '--repo=owner/other');
+      // A remove that deleted GitHub's hook and stopped before the deployment's config: GitHub now answers 404.
+      writeFileSync(join(bin, 'gh'), `#!/bin/sh\nif [ "$1" = "auth" ]; then exit 0; fi\necho "gh: Not Found (HTTP 404)" >&2\nexit 1\n`, { mode: 0o755 });
+      const again = await cli(withGh, 'webhook', 'remove', 'armada');
+      // No gh on the PATH, nor anything else: a new project's hook is printed to add by hand.
+      const noGh = await cli('', 'webhook', 'add', 'other', '--repo=owner/other');
 
-      expect({ badSecret, ghAfterBadSecret, removed, deletedHere, noGh }).toEqual({ badSecret: 2, ghAfterBadSecret: false, removed: 2, deletedHere: false, noGh: 0 });
+      expect({ badSecret, ghAfterBadSecret, removed, deletedHere, again, deletedAfter: calls.includes('DELETE /webhooks/armada'), noGh })
+        .toEqual({ badSecret: 2, ghAfterBadSecret: false, removed: 2, deletedHere: false, again: 0, deletedAfter: true, noGh: 0 });
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -1203,7 +1237,7 @@ describe('the webhook command', () => {
     chmodSync(join(bin, 'gh'), 0o755);
 
     try {
-      const env = { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
+      const env = { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: `${bin}:${process.env.PATH}` };
 
       const add = async () => {
         const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'webhook', 'add', 'armada', '--repo=owner/armada'], { env, stdout: 'pipe', stderr: 'pipe' });

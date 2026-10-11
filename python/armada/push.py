@@ -4,6 +4,7 @@ with `python3`, uploads it by its digest, and records each task's id against it.
 `.stream` and `.run` push first when the folder changed, once per process per deployment, like pushed() in
 push.ts."""
 
+import ast
 import importlib
 import io
 import os
@@ -13,6 +14,7 @@ import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .client import Armada
 
@@ -56,66 +58,94 @@ def find_project(here: str | None = None) -> Project | None:
         directory = directory.parent
 
 
-def _is_task(value: object) -> bool:
-    from .task import Task
-
-    return isinstance(value, Task)
-
-
 def _dotted(root: Path, path: Path) -> str:
     """`path`'s module name under `root`: `tasks/jobs.py` is `tasks.jobs`, `tasks/__init__.py` is `tasks`."""
     return str(path.relative_to(root).with_suffix("")).replace(os.sep, ".").removesuffix(".__init__")
 
 
-def _project_modules(root: Path) -> dict[str, Path]:
-    """The project's modules this process has imported, by name: those under `root`, from source."""
-    found: dict[str, Path] = {}
-    for name, module in list(sys.modules.items()):
-        source = getattr(module, "__file__", None)
-        path = Path(source).resolve() if isinstance(source, str) else None
-        if path is not None and path.suffix == ".py" and path.is_relative_to(root):
-            found[name] = path
+def _imports(root: Path, name: str, path: Path) -> list[Path]:
+    """The project modules `path` (module `name`) names in any `import` or `from`, a function body's included: a
+    task may import its helpers only when it runs, which no import at discovery loads."""
+    package = name if path.name == "__init__.py" else name.rpartition(".")[0]
+    named: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            named += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level > 0:
+                parts = package.split(".") if package else []
+                base = ".".join(parts[: len(parts) - node.level + 1] + ([base] if base else []))
+            named += [base] + [f"{base}.{alias.name}" for alias in node.names]
+    found: list[Path] = []
+    for each in named:
+        parts = [part for part in each.split(".") if part]
+        for depth in range(1, len(parts) + 1):
+            here = root.joinpath(*parts[:depth])
+            found.extend(hit.resolve() for hit in (here.with_suffix(".py"), here / "__init__.py") if hit.is_file())
     return found
 
 
 def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str], dict[str, Path]]:
-    """Every task the project's folders export, each by the file it is in, refusing an id two of them share, and the
-    project's modules their import loaded. Each file is imported under its own name, as the bundle imports it, so its
-    relative imports resolve, and Python's own import system decides what it needs: a from-list's submodule and each
-    package's `__init__.py` included."""
-    files: list[Path] = []
-    owners: dict[str, Path] = {}
+    """Every task the project's folders export, each by the file it is in, refusing an id two tasks share, and every
+    project module they need. Each file is imported under its own name, as the bundle imports it, so its relative
+    imports resolve; the modules that loads, and those any of them names in an import, are what it needs. The import
+    is fresh, from the files as they are now, and leaves this process's modules as it found them."""
+    from .task import Task
+
     tops = {Path(folder).parts[0] for folder in folders}
     # The SDK's own package name: a task folder of that name would shadow it here and in the container.
     if __package__ in tops:
         raise PushError(f"a task folder may not be named {__package__}, the SDK's package: rename it and its [tool.armada] tasks entry")
-    # A module of a task folder's name imported from elsewhere (another project, or a namespace package that has no
-    # file) is not this one's: Python would import that one again.
-    for name in [name for name in sys.modules if name.split(".")[0] in tops]:
-        source = getattr(sys.modules[name], "__file__", None)
-        if not (isinstance(source, str) and Path(source).resolve().is_relative_to(root)):
-            del sys.modules[name]
+    # The project's own top-level names, less the standard library's and the SDK's, which it cannot shadow here.
+    names = {child.stem for child in root.glob("*.py")}
+    names |= {child.name for child in root.iterdir() if child.is_dir() and child.name.isidentifier()}
+    names -= set(sys.stdlib_module_names) | {__package__ or ""}
+    ours = [name for name in sys.modules if name.split(".")[0] in names]
+    kept = {name: sys.modules.pop(name) for name in ours}
 
+    files: list[Path] = []
+    owners: dict[str, tuple[Task[Any, Any], Path]] = {}
     sys.path.insert(0, str(root))
     try:
         for folder in folders:
             for path in sorted((root / folder).rglob("*.py")):
-                if path.name.startswith("test_") or path.name == "__init__.py":
+                if path.name.startswith("test_") or path.name.endswith(".test.py"):
                     continue
                 module = importlib.import_module(_dotted(root, path))
-                tasks = [value for value in vars(module).values() if _is_task(value)]
+                tasks = [value for value in vars(module).values() if isinstance(value, Task)]
                 for value in tasks:
-                    if value.id in owners and owners[value.id] != path:
-                        raise PushError(f"two tasks have the id {value.id}: in {owners[value.id]} and {path}")
-                    owners[value.id] = path
+                    held = owners.get(value.id)
+                    # One task under two names is one task; two tasks of one id are not, in one file or two.
+                    if held is not None and held[0] is not value:
+                        raise PushError(f"two tasks have the id {value.id}: in {held[1]} and {path}")
+                    owners[value.id] = (value, path)
                 if tasks:
                     files.append(path)
+        loaded = {
+            name: Path(source).resolve()
+            for name, module in sys.modules.items()
+            if isinstance(source := getattr(module, "__file__", None), str)
+            and source.endswith(".py")
+            and Path(source).resolve().is_relative_to(root)
+        }
     finally:
         sys.path.remove(str(root))
+        for name in [name for name in sys.modules if name.split(".")[0] in names]:
+            del sys.modules[name]
+        sys.modules.update(kept)
 
     if not owners:
         raise PushError(f"no task is exported from {', '.join(folders)} under {root}")
-    return files, sorted(owners), _project_modules(root)
+    modules: dict[str, Path] = {}
+    queue = list(loaded.values())
+    while queue:
+        path = queue.pop()
+        name = _dotted(root, path)
+        if name not in modules:
+            modules[name] = path
+            queue += _imports(root, name, path)
+    return files, sorted(owners), modules
 
 
 def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:

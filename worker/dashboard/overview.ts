@@ -3,7 +3,7 @@
  * orange, what is free a dim dot), and the jobs made last, newest first.
  */
 import * as v from 'valibot';
-import { detach, FleetSchema, HealthSchema, JobsSchema, type Fleet, type JobBrief } from '../../src/protocol';
+import { briefOf, detach, FleetSchema, HealthSchema, JobsSchema, JobStatusSchema, type Fleet, type JobBrief } from '../../src/protocol';
 import { get } from './api';
 import { ago, count, duration, h, replace } from './dom';
 import { jobPill, nameOf, progress, tookOf } from './status';
@@ -86,8 +86,12 @@ export function overview(): View {
 
     const used = fleet.jobs.reduce((sum, job) => sum + job.vcpus, 0);
     const containers = fleet.jobs.reduce((sum, job) => sum + job.containers, 0);
+    // A job kept from before that the first page no longer holds, read again by itself until it is done.
+    const fresh = new Set(jobs.jobs.map((job) => job.id));
+    const kept = [...listed.values()].filter((job) => job.phase !== 'done' && !fresh.has(job.id));
+    const again = await Promise.all(kept.map(async (job) => briefOf(await get(`/jobs/${job.id}`, JobStatusSchema, signal))));
 
-    const all = merge(jobs.jobs);
+    const all = merge([...jobs.jobs, ...again]);
 
     if (!older) exhausted = jobs.jobs.length < PAGE;
     replace(lead, health.jobs === 0 ? 'Nothing runs now.' : `${count(health.jobs)} job${health.jobs === 1 ? '' : 's'} open on ${count(containers)} container${containers === 1 ? '' : 's'}.`);

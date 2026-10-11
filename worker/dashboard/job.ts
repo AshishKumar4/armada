@@ -258,14 +258,19 @@ interface Drawn {
 const TONES: Readonly<Record<TaskState, Tone>> = { queued: 'idle', running: 'live', green: 'ok', red: 'bad', timeout: 'warn', lost: 'bad', cancelled: 'idle' };
 
 /** A task in a modal drawer, redrawn as its job is: `closed` is told when the user closes it, never when its page is
- *  left. The browser keeps focus in it and closes the topmost dialog on Escape. */
+ *  left. The browser keeps focus in it and closes the topmost dialog on Escape. A poll that changes nothing it shows
+ *  but a running task's time leaves its nodes, so the focus and scroll in it stay where the user left them. */
 class TaskDrawer {
   private readonly dialog = h('dialog', { class: 'drawer' });
   private readonly body = h('div', { class: 'drawer-body' });
   private readonly head = h('div', { class: 'button-row' });
   private readonly heading = h('h2');
   private readonly problem = h('p', { class: 'error' });
+  private readonly item = h('pre', { class: 'code' });
+  private readonly since = h('dd');
   private readonly log = new LogDialog();
+  private task = '';
+  private drawn = '';
   private disposing = false;
 
   constructor(closed: () => void) {
@@ -273,6 +278,8 @@ class TaskDrawer {
 
     this.dialog.append(h('div', { class: 'drawer-head' }, this.heading, h('div', { class: 'button-row' }, this.head, closer)), this.body);
     this.dialog.addEventListener('close', () => {
+      this.task = '';
+
       if (!this.disposing) closed();
     });
     // A click on the backdrop, outside the drawer's box, closes it.
@@ -285,15 +292,27 @@ class TaskDrawer {
   draw({ job, index, landed, running, item, known, where }: Drawn): void {
     const outcome = landed?.outcome;
     const state = stateNow(landed ?? undefined, running !== null);
+
+    if (running !== null) replace(this.since, duration(Date.now() - running.started));
+    const task = `${job}/${String(index)}`;
+    const drawn = JSON.stringify([state, landed?.at, outcome?.attempt, running?.vessel, running?.slot, running?.started, known]);
+
+    if (task === this.task && drawn === this.drawn) return;
+
+    // Another task's problem is not this one's.
+    if (task !== this.task) replace(this.problem);
+    this.task = task;
+    this.drawn = drawn;
     const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
     const fetched = (path: string, name: string) => () => { detach(download(path, name), (error) => { replace(this.problem, describe(error)); }); };
 
+    replace(this.item, known ? JSON.stringify(item, null, 2) : '…');
     this.dialog.setAttribute('aria-label', `Task ${String(index)}`);
     replace(this.heading, `Task ${count(index)}`);
     replace(this.head, pill(TONES[state], STATE_WORDS[state]));
     replace(this.body,
       outcome === undefined
-        ? h('dl', { class: 'facts' }, fact('Container', running === null ? null : where(running.vessel, running.slot)), fact('Running for', running === null ? null : duration(Date.now() - running.started)),
+        ? h('dl', { class: 'facts' }, fact('Container', running === null ? null : where(running.vessel, running.slot)), running === null ? null : h('div', {}, h('dt', {}, 'Running for'), this.since),
           running === null ? fact('State', 'queued: no container has taken it yet') : null)
         : h('dl', { class: 'facts' },
           fact('Exit code', outcome.kind === 'exited' ? String(outcome.exitCode) : null),
@@ -305,21 +324,21 @@ class TaskDrawer {
           fact('CPU', outcome.cpuSeconds === undefined || outcome.seconds === 0 ? null : `${(outcome.cpuSeconds / outcome.seconds).toFixed(2)} cores on average`),
           fact('Error', outcome.error ?? null),
           fact('Answered', outcome.cached === true ? 'from the cache; nothing ran' : null)),
-      h('div', {}, h('p', { class: 'section-label' }, 'Item'), h('pre', { class: 'code' }, known ? JSON.stringify(item, null, 2) : '…')),
+      h('div', {}, h('p', { class: 'section-label' }, 'Item'), this.item),
       outcome?.value === undefined ? null : h('div', {}, h('p', { class: 'section-label' }, 'Output'), h('pre', { class: 'code' }, outcome.value)),
       outcome === undefined || outcome.tail === '' ? null : h('div', {}, h('p', { class: 'section-label' }, 'End of its log'), h('pre', { class: 'code' }, outcome.tail)),
-      outcome === undefined ? null : h('div', {}, h('div', { class: 'button-row' },
+      outcome === undefined ? null : h('div', { class: 'button-row' },
         h('button', { class: 'button', type: 'button', onclick: () => { this.log.show(job, index); } }, icon('log'), 'Whole log'),
         outcome.output ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`) }, icon('download'), 'Output') : null,
         outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`) }, icon('download'), 'Artifacts') : null),
-      this.problem));
+      this.problem);
 
     if (!this.dialog.open) this.dialog.showModal();
   }
 
-  /** Why the item could not be read. */
+  /** Why the item could not be read, in its place. */
   failed(said: string): void {
-    replace(this.problem, said);
+    replace(this.item, said);
   }
 
   /** Its page is left: it goes, its history untouched. */
@@ -352,7 +371,10 @@ class LogDialog {
         h('button', { class: 'button', type: 'button', onclick: () => { save(new Blob([this.text], { type: 'text/plain' }), this.name); } }, icon('download'), 'Save'),
         h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: () => { this.dialog.close(); } }, icon('close')))),
       h('div', { class: 'drawer-body' }, this.body));
-    this.dialog.addEventListener('close', () => { this.reading?.abort(); });
+    // The close event comes after close() returns: a log opened again by then keeps its read.
+    this.dialog.addEventListener('close', () => {
+      if (!this.dialog.open) this.reading?.abort();
+    });
     this.dialog.addEventListener('click', (event) => {
       if (event.target === this.dialog) this.dialog.close();
     });
@@ -372,9 +394,12 @@ class LogDialog {
     this.dialog.showModal();
     detach((async () => {
       const found = await blob(`/jobs/${job}/tasks/${String(index)}/log`, reading.signal);
+      const text = found === null ? '' : await found.text();
 
-      this.text = found === null ? '' : await found.text();
-      replace(this.body, logText(found === null ? null : this.text));
+      // A log closed, or another opened, while its text was read: this one shows nothing now.
+      if (reading.signal.aborted) return;
+      this.text = text;
+      replace(this.body, logText(found === null ? null : text));
       // A log ends with how its task ended, so it opens at its end.
       this.body.scrollTop = this.body.scrollHeight;
     })(), (error) => {
