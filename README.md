@@ -1,4 +1,4 @@
-<p align="center"><img src=".github/armada.webp" alt="armada in 80 seconds: 100 videos encoded on 100 containers in 21 s, live in armada's dashboard, against 11 minutes on one container; then how it works, its CI, and what else it runs" width="100%"></p>
+<p align="center"><img src=".github/armada.webp" alt="armada in 38 seconds: one CI suite on GitHub Actions in 13:02 and on armada in 7:27; 100 containers starting from one Cloudflare Containers snapshot; the scheduler placing tests longest first; 256 programs graded for post-training and 100 videos encoded; the CLI, TypeScript and Python calls" width="100%"></p>
 
 armada runs a command, or a TypeScript or Python function, over many inputs at once on Cloudflare Containers in your own
 account. I run Kinu's and Dew's CI on it.
