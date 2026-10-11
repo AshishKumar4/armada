@@ -43,7 +43,7 @@ export interface DestroyIO {
 
 const Envelope = v.object({
   success: v.boolean(), result: v.optional(JsonSchema),
-  errors: v.optional(v.array(v.object({ message: v.string() })), []),
+  errors: v.nullish(v.array(v.object({ message: v.string() })), []),
   result_info: v.optional(v.object({ total_pages: v.optional(v.number()) })),
 });
 
