@@ -357,7 +357,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
         await this.dropCurrent(slot);
         // A copy stopped for its twin's answer, which waits until this one can no longer end red.
-        await job.stopped(spec.name, current.claim.index);
+        await job.stopped(spec.name, current.claim.index, { slot, attempt: current.claim.attempt });
       }
     }
 
@@ -507,7 +507,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
     if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
 
-    if (!(await job.accept(spec.name, index, exitCode))) return;
+    if (!(await job.accept(spec.name, index, exitCode, { slot, attempt }))) return;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
@@ -619,8 +619,9 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   private async retire(spec: VesselSpec): Promise<false> {
-    await this.end('done', spec);
-    await this.env.JOB.getByName(spec.jobId).retired(spec.name);
+    const gone = await this.end('done', spec);
+
+    await this.env.JOB.getByName(spec.jobId).retired(spec.name, gone);
 
     return false;
   }

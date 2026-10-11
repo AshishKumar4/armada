@@ -7,6 +7,13 @@ import { bucket, namespace, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
 
+/** A registry whose one environment is always ready, for a job to run in. */
+const ready = () => {
+  const generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
+
+  return namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }), used: async () => undefined }));
+};
+
 describe('a task\'s artifacts', () => {
   test('are served as stored at /jobs/<id>/tasks/<i>/artifacts, and 404 when it kept none', async () => {
     const env = world({
@@ -30,11 +37,10 @@ describe('a task\'s artifacts', () => {
 describe('a task\'s status token', () => {
   test('reads its job\'s tasks at /status/<job>/<index>, each run until its container is gone, and nothing else', async () => {
     const id = '20261010120000-0123abcd';
-    const generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
 
     const env = world({
       JOB: namespace((name) => (name === id ? running : undefined)),
-      ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }), used: async () => undefined })),
+      ENVIRONMENTS: ready(),
       // v2's container cannot be destroyed, so its task may still run after the job ends.
       VESSEL: namespace((name) => ({ begin: async () => undefined, stop: async () => !name.endsWith('/v2') })),
     });
@@ -82,5 +88,36 @@ describe('a task\'s status token', () => {
       stopped: ['failed', []],
       refused: [403, 403, 403, 404, 404],
     });
+  });
+});
+
+describe('a run its vessel lost track of', () => {
+  test('stays in its task\'s status, beside the next run in that slot, until the vessel\'s container is gone', async () => {
+    const id = '20261010120000-4567abcd';
+
+    const env = world({
+      JOB: namespace(() => restarted),
+      ENVIRONMENTS: ready(),
+      VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
+    });
+
+    const restarted = new ArmadaJob(state().ctx, env);
+
+    await restarted.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 1 }), 'https://armada.test');
+    await restarted.alarm();
+    const first = await restarted.claim('v1');
+
+    if (first === null || 'waitMs' in first) throw new Error('v1 got no task');
+    const token = first.env['ARMADA_STATUS_TOKEN'] ?? '';
+    const ask = async (index: number) => v.parse(TaskStatusSchema, await (await worker.fetch(new Request(`https://armada.test/status/${id}/${String(index)}`, { headers: { authorization: `Bearer ${token}` } }), env)).json());
+
+    // Restarted with its slot's record lost, v1 asks for its slot's next task while the first may still run.
+    await restarted.claim('v1');
+    const both = await Promise.all([ask(0), ask(1)]);
+
+    await restarted.retired('v1', true);
+    const gone = await Promise.all([ask(0), ask(1)]);
+
+    expect([both, gone].map((each) => each.map((status) => status.running.map((run) => run.vessel)))).toEqual([[['v1'], ['v1']], [[], []]]);
   });
 });
