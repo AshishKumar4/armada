@@ -6,7 +6,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -17,9 +17,6 @@ CONFIG_DIR = Path.home() / ".config" / "armada"
 
 # How often a read is asked of a runner whose gateway failed to answer it.
 READ_ATTEMPTS = 5
-
-# The largest pack, in bytes, sent in one request.
-PACK_PART = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -155,7 +152,10 @@ class Armada:
         self.call(f"/jobs/{job}/cancel", "POST")
 
     def status(self, job: str) -> "JobStatus":
-        return JobStatus.of(self.call(f"/jobs/{job}").json())
+        answer = self.call(f"/jobs/{job}")
+        if answer.status == 404:
+            raise RequestError(404, f"no job {job} in this deployment")
+        return JobStatus.of(answer.json())
 
     def events(self, job: str, after: int) -> JsonObject:
         return object_of(self.call(f"/jobs/{job}/events?after={after}").json())
@@ -323,11 +323,3 @@ def summary_of(status: JobStatus) -> Summary:
         boot_ms=sorted(vessel.boot_ms for vessel in status.vessels if vessel.boot_ms is not None),
         tasks_per_second=(status.tasks.exited + status.tasks.failed) / (map_ms / 1000) if map_ms > 0 else 0,
     )
-
-
-def _as_iter_bytes(stream: BinaryIO, chunk: int = 65536) -> Iterator[bytes]:
-    while True:
-        part = stream.read(chunk)
-        if not part:
-            return
-        yield part

@@ -16,6 +16,15 @@ export const USER_HOME = '/home/ci';
 /** The runner's own state in a container: the pack, the job's files, a function's bundle, the current task. */
 export const STATE = '/armada';
 
+/** One exec's longest run, for every container driver (vessel, preparer). */
+export const EXEC_MS = 90_000;
+
+/** One alarm's share of a driver's loop; the next alarm takes it up at once. */
+export const SLICE_MS = 50_000;
+
+/** One blocking wait on a running task or phase. */
+export const WAIT_SECONDS = 20;
+
 /** Longer than a job may take, so only the job's end stops a container; one whose stop failed ends this long after its
  *  last exec. */
 export const INACTIVITY_MS = 6 * 60 * 60_000;

@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { argumentRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
-import { remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
+import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
 import { execute, OutFile, quote, ShellError, ShellSchema, type Shell } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
@@ -520,12 +520,6 @@ class Submission<I> {
 const BATCH = 500;
 
 const BATCH_MS = 250;
-
-const EnvelopeSchema = v.union([
-  v.object({ ok: v.literal(true), value: v.custom<Json>(() => true) }),
-  v.object({ ok: v.literal(true), bytes: v.string() }),
-  v.object({ ok: v.literal(false), error: v.object({ name: v.string(), message: v.string(), stack: v.string() }) }),
-]);
 
 /** A task's config, past the overloads' checks: its body takes JSON, or what its input schema gives. */
 type Config = TaskConfig<unknown, unknown, Output | undefined, unknown> & { readonly input?: StandardSchemaV1 };

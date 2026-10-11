@@ -52,7 +52,7 @@ def run_tasks(modules: list[ModuleType]) -> "None":
     if isinstance(answer, Shell):
         with open(marker, "w") as file:
             file.write("command")
-        sys.exit(execute(answer.script).exit_code)
+        sys.exit(execute(answer.script, inherit=True).exit_code)
     # The error's name follows, for the job to decide a retry by.
     with open(marker, "w") as file:
         file.write("value" if answer.error is None else f"value\n{answer.error}")

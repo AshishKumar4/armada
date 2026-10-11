@@ -12,7 +12,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
 import { failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
-import { AS_USER, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, startAndAnswer, STATE, USER_HOME, waitOn } from './container';
+import { AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 
 export type Generation = v.InferOutput<typeof GenerationSchema>;
@@ -303,14 +303,6 @@ const ROOT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 const STEP_MS = 12 * 60_000;
 
 const stepMs = (size: Size): number => STEP_MS * SIZES.medium.vcpus / SIZES[size].vcpus;
-
-const EXEC_MS = 90_000;
-
-/** One alarm's share of a phase; the next alarm takes it up at once. */
-const SLICE_MS = 50_000;
-
-/** One blocking wait on a running phase. */
-const WAIT_SECONDS = 20;
 
 /** Execs in a row the platform lost before the container counts as lost, as a vessel counts them. */
 const LOST_EXECS = 3;

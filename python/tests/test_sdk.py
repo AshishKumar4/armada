@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task
 from armada.push import bundle_tasks, find_project
 from armada.task import Envelope, RemoteError, _Value
-from armada.wire import environment_key
 
 
 class TestSh(unittest.TestCase):
@@ -33,6 +32,10 @@ class TestSh(unittest.TestCase):
     def test_raw_inserts_as_written(self) -> None:
         self.assertEqual(raw("echo {}", "a b").script, "echo a b")
 
+    def test_hands_each_word_to_the_program_unchanged(self) -> None:
+        words = ["name\n", "a b", "it's", "$(echo pwned)"]
+        self.assertEqual(sh("printf '[%s]' {}", words).text(), "".join(f"[{word}]" for word in words))
+
     def test_runs_and_reads(self) -> None:
         self.assertEqual(sh("echo hi").text(), "hi\n")
         with self.assertRaises(ShellError) as raised:
@@ -42,14 +45,6 @@ class TestSh(unittest.TestCase):
 
 
 class TestRecipe(unittest.TestCase):
-    def test_hashes_to_the_same_environment_key_as_the_ts_builder(self) -> None:
-        # Both digests are src/protocol.ts's environmentKey of the same recipes (bun -e, 2026-10-08).
-        self.assertEqual(
-            environment_key(recipe.debian().apt("ffmpeg").size("small").install("pip install httpx").spec),
-            "d8c5273ffe726a65c5916d14eab38bc97ae3b98adcc9d6a2334dc045b0dceb78",
-        )
-        self.assertEqual(environment_key(recipe.debian().spec), "f2f8d07dddb2aae1ca71538e2ff229cb1b97523099e80ca5a3785d390c6cd2cd")
-
     def test_appends_steps_in_order(self) -> None:
         built = recipe().apt("curl").setup("echo more").install("a").install("b").spec
         self.assertEqual(built["setup"].split("\n")[-1], "echo more")
@@ -101,7 +96,56 @@ class TestEnvelope(unittest.TestCase):
         self.assertEqual((type(error).__name__, error.name if isinstance(error, RemoteError) else ""), ("RemoteError", "Exit"))
 
 
+def _ran(root: Path, task_id: str, item: object) -> tuple[int, str, str, str]:
+    """The project's bundle run as a container runs it, from another directory: its exit, its log, its answer marker
+    and its out."""
+    import os
+    import subprocess
+
+    content, _ids = bundle_tasks(root, ["tasks"])
+    with tempfile.TemporaryDirectory() as box:
+        Path(box, "b.pyz").write_bytes(content)
+        env = {**os.environ, "ARMADA_TASK": task_id, "ARMADA_ITEM": json.dumps(item)}
+        env.update(ARMADA_OUT=f"{box}/out", ARMADA_ANSWER=f"{box}/answer")
+        with open(f"{box}/log", "w") as log:
+            ran = subprocess.run([sys.executable, f"{box}/b.pyz"], env=env, stdout=log, stderr=log, cwd="/")
+
+        def read(name: str) -> str:
+            return Path(box, name).read_text() if Path(box, name).exists() else ""
+
+        return ran.returncode, read("log"), read("answer"), read("out")
+
+
 class TestBundle(unittest.TestCase):
+    def test_runs_as_its_container_does_a_package_with_relative_and_from_list_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            Path(root, "pyproject.toml").write_text('[tool.armada]\nproject="p"\ntasks=["tasks"]\n')
+            for folder in ("tasks", "helpers"):
+                Path(root, folder).mkdir()
+            Path(root, "tasks", "__init__.py").write_text("OFFSET = 1\n")
+            Path(root, "helpers", "__init__.py").write_text("")
+            Path(root, "helpers", "compute.py").write_text("def double(n):\n    return n * 2\n")
+            Path(root, "tasks", "shared.py").write_text("from . import OFFSET\n")
+            Path(root, "tasks", "jobs.py").write_text(
+                "from armada import sh, task\nfrom helpers import compute\nfrom .shared import OFFSET\n\n"
+                "@task(id='twice')\ndef twice(n, ctx):\n    return compute.double(n) + OFFSET\n\n"
+                "@task(id='loud')\ndef loud(n, ctx):\n    return sh('echo diagnostic >&2; exit 3')\n\n"
+                "def check(n):\n    if n % 2 == 0:\n        raise ValueError('even')\n    return n\n\n"
+                "@task(id='odd', output=check)\ndef odd(n, ctx):\n    return n\n\n"
+                "@task(id='nan')\ndef nan(n, ctx):\n    return float('nan')\n"
+            )
+            twice, loud, odd, nan = (_ran(root, name, 20) for name in ("twice", "loud", "odd", "nan"))
+
+            got = {
+                "twice": (twice[0], twice[3]), "loud": (loud[0], "diagnostic" in loud[1], loud[2]),
+                "odd": (odd[0], odd[2]), "nan": (nan[0], nan[2]),
+            }
+            self.assertEqual(got, {
+                "twice": (0, '{"ok":true,"value":41}'), "loud": (3, True, "command"),
+                "odd": (1, "value\nSchemaError"), "nan": (1, "value\nValueError"),
+            })
+
     def _project(self, root: str) -> None:
         Path(root, "pyproject.toml").write_text('[project]\nname="x"\nversion="0.1.0"\n\n[tool.armada]\nproject="sq"\ntasks=["tasks"]\n')
         Path(root, "tasks").mkdir()

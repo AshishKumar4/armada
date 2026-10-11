@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, TaskSchema, TimingsSchema, type HookConfig, type Json,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -133,7 +133,7 @@ async function sweepBundles(env: Env): Promise<void> {
 
 /** `/bundles/<digest>`: a pushed project's bundle, stored once under the digest of its bytes. */
 const bundles: Handler = async (request, env, [digest]) => {
-  if (digest === undefined || !/^[0-9a-f]{64}$/u.test(digest)) return undefined;
+  if (!v.is(Digest, digest)) return undefined;
 
   if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(bundleKey(digest))) === null ? 404 : 200 });
 
@@ -208,7 +208,11 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
 
   const job = env.JOB.getByName(id);
 
-  if (tail === undefined) return Response.json(await job.status() ?? { error: 'no such job' });
+  if (tail === undefined) {
+    const status = await job.status();
+
+    return status === null ? Response.json({ error: 'no such job' }, { status: 404 }) : Response.json(status);
+  }
 
   if (tail === 'events') return Response.json(await job.events(Number(url.searchParams.get('after') ?? '0')));
 

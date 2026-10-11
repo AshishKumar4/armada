@@ -30,16 +30,20 @@ export interface Context<S extends string = string> {
   readonly secrets: Readonly<Record<S, string>>;
 }
 
-export interface RemoteError {
-  readonly name: string;
-  readonly message: string;
-  readonly stack: string;
-}
-
-export type { Json };
+const RemoteErrorSchema = v.object({ name: v.string(), message: v.string(), stack: v.string() });
 
 /** A body's answer as the container writes it: its value, its bytes in base64, or the error it threw. */
-export type Envelope = { readonly ok: true; readonly value: Json } | { readonly ok: true; readonly bytes: string } | { readonly ok: false; readonly error: RemoteError };
+export const EnvelopeSchema = v.union([
+  v.object({ ok: v.literal(true), value: v.custom<Json>(() => true) }),
+  v.object({ ok: v.literal(true), bytes: v.string() }),
+  v.object({ ok: v.literal(false), error: RemoteErrorSchema }),
+]);
+
+export type RemoteError = v.InferOutput<typeof RemoteErrorSchema>;
+
+export type Envelope = v.InferOutput<typeof EnvelopeSchema>;
+
+export type { Json };
 
 export interface Runnable {
   readonly id: string;

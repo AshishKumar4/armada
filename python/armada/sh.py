@@ -8,12 +8,12 @@ import subprocess
 from dataclasses import dataclass
 from typing import IO, Union
 
-_SAFE = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
+_SAFE = re.compile(r"[A-Za-z0-9_@%+=:,./-]+")
 
 
 def quote(word: str) -> str:
     """One word for the shell, single-quoted unless it needs no quoting."""
-    return word if _SAFE.match(word) else "'" + word.replace("'", "'\\''") + "'"
+    return word if _SAFE.fullmatch(word) else "'" + word.replace("'", "'\\''") + "'"
 
 
 class ShellError(Exception):
@@ -64,19 +64,15 @@ class Completed:
     stderr: str
 
 
-def execute(script: str, env: dict[str, str] | None = None, stdout: IO[bytes] | None = None) -> Completed:
-    """Runs `script` under /bin/sh, with stdout and stderr read whole unless `stdout` streams it."""
-    child = subprocess.Popen(
-        ["/bin/sh", "-c", script], env={**os.environ, **(env or {})}, stdout=stdout or subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+def execute(script: str, env: dict[str, str] | None = None, stdout: IO[bytes] | None = None, inherit: bool = False) -> Completed:
+    """Runs `script` under /bin/sh, with stdout and stderr read whole unless `stdout` streams it, or `inherit` leaves
+    both this process's: a task's command writes to the task's log."""
+    piped = None if inherit else subprocess.PIPE
+    child = subprocess.Popen(["/bin/sh", "-c", script], env={**os.environ, **(env or {})}, stdout=stdout or piped, stderr=piped)
     out, err = child.communicate()
 
     code = child.returncode if child.returncode >= 0 else 128
-    return Completed(code, (out or b"").decode(errors="replace"), err.decode(errors="replace"))
-
-
-def _is_shell(value: object) -> bool:
-    return isinstance(value, Shell)
+    return Completed(code, (out or b"").decode(errors="replace"), (err or b"").decode(errors="replace"))
 
 
 def _interpolated(value: object) -> str:

@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -96,16 +96,8 @@ const SLOT_RETRY_MS = 5_000;
 /** A start that has not answered in this long is a lost vessel; a snapshot new to a machine has taken 92 s. */
 const START_MS = 240_000;
 
-const EXEC_MS = 90_000;
-
 /** A name `export` takes: the task's variables named so reach it through its launch file (`positional`). */
 const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-
-/** One alarm's share of the loop; the next alarm takes it up at once. */
-const SLICE_MS = 50_000;
-
-/** One blocking wait on a running task. */
-const WAIT_SECONDS = 20;
 
 /** Waits in a row whose exec the platform lost before the container counts as lost: a wait only reads whether the
  *  task ended, so one lost connection says nothing of the task, which runs on. */

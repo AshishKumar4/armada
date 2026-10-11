@@ -6,7 +6,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
-import type { HookConfig, JobSpecSchema, Json, Webhook } from '../../src/protocol';
+import { Sha, type HookConfig, type JobSpecSchema, type Json, type Webhook } from '../../src/protocol';
 import type { Env } from './env';
 
 /** What a delivery asks for, once the event and the config decide it. */
@@ -17,15 +17,14 @@ export type Ask =
   | { readonly kind: 'fork' }
   | { readonly kind: 'ignore' };
 
-const Commit = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The parts of GitHub's `push` payload a driver needs. */
-const PushEvent = v.object({ ref: v.string(), after: Commit, deleted: v.optional(v.boolean(), false), repository: v.object({ default_branch: v.string() }) });
+const PushEvent = v.object({ ref: v.string(), after: Sha, deleted: v.optional(v.boolean(), false), repository: v.object({ default_branch: v.string() }) });
 
 /** The parts of GitHub's `pull_request` payload a driver needs: a deleted fork's head has no repo at all. */
 const PullRequestEvent = v.object({
   action: v.string(),
-  pull_request: v.object({ head: v.object({ sha: Commit, repo: v.nullable(v.object({ full_name: v.string() })) }) }),
+  pull_request: v.object({ head: v.object({ sha: Sha, repo: v.nullable(v.object({ full_name: v.string() })) }) }),
 });
 
 /** The pull request actions that bring new code. */

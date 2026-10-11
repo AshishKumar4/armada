@@ -211,10 +211,10 @@ def _command_answer(
 def _envelope_answer(outcome: Mapping[str, Json], read: Callable[[], bytes | None]) -> _Value | RemoteError:
     """A pushed task's answer: the envelope its process wrote, or an Exit when it died before answering."""
     inline = outcome.get("value")
-    text = inline if isinstance(inline, str) else (read() or b"").decode()
     try:
+        text = inline if isinstance(inline, str) else (read() or b"").decode()
         parsed: Json = json.loads(text)
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         parsed = None
     envelope = object_of(parsed)
     ok = envelope.get("ok")
@@ -236,7 +236,6 @@ class Submission(Generic[In]):
         self.id: str | None = None
         self.failure: BaseException | None = None
         self.known = threading.Event()
-        self.done = threading.Event()
         self.stopped = False
 
     def resolve(self, job: str) -> None:
@@ -247,32 +246,60 @@ class Submission(Generic[In]):
         self.failure = cause
         self.stopped = True
         self.known.set()
-        self.done.set()
 
     def pump(self, items: Iterable[In], make: Callable[[In, int], "WireTask"]) -> None:
-        """Runs in a thread: batches items into the open job, 500 to a batch or every BATCH_S, then closes it."""
+        """Runs in a thread: batches items into the open job, 500 to a batch or every BATCH_S however long the source
+        takes to give the next, then closes it. Whichever fails first, the source or a flush, cancels the job."""
         job = self.id
         assert job is not None
         batch: list[WireTask] = []
-        last = time.monotonic()
+        lock = threading.Lock()
+        ended = threading.Event()
+
+        def flush() -> None:
+            nonlocal batch
+            with lock:
+                taken, batch = batch, []
+                if taken:
+                    self.armada.add(job, taken)
+
+        def tick() -> None:
+            while not ended.wait(BATCH_S):
+                try:
+                    flush()
+                except BaseException as cause:
+                    self.abandon(job, cause)
+                    return
+
+        timer = threading.Thread(target=tick, daemon=True)
+        timer.start()
         try:
             for item in items:
                 if self.stopped:
                     return
                 assert self.sent is not None
-                batch.append(make(item, len(self.sent)))
-                self.sent.append(item)
-                if len(batch) >= BATCH or time.monotonic() - last >= BATCH_S:
-                    self.armada.add(job, batch)
-                    batch = []
-                    last = time.monotonic()
-            if batch:
-                self.armada.add(job, batch)
-            self.armada.close(job)
-            self.done.set()
+                with lock:
+                    batch.append(make(item, len(self.sent)))
+                    self.sent.append(item)
+                    full = len(batch) >= BATCH
+                if full:
+                    flush()
+            ended.set()
+            timer.join()
+            if not self.stopped:
+                flush()
+                self.armada.close(job)
         except BaseException as cause:
-            self.armada.cancel(job)
-            self.fail(cause)
+            self.abandon(job, cause)
+        finally:
+            ended.set()
+
+    def abandon(self, job: str, cause: BaseException) -> None:
+        """Ends open job `job` with `cause`, the first failure only."""
+        if self.stopped:
+            return
+        self.fail(cause)
+        self.armada.cancel(job)
 
 
 class Job(Generic[In, Out]):
@@ -443,7 +470,7 @@ class Task(Generic[In, Out]):
             "recipe": self.recipe,
             "run": {"kind": "task", "id": self.id, **({"bundle": bundle, "runtime": "python"} if bundle is not None else {})},
             "output": True, "pool": pool, "slots": slots, "label": label,
-            "env": env or {}, "files": files or {}, "tmpfs": tmpfs or ["/tmp", "/dev/shm"],
+            "env": env or {}, "files": files or {}, "tmpfs": tmpfs,
             "timeout": self.timeout, "speculative": self.speculative, "retries": _retries(self.retries),
             "secrets": self.secrets, "cache": self.cache,
         }
@@ -466,7 +493,6 @@ class Task(Generic[In, Out]):
                     wired = [self._wire(item, at) for at, item in enumerate(items)]
                     spec = {**self._spec(pool, slots, label, env, files, tmpfs, bundle), "items": wired}
                     submission.resolve(client.create(spec))
-                    submission.done.set()
                 else:
                     spec = {**self._spec(pool, slots, label, env, files, tmpfs, bundle), "items": [], "open": True}
                     submission.resolve(client.create(spec))
@@ -553,9 +579,13 @@ class Task(Generic[In, Out]):
             returned = self.body(checked, context)
             if isinstance(returned, Shell):
                 return returned
-            # The body's own value: the client that reads it checks it with the output.
             if isinstance(returned, (bytes, bytearray)):
                 return Envelope({"ok": True, "bytes": base64.b64encode(returned).decode()}, None)
+            # Checked here, as runner.ts does, so a refused value is red and retried by name; the body's own value is
+            # sent, which the reader checks again. Strict JSON: NaN and Infinity are not values.
+            if self.output is not None and not isinstance(self.output, str):
+                _check(self.output, returned, "the value")
+            json.dumps(returned, allow_nan=False)
             return Envelope({"ok": True, "value": returned}, None)
         except Exception as cause:
             error = remote_error(cause)

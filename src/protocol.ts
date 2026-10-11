@@ -447,7 +447,7 @@ export const HookConfigSchema = v.object({
   repo: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u, 'a repo is owner/name')),
   branches: v.optional(v.array(v.pipe(v.string(), v.minLength(1)))),
   pullRequests: v.optional(v.boolean(), false),
-  tokenSecret: v.optional(v.pipe(v.string(), v.regex(/^[A-Z_][A-Z0-9_]{0,63}$/u)), 'GITHUB_TOKEN'),
+  tokenSecret: v.optional(SecretName, 'GITHUB_TOKEN'),
   secret: v.pipe(v.string(), v.minLength(16)),
   hook: v.optional(v.number()),
 });

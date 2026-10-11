@@ -4,7 +4,7 @@ with `python3`, uploads it by its digest, and records each task's id against it.
 `.stream` and `.run` push first when the folder changed, once per process per deployment, like pushed() in
 push.ts."""
 
-import ast
+import importlib
 import io
 import os
 import sys
@@ -62,91 +62,65 @@ def _is_task(value: object) -> bool:
     return isinstance(value, Task)
 
 
-def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str]]:
-    """Every task the project's folders export, each by the file it is in, refusing an id two of them share."""
+def _dotted(root: Path, path: Path) -> str:
+    """`path`'s module name under `root`: `tasks/jobs.py` is `tasks.jobs`, `tasks/__init__.py` is `tasks`."""
+    return str(path.relative_to(root).with_suffix("")).replace(os.sep, ".").removesuffix(".__init__")
+
+
+def _project_modules(root: Path) -> dict[str, Path]:
+    """The project's modules this process has imported, by name: those under `root`, from source."""
+    found: dict[str, Path] = {}
+    for name, module in list(sys.modules.items()):
+        source = getattr(module, "__file__", None)
+        path = Path(source).resolve() if isinstance(source, str) else None
+        if path is not None and path.suffix == ".py" and path.is_relative_to(root):
+            found[name] = path
+    return found
+
+
+def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str], dict[str, Path]]:
+    """Every task the project's folders export, each by the file it is in, refusing an id two of them share, and the
+    project's modules their import loaded. Each file is imported under its own name, as the bundle imports it, so its
+    relative imports resolve, and Python's own import system decides what it needs: a from-list's submodule and each
+    package's `__init__.py` included."""
     files: list[Path] = []
     owners: dict[str, Path] = {}
+    # A module of a name this project uses, imported from elsewhere (another project, or a folder's namespace package
+    # that has no file), is not this one's: Python would import that one again.
+    tops = {child.name for child in root.iterdir() if child.is_dir()} | {child.stem for child in root.glob("*.py")}
+    for name in [name for name in sys.modules if name.split(".")[0] in tops]:
+        source = getattr(sys.modules[name], "__file__", None)
+        if not (isinstance(source, str) and Path(source).resolve().is_relative_to(root)):
+            del sys.modules[name]
 
-    for folder in folders:
-        for path in sorted((root / folder).rglob("*.py")):
-            if path.name.endswith((".test.py",)) or path.name.startswith("test_"):
-                continue
-            tree = ast.parse(path.read_text())
-            top = [node.targets[0].id for node in tree.body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)]
-            decorated = [
-                node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list
-            ]
-            if not top and not decorated:
-                continue
-            sys.path.insert(0, str(root))
-            try:
-                import importlib.util
-
-                spec = importlib.util.spec_from_file_location(f"_armada_scan_{path.stem}_{abs(hash(path))}", path)
-                if spec is None or spec.loader is None:
+    sys.path.insert(0, str(root))
+    try:
+        for folder in folders:
+            for path in sorted((root / folder).rglob("*.py")):
+                if path.name.startswith("test_") or path.name == "__init__.py":
                     continue
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                for value in vars(module).values():
-                    if _is_task(value):
-                        if value.id in owners:
-                            raise PushError(f"two tasks have the id {value.id}: in {owners[value.id]} and {path}")
-                        owners[value.id] = path
-            finally:
-                sys.path.remove(str(root))
-            if any(_is_task(value) for value in vars(module).values()):
-                files.append(path)
+                module = importlib.import_module(_dotted(root, path))
+                tasks = [value for value in vars(module).values() if _is_task(value)]
+                for value in tasks:
+                    if value.id in owners and owners[value.id] != path:
+                        raise PushError(f"two tasks have the id {value.id}: in {owners[value.id]} and {path}")
+                    owners[value.id] = path
+                if tasks:
+                    files.append(path)
+    finally:
+        sys.path.remove(str(root))
 
     if not owners:
         raise PushError(f"no task is exported from {', '.join(folders)} under {root}")
-    return files, sorted(owners)
-
-
-def _module_paths(root: Path, files: list[Path]) -> dict[str, Path]:
-    """The task files plus every project-root module they import: the `import`/`from` names in each file that
-    resolve under the root, transitively. Third-party packages come from the recipe's install step, never the
-    bundle."""
-    found: dict[str, Path] = {}
-    queue = list(files)
-    while queue:
-        file = queue.pop()
-        key = str(file.relative_to(root)).removesuffix(".py").replace(os.sep, ".")
-        if key in found:
-            continue
-        found[key] = file
-        tree = ast.parse(file.read_text())
-        package = key.rpartition(".")[0]
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                if node.level == 0 and node.module is not None:
-                    names = [node.module]
-                elif node.level > 0:
-                    # `from .. import x`: the package `level` steps up from the file's own.
-                    base = package.split(".")[: max(0, len(package.split(".")) - node.level + 1)]
-                    names = [".".join(base + ([node.module] if node.module else []))]
-            for name in names:
-                for depth in range(len(name.split(".")), 0, -1):
-                    prefix = name.split(".")[:depth]
-                    candidate = root.joinpath(*prefix).with_suffix(".py")
-                    package_init = root.joinpath(*prefix) / "__init__.py"
-                    hit = candidate if candidate.exists() else (package_init if package_init.exists() else None)
-                    if hit is not None and hit.resolve().is_relative_to(root):
-                        resolved = hit.resolve()
-                        if str(resolved.relative_to(root)).removesuffix(".py").replace(os.sep, ".") not in found:
-                            queue.append(resolved)
-                        break
-    return found
+    return files, sorted(owners), _project_modules(root)
 
 
 def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
     """The project's task files bundled as a zipapp (`python3 bundle.pyz` runs its `__main__.py`): the runner,
     the armada package's runtime modules, the task folders' modules and every project module they import.
     Sorted entries, fixed timestamps and modes: the same sources give the same digest."""
-    files, ids = _task_files(root, folders)
-    modules = _module_paths(root, files)
+    root = root.resolve()
+    files, ids, modules = _task_files(root, folders)
     archive = io.BytesIO()
     # ZIP64 fields carry no timestamp; DOS epoch 1980-01-01 is the fixed date.
     fixed = (1980, 1, 1, 0, 0, 0)
@@ -175,7 +149,7 @@ def bundle_tasks(root: Path, folders: list[str]) -> tuple[bytes, list[str]]:
                     if not (root / folder / "__init__.py").exists():
                         add(f"{folder}/__init__.py", b"")
             add(inside, path.read_bytes())
-        names = sorted(str(path.relative_to(root)).removesuffix(".py").replace(os.sep, ".") for path in files)
+        names = sorted(_dotted(root, path) for path in files)
         entry = (
             "import importlib\n"
             "from armada.runner import run_tasks\n"

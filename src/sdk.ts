@@ -248,7 +248,11 @@ export class Armada {
   }
 
   async status(id: string): Promise<JobStatus> {
-    return v.parse(JobStatusSchema, await (await this.call(`/jobs/${id}`)).json());
+    const answer = await this.call(`/jobs/${id}`);
+
+    if (answer.status === 404) throw new RequestError(404, `no job ${id} in this deployment`);
+
+    return v.parse(JobStatusSchema, await answer.json());
   }
 
   /** Outcomes after `after`, in batches, and whether the job is done. */
