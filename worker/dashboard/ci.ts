@@ -15,8 +15,8 @@ export function ci(project: string | null, sha: string | null): View {
 
   document.title = 'CI · armada';
 
-  const pollster = poll(15_000, banner, async () => {
-    const { projects } = await get('/verdicts', ProjectsSchema);
+  const pollster = poll(15_000, banner, async (signal) => {
+    const { projects } = await get('/verdicts', ProjectsSchema, signal);
     const shown = project ?? projects[0] ?? null;
 
     replace(tabs, projects.length < 2 ? null : projects.map((name) => h('a', { class: 'tab', href: `#/ci/${name}`, current: name === shown }, name)));
@@ -24,18 +24,19 @@ export function ci(project: string | null, sha: string | null): View {
     if (shown === null) {
       replace(body, empty('No verdict yet', 'A whole ', h('span', { class: 'mono' }, 'armada run <commit>'), ' stores one.'));
 
-      return false;
+      // Not final: a run may store the first verdict while this page is shown.
+      return true;
     }
 
     if (sha !== null) {
       replace(head, h('div', {}, h('a', { class: 'back', href: `#/ci/${shown}` }, icon('back'), shown), h('h1', { class: 'mono' }, sha.slice(0, 12))));
       replace(tabs);
-      replace(body, verdict(await get(`/verdicts/${shown}/${sha}`, VerdictFileSchema)));
+      replace(body, verdict(await get(`/verdicts/${shown}/${sha}`, VerdictFileSchema, signal)));
 
       return false;
     }
 
-    const { verdicts } = await get(`/verdicts/${shown}`, VerdictsSchema);
+    const { verdicts } = await get(`/verdicts/${shown}`, VerdictsSchema, signal);
 
     replace(body, verdicts.length === 0 ? empty('No verdict yet') : h('div', { class: 'rows' }, verdicts.map((each) => h('a', { class: 'row-link', href: `#/ci/${shown}/${each.sha}` },
       h('div', {}, h('div', { class: 'mono' }, each.sha.slice(0, 12)), h('div', { class: 'faint', title: when(each.uploaded) }, ago(each.uploaded))),

@@ -26,10 +26,17 @@ export function overview(): View {
   const jobsBody = h('div', { class: 'card-body flush' });
   const secretsBody = h('div', { class: 'card-body' });
   const lead = h('p', {}, 'Reading the fleet…');
-  /** Older pages, read when asked for; the first page is read again at each poll. */
-  let older: JobBrief[] = [];
-  let first: JobBrief[] = [];
+  /** Every job read so far, by id, newest first: each poll's first page and each older page merged in, so a job that a
+   *  newer one pushes off the first page stays where it was. */
+  const listed = new Map<string, JobBrief>();
+  let older = false;
   let exhausted = false;
+
+  const merge = (jobs: readonly JobBrief[]): JobBrief[] => {
+    for (const job of jobs) listed.set(job.id, job);
+
+    return [...listed.values()].sort((left, right) => right.id.localeCompare(left.id));
+  };
 
   const element = h('div', { class: 'page' },
     h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, 'Fleet'), lead)),
@@ -39,9 +46,7 @@ export function overview(): View {
       h('div', { class: 'stack' }, figure, h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Secrets')), secretsBody))),
     h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Recent jobs'), h('span', { class: 'aside' }, 'newest first')), jobsBody));
 
-  const drawJobs = (): void => {
-    const all = [...first, ...older.filter((job) => !first.some((each) => each.id === job.id))];
-
+  const drawJobs = (all: readonly JobBrief[]): void => {
     if (all.length === 0) {
       replace(jobsBody, empty('No jobs yet', 'Start one with ', h('span', { class: 'mono' }, 'armada map --times=3 -- echo hello {item}')));
 
@@ -57,9 +62,9 @@ export function overview(): View {
         detach((async () => {
           const { jobs } = await get(`/jobs?limit=${String(PAGE)}&before=${encodeURIComponent(all.at(-1)?.id ?? '')}`, JobsSchema);
 
-          older = [...older, ...jobs];
+          older = true;
           exhausted = jobs.length < PAGE;
-          drawJobs();
+          drawJobs(merge(jobs));
         })(), (error) => {
           if (button instanceof HTMLButtonElement) button.disabled = false;
           failed(banner, error);
@@ -73,29 +78,29 @@ export function overview(): View {
       h('tbody', {}, all.map(row))), more);
   };
 
-  const pollster = poll(4000, banner, async () => {
+  const pollster = poll(4000, banner, async (signal) => {
     const [health, fleet, jobs, secrets] = await Promise.all([
-      get('/health', HealthSchema), get('/fleet', FleetSchema), get(`/jobs?limit=${String(PAGE)}`, JobsSchema), get('/secrets', v.object({ names: v.array(v.string()) })),
+      get('/health', HealthSchema, signal), get('/fleet', FleetSchema, signal), get(`/jobs?limit=${String(PAGE)}`, JobsSchema, signal),
+      get('/secrets', v.object({ names: v.array(v.string()) }), signal),
     ]);
 
     const used = fleet.jobs.reduce((sum, job) => sum + job.vcpus, 0);
     const containers = fleet.jobs.reduce((sum, job) => sum + job.containers, 0);
-    const open = jobs.jobs.filter((job) => job.phase !== 'done');
 
-    first = jobs.jobs;
+    const all = merge(jobs.jobs);
 
-    if (older.length === 0) exhausted = jobs.jobs.length < PAGE;
+    if (!older) exhausted = jobs.jobs.length < PAGE;
     replace(lead, health.jobs === 0 ? 'Nothing runs now.' : `${count(health.jobs)} job${health.jobs === 1 ? '' : 's'} open on ${count(containers)} container${containers === 1 ? '' : 's'}.`);
     replace(figure,
       stat('vCPUs in use', count(used), `of ${count(fleet.cap)}`),
       stat('Containers', count(containers)),
-      stat('Tasks running', count(open.reduce((sum, job) => sum + job.tasks.running, 0))),
-      stat('Tasks queued', count(open.reduce((sum, job) => sum + job.tasks.queued, 0))));
-    replace(fleetBody, ...fleetPicture(fleet, used, new Map([...first, ...older].map((job) => [job.id, nameOf(job)]))));
+      stat('Tasks running', count(fleet.tasks?.running ?? 0)),
+      stat('Tasks queued', count(fleet.tasks?.queued ?? 0)));
+    replace(fleetBody, ...fleetPicture(fleet, used, new Map(all.map((job) => [job.id, nameOf(job)]))));
     replace(secretsBody, secrets.names.length === 0
       ? h('p', { class: 'muted' }, 'None set. ', h('span', { class: 'mono' }, 'armada secret set NAME'), ' sets one; no page reads a value back.')
       : h('div', { class: 'button-row' }, secrets.names.map((name) => h('span', { class: 'pill mono' }, name))));
-    drawJobs();
+    drawJobs(all);
     document.title = health.jobs === 0 ? 'armada' : `armada · ${count(health.jobs)} open`;
 
     return true;

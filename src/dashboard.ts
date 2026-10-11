@@ -70,11 +70,13 @@ export async function serveDashboard(armada: Armada, port: number): Promise<neve
         return await file.exists() ? new Response(file) : new Response('not found', { status: 404 });
       }
 
+      // Read only: the bearer goes with a dashboard's GETs, never a page's POST to /drain or /cancel.
+      if (request.method !== 'GET' && request.method !== 'HEAD') return new Response('the dashboard only reads', { status: 405 });
       const headers = new Headers(request.headers);
 
       headers.set('authorization', `Bearer ${armada.connection.token}`);
       headers.delete('host');
-      const answer = await fetch(origin + url.pathname + url.search, { method: request.method, headers, body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body });
+      const answer = await fetch(origin + url.pathname + url.search, { method: request.method, headers });
       // fetch has already inflated a gzipped log, so the length and encoding it came with no longer hold.
       const passed = new Headers(answer.headers);
 

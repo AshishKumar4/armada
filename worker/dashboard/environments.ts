@@ -8,9 +8,6 @@ import { empty, poll, type View } from './view';
 
 type Entry = v.InferOutput<typeof EnvironmentEntrySchema>;
 
-/** The phases of a preparation, in order (worker/src/environments.ts). */
-const PHASES = ['base', 'setup', 'receive', 'install', 'snapshot'] as const;
-
 export function environments(): View {
   const banner = h('div');
   const body = h('div', { class: 'card-body flush' }, h('div', { class: 'card-body' }, h('div', { class: 'skeleton' })));
@@ -23,8 +20,8 @@ export function environments(): View {
 
   document.title = 'Environments · armada';
 
-  const pollster = poll(10_000, banner, async () => {
-    const listed = await get('/environments', EnvironmentsSchema);
+  const pollster = poll(10_000, banner, async (signal) => {
+    const listed = await get('/environments', EnvironmentsSchema, signal);
 
     const order = (entry: Entry): number => {
       switch (entry.state) {
@@ -59,13 +56,15 @@ function row(key: string, entry: Entry): HTMLTableRowElement {
   }
 
   const { generation } = entry;
-  const total = PHASES.reduce((sum, phase) => sum + (generation.seconds[phase] ?? 0), 0);
+  // In the order the preparer ran them, as it records them.
+  const phases = Object.entries(generation.seconds);
+  const total = phases.reduce((sum, [, seconds]) => sum + seconds, 0);
 
   return h('tr', {}, name, h('td', {}, pill('ok', 'ready')),
     h('td', { class: 'mono wide' }, generation.sha?.slice(0, 10) ?? h('span', { class: 'faint' }, 'none')),
     h('td', { class: 'wide' }, h('div', { class: 'progress-cell' },
-      h('div', { class: 'phases', title: PHASES.map((phase) => `${phase} ${duration((generation.seconds[phase] ?? 0) * 1000)}`).join(' · ') },
-        PHASES.map((phase) => (generation.seconds[phase] ?? 0) === 0 ? null : h('span', { class: phase, style: { width: `${String(((generation.seconds[phase] ?? 0) / Math.max(total, 1)) * 100)}%` } }))),
+      h('div', { class: 'phases', title: phases.map(([phase, seconds]) => `${phase} ${duration(seconds * 1000)}`).join(' · ') },
+        phases.map(([phase, seconds]) => seconds === 0 ? null : h('span', { class: phase, style: { width: `${String((seconds / Math.max(total, 1)) * 100)}%` } }))),
       h('span', { class: 'num muted' }, duration(total * 1000)))),
     h('td', { class: 'right num wide' }, bytes(generation.snapshot.size)),
     h('td', { class: 'right muted', title: `prepared ${when(generation.created)}` }, ago(entry.lastUsed)));

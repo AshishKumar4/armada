@@ -422,7 +422,12 @@ export const EnvironmentEntrySchema = v.variant('state', [
 export const EnvironmentsSchema = v.array(v.object({ key: v.string(), entry: EnvironmentEntrySchema }));
 
 /** What a deployment's fleet holds: the most vCPUs it may run at once, and each job's share of them now. */
-export const FleetSchema = v.object({ cap: v.number(), jobs: v.array(v.object({ id: v.string(), vcpus: v.number(), containers: v.number() })) });
+/** The fleet now: its cap, the vCPUs and containers each job holds, and the tasks running and queued across every open
+ *  job, however old. */
+export const FleetSchema = v.object({
+  cap: v.number(), jobs: v.array(v.object({ id: v.string(), vcpus: v.number(), containers: v.number() })),
+  tasks: v.optional(v.object({ running: v.number(), queued: v.number() })),
+});
 
 export type Fleet = v.InferOutput<typeof FleetSchema>;
 

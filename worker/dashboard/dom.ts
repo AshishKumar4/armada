@@ -10,14 +10,11 @@ export interface Props {
   readonly title?: string;
   readonly href?: string;
   readonly type?: string;
-  readonly value?: string;
   readonly placeholder?: string;
   readonly label?: string;
   readonly current?: boolean;
   readonly data?: Readonly<Record<string, string>>;
-  readonly style?: Readonly<Partial<Pick<CSSStyleDeclaration, 'width' | 'height' | 'minWidth' | 'background'>>>;
-  /** CSS custom properties, without their `--`. */
-  readonly vars?: Readonly<Record<string, string>>;
+  readonly style?: Readonly<Pick<CSSStyleDeclaration, 'width'>>;
   readonly onclick?: (event: MouseEvent) => void;
   readonly onsubmit?: (event: SubmitEvent) => void;
 }
@@ -39,17 +36,11 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = 
 
   if (props.style !== undefined) Object.assign(element.style, props.style);
 
-  for (const [name, value] of Object.entries(props.vars ?? {})) element.style.setProperty(`--${name}`, value);
-
   if (props.onclick !== undefined) element.addEventListener('click', props.onclick);
 
   if (element instanceof HTMLAnchorElement && props.href !== undefined) element.href = props.href;
 
-  if (element instanceof HTMLInputElement || element instanceof HTMLButtonElement) {
-    if (props.type !== undefined) element.setAttribute('type', props.type);
-
-    if (props.value !== undefined) element.value = props.value;
-  }
+  if ((element instanceof HTMLInputElement || element instanceof HTMLButtonElement) && props.type !== undefined) element.setAttribute('type', props.type);
 
   if (element instanceof HTMLInputElement && props.placeholder !== undefined) element.placeholder = props.placeholder;
 

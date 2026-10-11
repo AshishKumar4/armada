@@ -42,12 +42,13 @@ export function takeToken(): void {
   history.replaceState(null, '', `${location.pathname}#/`);
 }
 
-async function request(path: string): Promise<Response> {
+/** A request, ended by `signal` when the page that made it is left. */
+async function request(path: string, signal?: AbortSignal): Promise<Response> {
   const headers = new Headers({ [PROTOCOL_HEADER]: String(PROTOCOL) });
   const bearer = token();
 
   if (bearer !== null) headers.set('authorization', `Bearer ${bearer}`);
-  const response = await fetch(path, { headers });
+  const response = await fetch(path, { headers, signal });
 
   if (response.status === 403) throw new SignedOut();
 
@@ -61,16 +62,16 @@ async function failure(response: Response): Promise<string> {
   return said.success ? said.output.error : `the Worker answered ${String(response.status)}`;
 }
 
-async function answered(path: string): Promise<Response> {
-  const response = await request(path);
+async function answered(path: string, signal?: AbortSignal): Promise<Response> {
+  const response = await request(path, signal);
 
   if (!response.ok) throw new RequestError(response.status, await failure(response));
 
   return response;
 }
 
-export async function get<const S extends v.GenericSchema>(path: string, schema: S): Promise<v.InferOutput<S>> {
-  return v.parse(schema, await (await answered(path)).json());
+export async function get<const S extends v.GenericSchema>(path: string, schema: S, signal?: AbortSignal): Promise<v.InferOutput<S>> {
+  return v.parse(schema, await (await answered(path, signal)).json());
 }
 
 /** The deployment's health and its host: this page's own, or the one `armada dashboard --serve` passes requests to. */
@@ -81,8 +82,8 @@ export async function deployment(): Promise<{ readonly health: Health; readonly 
 }
 
 /** A stored object (a log, an output, a task's artifacts), or null where there is none. */
-export async function blob(path: string): Promise<Blob | null> {
-  const response = await request(path);
+export async function blob(path: string, signal?: AbortSignal): Promise<Blob | null> {
+  const response = await request(path, signal);
 
   if (response.status === 404) return null;
 

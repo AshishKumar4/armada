@@ -31,12 +31,35 @@ export function jobView(id: string, opened: number | null): View {
   const vesselsBody = h('div', { class: 'vessels scroll-y' });
   const vesselsAside = h('span', { class: 'aside' });
   const tasksAside = h('span', { class: 'aside' });
+  // The grid and the timeline are canvases: this opens a task by its number from the keyboard.
+  const pick = h('input', { class: 'input task-pick', type: 'number', placeholder: 'Task', label: 'Task number' });
+
+  const picker = h('form', {
+    class: 'button-row',
+    onsubmit: (event) => {
+      event.preventDefault();
+      const index = Number(pick.value);
+
+      if (Number.isInteger(index) && index >= 0 && index < (status?.tasks.total ?? 0)) open(index);
+    },
+  }, pick, h('button', { class: 'button', type: 'submit' }, 'Open'));
+
   const problemsCard = h('div');
   const outcomes = new Map<number, Landed>();
   let status: JobStatus | null = null;
   let seq = 0;
-  let items: Promise<readonly Json[]> | null = null;
-  let drawer: (() => void) | null = null;
+  /** The job's items as last read: read again for a task past them, which an open job grows by. */
+  let items: readonly Json[] = [];
+  /** The task in the drawer, redrawn at each refresh. */
+  let shown: number | null = null;
+  const left = new AbortController();
+  const { signal } = left;
+
+  const drawer = new TaskDrawer(() => {
+    shown = null;
+    history.replaceState(null, '', `#/jobs/${id}`);
+  });
+
   /** The containers that ran tasks in more than one slot, as of the last render. */
   let split: Split = new Map();
   const where = (vessel: string, slot: number | undefined): string => laneOf(vessel, slot, split);
@@ -66,7 +89,7 @@ export function jobView(id: string, opened: number | null): View {
     banner,
     h('section', { class: 'card' }, summary),
     h('div', { class: 'grid grid-job' },
-      h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Tasks'), tasksAside),
+      h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Tasks'), h('div', { class: 'button-row' }, tasksAside, picker)),
         h('div', { class: 'card-body' }, grid.element, h('div', { class: 'key' }, KEY.map((state) => h('span', {}, h('span', { class: `swatch ${state}` }), STATE_WORDS[state]))))),
       h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Containers'), vesselsAside), h('div', { class: 'card-body flush' }, vesselsBody))),
     h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Timeline'), h('span', { class: 'aside' }, 'from the job\'s start')),
@@ -108,26 +131,34 @@ export function jobView(id: string, opened: number | null): View {
     const { lanes, placed } = segments(status, outcomes, now, split);
 
     timeline.update(lanes, placed, { from: status.startedAt ?? status.createdAt, to: status.finishedAt ?? now, live: status.phase !== 'done' });
+
+    if (shown !== null) drawTask(shown);
+  };
+
+  const drawTask = (index: number): void => {
+    drawer.draw({ job: id, index, landed: outcomes.get(index) ?? null, running: status?.running?.find((each) => each.index === index) ?? null, item: items[index] ?? null, known: index < items.length, where });
   };
 
   const open = (index: number): void => {
-    drawer?.();
+    shown = index;
     history.replaceState(null, '', `#/jobs/${id}/${String(index)}`);
-    items ??= get(`/jobs/${id}/items`, v.object({ items: v.array(JsonSchema) })).then((answer) => answer.items);
-    drawer = taskDrawer({
-      job: id, index, landed: outcomes.get(index) ?? null, running: status?.running?.find((each) => each.index === index) ?? null, items, where,
-      closed: () => {
-        drawer = null;
-        history.replaceState(null, '', `#/jobs/${id}`);
-      },
+    drawTask(index);
+
+    if (index < items.length) return;
+    detach((async () => {
+      items = (await get(`/jobs/${id}/items`, v.object({ items: v.array(JsonSchema) }), signal)).items;
+
+      if (shown === index) drawTask(index);
+    })(), (error) => {
+      if (!signal.aborted) drawer.failed(describe(error));
     });
   };
 
-  const pollster = poll(1500, banner, async () => {
-    status = await get(`/jobs/${id}`, JobStatusSchema);
+  const pollster = poll(1500, banner, async (polled) => {
+    status = await get(`/jobs/${id}`, JobStatusSchema, polled);
 
     for (let more = true; more;) {
-      const batch = await get(`/jobs/${id}/events?after=${String(seq)}`, EventsSchema);
+      const batch = await get(`/jobs/${id}/events?after=${String(seq)}`, EventsSchema, polled);
 
       for (const event of batch.events) outcomes.set(event.outcome.index, { outcome: event.outcome, at: event.at });
       seq = batch.events.at(-1)?.seq ?? seq;
@@ -148,10 +179,11 @@ export function jobView(id: string, opened: number | null): View {
   return {
     element,
     dispose: () => {
+      left.abort();
       pollster.stop();
       grid.dispose();
       timeline.dispose();
-      drawer?.();
+      drawer.dispose();
     },
   };
 }
@@ -212,56 +244,54 @@ function segments(status: JobStatus, outcomes: ReadonlyMap<number, Landed>, now:
   return { lanes, placed: [...starts, ...tasks] };
 }
 
-/** What a task's drawer shows and is told: the job and task, how it landed or where it runs, the job's items when read,
- *  how its container is named, and what its close does. */
+/** What a task's drawer shows: the job and task, how it landed or where it runs, and its item, `known` once read. */
 interface Drawn {
   readonly job: string;
   readonly index: number;
   readonly landed: Landed | null;
   readonly running: Running | null;
-  readonly items: Promise<readonly Json[]>;
+  readonly item: Json;
+  readonly known: boolean;
   readonly where: (vessel: string, slot: number | undefined) => string;
-  readonly closed: () => void;
 }
 
-/** A task in a drawer: what it was given, how it ended, and its files. Answers the drawer's close. */
-function taskDrawer({ job, index, landed, running, items, where, closed }: Drawn): () => void {
-  const previous = document.activeElement;
-  const itemSlot = h('pre', { class: 'code' }, '…');
+const TONES: Readonly<Record<TaskState, Tone>> = { queued: 'idle', running: 'live', green: 'ok', red: 'bad', timeout: 'warn', lost: 'bad', cancelled: 'idle' };
 
-  const close = (): void => {
-    backdrop.remove();
-    panel.remove();
-    document.removeEventListener('keydown', escape);
+/** A task in a modal drawer, redrawn as its job is: `closed` is told when the user closes it, never when its page is
+ *  left. The browser keeps focus in it and closes the topmost dialog on Escape. */
+class TaskDrawer {
+  private readonly dialog = h('dialog', { class: 'drawer' });
+  private readonly body = h('div', { class: 'drawer-body' });
+  private readonly head = h('div', { class: 'button-row' });
+  private readonly heading = h('h2');
+  private readonly problem = h('p', { class: 'error' });
+  private readonly log = new LogDialog();
+  private disposing = false;
 
-    if (previous instanceof HTMLElement) previous.focus();
-    closed();
-  };
+  constructor(closed: () => void) {
+    const closer = h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: () => { this.dialog.close(); } }, icon('close'));
 
-  const escape = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape' && document.querySelector('.modal') === null) close();
-  };
+    this.dialog.append(h('div', { class: 'drawer-head' }, this.heading, h('div', { class: 'button-row' }, this.head, closer)), this.body);
+    this.dialog.addEventListener('close', () => {
+      if (!this.disposing) closed();
+    });
+    // A click on the backdrop, outside the drawer's box, closes it.
+    this.dialog.addEventListener('click', (event) => {
+      if (event.target === this.dialog) this.dialog.close();
+    });
+    document.body.append(this.dialog);
+  }
 
-  const closer = h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: close }, icon('close'));
-  const outcome = landed?.outcome;
-  const state = stateNow(landed ?? undefined, running !== null);
-  const tones: Readonly<Record<TaskState, Tone>> = { queued: 'idle', running: 'live', green: 'ok', red: 'bad', timeout: 'warn', lost: 'bad', cancelled: 'idle' };
-  const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
+  draw({ job, index, landed, running, item, known, where }: Drawn): void {
+    const outcome = landed?.outcome;
+    const state = stateNow(landed ?? undefined, running !== null);
+    const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
+    const fetched = (path: string, name: string) => () => { detach(download(path, name), (error) => { replace(this.problem, describe(error)); }); };
 
-  const problem = h('p', { class: 'error' });
-  const fetched = (path: string, name: string) => () => { detach(download(path, name), (error) => { replace(problem, describe(error)); }); };
-
-  const files = outcome === undefined ? null : h('div', {}, h('div', { class: 'button-row' },
-    h('button', { class: 'button', type: 'button', onclick: () => { showLog(job, index); } }, icon('log'), 'Whole log'),
-    outcome.output ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`) }, icon('download'), 'Output') : null,
-    outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`) }, icon('download'), 'Artifacts') : null),
-  problem);
-
-  const backdrop = h('div', { class: 'backdrop', onclick: close });
-
-  const panel = h('aside', { class: 'drawer', label: `Task ${String(index)}` },
-    h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}`), h('div', { class: 'button-row' }, pill(tones[state], STATE_WORDS[state]), closer)),
-    h('div', { class: 'drawer-body' },
+    this.dialog.setAttribute('aria-label', `Task ${String(index)}`);
+    replace(this.heading, `Task ${count(index)}`);
+    replace(this.head, pill(TONES[state], STATE_WORDS[state]));
+    replace(this.body,
       outcome === undefined
         ? h('dl', { class: 'facts' }, fact('Container', running === null ? null : where(running.vessel, running.slot)), fact('Running for', running === null ? null : duration(Date.now() - running.started)),
           running === null ? fact('State', 'queued: no container has taken it yet') : null)
@@ -275,17 +305,30 @@ function taskDrawer({ job, index, landed, running, items, where, closed }: Drawn
           fact('CPU', outcome.cpuSeconds === undefined || outcome.seconds === 0 ? null : `${(outcome.cpuSeconds / outcome.seconds).toFixed(2)} cores on average`),
           fact('Error', outcome.error ?? null),
           fact('Answered', outcome.cached === true ? 'from the cache; nothing ran' : null)),
-      h('div', {}, h('p', { class: 'section-label' }, 'Item'), itemSlot),
+      h('div', {}, h('p', { class: 'section-label' }, 'Item'), h('pre', { class: 'code' }, known ? JSON.stringify(item, null, 2) : '…')),
       outcome?.value === undefined ? null : h('div', {}, h('p', { class: 'section-label' }, 'Output'), h('pre', { class: 'code' }, outcome.value)),
       outcome === undefined || outcome.tail === '' ? null : h('div', {}, h('p', { class: 'section-label' }, 'End of its log'), h('pre', { class: 'code' }, outcome.tail)),
-      files));
+      outcome === undefined ? null : h('div', {}, h('div', { class: 'button-row' },
+        h('button', { class: 'button', type: 'button', onclick: () => { this.log.show(job, index); } }, icon('log'), 'Whole log'),
+        outcome.output ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/output`, `${job}-${String(index)}.out`) }, icon('download'), 'Output') : null,
+        outcome.artifacts === true ? h('button', { class: 'button', type: 'button', onclick: fetched(`/jobs/${job}/tasks/${String(index)}/artifacts`, `${job}-${String(index)}-artifacts.tar.gz`) }, icon('download'), 'Artifacts') : null),
+      this.problem));
 
-  document.body.append(backdrop, panel);
-  document.addEventListener('keydown', escape);
-  closer.focus();
-  detach(items.then((all) => { replace(itemSlot, JSON.stringify(all[index] ?? null, null, 2)); }), (error) => { replace(itemSlot, describe(error)); });
+    if (!this.dialog.open) this.dialog.showModal();
+  }
 
-  return close;
+  /** Why the item could not be read. */
+  failed(said: string): void {
+    replace(this.problem, said);
+  }
+
+  /** Its page is left: it goes, its history untouched. */
+  dispose(): void {
+    this.disposing = true;
+    this.log.dispose();
+    this.dialog.close();
+    this.dialog.remove();
+  }
 }
 
 async function download(path: string, name: string): Promise<void> {
@@ -294,39 +337,56 @@ async function download(path: string, name: string): Promise<void> {
   if (found !== null) save(found, name);
 }
 
-/** A task's whole log, in a window over the page. */
-function showLog(job: string, index: number): void {
-  const body = h('pre', { class: 'code tall' }, 'Reading the log…');
-  let text = '';
+/** A task's whole log, in a modal window over the drawer. */
+class LogDialog {
+  private readonly dialog = h('dialog', { class: 'modal' });
+  private readonly heading = h('h2');
+  private readonly body = h('pre', { class: 'code tall' });
+  private text = '';
+  private name = '';
+  private reading: AbortController | null = null;
 
-  const close = (): void => {
-    modal.remove();
-    shade.remove();
-    document.removeEventListener('keydown', escape);
-  };
+  constructor() {
+    this.dialog.append(
+      h('div', { class: 'drawer-head' }, this.heading, h('div', { class: 'button-row' },
+        h('button', { class: 'button', type: 'button', onclick: () => { save(new Blob([this.text], { type: 'text/plain' }), this.name); } }, icon('download'), 'Save'),
+        h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: () => { this.dialog.close(); } }, icon('close')))),
+      h('div', { class: 'drawer-body' }, this.body));
+    this.dialog.addEventListener('close', () => { this.reading?.abort(); });
+    this.dialog.addEventListener('click', (event) => {
+      if (event.target === this.dialog) this.dialog.close();
+    });
+    document.body.append(this.dialog);
+  }
 
-  const escape = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape') close();
-  };
+  show(job: string, index: number): void {
+    this.reading?.abort();
+    const reading = new AbortController();
 
-  const shade = h('div', { class: 'backdrop', onclick: close });
+    this.reading = reading;
+    this.text = '';
+    this.name = `${job}-${String(index)}.log`;
+    this.dialog.setAttribute('aria-label', `Task ${String(index)}'s log`);
+    replace(this.heading, `Task ${count(index)}'s log`);
+    replace(this.body, 'Reading the log…');
+    this.dialog.showModal();
+    detach((async () => {
+      const found = await blob(`/jobs/${job}/tasks/${String(index)}/log`, reading.signal);
 
-  const modal = h('div', { class: 'modal', label: `Task ${String(index)}'s log` },
-    h('div', { class: 'drawer-head' }, h('h2', {}, `Task ${count(index)}'s log`), h('div', { class: 'button-row' },
-      h('button', { class: 'button', type: 'button', onclick: () => { save(new Blob([text], { type: 'text/plain' }), `${job}-${String(index)}.log`); } }, icon('download'), 'Save'),
-      h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: close }, icon('close')))),
-    h('div', { class: 'drawer-body' }, body));
+      this.text = found === null ? '' : await found.text();
+      replace(this.body, logText(found === null ? null : this.text));
+      // A log ends with how its task ended, so it opens at its end.
+      this.body.scrollTop = this.body.scrollHeight;
+    })(), (error) => {
+      if (!reading.signal.aborted) replace(this.body, describe(error));
+    });
+  }
 
-  document.body.append(shade, modal);
-  document.addEventListener('keydown', escape);
-  detach((async () => {
-    const found = await blob(`/jobs/${job}/tasks/${String(index)}/log`);
-
-    text = found === null ? '' : await found.text();
-    replace(body, logText(found === null ? null : text));
-    // A log ends with how its task ended, so it opens at its end.
-    body.scrollTop = body.scrollHeight;
-  })(), (error) => { replace(body, describe(error)); });
+  dispose(): void {
+    this.reading?.abort();
+    this.dialog.close();
+    this.dialog.remove();
+  }
 }
 
 /** Where a task runs now. */

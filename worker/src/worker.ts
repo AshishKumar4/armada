@@ -394,8 +394,16 @@ const webhooks: Handler = async (request, env, [project]) => {
   return Response.json({ removed: project, ...await hooks.remove(project) });
 };
 
-/** `/fleet`: the vCPUs each job holds now, under the deployment's cap. */
-const shares: Handler = async (request, env) => request.method === 'GET' ? Response.json(await env.FLEET.getByName(SINGLE).shares()) : undefined;
+/** `/fleet`: the vCPUs each job holds now, under the deployment's cap, and the tasks of every open job. */
+const shares: Handler = async (request, env) => {
+  if (request.method !== 'GET') return undefined;
+  const fleet = env.FLEET.getByName(SINGLE);
+  const [held, open] = await Promise.all([fleet.shares(), fleet.open()]);
+  const statuses = await Promise.all(open.map(async (id) => await env.JOB.getByName(id).status()));
+  const work = statuses.reduce((sum, status) => ({ running: sum.running + (status?.tasks.running ?? 0), queued: sum.queued + (status?.tasks.queued ?? 0) }), { running: 0, queued: 0 });
+
+  return Response.json({ ...held, tasks: work });
+};
 
 const ROUTES: ReadonlyMap<string, Handler> = new Map([
   ['packs', packs], ['bundles', bundles], ['tasks', tasks], ['jobs', jobs], ['verdicts', verdicts], ['timings', timings], ['environments', environments], ['secrets', secrets], ['fleet', shares], ['webhooks', webhooks],

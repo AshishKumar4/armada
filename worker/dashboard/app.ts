@@ -49,11 +49,9 @@ function theme(): 'light' | 'dark' {
   return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 
+/** The page in `theme()`: the one palette its CSS has for it. */
 function applyTheme(): void {
-  const chosen = localStorage.getItem(THEME);
-
-  if (chosen === 'light' || chosen === 'dark') document.documentElement.dataset['theme'] = chosen;
-  else delete document.documentElement.dataset['theme'];
+  document.documentElement.dataset['theme'] = theme();
   // The canvases read the theme's colours when they paint.
   document.dispatchEvent(new Event('themechange'));
 }

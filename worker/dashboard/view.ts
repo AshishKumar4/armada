@@ -15,16 +15,16 @@ export function whenSignedOut(handler: () => void): void {
   onSignedOut = handler;
 }
 
-/** A page's poll: stopped when the page is left, run again at once on request. */
+/** A page's poll, which `stop` ends when the page is left. */
 export interface Poller {
   stop(): void;
-  now(): void;
 }
 
 /** Runs `refresh` now and then every `ms` after each run ends, while the page is visible, until `stop`. A failure is
- *  shown in `banner` and the next run tries again; a refused bearer signs out. `refresh` answers whether to go on. */
-export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boolean>): Poller {
-  let stopped = false;
+ *  shown in `banner` and the next run tries again; a refused bearer signs out. `refresh` answers whether to go on.
+ *  `stop` aborts the `signal` `refresh` gets, so a run under way when the page is left changes nothing. */
+export function poll(ms: number, banner: HTMLElement, refresh: (signal: AbortSignal) => Promise<boolean>): Poller {
+  const left = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running = false;
 
@@ -33,16 +33,20 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
   const run = async (): Promise<void> => {
     clearTimeout(timer);
 
-    if (stopped || running) return;
+    if (left.signal.aborted || running) return;
     running = true;
     let again = true;
 
     try {
-      again = await refresh();
+      again = await refresh(left.signal);
+
+      if (left.signal.aborted) return;
       replace(banner);
     } catch (cause) {
+      if (left.signal.aborted) return;
+
       if (cause instanceof SignedOut) {
-        stopped = true;
+        left.abort();
         onSignedOut();
 
         return;
@@ -53,7 +57,7 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
       running = false;
     }
 
-    if (!stopped && again && document.visibilityState === 'visible') timer = setTimeout(kick, ms);
+    if (!left.signal.aborted && again && document.visibilityState === 'visible') timer = setTimeout(kick, ms);
   };
 
   function kick(): void {
@@ -69,11 +73,10 @@ export function poll(ms: number, banner: HTMLElement, refresh: () => Promise<boo
 
   return {
     stop: () => {
-      stopped = true;
+      left.abort();
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', visible);
     },
-    now: kick,
   };
 }
 

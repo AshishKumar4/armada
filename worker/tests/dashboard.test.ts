@@ -134,15 +134,18 @@ describe('a job\'s status', () => {
 });
 
 describe('the fleet', () => {
-  test('says each job\'s share of the vCPUs it holds, largest first, under its cap', async () => {
-    const { fleet, json } = deployment();
+  test('says each job\'s share of the vCPUs it holds, largest first, under its cap, and the tasks of every open job', async () => {
+    const { fleet, json, ask } = deployment();
 
     await fleet.acquire('20261008120000-aaaaaaaa/v1', 4);
     await fleet.acquire('20261008120000-aaaaaaaa/v2', 4);
     await fleet.acquire('20261008120001-bbbbbbbb/v1', 2);
+    // An open job of three tasks, counted whatever page of the list it is on.
+    await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }, { item: 'c', argv: ['true'] }], run: { kind: 'command' } }) });
 
     expect(await json('/fleet', FleetSchema)).toEqual({
       cap: 64, jobs: [{ id: '20261008120000-aaaaaaaa', vcpus: 8, containers: 2 }, { id: '20261008120001-bbbbbbbb', vcpus: 2, containers: 1 }],
+      tasks: { running: 0, queued: 3 },
     });
   });
 });
