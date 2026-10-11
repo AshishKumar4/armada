@@ -5,7 +5,9 @@ account. I run Kinu's and Dew's CI on it.
 
 - 100 videos re-encoded to 720p in 21 to 22 s on 100 containers, 1.3 to 1.4 times the slowest single encode. One
   container took 12 minutes for the same 100.
-- A 90-row CI suite ran in 7 min 19 s on 13 containers. Its GitHub Actions matrix of 15 jobs took 13 min 2 s.
+- A 90-row CI suite ran in 7 min 27 s on 13 containers. Its GitHub Actions matrix of 15 jobs took 13 min 2 s.
+- armada runs the longest tasks first. Over 325 green runs of Kinu's suite, the tests ended a median 2.0% after
+  their lower bound: the longest row, or all the rows' time split evenly over the containers, whichever is longer.
 - One `true` task came back 2.5 s after it was sent.
 
 ## Install
@@ -41,7 +43,7 @@ loses runs again, up to three attempts, so a task should be safe to run twice.
 | Workload | armada | Comparison |
 |---|---|---|
 | 100 videos to 720p ([`examples/video-720p`](examples/video-720p)) | 21.1 s, 21.8 s and 22.3 s on 100 `small` containers (`bun bench.ts 100`) | 718.7 s in sequence on one `small` container, 7.2 s a video (`bun bench.ts 100 serial`) |
-| A 90-row CI suite ([Kinu](https://github.com/AshishKumar4/kinu) at `0b74ff100`) | 7 min 19 s on 13 `medium` containers (`armada run 0b74ff100`) | 13 min 2 s on its GitHub Actions matrix of 15 jobs ([run 37672204809](https://github.com/AshishKumar4/kinu/actions/runs/37672204809)) |
+| A 90-row CI suite ([Kinu](https://github.com/AshishKumar4/kinu) at `0b74ff100`) | 7 min 27 s on 13 `medium` containers (`armada run 0b74ff100`) | 13 min 2 s on its GitHub Actions matrix of 15 jobs ([run 37672204809](https://github.com/AshishKumar4/kinu/actions/runs/37672204809)) |
 | One task from a prepared snapshot | 2.5 s from sending it to its answer (`armada map --times=1 --size=micro -- true`) | |
 | 100 three-second tasks | 9.1 s and 11.4 s on 100 `micro` containers (`armada map --times=100 --pool=100 --size=micro -- sleep 3`) | 300 s of work |
 | 100 cached video answers | 5.6 s and 5.7 s, with no container started (`bun bench.ts 100 cached`) | 24.0 s and 28.3 s computing them |
