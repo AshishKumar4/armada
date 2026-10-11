@@ -16,7 +16,7 @@
  *                as its evidence, extracted next to the run's report; one the task did not keep fails the run ungraded.
  */
 import * as v from 'valibot';
-import { BaseSchema, DEFAULT_BASE, Project, SecretName, SizeSchema } from './protocol';
+import { BaseSchema, DEFAULT_BASE, JobSpecSchema, Project, SizeSchema } from './protocol';
 
 const Path = v.pipe(v.string(), v.minLength(1), v.check((path) => !path.startsWith('/') && !path.split('/').includes('..'), 'a path inside the commit'));
 
@@ -41,20 +41,14 @@ const ConfigSchema = v.object({
   /** `local` runs the plan in this checkout where it is the commit itself and clean, as a CI runner's is, rather than
    *  in a container whose start can take a minute; elsewhere the plan runs in a container as ever. */
   plan: v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)), local: v.optional(v.boolean(), false) }),
+  /** The task job's own settings (`slots`, `speculative`, `hedge`, `timeout`, `secrets`) are a job's, as a job spec has
+   *  them. */
   task: v.object({
     command: v.pipe(v.array(v.string()), v.minLength(1)),
     /** The matrix key that names a task; `name`, else the first string-valued key, by default. */
     name: v.optional(v.string()),
     verdict: v.optional(v.boolean(), true),
-    /** Whether a straggling task may be run again by an idle container, first answer kept. */
-    speculative: v.optional(v.boolean(), false),
-    /** The tasks one container runs at once, each in its own slot. Default 1. */
-    slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
-    /** How many of the plan's heaviest tasks run twice from the start, first answer kept. */
-    hedge: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
-    timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
-    /** The deployment's secrets (`armada secret set <name>`) each task gets in its environment, by name. */
-    secrets: v.optional(v.array(SecretName), []),
+    ...v.pick(JobSpecSchema, ['slots', 'speculative', 'hedge', 'timeout', 'secrets']).entries,
   }),
 });
 
@@ -68,25 +62,4 @@ export function parseConfig(text: string): Config {
 
 export function checkoutOf(config: Config): string {
   return config.checkout ?? `/home/ci/work/${config.name}/${config.name}`;
-}
-
-/** Whether `path` matches a `key` glob: `*` and `?` within a segment, `**` across segments. */
-export function matches(glob: string, path: string): boolean {
-  let pattern = '';
-
-  for (let at = 0; at < glob.length; at += 1) {
-    const rest = glob.slice(at);
-
-    if (rest.startsWith('**/')) {
-      pattern += '(?:.*/)?';
-      at += 2;
-    } else if (rest.startsWith('**')) {
-      pattern += '.*';
-      at += 1;
-    } else if (rest.startsWith('*')) pattern += '[^/]*';
-    else if (rest.startsWith('?')) pattern += '[^/]';
-    else pattern += rest.charAt(0).replace(/[.+^${}()|[\]\\]/gu, '\\$&');
-  }
-
-  return new RegExp(`^${pattern}$`, 'u').test(path);
 }

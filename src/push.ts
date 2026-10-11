@@ -74,9 +74,6 @@ async function tasksOf(root: string, folders: readonly string[]): Promise<{ read
   return { exports, ids: [...owners.keys()].sort() };
 }
 
-/** A line holding only the comment Bun puts above each module it bundles: the module's path. */
-const MODULE_PATH = /^\/\/ [^\s]+\.(?:[cm]?[jt]sx?|json)\n/gmu;
-
 /** The project's task files bundled for node, with the runner as the entry. */
 export async function bundleTasks(root: string, folders: readonly string[]): Promise<{ readonly bytes: Uint8Array<ArrayBuffer>; readonly ids: string[] }> {
   const { exports, ids } = await tasksOf(root, folders);
@@ -91,16 +88,16 @@ export async function bundleTasks(root: string, folders: readonly string[]): Pro
       `import { runTasks } from ${JSON.stringify(runner)};`,
       `await runTasks([${exports.map((_, at) => `t${String(at)}`).join(', ')}]);`,
     ].join('\n') + '\n');
-    const built = await Bun.build({ entrypoints: [entry], target: 'node', format: 'esm' });
+    // Whitespace minified, which drops the comment Bun marks each module with: its path from here, the scratch
+    // directory's random name and the checkout's place included. Without them, the same task files bundle to the same
+    // bytes from every push and every checkout, so to the same digest and the same cache keys. Names stay as written,
+    // so an error's name, which a task's retries match, is the one its code gave it.
+    const built = await Bun.build({ entrypoints: [entry], target: 'node', format: 'esm', minify: { whitespace: true } });
     const [output] = built.outputs;
 
     if (!built.success || output === undefined) throw new Error(`bundling the tasks failed:\n${built.logs.map(String).join('\n')}`);
-    // Bun marks each module with a comment of its path from here, the scratch directory's random name and the
-    // checkout's place included. Without them, the same task files bundle to the same bytes from every push and
-    // every checkout, so to the same digest and the same cache keys.
-    const code = (await output.text()).replace(MODULE_PATH, '');
 
-    return { bytes: new TextEncoder().encode(code), ids };
+    return { bytes: new Uint8Array(await output.arrayBuffer()), ids };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

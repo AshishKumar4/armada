@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { INLINE_BYTES, JobSpecSchema, MAX_ARGUMENT_BYTES, PushSchema, type Outcome } from '../src/protocol';
+import { INLINE_BYTES, JobSpecSchema, MAX_ARGUMENT_BYTES, PushSchema, refusal, type Outcome } from '../src/protocol';
 import { Armada } from '../src/sdk';
 import { MapError, push, recipe, sh, task, type Json, type Result } from '../src/index';
 import { commandTask } from '../src/task';
@@ -15,7 +15,8 @@ const FIXTURES = join(import.meta.dir, 'fixtures');
 
 /**
  * A deployment that runs each task on this machine as a container would: a pushed task's bundle under `node`, a
- * command's argv, each with the item in `ARMADA_ITEM` and its output to `ARMADA_OUT`. Tasks at `lose` are lost.
+ * command's argv, each with the item in `ARMADA_ITEM` and its output to `ARMADA_OUT`. Tasks at `lose` are lost. It
+ * refuses what the Worker refuses.
  */
 function localFleet(lose: readonly number[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'armada-fleet-'));
@@ -91,6 +92,9 @@ function localFleet(lose: readonly number[] = []) {
 
       if (id === undefined) {
         const spec = v.parse(JobSpecSchema, await request.json());
+        const refused = refusal(spec.run, spec.items, spec.pool, spec.slots);
+
+        if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 
         if (spec.run.kind === 'task') {
           const bundle = spec.run.bundle ?? ids.get(spec.run.id);
@@ -114,6 +118,9 @@ function localFleet(lose: readonly number[] = []) {
 
       if (tail === 'items' && request.method === 'POST') {
         const { items } = v.parse(v.object({ items: JobSpecSchema.entries.items }), await request.json());
+        const refused = refusal(job.spec.run, items, job.spec.pool, job.spec.slots);
+
+        if (refused !== null) return Response.json({ error: refused }, { status: 400 });
         const first = job.spec.items.length;
 
         job.spec.items.push(...items);
@@ -451,6 +458,39 @@ describe('a job\'s items', () => {
 
     expect(seen).toEqual([[0, 'a'], [1, 'b']]);
   });
+
+  test('one the job refuses, while the source waits, ends the stream with why and cancels the job', async () => {
+    const { armada, seen } = await fleet();
+    const never = Promise.withResolvers<never>();
+
+    const items = async function* refusedThenStalls() {
+      yield { gang: 2 };
+      await never.promise;
+    };
+
+    const job = commandTask(recipe.debian().spec, () => ['true']).stream(items(), { armada, pool: 1 });
+    const failed = await job.settled().then(() => false, () => true);
+
+    expect({ failed, cancelled: seen.includes('POST /jobs/cancel') }).toEqual({ failed: true, cancelled: true });
+  });
+
+  test('that are not JSON as they are, such as NaN, are refused before anything is sent', async () => {
+    const { armada, jobs } = await fleet();
+    const refused = await touch.map([1, Number.NaN], { armada }).then(() => false, () => true);
+
+    expect({ refused, jobs: jobs.size }).toEqual({ refused: true, jobs: 0 });
+  });
+
+  test('of a job attached by its id are read once for a batch of results, not once each', async () => {
+    const { armada, seen } = await fleet();
+    const ran = touch.stream(Array.from({ length: 50 }, (_, n) => n), { armada });
+    const done = await ran.settled();
+
+    seen.length = 0;
+    const attached = await touch.job(await ran.id, { armada }).settled();
+
+    expect({ done: done.length, attached: attached.length, reads: seen.filter((each) => each === 'GET /jobs/items').length }).toEqual({ done: 50, attached: 50, reads: 1 });
+  });
 });
 
 describe('a recipe built a step at a time', () => {
@@ -471,25 +511,29 @@ describe('a recipe built a step at a time', () => {
 });
 
 describe('sh', () => {
-  test('quotes each interpolation as one word, a list as one word each, and refuses one inside the template\'s own quotes', async () => {
+  test('hands each interpolation to the program as one literal word, and refuses one where the shell would expand it', async () => {
     const hostile = `$(echo pwned) "q" 'r' \\ ; |`;
 
     expect({
       word: await sh`printf '[%s]' ${hostile}`.text(),
       list: await sh`printf '[%s]' ${['a b', 'c']}`.text(),
-      number: sh`sleep ${1.5}`.script,
-      doubled: (() => { try { return sh`echo "${hostile}"`.script; } catch (cause) { return String(cause); } })(),
-      single: (() => { try { return sh`echo '${hostile}'`.script; } catch (cause) { return String(cause); } })(),
-      escaped: sh`echo \\" ${'x'}`.script,
-      raw: sh.raw`echo ${'$HOME'}`.script,
-    }).toEqual({
-      word: `[${hostile}]`,
-      list: '[a b][c]',
-      number: 'sleep 1.5',
-      doubled: 'Error: sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`',
-      single: 'Error: sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`',
-      escaped: 'echo \\" x',
-      raw: 'echo $HOME',
-    });
+      afterHeredoc: await sh`cat <<EOF
+here
+EOF
+printf '[%s]' ${hostile} $((1 << 2))`.text(),
+      escaped: await sh`printf '%s ' \\" ${'x'}`.text(),
+      raw: await sh.raw`printf %s ${'$((6 * 7))'}`.text(),
+    }).toEqual({ word: `[${hostile}]`, list: '[a b][c]', afterHeredoc: `here\n[${hostile}][4]`, escaped: '" x ', raw: '42' });
+
+    for (const misplaced of [
+      () => sh`echo "${hostile}"`,
+      () => sh`echo '${hostile}'`,
+      () => sh`cat <<EOF
+${hostile}
+EOF`,
+      () => sh`cat <<'EOF'
+${hostile}
+EOF`,
+    ]) expect(misplaced).toThrow();
   });
 });

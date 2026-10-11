@@ -3,8 +3,8 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argvOf, extractTar, lanesFor, packBase, packOf, poolFor } from '../src/ci';
-import { matches, parseConfig } from '../src/config';
+import { argvOf, extractTar, lanesFor, manifestOf, packBase, packOf, poolFor } from '../src/ci';
+import { parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
@@ -110,11 +110,27 @@ describe('a project\'s CI config', () => {
     }
   });
 
-  test('key globs match within a segment with * and across segments with **', () => {
-    const globs = ['bun.lock', 'packages/*/package.json', 'patches/**'];
-    const paths = ['bun.lock', 'packages/core/package.json', 'packages/core/src/package.json', 'patches/a.patch', 'patches/deep/b.patch', 'package.json'];
+  test('keys its environment by the commit\'s files its globs match, * within a segment and ** across, any name as it is', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'armada-manifest-'));
+    const paths = ['bun.lock', 'packages/core/package.json', 'packages/core/src/package.json', 'patches/a.patch', 'patches/deep/b.patch', 'package.json', 'env/café.lock', 'ci/setup.sh'];
 
-    expect(paths.filter((path) => globs.some((glob) => matches(glob, path)))).toEqual(['bun.lock', 'packages/core/package.json', 'patches/a.patch', 'patches/deep/b.patch']);
+    try {
+      git(repo, 'init', '-q');
+
+      for (const path of paths) {
+        mkdirSync(join(repo, path, '..'), { recursive: true });
+        writeFileSync(join(repo, path), path);
+      }
+
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'files');
+      const config = parseConfig(JSON.stringify({ name: 'app', environment: { setup: 'ci/setup.sh', key: ['bun.lock', 'packages/*/package.json', 'patches/**', 'env/**'] }, plan: { command: ['plan'] }, task: { command: ['run'] } }));
+
+      expect(manifestOf(repo, git(repo, 'rev-parse', 'HEAD'), config).map(({ path }) => path).toSorted())
+        .toEqual(['bun.lock', 'ci/setup.sh', 'env/café.lock', 'packages/core/package.json', 'patches/a.patch', 'patches/deep/b.patch']);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
 
@@ -562,7 +578,7 @@ describe('the CLI\'s arguments', () => {
     ]);
   });
 
-  test('are its own before --, and every word after -- is the command\'s', async () => {
+  test('are its own before --, every word after -- is the command\'s, and --connection wins over ARMADA_URL', async () => {
     const jobs: unknown[] = [];
 
     const server = Bun.serve({
@@ -585,16 +601,25 @@ describe('the CLI\'s arguments', () => {
       },
     });
 
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-connection-'));
+    const named = join(scratch, 'named.json');
+
+    writeFileSync(named, JSON.stringify({ url: server.url.href, token: 't', account: '' }));
+
     try {
-      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=2', '--', 'tool', '--output', '--items=x'], {
-        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
-      });
+      const map = async (args: readonly string[], url: string) => await Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', ...args, '--times=2', '--', 'tool', '--output', '--items=x'], {
+        env: { ...process.env, ARMADA_URL: url, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      }).exited;
 
       const argv = ['tool', '--output', '--items=x'];
+      // Nothing listens on port 9: the named connection's server is the only one that can answer.
+      const exits = [await map([], server.url.href), await map([`--connection=${named}`], 'http://127.0.0.1:9')];
+      const job = { items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false };
 
-      expect({ exit: await cli.exited, jobs }).toMatchObject({ exit: 0, jobs: [{ items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false }] });
+      expect({ exits, jobs }).toMatchObject({ exits: [0, 0], jobs: [job, job] });
     } finally {
       await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 });
@@ -704,19 +729,22 @@ describe('armada verdict', () => {
   });
 });
 
-/** How a test's runner answers `armada run` beyond its plan and verdict: the task's exit, the plan and task
+/** How a test's runner answers `armada run` beyond its plan and verdict: the task's and the plan's exits, the plan and task
  *  configuration, and the timings it holds. */
 interface Runner {
   readonly taskExit?: number;
+  readonly planExit?: number;
   readonly planConfig?: Json;
   readonly taskConfig?: Readonly<Record<string, Json>>;
   readonly timings?: Json;
+  /** Each task's artifacts archive, one task each: the task job then lands these, every one with its archive. */
+  readonly artifacts?: readonly Uint8Array[];
 }
 
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: Json, verdict: Json, { taskExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} } }: Runner = {}) {
+  async function run(args: readonly string[], plan: Json, verdict: Json, { taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts }: Runner = {}) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -749,7 +777,15 @@ describe('armada run', () => {
           return Response.json({ id: commands.at(-1)?.includes('task') === true ? 'tasks' : 'plan' });
         }
 
-        if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: pathname.startsWith('/jobs/tasks/') ? { ...outcome, exitCode: taskExit } : outcome }], done: true });
+        if (pathname.startsWith('/jobs/tasks/') && pathname.endsWith('/events') && artifacts !== undefined) {
+          return Response.json({ events: artifacts.map((_, index) => ({ seq: index + 1, outcome: { ...outcome, index, artifacts: true } })), done: true });
+        }
+
+        if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: { ...outcome, exitCode: pathname.startsWith('/jobs/tasks/') ? taskExit : planExit } }], done: true });
+
+        const archive = /^\/jobs\/tasks\/tasks\/(\d+)\/artifacts$/u.exec(pathname)?.[1];
+
+        if (archive !== undefined) return new Response(artifacts?.[Number(archive)]);
 
         if (pathname === '/jobs/plan/tasks/0/output') return new Response(JSON.stringify(plan));
 
@@ -841,6 +877,38 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, said: ran.stdout.includes('NOT GRADED'), named: path.endsWith('proj-tasks.json'), graded: report.graded, rows: report.verdicts.rows.map((row) => [row.name, row.exitCode]) })
       .toEqual({ exit: 2, said: true, named: true, graded: 'not graded', rows: [['x.mjs', 0]] });
+  });
+
+  test('a plan that fails, or prints no plan, ends the run ungraded with a report that says why, and starts no task', async () => {
+    const reports = await Promise.all([
+      run([], { include: [{ name: 'a', rows: ['x'] }] }, '', { planExit: 1 }),
+      run([], 'not a plan', ''),
+    ]);
+
+    expect(reports.map((ran) => {
+      const report = v.parse(v.looseObject({ graded: v.string(), planJob: v.string(), job: v.null(), problems: v.array(v.string()) }), JSON.parse(ran.report));
+
+      return { exit: ran.exit, jobs: ran.commands.length, graded: report.graded, plan: report.planJob, problems: report.problems.length };
+    })).toEqual([{ exit: 2, jobs: 1, graded: 'not graded', plan: 'plan', problems: 1 }, { exit: 2, jobs: 1, graded: 'not graded', plan: 'plan', problems: 1 }]);
+  });
+
+  test('two tasks of one name each keep their own evidence, under their index', async () => {
+    const tar = (file: string, text: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'armada-evidence-'));
+
+      writeFileSync(join(dir, file), text);
+
+      return Bun.spawnSync(['tar', '-czf', '-', '-C', dir, file]).stdout;
+    };
+
+    const ran = await run([], { include: [{ name: 'unit', rows: ['x'] }, { name: 'unit', rows: ['y'] }] }, '', {
+      taskConfig: { verdict: false },
+      artifacts: [tar('evidence.txt', 'first'), tar('evidence.txt', 'second')],
+    });
+
+    const report = v.parse(v.looseObject({ artifacts: v.record(v.string(), v.string()) }), JSON.parse(ran.report));
+
+    expect(Object.keys(report.artifacts).toSorted()).toEqual(['0', '1']);
   });
 
   test('a row a problem names reads red in the report, with the problem, though its task reported it green', async () => {

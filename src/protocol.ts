@@ -189,9 +189,11 @@ export function argumentRefusal(argv: readonly string[]): string | null {
   return long < 0 ? null : `argument ${String(long)} is ${String(sizes[long])} bytes, and Linux starts no process with one over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the command reads`;
 }
 
-/** Why a task cannot start with `item`, or null: every task's environment holds it as `ARMADA_ITEM=<its JSON>`, one
- *  string Linux bounds as it bounds an argument. */
+/** Why a task cannot start with `item`, or null: it must be JSON as it is, since NaN and Infinity would arrive as null,
+ *  and every task's environment holds it as `ARMADA_ITEM=<its JSON>`, one string Linux bounds as it bounds an
+ *  argument. */
 export function itemRefusal(item: Json): string | null {
+  if (!v.is(JsonValueSchema, item)) return 'item is not JSON as it is: a number in it is NaN or infinite, which JSON would send as null';
   const size = bytesOf(`ARMADA_ITEM=${JSON.stringify(item) ?? 'null'}`);
 
   return size > MAX_ARGUMENT_BYTES ? `item is ${String(size)} bytes as ARMADA_ITEM, and Linux starts no process with an environment string over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the task reads` : null;

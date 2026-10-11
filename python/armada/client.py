@@ -43,12 +43,13 @@ def connection_file(name: str) -> Path:
 
 
 def connect() -> "Armada":
-    """The runner this machine deployed, the one ARMADA_CONNECTION names, or ARMADA_URL and ARMADA_TOKEN."""
+    """The runner ARMADA_CONNECTION names; else the one ARMADA_URL and ARMADA_TOKEN give; else the one this machine
+    deployed. A named connection comes first: it is the one asked for."""
+    named = os.environ.get("ARMADA_CONNECTION")
     url = os.environ.get("ARMADA_URL")
     token = os.environ.get("ARMADA_TOKEN")
-    if url is not None and token is not None:
+    if named is None and url is not None and token is not None:
         return Armada(Connection(url, token, os.environ.get("ARMADA_ACCOUNT", "")))
-    named = os.environ.get("ARMADA_CONNECTION")
     file = Path(named) if named else connection_file("armada")
 
     if not file.exists():

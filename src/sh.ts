@@ -68,29 +68,78 @@ function interpolated(value: Word): string {
   return Array.isArray(value) ? value.map((word) => quote(String(word))).join(' ') : quote(String(value));
 }
 
-/** Whether the shell is inside quotes at the end of `script`: an interpolation quoted again there would be read inside
- *  those quotes, where `$(...)` still runs within double quotes. */
-function quoted(script: string): boolean {
+/** A here-document's delimiter, and whether `<<-` strips its lines' leading tabs. */
+interface Heredoc {
+  readonly word: string;
+  readonly strip: boolean;
+}
+
+/** Where the end of `script` leaves the shell when it is not reading plain words: inside quotes, where `$(...)` still
+ *  runs within double quotes, or inside a here-document's body, where the shell expands `$(...)` through any quotes
+ *  and a quoted delimiter keeps the quotes themselves. An interpolation in either place is not one literal word. */
+function context(script: string): 'quotes' | 'heredoc' | null {
   let open: '' | "'" | '"' = '';
+  // Inside `$((...))`, where `<<` is a shift.
+  let arithmetic = 0;
+  const pending: Heredoc[] = [];
+  let body: Heredoc | undefined;
 
   for (let at = 0; at < script.length; at += 1) {
+    if (body !== undefined) {
+      const end = script.indexOf('\n', at);
+
+      if (end === -1) return 'heredoc';
+      const line = script.slice(at, end);
+
+      if ((body.strip ? line.replace(/^\t+/u, '') : line) === body.word) body = pending.shift();
+      at = end;
+      continue;
+    }
+
     const char = script[at];
 
-    if (open !== "'" && char === '\\') at += 1;
-    else if (open === '' && (char === "'" || char === '"')) open = char;
-    else if (char === open) open = '';
+    if (open !== "'" && char === '\\') {
+      at += 1;
+    } else if (open === '' && (char === "'" || char === '"')) {
+      open = char;
+    } else if (char === open) {
+      open = '';
+    } else if (open === '' && script.startsWith('$((', at)) {
+      arithmetic += 1;
+      at += 2;
+    } else if (arithmetic > 0 && script.startsWith('))', at)) {
+      arithmetic -= 1;
+      at += 1;
+    } else if (open === '' && char === '\n' && pending.length > 0) {
+      body = pending.shift();
+    } else if (open === '' && arithmetic === 0 && script.startsWith('<<', at) && !script.startsWith('<<<', at)) {
+      const heredoc = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/u.exec(script.slice(at));
+
+      if (heredoc !== null) {
+        pending.push({ word: heredoc[2] ?? heredoc[3] ?? heredoc[4] ?? '', strip: heredoc[1] === '-' });
+        at += heredoc[0].length - 1;
+      }
+    }
   }
 
-  return open !== '';
+  if (body !== undefined) return 'heredoc';
+
+  return open === '' ? null : 'quotes';
 }
+
+const MISPLACED = {
+  quotes: 'sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`',
+  heredoc: 'sh cannot make a ${} one word inside a here-document: pass it as an argument, as sh`printf \'%s\\n\' ${word}`',
+} as const;
 
 function template(strings: TemplateStringsArray, values: readonly Word[], escape: (value: Word) => string): Shell {
   return new Shell(strings.reduce((script, part, at) => {
     const value = values[at];
 
     if (value === undefined) return script + part;
+    const where = escape === interpolated ? context(script + part) : null;
 
-    if (escape === interpolated && quoted(script + part)) throw new Error('sh quotes each ${} itself: write sh`echo ${word}`, not sh`echo "${word}"`');
+    if (where !== null) throw new Error(MISPLACED[where]);
 
     return script + part + escape(value);
   }, ''));

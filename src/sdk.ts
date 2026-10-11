@@ -40,14 +40,14 @@ export function connectionFile(name: string): string {
   return join(CONFIG_DIR, name === 'armada' ? 'connection.json' : `${name}.json`);
 }
 
-/** The runner this machine deployed (`armada deploy`), the one `ARMADA_CONNECTION` names, or `ARMADA_URL` and
- *  `ARMADA_TOKEN`. */
+/** The runner `ARMADA_CONNECTION` (or `--connection`) names; else the one `ARMADA_URL` and `ARMADA_TOKEN` give; else the
+ *  one this machine deployed (`armada deploy`). A named connection comes first: it is the one asked for. */
 export function connect(): Armada {
+  const named = process.env['ARMADA_CONNECTION'];
   const url = process.env['ARMADA_URL'];
   const token = process.env['ARMADA_TOKEN'];
 
-  if (url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
-  const named = process.env['ARMADA_CONNECTION'];
+  if (named === undefined && url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
   const file = named ?? connectionFile('armada');
 
   if (!existsSync(file)) throw new Error(named === undefined ? 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN' : `no connection file at ${file}`);

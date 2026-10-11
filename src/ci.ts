@@ -10,11 +10,11 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { checkoutOf, CONFIG_FILE, matches, parseConfig, type Config } from './config';
+import { checkoutOf, CONFIG_FILE, parseConfig, type Config } from './config';
 import { listSchedule } from './dispatch';
 import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type Manifest, type Size, type Timings } from './protocol';
-import type { Armada } from './sdk';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Manifest, type Size, type Timings } from './protocol';
+import type { Armada, Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -83,15 +83,17 @@ export function localPlan({ repo, sha, command, target, timings, env }: LocalPla
   }
 }
 
-/** The commit's paths that key its environment: the `key` globs and the two recipe scripts. */
-function manifestOf(repo: string, sha: string, config: Config): Manifest {
-  const globs = [...config.environment.key, config.environment.setup ?? '', config.environment.install ?? ''].filter((glob) => glob !== '');
+/** The commit's paths that key its environment: the `key` globs and the two recipe scripts. Records are NUL-ended, so
+ *  a path git would otherwise quote (non-ASCII, a tab or a newline in it) is read as it is. */
+export function manifestOf(repo: string, sha: string, config: Config): Manifest {
+  const globs = [...config.environment.key, config.environment.setup ?? '', config.environment.install ?? ''].filter((glob) => glob !== '').map((glob) => new Bun.Glob(glob));
 
-  return git(repo, ['ls-tree', '-r', '--full-tree', sha]).toString().split('\n').flatMap((line) => {
-    const [meta = '', path = ''] = line.split('\t');
-    const id = meta.split(' ')[2] ?? '';
+  return git(repo, ['ls-tree', '-r', '-z', '--full-tree', sha]).toString().split('\0').flatMap((record) => {
+    const tab = record.indexOf('\t');
+    const path = record.slice(tab + 1);
+    const id = record.slice(0, tab).split(' ')[2] ?? '';
 
-    return path !== '' && globs.some((glob) => matches(glob, path)) ? [{ path, id }] : [];
+    return tab !== -1 && globs.some((glob) => glob.match(path)) ? [{ path, id }] : [];
   });
 }
 
@@ -403,6 +405,19 @@ interface RunResult {
 
 const EXITS = { pass: 0, fail: 1, 'not graded': 2 } as const;
 
+/** What a run's report file holds beside its commit: written for every run that knows its commit, graded or not. */
+interface Report {
+  readonly planJob: string;
+  readonly job: string | null;
+  readonly graded: RunResult['graded'];
+  readonly status: JobStatus | null;
+  readonly summary: Summary | null;
+  readonly problems: readonly string[];
+  readonly rows: readonly VerdictRow[];
+  /** Each task's extracted artifacts, by the task's index in the plan. */
+  readonly artifacts: Readonly<Record<string, string>>;
+}
+
 /** `armada run`: progress as it goes, and with `json` one {@link RunResult} on stdout at the end, the progress then on
  *  stderr. Exits 0 when every row is green, 1 when one is red, and 2 when the run cannot be graded. */
 export async function runCI(armada: Armada, target: string, options: RunOptions): Promise<number> {
@@ -432,9 +447,39 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
   if (uploaded !== null) note(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots };
-  const here = config.plan.local ? localPlan({ repo, sha, command: [...config.plan.command, ...planArgs], target: config.target, timings, env: config.env }) : undefined;
   let planId = 'local';
+  let planStatus: JobStatus | null = null;
   let printed: string;
+
+  /** Writes the report, named by the task job, or by the plan when no task job started, and says where. */
+  const writeReport = (contents: Report): string => {
+    const path = join(REPORTS, `${config.name}-${contents.job ?? (planId === 'local' ? `local-${String(began)}` : planId)}.json`);
+    const { rows, ...rest } = contents;
+
+    mkdirSync(REPORTS, { recursive: true });
+    writeFileSync(path, JSON.stringify({ sha, ...rest, verdicts: { sha, part: 'all', rows } }, null, 2));
+
+    return path;
+  };
+
+  /** A run that ended before it had tasks to grade: its plan failed, or printed no plan. */
+  const ungraded = (problem: string): RunResult => {
+    const report = writeReport({ planJob: planId, job: null, graded: 'not graded', status: planStatus, summary: null, problems: [problem], rows: [], artifacts: {} });
+
+    note(`\nNOT GRADED: ${problem}`);
+    note(`report: ${report}`);
+
+    return { sha, planJob: planId, job: null, report, graded: 'not graded', problems: [problem], rows: [] };
+  };
+
+  let here: string | undefined;
+
+  try {
+    here = config.plan.local ? localPlan({ repo, sha, command: [...config.plan.command, ...planArgs], target: config.target, timings, env: config.env }) : undefined;
+  } catch (cause) {
+    return ungraded(`the plan command failed here: ${errorOf({ cause }).message}`);
+  }
+
   // The plan's own usage, which a container's plan reports and a local one does not.
   const planRun: { readonly meta: Parameters<typeof usageOf>[0][number] }[] = [];
 
@@ -447,13 +492,9 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
     note(`plan job ${planId}`);
     const [planned] = await follow(planJob, began, { name: () => 'plan', say: exitWord, note });
 
-    if (planned?.kind !== 'ok') {
-      const problem = `the plan command did not print a plan\n${planned === undefined ? (await planJob.status()).problems.join('\n') : planned.meta.tail}`;
+    planStatus = await planJob.status();
 
-      note(`\nNOT GRADED: ${problem}`);
-
-      return { sha, planJob: planId, job: null, report: null, graded: 'not graded', problems: [problem], rows: [] };
-    }
+    if (planned?.kind !== 'ok') return ungraded(`the plan command did not print a plan\n${planned === undefined ? planStatus.problems.join('\n') : planned.meta.tail}`);
 
     printed = planned.value;
     planRun.push(planned);
@@ -462,7 +503,10 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
     printed = here;
   }
 
-  const plan = v.parse(PlanSchema, JSON.parse(printed));
+  const printedPlan = v.safeParse(PlanSchema, jsonOf(printed));
+
+  if (!printedPlan.success) return ungraded(`the plan printed no plan: ${v.summarize(printedPlan.issues)}`);
+  const plan = printedPlan.output;
   const names = plan.include.map((entry, index) => taskName(entry, config.task.name, index));
   const slots = config.task.slots;
 
@@ -518,7 +562,8 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
 
   const results = await follow(job, began, { name: nameOf, say, note });
   const status = await job.status();
-  // Each task's artifacts beside the report, under the task's name; a row names one as its evidence.
+  // Each task's artifacts beside the report, under the task's index and name, since two tasks may share a name; a row
+  // names one as its evidence.
   const kept = new Map<number, { readonly dir: string; readonly paths: ReadonlySet<string> }>();
 
   for (const result of results) {
@@ -526,7 +571,7 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
     const archive = await job.artifacts(result.index);
 
     if (archive === null) continue;
-    const dir = join(REPORTS, `${config.name}-${jobId}`, nameOf(result.index));
+    const dir = join(REPORTS, `${config.name}-${jobId}`, `${String(result.index)}-${nameOf(result.index)}`);
 
     kept.set(result.index, { dir, paths: new Set(extractTar(archive, dir)) });
   }
@@ -550,11 +595,12 @@ async function runGraded(armada: Armada, target: string, { label, planArgs, secr
 
   const outcome = outcomeOf(graded);
   const file = { sha, part: 'all', rows: graded.rows };
-  const report = join(REPORTS, `${config.name}-${jobId}.json`);
   const summary = await job.summary();
 
-  mkdirSync(REPORTS, { recursive: true });
-  writeFileSync(report, JSON.stringify({ sha, planJob: planId, job: jobId, graded: outcome, status, summary, problems: graded.problems, verdicts: file, artifacts: Object.fromEntries([...kept].map(([index, held]) => [nameOf(index), held.dir])) }, null, 2));
+  const report = writeReport({
+    planJob: planId, job: jobId, graded: outcome, status, summary, problems: graded.problems, rows: graded.rows,
+    artifacts: Object.fromEntries([...kept].map(([index, held]) => [String(index), held.dir])),
+  });
 
   for (const problem of status.problems) note(`problem: ${problem}`);
 

@@ -258,14 +258,7 @@ export function task(config: Config): Task<Json, Answer<unknown, Output | undefi
 }
 
 /** A job's options of the task itself. */
-interface TaskOptions {
-  readonly timeout?: number;
-  readonly speculative?: boolean;
-  readonly hedge?: number;
-  readonly retries?: Retries;
-  readonly secrets?: readonly string[];
-  readonly cache?: { readonly days: number };
-}
+type TaskOptions = Pick<TaskConfig<never, never, undefined>, 'timeout' | 'speculative' | 'hedge' | 'retries' | 'secrets' | 'cache'>;
 
 /** A body's own answer, as its envelope brings it back or `.local` has it: JSON, or bytes. */
 type Delivered = { readonly value: Json } | { readonly bytes: Uint8Array };
@@ -382,10 +375,15 @@ abstract class Base<I extends Json, O> {
   job(id: string, options: Pick<MapOptions, 'armada'> = {}): Job<Json, O> {
     const armada = options.armada ?? connect();
     let held: readonly Json[] = [];
+    // The read under way: the results of one batch of events all wait on one read, not one each.
+    let reading: Promise<readonly Json[]> | undefined;
 
     // The job's items as it holds them, read again when it grew past what was read.
     return new Job(armada, this.answering, new Submission<Json>(armada, async () => await Promise.resolve(id)), async (known, index) => {
-      if (index >= held.length) held = await armada.items(known);
+      if (index >= held.length) {
+        reading ??= armada.items(known).finally(() => { reading = undefined; });
+        held = await reading;
+      }
 
       return held[index] ?? null;
     });
@@ -474,8 +472,11 @@ class Submission<I> {
       if (batch.length >= BATCH) await flush();
     };
 
-    this.timer = setInterval(() => { detach(flush(), (failure) => { this.fail(failure); }); }, BATCH_MS);
-    detach(this.send(id, items, enqueue, flush), (failure) => { this.fail(failure); });
+    // Whichever fails first, the timer's flush or the source, ends the job the one way.
+    const abandon = (failure: Error): void => { detach(this.abandon(id, failure), (cause) => { this.fail(cause); }); };
+
+    this.timer = setInterval(() => { detach(flush(), abandon); }, BATCH_MS);
+    detach(this.send(id, items, enqueue, flush), abandon);
   }
 
   /** Stops taking items: the job was cancelled, or a failure ended it. */
@@ -486,29 +487,26 @@ class Submission<I> {
   }
 
   private async send(id: string, items: Iterable<I> | AsyncIterable<I>, enqueue: (item: I) => Promise<void>, flush: () => Promise<void>): Promise<void> {
-    try {
-      for await (const item of items) {
-        if (this.stopped) return;
-        await enqueue(item);
-      }
-
-      await flush();
-      await this.armada.close(id);
-      this.stop();
-    } catch (cause) {
-      this.fail(errorOf({ cause }));
-      await this.cancelAfter(id);
+    for await (const item of items) {
+      if (this.stopped) return;
+      await enqueue(item);
     }
+
+    await flush();
+    await this.armada.close(id);
+    this.stop();
   }
 
-  /** Cancels the job a failure ended; a cancel that fails too is said in the failure. */
-  private async cancelAfter(id: string): Promise<void> {
+  /** Ends open job `id` with `failure`, the first one only: it stops taking items and is cancelled. A cancel that fails
+   *  too is said in the failure. */
+  private async abandon(id: string, failure: Error): Promise<void> {
+    if (this.failure !== null) return;
+    this.fail(failure);
+
     try {
       await this.armada.cancel(id);
     } catch (cause) {
-      const failed = this.failure ?? new Error('the job\'s items stopped');
-
-      this.failure = new Error(`${failed.message}; cancelling job ${id} failed too: ${errorOf({ cause }).message}`, { cause: failed });
+      this.failure = new Error(`${failure.message}; cancelling job ${id} failed too: ${errorOf({ cause }).message}`, { cause: failure });
     }
   }
 
