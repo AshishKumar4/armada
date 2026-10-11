@@ -28,21 +28,20 @@ describe('a task\'s artifacts', () => {
 });
 
 describe('a task\'s status token', () => {
-  test('reads its job\'s tasks at /status/<job>/<index>, each run until its container lets it go, and nothing else', async () => {
+  test('reads its job\'s tasks at /status/<job>/<index>, each run until its container is gone, and nothing else', async () => {
     const id = '20261010120000-0123abcd';
     const generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
-    // What each vessel's container holds: a run stays held until its process exited or was killed.
-    const held = new Map<string, { slot: number; index: number; attempt: number; started: number }[]>();
 
     const env = world({
       JOB: namespace((name) => (name === id ? running : undefined)),
       ENVIRONMENTS: namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }), used: async () => undefined })),
-      VESSEL: namespace((name) => ({ begin: async () => undefined, stop: async () => undefined, runs: async () => held.get(name.split('/')[1] ?? '') ?? [] })),
+      // v2's container cannot be destroyed, so its task may still run after the job ends.
+      VESSEL: namespace((name) => ({ begin: async () => undefined, stop: async () => !name.endsWith('/v2') })),
     });
 
     const running = new ArmadaJob(state().ctx, env);
 
-    await running.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' } }), 'https://armada.test');
+    await running.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }, { item: 'c', argv: ['true'] }], run: { kind: 'command' } }), 'https://armada.test');
     await running.alarm();
     const claim = await running.claim('v1');
 
@@ -60,25 +59,27 @@ describe('a task\'s status token', () => {
 
     await running.accept('v1', 0, 3);
     await running.complete('v1', { index: 0, kind: 'exited', exitCode: 3, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false }, 1000);
-    // A copy on v2 the job no longer counts, which v2 has not killed yet.
-    held.set('v2', [{ slot: 0, index: 0, attempt: 1, started: 1 }]);
-    const stopping = await ask(`/status/${id}/0`);
-
-    held.set('v2', []);
-    const after = await ask(`/status/${id}/0`);
-    const refused = await Promise.all([ask(`/jobs/${id}`), ask(`/status/20261010120000-ffffffff/0`), ask(`/status/${id}/0`, 'guess'), ask(`/status/${id}/0`, token, 'POST'), ask(`/status/${id}/2`)]);
+    await running.claim('v2');
+    await running.claim('v3');
+    await running.cancel('cancelled by its client', 'cancelled');
+    const landed = await ask(`/status/${id}/0`);
+    const stuck = await ask(`/status/${id}/1`);
+    const stopped = await ask(`/status/${id}/2`);
+    const refused = await Promise.all([ask(`/jobs/${id}`), ask(`/status/20261010120000-ffffffff/0`), ask(`/status/${id}/0`, 'guess'), ask(`/status/${id}/0`, token, 'POST'), ask(`/status/${id}/3`)]);
 
     expect({
       identity: [claim.env['ARMADA_JOB_ID'], claim.env['ARMADA_VESSEL'], 'ARMADA_TOKEN' in claim.env],
       during: [during.body?.phase, during.body?.state, during.body?.attempt, runs(during)],
-      stopping: [stopping.body?.state, stopping.body?.exitCode, runs(stopping)],
-      after: [after.body?.state, runs(after)],
+      landed: [landed.body?.state, landed.body?.exitCode, runs(landed)],
+      stuck: [stuck.body?.phase, stuck.body?.state, stuck.body?.reason, runs(stuck)],
+      stopped: [stopped.body?.state, runs(stopped)],
       refused: refused.map((each) => each.status),
     }).toEqual({
       identity: [id, 'v1', false],
       during: ['running', 'running', 1, [['v1', 0, 1]]],
-      stopping: ['exited', 3, [['v2', 0, 1]]],
-      after: ['exited', []],
+      landed: ['exited', 3, []],
+      stuck: ['done', 'failed', 'cancelled', [['v2', 0, 1]]],
+      stopped: ['failed', []],
       refused: [403, 403, 403, 404, 404],
     });
   });

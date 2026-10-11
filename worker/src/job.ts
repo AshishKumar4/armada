@@ -144,6 +144,9 @@ export class ArmadaJob extends DurableObject<Env> {
       outcome TEXT, PRIMARY KEY (idx, rank))`);
     // The vessels staying, each until a time, for a task about to become a straggler (`claim`).
     this.sql.exec('CREATE TABLE IF NOT EXISTS standby (vessel TEXT PRIMARY KEY, until INTEGER NOT NULL)');
+    // Each run handed out, from its claim until its vessel says its process is gone (`taskStatus`).
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS runs (vessel TEXT NOT NULL, slot INTEGER NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL,
+      started INTEGER NOT NULL, PRIMARY KEY (vessel, slot))`);
     const tasks = this.sql.exec<{ name: string }>('PRAGMA table_info(tasks)').toArray().map((column) => column.name);
 
     for (const column of ['dup', 'slot', 'dup_slot']) {
@@ -370,7 +373,7 @@ export class ArmadaJob extends DurableObject<Env> {
     try {
       await this.env.VESSEL.getByName(`${id}/${name}`).begin(vessel);
     } catch (cause) {
-      await this.vesselFailed(name, `could not start: ${said({ cause })}`);
+      await this.vesselFailed(name, `could not start: ${said({ cause })}`, { gone: true });
     }
   }
 
@@ -401,8 +404,18 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** The next task for `name`'s `slot`; how long to wait, while the gang it joined gathers its ranks or the only
    *  tasks left wait out a retry's backoff; or null when there is none left for it: the vessel stops once its last
-   *  slot is done. */
+   *  slot is done. A task handed out is a run of it until its vessel says its process is gone (`taskStatus`). */
   async claim(name: string, slot = 0): Promise<Claim | { readonly waitMs: number } | null> {
+    const claimed = await this.next(name, slot);
+
+    if (claimed !== null && !('waitMs' in claimed)) {
+      this.sql.exec('INSERT OR REPLACE INTO runs (vessel, slot, idx, attempt, started) VALUES (?, ?, ?, ?, ?)', name, slot, claimed.index, claimed.attempt, Date.now());
+    }
+
+    return claimed;
+  }
+
+  private async next(name: string, slot: number): Promise<Claim | { readonly waitMs: number } | null> {
     const spec = await this.spec();
 
     if (spec === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return null;
@@ -601,6 +614,8 @@ export class ArmadaJob extends DurableObject<Env> {
    *  green copy: a green is held, unreported, until the other copy has stopped or ended (`complete`, `release`). Only a
    *  lost container (`vesselFailed`) falls through to the other copy. A late duplicate is told no. */
   async accept(name: string, index: number, exitCode: number): Promise<boolean> {
+    // The process exited: the run is over, whatever its answer is worth.
+    this.sql.exec('DELETE FROM runs WHERE vessel = ? AND idx = ?', name, index);
     const task = this.sql.exec<{ state: string; vessel: string | null; dup: string | null }>('SELECT state, vessel, dup FROM tasks WHERE idx = ?', index).toArray()[0];
     const member = this.member(name, index);
 
@@ -637,8 +652,10 @@ export class ArmadaJob extends DurableObject<Env> {
     return true;
   }
 
-  /** `name` stopped its copy of `index` when told to (`still`), so the other copy's green, held until now, is reported. */
+  /** `name` killed its run of `index` when told to (`still`), so a copy's other copy's green, held until now, is
+   *  reported. */
   async stopped(name: string, index: number): Promise<void> {
+    this.sql.exec('DELETE FROM runs WHERE vessel = ? AND idx = ?', name, index);
     const task = this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', index).toArray()[0];
 
     if (task?.dup !== name) return;
@@ -731,11 +748,15 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** A vessel was lost: its task goes back on the queue (or is failed after its second loss), and a vessel replaces it
    *  while there is work it could take. A vessel whose start found its snapshot `missing` is not replaced from it:
-   *  every start from it would fail alike, so the pool refills from the job's environment, prepared again. */
-  async vesselFailed(name: string, error: string, missing?: string): Promise<void> {
+   *  every start from it would fail alike, so the pool refills from the job's environment, prepared again. Its runs
+   *  end only once its container is `gone`. */
+  async vesselFailed(name: string, error: string, { missing, gone = false }: { readonly missing?: string; readonly gone?: boolean } = {}): Promise<void> {
     const spec = await this.spec();
 
     if (spec === undefined) return;
+
+    // A container that may still be up may still run its tasks.
+    if (gone) this.sql.exec('DELETE FROM runs WHERE vessel = ?', name);
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
@@ -880,8 +901,15 @@ export class ArmadaJob extends DurableObject<Env> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const live = this.sql.exec<{ name: string }>(`SELECT name FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).toArray();
 
-    // The job is concluded already; a vessel that cannot be told ends at its container's inactivity timeout.
-    await Promise.allSettled(live.map(async ({ name }) => await this.env.VESSEL.getByName(`${id}/${name}`).stop()));
+    // The job is concluded already; a vessel that cannot be told ends at its container's inactivity timeout, and its
+    // runs stay until then.
+    const stopped = await Promise.allSettled(live.map(async ({ name }) => await this.env.VESSEL.getByName(`${id}/${name}`).stop()));
+
+    for (const [at, { name }] of live.entries()) {
+      const each = stopped[at];
+
+      if (each?.status === 'fulfilled' && each.value) this.sql.exec('DELETE FROM runs WHERE vessel = ?', name);
+    }
   }
 
   private async watch(): Promise<void> {
@@ -890,8 +918,9 @@ export class ArmadaJob extends DurableObject<Env> {
 
     for (const vessel of this.sql.exec<{ name: string; state: 'waiting' | 'booting' | 'working'; beat: number }>(`SELECT name, state, beat FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).toArray()) {
       if (now - vessel.beat <= SILENT_MS[vessel.state]) continue;
-      await Promise.allSettled([this.env.VESSEL.getByName(`${id}/${vessel.name}`).stop()]);
-      await this.vesselFailed(vessel.name, `not heard from for ${String(Math.floor((now - vessel.beat) / 1000))} s while ${vessel.state}`);
+      const [stopped] = await Promise.allSettled([this.env.VESSEL.getByName(`${id}/${vessel.name}`).stop()]);
+
+      await this.vesselFailed(vessel.name, `not heard from for ${String(Math.floor((now - vessel.beat) / 1000))} s while ${vessel.state}`, { gone: stopped.status === 'fulfilled' && stopped.value });
     }
   }
 
@@ -922,9 +951,9 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** Task `index`'s status for its job's status token (`GET /status/<job>/<index>`), or null for a task the job has
-   *  not. Its runs are every one that may still be going: each the job has handed out and not yet taken back, and
-   *  each a vessel still holds, which it lets go only once the task's process exited or was killed, or its container
-   *  was destroyed. A vessel that cannot be asked fails the answer, never shortens it. */
+   *  not. Its runs are every one that may still be going: each handed out (`runs`) until its vessel said its process
+   *  exited or was killed, or its container is gone, and each the job counts as running, for runs an earlier Worker
+   *  handed out. */
   async taskStatus(index: number): Promise<TaskStatus | null> {
     const id = await this.ctx.storage.get<string>('id');
     const task = this.sql.exec<{ state: string; attempts: number }>('SELECT state, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
@@ -934,13 +963,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const [last] = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM events WHERE json_extract(outcome, '$.index') = ? ORDER BY seq DESC LIMIT 1`, index).toArray();
     const ended = task.state === 'exited' || task.state === 'failed' ? task.state : undefined;
     const outcome = ended === undefined || last === undefined ? undefined : v.parse(OutcomeSchema, JSON.parse(last.outcome));
-    const handed = this.running().filter((each) => each.index === index).map(({ vessel, slot, started }) => ({ vessel, slot, attempt: task.attempts, started }));
-    const names = this.sql.exec<{ name: string }>('SELECT name FROM vessels').toArray().map((row) => row.name);
-
-    const held = await Promise.all(names.map(async (name) => (await this.env.VESSEL.getByName(`${id}/${name}`).runs())
-      .filter((run) => run.index === index).map(({ slot, attempt, started }) => ({ vessel: name, slot, attempt, started }))));
-
-    const runs = new Map([...handed, ...held.flat()].map((run) => [`${run.vessel}/${String(run.slot)}/${String(run.attempt)}`, run]));
+    const counted = this.running().filter((each) => each.index === index).map(({ vessel, slot, started }) => ({ vessel, slot, attempt: task.attempts, started }));
+    const handed = this.sql.exec<{ vessel: string; slot: number; attempt: number; started: number }>('SELECT vessel, slot, attempt, started FROM runs WHERE idx = ?', index).toArray();
+    const runs = new Map([...counted, ...handed].map((run) => [`${run.vessel}/${String(run.slot)}/${String(run.attempt)}`, run]));
 
     return {
       job: id, phase, index, attempt: task.attempts, state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),

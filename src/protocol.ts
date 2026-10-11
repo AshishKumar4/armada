@@ -346,8 +346,8 @@ export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
 
 /** A task's status, as `GET /status/<job>/<index>` answers its job's status token: the job's phase, the task's state and
  *  attempt, every run of it that may still be going, by the container its tasks know as ARMADA_VESSEL (every rank of a
- *  gang, each copy of a repeated one, any the job stopped until its process is gone), and once it ended, its last
- *  outcome's exit code and reason. */
+ *  gang, each copy of a repeated one, one the job stopped until its process or container is gone), and once it ended,
+ *  its last outcome's exit code and reason. */
 export const TaskStatusSchema = v.object({
   job: v.string(),
   phase: JobStatusSchema.entries.phase,

@@ -479,11 +479,11 @@ describe('a job whose snapshot is lost while its vessels start', () => {
 
     await gang.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: { gang: 4 }, argv: ['true'] }], run: { kind: 'command' }, pool: 4 }));
     await gang.alarm();
-    await gang.vesselFailed('v1', 'the start ended', 'gone');
+    await gang.vesselFailed('v1', 'the start ended', { missing: 'gone', gone: true });
     ready = snapshotOf('fresh');
     await gang.alarm();
 
-    for (const late of ['v2', 'v3', 'v4']) await gang.vesselFailed(late, 'the start ended', 'gone');
+    for (const late of ['v2', 'v3', 'v4']) await gang.vesselFailed(late, 'the start ended', { missing: 'gone', gone: true });
     const status = await gang.status();
 
     expect({ begun, alive: status?.vessels.filter((each) => each.state === 'waiting').map((each) => each.name), phase: status?.phase }).toEqual({
@@ -512,7 +512,7 @@ describe('a job whose snapshot is lost while its vessels start', () => {
 
     await ending.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }));
     await ending.alarm();
-    const failing = ending.vesselFailed('v1', 'the start ended', 'gone');
+    const failing = ending.vesselFailed('v1', 'the start ended', { missing: 'gone', gone: true });
 
     await ending.cancel('cancelled by its client', 'cancelled');
     told.resolve(undefined);
