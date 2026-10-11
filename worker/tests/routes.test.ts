@@ -63,7 +63,7 @@ describe('a task\'s status token', () => {
     const runs = (asked: Awaited<ReturnType<typeof ask>>) => asked.body?.running.map((run) => [run.vessel, run.slot, run.attempt]);
     const during = await ask(`${claim.env['ARMADA_STATUS_URL'] ?? ''}/${claim.env['ARMADA_INDEX'] ?? ''}`);
 
-    await running.accept('v1', 0, 3);
+    await running.accept('v1', 0, 3, { slot: 0, attempt: 1 });
     await running.complete('v1', { index: 0, kind: 'exited', exitCode: 3, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false }, 1000);
     await running.claim('v2');
     await running.claim('v3');
@@ -111,13 +111,34 @@ describe('a run its vessel lost track of', () => {
     const token = first.env['ARMADA_STATUS_TOKEN'] ?? '';
     const ask = async (index: number) => v.parse(TaskStatusSchema, await (await worker.fetch(new Request(`https://armada.test/status/${id}/${String(index)}`, { headers: { authorization: `Bearer ${token}` } }), env)).json());
 
-    // Restarted with its slot's record lost, v1 asks for its slot's next task while the first may still run.
+    // Restarted with its slot's record lost, v1 asks for its slot's next task while the first may still run; a word
+    // that names no run, as an earlier vessel's, ends none.
     await restarted.claim('v1');
+    await restarted.accept('v1', 1, 0);
     const both = await Promise.all([ask(0), ask(1)]);
 
     await restarted.retired('v1', true);
     const gone = await Promise.all([ask(0), ask(1)]);
 
     expect([both, gone].map((each) => each.map((status) => status.running.map((run) => run.vessel)))).toEqual([[['v1'], ['v1']], [[], []]]);
+  });
+});
+
+describe('a job an earlier Worker made', () => {
+  test('refuses its tasks\' status, since none of its runs were recorded', async () => {
+    const id = '20261010120000-89abcdef';
+    const stored = state();
+    const env = world({ JOB: namespace(() => earlier), ENVIRONMENTS: ready(), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })) });
+    const earlier = new ArmadaJob(stored.ctx, env);
+
+    await earlier.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }), 'https://armada.test');
+    await stored.ctx.storage.delete('recorded');
+    await earlier.alarm();
+    const claim = await earlier.claim('v1');
+
+    if (claim === null || 'waitMs' in claim) throw new Error('v1 got no task');
+    const answer = await worker.fetch(new Request(`https://armada.test/status/${id}/0`, { headers: { authorization: `Bearer ${claim.env['ARMADA_STATUS_TOKEN'] ?? ''}` } }), env);
+
+    expect(answer.status).toBe(409);
   });
 });

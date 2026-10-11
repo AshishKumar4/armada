@@ -161,7 +161,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const { items, env, open, ...kept } = spec;
 
     this.insert(items);
-    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
     await this.ctx.storage.setAlarm(Date.now());
     await this.env.FLEET.getByName(SINGLE).opened(id);
   }
@@ -615,8 +615,8 @@ export class ArmadaJob extends DurableObject<Env> {
    *  green copy: a green is held, unreported, until the other copy has stopped or ended (`complete`, `release`). Only a
    *  lost container (`vesselFailed`) falls through to the other copy. A late duplicate is told no. */
   async accept(name: string, index: number, exitCode: number, run?: RunEnd): Promise<boolean> {
-    // The process exited: the run is over, whatever its answer is worth.
-    this.runs.ended(name, index, run);
+    // The process exited: the run is over, whatever its answer is worth. A word that names no run ends none.
+    if (run !== undefined) this.runs.ended({ vessel: name, index, ...run });
     const task = this.sql.exec<{ state: string; vessel: string | null; dup: string | null }>('SELECT state, vessel, dup FROM tasks WHERE idx = ?', index).toArray()[0];
     const member = this.member(name, index);
 
@@ -656,7 +656,7 @@ export class ArmadaJob extends DurableObject<Env> {
   /** `name` killed its run of `index` when told to (`still`), so a copy's other copy's green, held until now, is
    *  reported. */
   async stopped(name: string, index: number, run?: RunEnd): Promise<void> {
-    this.runs.ended(name, index, run);
+    if (run !== undefined) this.runs.ended({ vessel: name, index, ...run });
     const task = this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', index).toArray()[0];
 
     if (task?.dup !== name) return;
@@ -952,22 +952,26 @@ export class ArmadaJob extends DurableObject<Env> {
     return (await this.ctx.storage.get<string>('key')) ?? '';
   }
 
-  /** Task `index`'s status for its job's status token (`GET /status/<job>/<index>`), or null for a task the job has
-   *  not, with every run of it that may still be going (`Runs`). A run an earlier Worker handed out is not among them:
-   *  it got no status token, so no task can ask after it. */
-  async taskStatus(index: number): Promise<TaskStatus | null> {
+  /** Task `index`'s status for its job's status token (`GET /status/<job>/<index>`), with every run of it that may
+   *  still be going (`Runs`); or why there is none: the job has no such task, or an earlier Worker made the job and
+   *  recorded none of its runs, so none can be said to be over. */
+  async taskStatus(index: number): Promise<{ readonly status: TaskStatus } | { readonly refused: string; readonly code: 404 | 409 }> {
     const id = await this.ctx.storage.get<string>('id');
     const task = this.sql.exec<{ state: string; attempts: number }>('SELECT state, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
 
-    if (id === undefined || task === undefined) return null;
+    if (id === undefined || task === undefined) return { refused: 'no such task', code: 404 };
+
+    if ((await this.ctx.storage.get<boolean>('recorded')) !== true) return { refused: `job ${id} began before its runs were recorded, so none can be said to be over`, code: 409 };
     const phase = (await this.ctx.storage.get<Phase>('phase')) ?? 'done';
     const [last] = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM events WHERE json_extract(outcome, '$.index') = ? ORDER BY seq DESC LIMIT 1`, index).toArray();
     const ended = task.state === 'exited' || task.state === 'failed' ? task.state : undefined;
     const outcome = ended === undefined || last === undefined ? undefined : v.parse(OutcomeSchema, JSON.parse(last.outcome));
 
     return {
-      job: id, phase, index, attempt: task.attempts, state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
-      running: this.runs.of(index), exitCode: outcome?.exitCode, reason: outcome?.reason,
+      status: {
+        job: id, phase, index, attempt: task.attempts, state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
+        running: this.runs.of(index), exitCode: outcome?.exitCode, reason: outcome?.reason,
+      },
     };
   }
 

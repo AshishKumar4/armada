@@ -527,9 +527,9 @@ async function statused(request: Request, env: Env, [job, index, ...extra]: read
     return Response.json({ error: 'forbidden' }, { status: 403 });
   }
 
-  const status = await env.JOB.getByName(job).taskStatus(Number(index));
+  const answer = await env.JOB.getByName(job).taskStatus(Number(index));
 
-  return status === null ? notFound() : Response.json(status);
+  return 'refused' in answer ? Response.json({ error: answer.refused }, { status: answer.code }) : Response.json(answer.status);
 }
 
 export default {

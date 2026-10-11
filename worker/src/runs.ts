@@ -12,8 +12,7 @@ export interface Run {
   readonly attempt: number;
 }
 
-/** What a vessel says of a run it ended: its slot and attempt. One an earlier vessel ended names neither, and ends
- *  each of its runs of the task. */
+/** What a vessel says of a run it ended, beside its name and task: its slot and attempt. */
 export interface RunEnd {
   readonly slot: number;
   readonly attempt: number;
@@ -29,10 +28,9 @@ export class Runs {
     this.sql.exec('INSERT OR IGNORE INTO runs (vessel, slot, idx, attempt, started) VALUES (?, ?, ?, ?, ?)', vessel, slot, index, attempt, started);
   }
 
-  /** `vessel`'s run of task `index` exited or was killed. */
-  ended(vessel: string, index: number, run: RunEnd | undefined): void {
-    if (run === undefined) this.sql.exec('DELETE FROM runs WHERE vessel = ? AND idx = ?', vessel, index);
-    else this.sql.exec('DELETE FROM runs WHERE vessel = ? AND idx = ? AND slot = ? AND attempt = ?', vessel, index, run.slot, run.attempt);
+  /** The run exited or was killed. */
+  ended({ vessel, slot, index, attempt }: Run): void {
+    this.sql.exec('DELETE FROM runs WHERE vessel = ? AND slot = ? AND idx = ? AND attempt = ?', vessel, slot, index, attempt);
   }
 
   /** `vessel`'s container is gone, and every run in it. */
