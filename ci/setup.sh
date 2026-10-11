@@ -23,5 +23,4 @@ curl -fsSL -o /tmp/elan.tar.gz "https://github.com/leanprover/elan/releases/down
 echo "${ELAN_SHA256}  /tmp/elan.tar.gz" | sha256sum -c
 tar xzf /tmp/elan.tar.gz -C /tmp
 ELAN_HOME=/home/ci/.elan /tmp/elan-init -y --no-modify-path --default-toolchain leanprover/lean4:v4.34.1
-chown -R ci: /home/ci/.elan
 rm -f /tmp/elan.tar.gz /tmp/elan-init

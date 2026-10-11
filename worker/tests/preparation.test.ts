@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { workdirOf, type Recipe, type Size } from '../../src/protocol';
 import { ArmadaPreparer, type Generation } from '../src/environments';
+import { STATE } from '../src/container';
 import { container, namespace, state, world, type Answer } from './harness';
 
 const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'locale-gen\n', install: '', size: 'medium' };
@@ -175,30 +176,51 @@ const root = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode ==
 
 if (!root) console.log('preparation.test: a phase delivered twice: skipped: it runs as root beside armada\'s runner layer');
 
+/** A preparer on this host, at `recipe`'s setup phase, with the runner layer's work directory in place and no phase
+ *  begun: a phase whose directory exists is taken as already launched. */
+async function atSetup(phases: Recipe) {
+  const failures: string[] = [];
+  const stored = state(here());
+
+  const preparer = new ArmadaPreparer(stored.ctx, world({
+    ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
+  }));
+
+  rmSync(`${STATE}/phases`, { recursive: true, force: true });
+  mkdirSync(workdirOf(phases), { recursive: true });
+  await stored.ctx.storage.put('preparation', { key: 'k'.repeat(64), since: 0, recipe: phases, sha: null, phase: 'setup', seconds: {}, snapshot: null });
+
+  return { preparer, failures, phase: async () => (await stored.ctx.storage.get<{ phase: string }>('preparation'))?.phase };
+}
+
 describe.skipIf(!root)('a preparation phase', () => {
   test('runs once when its alarm is delivered again while it runs', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-prep-'));
-    const failures: string[] = [];
-    const stored = state(here());
-
-    const preparer = new ArmadaPreparer(stored.ctx, world({
-      ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
-    }));
 
     // A setup that holds a lock while it runs, as apt-get holds dpkg's.
     const setup = `mkdir ${scratch}/lock || { echo "held by another setup" >&2; exit 100; }\necho ran >> ${scratch}/runs\nsleep 2\nrmdir ${scratch}/lock\n`;
 
     try {
-      // Where the runner layer, the phase before, leaves the setup's working directory.
-      mkdirSync(workdirOf(recipe), { recursive: true });
-      await stored.ctx.storage.put('preparation', { key: 'k'.repeat(64), since: 0, recipe: { ...recipe, setup }, sha: null, phase: 'setup', seconds: {}, snapshot: null });
+      const { preparer, failures, phase } = await atSetup({ ...recipe, setup });
       // Two invocations of the phase's alarm at once: the platform delivers an alarm at least once.
       await Promise.all([preparer.alarm(), preparer.alarm()]);
-      const phase = (await stored.ctx.storage.get<{ phase: string }>('preparation'))?.phase;
 
-      expect({ failures, runs: readFileSync(`${scratch}/runs`, 'utf8'), phase }).toEqual({ failures: [], runs: 'ran\n', phase: 'receive' });
+      expect({ failures, runs: readFileSync(`${scratch}/runs`, 'utf8'), phase: await phase() }).toEqual({ failures: [], runs: 'ran\n', phase: 'receive' });
     } finally {
       rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  test('leaves the user able to write what the recipe\'s setup, as root, put in the user\'s home', async () => {
+    try {
+      // As uv's installer does: setup writes under $HOME/.local, then install, as the user, writes beside it.
+      const { preparer, failures, phase } = await atSetup({ ...recipe, setup: 'mkdir -p "$HOME/.local/share" && touch "$HOME/.local/marker"\n', install: 'mkdir -p "$HOME/.local/share/uv/python"\n' });
+
+      for (let alarm = 0; alarm < 40 && failures.length === 0 && (await phase()) !== 'snapshot'; alarm += 1) await preparer.alarm();
+
+      expect({ failures, made: Bun.spawnSync(['test', '-d', '/home/ci/.local/share/uv/python']).exitCode }).toEqual({ failures: [], made: 0 });
+    } finally {
+      rmSync('/home/ci/.local', { recursive: true, force: true });
     }
   });
 });
