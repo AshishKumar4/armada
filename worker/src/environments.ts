@@ -222,6 +222,14 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     return [...entries].map(([name, entry]) => ({ key: name.slice('env:'.length), entry }));
   }
 
+  /** Read-only purge inventory: deletion debts are otherwise invisible once the Worker and its namespace go. */
+  async inventory(): Promise<string[]> {
+    const ready = (await this.list()).flatMap(({ entry }) => entry.state === 'ready' ? [entry.generation.snapshot.id] : []);
+    const debts = [...(await this.ctx.storage.list<Debt>({ prefix: 'debt:' })).keys()].map((name) => name.slice('debt:'.length));
+
+    return [...new Set([...ready, ...debts])];
+  }
+
   /** After `armada prune` deleted its snapshot: the next job with this key prepares again. */
   async forget(key: string): Promise<void> {
     await this.ctx.storage.delete(`env:${key}`);

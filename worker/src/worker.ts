@@ -350,6 +350,8 @@ const environments: Handler = async (request, env, [key]) => {
 
   if (key === undefined) return Response.json(await registry.list());
 
+  if (key === 'inventory' && request.method === 'GET') return Response.json({ snapshots: await registry.inventory(), credentialsExpire: env.REGISTRY_CREDENTIALS_EXPIRE });
+
   if (key === 'resolve' && request.method === 'POST') {
     const resolved = await environmentKey(v.parse(v.object({ recipe: RecipeSchema }), await request.json()).recipe);
 

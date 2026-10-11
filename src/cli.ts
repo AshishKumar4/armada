@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
 /** The armada CLI; `armada --help` prints its usage. */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
-import { registryCredentials } from './registry';
+import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
+import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
 import { BaseSchema, deadlineRefusal, describeUsage, errorOf, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
@@ -19,6 +20,9 @@ const USAGE = `armada runs a command over many inputs at once, on Cloudflare Con
 Usage:
   armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
                                        deploy armada to your Cloudflare account, logging in if needed
+  armada destroy --name=<name> [--account=<id>] [--force]
+                                       purge exactly this deployment; refuses open jobs unless forced;
+                                       R2 expires objects/uploads in 1 day; re-run to remove the empty bucket
   armada map [options] -- <command>    run the command once per item
   armada run <commit|worktree> [--deadline=S] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json; --json prints the
@@ -82,6 +86,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
+  ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
@@ -385,6 +390,38 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   }
 
   return 0;
+}
+
+/** Destroy uses only this name's connection, never ARMADA_CONNECTION or the default deployment as a fallback.
+ * The inventory contains IDs, not credentials. Atomic replacements survive an interrupted purge. */
+async function destroy(name: string, force: boolean): Promise<number> {
+  const file = connectionFile(name);
+  const checkpoint = join(CONFIG_DIR, `${name}.destroy.json`);
+  const saved = existsSync(checkpoint) ? v.parse(DestroyStateSchema, JSON.parse(readFileSync(checkpoint, 'utf8'))) : null;
+  const connection = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))) : null;
+  const account = option('account') ?? saved?.account ?? connection?.account ?? accountOf();
+
+  mkdirSync(CONFIG_DIR, { recursive: true });
+
+  return await destroyDeployment(name, account, force, {
+    run: wranglerRan, fetch,
+    connection: () => connection,
+    load: () => saved,
+    save: (state) => {
+      const temporary = `${checkpoint}.${String(process.pid)}.tmp`;
+
+      writeFileSync(temporary, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+      renameSync(temporary, checkpoint);
+    },
+    removeConnection: () => {
+      if (!existsSync(file)) return;
+      rmSync(file);
+      console.log(`removed local connection ${file}`);
+    },
+    removeState: () => { rmSync(checkpoint, { force: true }); },
+    snapshot: deleteSnapshotWith, image: deleteImageWith, credentials: registryCredentials,
+    say: (message) => { console.log(message); }, now: Date.now,
+  });
 }
 
 /** How long a deploy waits for its first look, asking every FIRST_LOOK_WAIT_MS. For a moment after a deploy, `/health`
@@ -738,6 +775,11 @@ async function main(): Promise<number> {
 
       return await deploy(name, whole('vcpus'), flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
     }
+
+    case 'destroy':
+      if (connection !== undefined || process.env['ARMADA_CONNECTION'] !== undefined) throw new Error('destroy takes --name, not --connection or ARMADA_CONNECTION');
+
+      return await destroy(destroyName(option('name')), flag('force'));
 
     case 'prune':
       return await pruneOn(connect(), whole('keep', 0));
