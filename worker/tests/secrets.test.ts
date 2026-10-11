@@ -81,12 +81,16 @@ describe('the mask', () => {
       const keep = spawnSync('node', ['-e', KEEP_MASK, kept], { env: { PATH: process.env['PATH'], ARMADA_MASK: 'API_KEY LONG SHORT', API_KEY: VALUE, LONG: `${VALUE}-long`, SHORT: 'abc' }, encoding: 'utf8' });
       const mode = statSync(kept).mode & 0o777;
 
-      // The first value straddles the 1 MiB read.
-      writeFileSync(log, `${'x'.repeat((1 << 20) - 5)}${VALUE} and ${VALUE}-long then abc\n`);
+      // The first value straddles the first 1 MiB read. The second read ends two bytes past the longer value's start
+      // plus the shorter value it begins with, so that read holds the shorter one whole and the longer one only in part.
+      const head = `${'x'.repeat((1 << 20) - 5)}${VALUE} and `;
+      const second = 'y'.repeat(2 * (1 << 20) - VALUE.length - 2 - head.length);
+
+      writeFileSync(log, `${head}${second}${VALUE}-long then abc\n`);
       const ran = spawnSync('node', ['-e', MASK, log, kept], { env: { PATH: process.env['PATH'] }, encoding: 'utf8' });
 
       expect({ keep: keep.status, mode: mode.toString(8), exit: ran.status, stderr: ran.stderr, after: readFileSync(log, 'utf8'), kept: existsSync(kept) })
-        .toEqual({ keep: 0, mode: '600', exit: 0, stderr: '', after: `${'x'.repeat((1 << 20) - 5)}*** and *** then abc\n`, kept: false });
+        .toEqual({ keep: 0, mode: '600', exit: 0, stderr: '', after: `${'x'.repeat((1 << 20) - 5)}*** and ${second}*** then abc\n`, kept: false });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -7,7 +7,7 @@ import { argvOf, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } fr
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
-import { taskKey } from '../src/env';
+import { runKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
 
 const spec: VesselSpec = {
@@ -96,7 +96,7 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
   // storage.
   if (launched !== undefined) {
     task.given.done = true;
-    await stored.ctx.storage.put({ state: 'working', current: { claim: { index: 0, attempt: 1, argv: ['true'], secrets: [], duplicate: false }, startedAt: Date.now() - launched } });
+    await stored.ctx.storage.put({ state: 'working', 'slot:0': { claim: { index: 0, attempt: 1, argv: ['true'], secrets: [], duplicate: false }, startedAt: Date.now() - launched } });
   }
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
@@ -160,14 +160,16 @@ describe('a task\'s artifacts', () => {
     const kept = await run(0, { packed: true });
     const empty = await run(0);
 
-    expect([kept.completed[0]?.artifacts, kept.stored.get('jobs/job/tasks/0/artifacts.tar.gz'), empty.completed[0]?.artifacts, empty.stored.has('jobs/job/tasks/0/artifacts.tar.gz')])
+    const key = runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'artifacts');
+
+    expect([kept.completed[0]?.artifacts, kept.stored.get(key), empty.completed[0]?.artifacts, empty.stored.has(key)])
       .toEqual([true, 'packed', undefined, false]);
   });
 
   test('of a gang are its rank 0\'s only: rank 1 stores nothing and says none', async () => {
     const second = await run(0, { packed: true, gang: { rank: 1, job: 'job', vessels: ['v1', 'v2'], origin: 'https://origin', token: 't' } });
 
-    expect([second.completed[0]?.artifacts, second.stored.has('jobs/job/tasks/0/artifacts.tar.gz')]).toEqual([undefined, false]);
+    expect([second.completed[0]?.artifacts, second.stored.has(runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'artifacts'))]).toEqual([undefined, false]);
   });
 });
 
@@ -176,7 +178,7 @@ describe('a task\'s output', () => {
     const small = await run(0, { out: '{"n": 1}' });
     const large = await run(0, { out: 'x'.repeat(32 * 1024 + 1) });
 
-    expect([small.completed[0]?.value, large.completed[0]?.output, large.completed[0]?.value, large.stored.get('jobs/job/tasks/0/output')?.length])
+    expect([small.completed[0]?.value, large.completed[0]?.output, large.completed[0]?.value, large.stored.get(runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'output'))?.length])
       .toEqual(['{"n": 1}', true, undefined, 32 * 1024 + 1]);
   });
 });
@@ -223,40 +225,6 @@ describe('a task that names secrets', () => {
 
     expect({ order: kept !== -1 && kept < launched && launched < masked && masked < tailed, keep: [seen[kept]?.argv[3], seen[kept]?.env], mask: seen[masked]?.argv.slice(3), read })
       .toEqual({ order: true, keep: [MASK_VALUES, { API_KEY: 'sk-launched', ARMADA_MASK: 'API_KEY' }], mask: ['/armada/task/log', MASK_VALUES], read: 0 });
-  });
-
-  test('a green answer its claim says to cache is written there before its outcome is reported', async () => {
-    let cachedAtReport: string | undefined;
-    const artifacts = bucket();
-
-    const stored = state(container((argv) => {
-      if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
-
-      if (argv[0] === 'stat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? '21' : '0' };
-
-      if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? '{"ok":true,"value":4}' : '' };
-
-      return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
-    }));
-
-    const job = {
-      booted: async () => undefined,
-      waiting: async () => undefined,
-      claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], cache: { key: 'cache/square-2', expires: 1234 }, duplicate: false }).next,
-      still: async () => true,
-      accept: async () => true,
-      complete: async () => { cachedAtReport = artifacts.objects.get('cache/square-2'); },
-      retired: async () => undefined,
-      vesselFailed: async () => undefined,
-    };
-
-    const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
-
-    await vessel.begin({ ...spec, output: true });
-
-    for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
-
-    expect({ cachedAtReport, expires: artifacts.kept.get('cache/square-2')?.customMetadata['expires'] }).toEqual({ cachedAtReport: '{"ok":true,"value":4}', expires: '1234' });
   });
 });
 
@@ -329,7 +297,7 @@ describe('a gang rank', () => {
       return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length, relayLogs, stops };
     };
 
-    const log = taskKey(spec.jobId, 0, 'log', 1);
+    const log = runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'log');
 
     expect([await kept(false, true), await kept(true, false), await kept(true, true)])
       .toEqual([{ logged: [log], completed: 0, relayLogs: 1, stops: 0 }, { logged: [log], completed: 0, relayLogs: 1, stops: 1 }, { logged: [log], completed: 1, relayLogs: 1, stops: 0 }]);
@@ -345,7 +313,7 @@ describe('a gang rank', () => {
     const link = `id=${'0'.repeat(16)}`;
     const none = await relay('t'.repeat(48), `port=8476&${link}`);
 
-    await stored.ctx.storage.put('current', { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false, gang: { rank: 0, job: 'job', vessels: ['v1', 'v2'], origin: '', token: 't'.repeat(48) } }, startedAt: 0 });
+    await stored.ctx.storage.put('slot:0', { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false, gang: { rank: 0, job: 'job', vessels: ['v1', 'v2'], origin: '', token: 't'.repeat(48) } }, startedAt: 0 });
 
     expect([none, await relay('u'.repeat(48), `port=8476&${link}`), await relay('t'.repeat(48), `port=0&${link}`), await relay('t'.repeat(48), 'port=8476&id=x')])
       .toEqual([403, 403, 400, 400]);

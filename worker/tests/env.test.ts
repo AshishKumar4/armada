@@ -113,7 +113,7 @@ describe('a job\'s env', () => {
     expect({ claimed, keptAfterCancel, keptWhenDone: done.dump().includes(SECRET) }).toEqual({ claimed: SECRET, keptAfterCancel: false, keptWhenDone: false });
   });
 
-  test('an earlier Worker left inside a job\'s spec, or a vessel\'s claim, is gone at the end with nothing read before', async () => {
+  test('an earlier Worker left inside a job\'s spec, or a vessel\'s stored claim, is gone at the end with nothing read before', async () => {
     const jobState = state();
     const job = new ArmadaJob(jobState.ctx, world({ VESSEL: namespace(() => ({ stop: async () => undefined })) }));
     const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } });
@@ -134,7 +134,7 @@ describe('a job\'s env', () => {
       const stored = state(container(() => new Error('Network connection lost.')));
       const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => ({ vesselFailed: async () => undefined })) }));
 
-      await stored.ctx.storage.put({ spec: { jobId: 'j1', name: 'v1', vcpus: 4 }, state: 'working', current: { claim, startedAt: 0 } });
+      await stored.ctx.storage.put({ spec: { jobId: 'j1', name: 'v1', vcpus: 4 }, state: 'working', 'slot:0': { claim, startedAt: 0 } });
       await conclude(vessel);
       vessels[end] = stored.dump().includes(SECRET);
     }

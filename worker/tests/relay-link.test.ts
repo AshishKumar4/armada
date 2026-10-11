@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { connect } from 'node:net';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { connect, createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Writable } from 'node:stream';
-import { Piped, RELAY_PY } from '../src/relay';
+import * as v from 'valibot';
+import { STATE } from '../src/container';
+import { GANG_UP, Piped, RELAY_IN, RELAY_PY } from '../src/relay';
 
 /** Both ends of a link in one relay.py process, as two ranks' relays: the inbound end's server on a free port (printed
  *  first), an echo server on rank 0's address, and a program whose connection to the echo goes out through `carry`.
@@ -151,4 +156,101 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
     expect({ out: result.out, said: result.err.includes('holds no such link'), timedOut: result.err.includes('timed out') })
       .toEqual({ out: '0 True', said: true, timedOut: false });
   }, 60_000);
+});
+
+/** Whether process `pid` has exited, waited for when `wait`, by Linux's process-exit event. */
+async function exited(pid: number, wait: boolean): Promise<boolean> {
+  const waiting = Bun.spawn(['python3', '-c', String.raw`import os, select, sys
+try:
+    fd = os.pidfd_open(int(sys.argv[1]))
+except ProcessLookupError:
+    sys.exit(0)
+ready = select.select([fd], [], [], None if sys.argv[2] == "wait" else 0)[0]
+sys.exit(0 if ready else 1)
+`, String(pid), wait ? 'wait' : 'poll']);
+
+  return await waiting.exited === 0;
+}
+
+/** Whether a relay's inbound port answers a link to `port` on rank 0's address, as a vessel's pipe opens one, with
+ *  what is served there. */
+async function greeted(port: number): Promise<boolean> {
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  const socket = connect(RELAY_IN, '127.0.0.1');
+  let bytes = Buffer.alloc(0);
+
+  const finish = (value: boolean) => {
+    socket.destroy();
+    resolve(value);
+  };
+
+  socket.setTimeout(2000, () => { finish(false); });
+  socket.on('connect', () => { socket.write(`${'0'.repeat(16)} ${String(port)} 0\n`); });
+  socket.on('error', () => { finish(false); });
+  socket.on('end', () => { finish(false); });
+  // Records as `Piped` carries them: a kind, a length, a body; a data record's body is its offset, then its bytes.
+  socket.on('data', (data: Buffer) => {
+    bytes = Buffer.concat([bytes, data]);
+
+    while (bytes.length >= 5 && bytes.length >= bytes.readUInt32BE(1) + 5) {
+      const size = bytes.readUInt32BE(1);
+      const [kind] = bytes;
+      const body = bytes.subarray(5, 5 + size);
+
+      bytes = bytes.subarray(5 + size);
+
+      if (kind === 0x62) return finish(body.subarray(8).toString() === 'ready');
+    }
+  });
+
+  return await promise;
+}
+
+describe('a gang\'s relay replaced in its container', () => {
+  test('is the one serving the next gang, even when the last relay has not let go of its ports yet', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-gang-up-'));
+    const bin = join(scratch, 'bin');
+    const pids: number[] = [];
+    const server = createServer((socket) => { socket.end('ready'); });
+    const listening = Promise.withResolvers<void>();
+
+    // The privileged network setup is the platform's: only it is stubbed; the scripts and the relay are real.
+    mkdirSync(bin);
+
+    for (const command of ['hostname', 'iptables', 'mount', 'umount']) writeFileSync(join(bin, command), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(join(scratch, 'relay.py'), RELAY_PY);
+    // Rank 0's address, where the relay connects a link's port.
+    server.listen(0, '127.0.1.1', listening.resolve);
+    await listening.promise;
+    const { port } = v.parse(v.object({ port: v.number() }), server.address());
+
+    const up = async (token: string) => {
+      const setup = Bun.spawn(['/bin/sh', '-c', GANG_UP.replaceAll(STATE, scratch), 'gang', '0', '2', 'https://armada.test', 'job', token, 'v1', 'v2'], {
+        env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, stdout: 'ignore', stderr: 'pipe',
+      });
+
+      const exitCode = await setup.exited;
+
+      pids.push(Number(readFileSync(join(scratch, 'relay.pid'), 'utf8')));
+
+      return exitCode;
+    };
+
+    try {
+      const first = await up('a'.repeat(48));
+      const [old] = pids;
+
+      // The last gang's relay still holds its ports when the next gang's setup starts.
+      if (old !== undefined) process.kill(old, 'SIGSTOP');
+      const second = await up('b'.repeat(48));
+      const replaced = old !== undefined && await exited(old, false);
+
+      expect({ first, second, replaced, served: await greeted(port) }).toEqual({ first: 0, second: 0, replaced: true, served: true });
+    } finally {
+      for (const pid of pids) if (!(await exited(pid, false))) process.kill(pid, 'SIGKILL');
+
+      server.close();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

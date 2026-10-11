@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
 import { cacheKey, environmentKey, JobSpecSchema, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
 import type { Generation } from '../src/environments';
-import { taskKey } from '../src/env';
-import { ArmadaJob } from '../src/job';
+import { runKey } from '../src/env';
+import { ArmadaJob, type Claim } from '../src/job';
 import { bucket, namespace, state, world } from './harness';
 
 const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
@@ -12,7 +12,7 @@ const bundle = 'b'.repeat(64);
 
 /** A job of the cached pushed task `task` over `items`, on a ready environment, beside the other jobs of `artifacts`;
  *  its vessels only record that they began. An `open` job takes more items. */
-async function cachedJob(id: string, items: readonly Json[], artifacts: ReturnType<typeof bucket>, { task = 'square', open = false }: { readonly task?: string; readonly open?: boolean } = {}) {
+async function cachedJob(id: string, items: readonly Json[], artifacts: ReturnType<typeof bucket>, { task = 'square', open = false, hedge = 0 }: { readonly task?: string; readonly open?: boolean; readonly hedge?: number } = {}) {
   const begun: string[] = [];
   const stored = state();
 
@@ -22,22 +22,34 @@ async function cachedJob(id: string, items: readonly Json[], artifacts: ReturnTy
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
   }));
 
-  await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: task, bundle }, cache: { days: 7 }, open }));
+  await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: task, bundle }, cache: { days: 7 }, open, hedge, pool: 2 }));
   await job.alarm();
 
   return { job, id, artifacts, begun, pending: stored.pending };
 }
 
-/** `vessel` runs its next task: its envelope lands in R2, and its outcome exits `exitCode`. */
+/** `vessel` runs its next task, as a vessel does: its envelope into R2 under its run, then its outcome, exiting `exitCode`. */
 async function answer({ job, id, artifacts }: Awaited<ReturnType<typeof cachedJob>>, vessel: string, exitCode: number, envelope: string): Promise<void> {
   const claim = await job.claim(vessel);
 
-  if (claim === null || 'waitMs' in claim || !(await job.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
-  await artifacts.put(taskKey(id, claim.index, 'output'), envelope);
+  if (claim === null || 'waitMs' in claim) throw new Error(`${vessel} got no task`);
+  await finish({ job, id, artifacts }, { vessel, claim, exitCode, envelope });
+}
 
-  // What a vessel does with a green answer its claim says to cache (vessel.test.ts holds the vessel to it).
-  if (exitCode === 0 && claim.cache !== undefined) await artifacts.put(claim.cache.key, envelope, { customMetadata: { expires: String(claim.cache.expires), answer: 'value' } });
-  const outcome: Outcome = { index: claim.index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: 1, tail: '', output: true, value: envelope, answer: 'value' };
+/** A run's end: its vessel and claim, its exit code, and the envelope it wrote. */
+interface Run {
+  readonly vessel: string;
+  readonly claim: Claim;
+  readonly exitCode: number;
+  readonly envelope: string;
+}
+
+/** `vessel`'s run of `claim` ends with `exitCode`: its envelope into R2 under its run, if its answer is the one kept, then
+ *  its outcome. */
+async function finish({ job, id, artifacts }: Pick<Awaited<ReturnType<typeof cachedJob>>, 'job' | 'id' | 'artifacts'>, { vessel, claim, exitCode, envelope }: Run): Promise<void> {
+  if (!(await job.accept(vessel, claim.index, exitCode, { slot: 0, attempt: claim.attempt }))) return;
+  await artifacts.put(runKey(id, claim.index, { vessel, attempt: claim.attempt }, 'output'), envelope);
+  const outcome: Outcome = { index: claim.index, kind: 'exited', exitCode, seconds: 1, vessel, attempt: claim.attempt, tail: '', output: true, value: envelope, answer: 'value' };
 
   await job.complete(vessel, outcome, 1000);
 }
@@ -59,7 +71,7 @@ describe('a cached task', () => {
     const third = await cachedJob('j3', [{ a: 1, b: 2 }], artifacts);
 
     expect({
-      first: first.begun, second: second.begun, events, output: artifacts.objects.get((await second.job.cachedFrom(1)) ?? ''),
+      first: first.begun, second: second.begun, events, output: artifacts.objects.get((await second.job.fileOf(1, 'output')) ?? ''),
       key: artifacts.objects.has(await cacheKey(bundle, 'square', await environmentKey(v.parse(RecipeSchema, {})), { b: 2, a: 1 })), third: third.begun,
     }).toEqual({
       first: ['j1/v1', 'j1/v2'], second: ['j2/v1'], events: [{ index: 1, cached: true, value: '{"ok":true,"value":3}' }], output: '{"ok":true,"value":3}',
@@ -114,9 +126,34 @@ describe('a cached task', () => {
     held.resolve();
     await adding;
 
-    expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.objects.get((await open.job.cachedFrom(0)) ?? '') }).toEqual({
+    expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.objects.get((await open.job.fileOf(0, 'output')) ?? '') }).toEqual({
       claimed: null, events: [{ index: 0, cached: true, value: '{"ok":true,"value":25}' }], output: '{"ok":true,"value":25}',
     });
+  });
+
+  test('keeps a hedged task\'s green only once its other copy can no longer end it red', async () => {
+    const artifacts = bucket();
+
+    const answered = async (copies: readonly number[]) => {
+      const job = await cachedJob(`h${copies.join('')}`, [7], artifacts, { hedge: 1 });
+      const claims = [await job.job.claim('v1'), await job.job.claim('v2')];
+
+      for (const [at, claim] of claims.entries()) {
+        if (claim === null || 'waitMs' in claim) throw new Error('both copies run');
+        await finish(job, { vessel: `v${String(at + 1)}`, claim, exitCode: copies[at] ?? 0, envelope: '{"ok":true,"value":49}' });
+      }
+
+      await Promise.all(job.pending);
+      const again = await cachedJob(`a${copies.join('')}`, [7], artifacts);
+
+      return (await again.job.events(0)).events.map((event) => brief(event.outcome));
+    };
+
+    // The first copy's green, then the other copy's red: the task is red, and nothing is cached.
+    const red = await answered([0, 1]);
+    const green = await answered([0, 0]);
+
+    expect({ red, green }).toEqual({ red: [], green: [{ index: 0, cached: true, value: '{"ok":true,"value":49}' }] });
   });
 
   test('gives a task back to the queue when its cache read fails', async () => {

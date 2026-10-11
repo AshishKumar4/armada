@@ -24,8 +24,13 @@ export type Readiness =
   | { readonly kind: 'preparing'; readonly since: number }
   | { readonly kind: 'failed'; readonly reason: string };
 
-/** A preparation still unfinished after this was lost: the next job asks again. */
+/** A preparation whose preparer has not been heard from in this long was lost: the next job asks again. Its preparer
+ *  beats at each alarm (`beat`), so a phase may run as long as its own bound allows. */
 const LEASE_MS = 60 * 60_000;
+
+/** Whether `entry` is a preparation still under way at `now`. */
+const preparing = (entry: Entry | undefined, now: number): entry is Extract<Entry, { readonly state: 'preparing' }> =>
+  entry?.state === 'preparing' && now - (entry.beat ?? entry.since) < LEASE_MS;
 
 /** A failed preparation is the answer for this long, so the jobs waiting on it end; then it may be asked again. */
 const FAILURE_HOLD_MS = 5 * 60_000;
@@ -53,7 +58,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
 
     if (entry?.state === 'ready') return entry.generation.sha ?? 'root';
 
-    return entry?.state === 'preparing' && Date.now() - entry.since < LEASE_MS ? entry.sha ?? 'root' : 'root';
+    return preparing(entry, Date.now()) ? entry.sha ?? 'root' : 'root';
   }
 
   /** The key's environment, or its preparation begun; a repository recipe prepares only from a `root` pack. */
@@ -66,7 +71,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
       return { kind: 'ready', generation: entry.generation };
     }
 
-    if (entry?.state === 'preparing' && now - entry.since < LEASE_MS) return { kind: 'preparing', since: entry.since };
+    if (preparing(entry, now)) return { kind: 'preparing', since: entry.since };
 
     if (entry?.state === 'failed' && now - entry.at < FAILURE_HOLD_MS) return { kind: 'failed', reason: entry.reason };
 
@@ -127,9 +132,11 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     }
   }
 
-  /** The next look, in an hour, while an environment is ready. */
+  /** The next look, in an hour, while an environment is ready or a snapshot's delete is owed. */
   private async lookAgain(): Promise<void> {
-    if ((await this.list()).some(({ entry }) => entry.state === 'ready')) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
+    const owed = (await this.ctx.storage.list({ prefix: 'debt:', limit: 1 })).size > 0;
+
+    if (owed || (await this.list()).some(({ entry }) => entry.state === 'ready')) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
   }
 
   /** Deletes the snapshots of the environments past those `retention` keeps (`expired`) with the deployment's
@@ -141,13 +148,16 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     const credentials = this.env.REGISTRY_CREDENTIALS;
 
     if (credentials === undefined) throw new Error('this deployment has no registry credentials to delete snapshots with; armada deploy mints them');
+    // Listed before the calls below let other requests in: a job admitted meanwhile is missing from `used`, but asking
+    // for its environment changes that entry, which the check before each delete sees.
+    const listed = await this.list();
     const open = await this.env.FLEET.getByName(SINGLE).open();
     const used = new Set(await Promise.all(open.map(async (job) => await this.env.JOB.getByName(job).environment())));
     const pruned: string[] = [];
 
     await this.settle(credentials, used);
 
-    for (const { key, snapshot, lastUsed } of expired(await this.list(), used, Date.now(), retention)) {
+    for (const { key, snapshot, lastUsed } of expired(listed, used, Date.now(), retention)) {
       // A job that asked for it since the listing, while a call above let other requests in, keeps it: the read and the
       // delete are storage alone, with nothing between them that lets one in.
       const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
@@ -164,9 +174,12 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     return pruned;
   }
 
-  /** A snapshot made for `key` that no environment records: a preparation's that failed after its snapshot. */
+  /** A snapshot made for `key` that no environment records: a preparation's that failed after its snapshot. A look is
+   *  due for it, if none is. */
   async orphaned(snapshot: string, key: string): Promise<void> {
     await this.owe(snapshot, key);
+
+    if ((await this.ctx.storage.getAlarm()) === null) await this.lookAgain();
   }
 
   /** Deletes the owed snapshots, but those of a key an open job uses: a job holds its generation, so a vessel it starts
@@ -206,6 +219,13 @@ export class ArmadaEnvironments extends DurableObject<Env> {
 
   private async owe(ref: string, key: string): Promise<void> {
     await this.ctx.storage.put(`debt:${ref}`, { key, since: Date.now() } satisfies Debt);
+  }
+
+  /** The preparation of `key` begun `since` is under way: its preparer beats, so it is not taken for lost. */
+  async beat(key: string, since: number): Promise<void> {
+    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+
+    if (entry?.state === 'preparing' && entry.since === since) await this.ctx.storage.put(`env:${key}`, { ...entry, beat: Date.now() } satisfies Entry);
   }
 
   /** A failure ends the key's preparation only if it is the attempt begun `since`, not one a later attempt replaced. */
@@ -317,6 +337,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
     const preparation = await this.ctx.storage.get<Preparation>('preparation');
 
     if (preparation === undefined) return;
+    await this.env.ENVIRONMENTS.getByName(SINGLE).beat(preparation.key, preparation.since);
     const began = Date.now();
     // The snapshot once one is made, so a preparation that fails after it owes it rather than lose it.
     let made = preparation.snapshot;
@@ -340,8 +361,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await Promise.allSettled([this.ctx.container?.destroy()]);
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
 
-      if (made !== null) await this.registry().orphaned(made.id, preparation.key);
-      await this.registry().preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`);
+      if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
+      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`);
     }
   }
 
@@ -454,16 +475,12 @@ export class ArmadaPreparer extends DurableObject<Env> {
   private async done(preparation: Preparation): Promise<void> {
     if (preparation.snapshot === null) throw new Error('a finished preparation has no snapshot');
     await this.ctx.storage.delete('preparation');
-    await this.registry().prepared({ key: preparation.key, snapshot: preparation.snapshot, sha: preparation.sha, created: Date.now(), seconds: preparation.seconds });
+    await this.env.ENVIRONMENTS.getByName(SINGLE).prepared({ key: preparation.key, snapshot: preparation.snapshot, sha: preparation.sha, created: Date.now(), seconds: preparation.seconds });
   }
 
   private container(): Container {
     if (this.ctx.container === undefined) throw new Error('ArmadaPreparer has no container binding');
 
     return this.ctx.container;
-  }
-
-  private registry() {
-    return this.env.ENVIRONMENTS.getByName(SINGLE);
   }
 }

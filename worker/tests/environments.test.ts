@@ -271,6 +271,31 @@ describe('a deployment that keeps one environment', () => {
   test('keeps one a job asked for while the prune was under way', async () => {
     expect(await pruning(true)).toEqual({ deleted: [['c', true]], kept: ['b', 'new', 'old'], manifests: ['b', 'new', 'old'] });
   });
+
+  test('keeps one a job asked for while the prune was asking which jobs are open', async () => {
+    const stored = state();
+    const fake = await registry(['b', 'new']);
+
+    globalThis.fetch = fakeFetch(fake.answer);
+
+    const environments = new ArmadaEnvironments(stored.ctx, world({
+      KEEP_ENVIRONMENTS: '0', REGISTRY_CREDENTIALS: 'user:secret',
+      // A job is admitted, and asks for b, while the fleet answers which jobs are open, without it.
+      FLEET: namespace(() => ({
+        open: async () => {
+          await environments.ensure('b', v.parse(RecipeSchema, {}), null);
+
+          return [];
+        },
+      })),
+      JOB: namespace(() => ({ environment: async () => '' })),
+    }));
+
+    await stored.ctx.storage.put('env:b', { state: 'ready', generation: generation('b'), lastUsed: Date.now() - 4 * HOUR });
+    await environments.prune({ keep: 0, recentMs: 0 });
+
+    expect({ kept: (await environments.list()).map((each) => each.key), manifests: fake.left() }).toEqual({ kept: ['b'], manifests: ['b', 'new'] });
+  });
 });
 
 describe('a snapshot no environment records any more', () => {
@@ -319,6 +344,23 @@ describe('a snapshot no environment records any more', () => {
     expect(fake.left()).toEqual(['k-first', 'k-second']);
   });
 
+  test('a preparation\'s snapshot owed while no environment is ready is looked at again until its delete is done', async () => {
+    const { environments, fake, stored } = await deployment([]);
+
+    fake.refuseNextDigest();
+    await environments.orphaned('snapshot-made', 'other');
+    const first = await stored.ctx.storage.getAlarm();
+
+    await environments.alarm();
+    const owed = (await stored.ctx.storage.list({ prefix: 'debt:' })).size;
+    const again = await stored.ctx.storage.getAlarm();
+
+    await environments.alarm();
+
+    expect({ first: first !== null, owed, again: again !== null, left: fake.left(), after: (await stored.ctx.storage.list({ prefix: 'debt:' })).size })
+      .toEqual({ first: true, owed: 1, again: true, left: ['k-first', 'k-second'], after: 0 });
+  });
+
   test('a digest delete that fails once the tags are gone owes the digest, and the next prune deletes that', async () => {
     const { environments, fake, stored } = await deployment([]);
     await environments.orphaned('snapshot-made', 'other');
@@ -329,5 +371,30 @@ describe('a snapshot no environment records any more', () => {
     await environments.prune({ keep: 5, recentMs: 0 });
 
     expect({ owed: owed.map((name) => name.startsWith('debt:sha256:')), tags, left: fake.left() }).toEqual({ owed: [true], tags: 4, left: ['k-first', 'k-second'] });
+  });
+});
+
+describe('a preparation under way', () => {
+  test('is not taken for lost while its preparer beats, however long its phases run; one that stops beating is, after the lease', async () => {
+    const stored = state();
+    let begun = 0;
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+    const recipe = v.parse(RecipeSchema, {});
+    const start = Date.now();
+
+    await environments.ensure('k', recipe, null, start);
+    const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get('env:k'));
+
+    // Its phases run on, past an hour, its preparer beating at each alarm.
+    for (let minutes = 50; minutes <= 150; minutes += 50) {
+      setSystemTime(start + minutes * MINUTE);
+      await environments.beat('k', since);
+    }
+
+    const beating = await environments.ensure('k', recipe, null, start + 150 * MINUTE);
+    const silent = await environments.ensure('k', recipe, null, start + 211 * MINUTE);
+
+    setSystemTime();
+    expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
   });
 });

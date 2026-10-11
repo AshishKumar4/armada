@@ -37,6 +37,7 @@ async function prepare(answer: Answer, alarms = 40, size: Size = 'medium', stops
 
   const preparer = new ArmadaPreparer(stored.ctx, world({
     ENVIRONMENTS: namespace(() => ({
+      beat: async () => undefined,
       prepared: async (generation: Generation) => { generations.push(generation); },
       preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); },
     })),

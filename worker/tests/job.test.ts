@@ -14,8 +14,9 @@ const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot'
 async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   const begun: string[] = [];
   const used: string[] = [];
+  const stored = state();
 
-  const created = new ArmadaJob(state().ctx, world({
+  const created = new ArmadaJob(stored.ctx, world({
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
     ENVIRONMENTS: namespace(() => ({ used: async (key: string) => { used.push(key); }, ensure: async () => ({ kind: 'ready', generation }) })),
   }));
@@ -23,7 +24,7 @@ async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   await created.create('j1', v.parse(JobSpecSchema, spec));
   await created.alarm();
 
-  return { job: created, begun, used };
+  return { job: created, begun, used, stored };
 }
 
 const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
@@ -200,6 +201,63 @@ describe('a hedged job', () => {
       greenOnceTheOtherWasLost: { told: false, events: [['v1', 0, true]] },
       firstRedBesideAGreen: { told: false, events: [['v1', 1, true]] },
     });
+  });
+});
+
+describe('a hedged task\'s copies', () => {
+  test('are a vessel each from the start, even for a job of one item', async () => {
+    const { begun } = await job({ recipe: {}, items: [{ item: { weight: 9 }, argv: ['true'] }], run: { kind: 'command' }, hedge: 1, pool: 2 });
+
+    expect(begun).toEqual(['j1/v1', 'j1/v2']);
+  });
+
+  test('keep the slot each ran in, whichever answers first', async () => {
+    const { job: hedged } = await job({ recipe: {}, items: [{ item: { weight: 9 }, argv: ['true'] }, { item: { weight: 1 }, argv: ['true'] }], run: { kind: 'command' }, hedge: 1, slots: 4 });
+
+    await hedged.claim('v1', 0);
+    await hedged.claim('v2', 2);
+    await hedged.accept('v2', 0, 0, { slot: 2, attempt: 1 });
+
+    expect((await hedged.status())?.running?.filter((each) => each.index === 0).map((each) => [each.vessel, each.slot])).toEqual([['v2', 2]]);
+  });
+
+  test('end with the one outcome the job gave a task it cancelled, even when a green was held for the other copy', async () => {
+    const { job: hedged } = await job({ recipe: {}, items: [{ item: { weight: 9 }, argv: ['true'] }], run: { kind: 'command' }, hedge: 1 });
+
+    await hedged.claim('v1');
+    await hedged.claim('v2');
+    await hedged.accept('v1', 0, 0, { slot: 0, attempt: 1 });
+    await hedged.complete('v1', exited(0, 'v1'), 1000);
+    await hedged.cancel('cancelled by its client', 'cancelled');
+    await hedged.stopped('v2', 0, { slot: 0, attempt: 1 });
+
+    expect((await hedged.events(0)).events.map((event) => [event.outcome.kind, event.outcome.reason])).toEqual([['failed', 'cancelled']]);
+  });
+});
+
+describe('a run the job no longer counts', () => {
+  test('is told to stop, though the task it ran is running again elsewhere, or in another slot of its own vessel', async () => {
+    const { job: retried } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, slots: 2, retries: { exitCodes: [3], attempts: 3, backoffSeconds: 0 } });
+
+    await retried.claim('v1', 0);
+    // The first run's answer names a retry: the task runs again, here in the vessel's other slot.
+    await retried.accept('v1', 0, 3, { slot: 0, attempt: 1 });
+    await retried.complete('v1', exited(0, 'v1', 3), 1000);
+    await retried.claim('v1', 1);
+
+    expect({ stale: await retried.still('v1', 0, 0), current: await retried.still('v1', 0, 1) }).toEqual({ stale: false, current: true });
+  });
+});
+
+describe('a job an earlier Worker stored', () => {
+  test('runs with the fields added since at their defaults', async () => {
+    const { job: earlier, begun, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, open: true });
+    const { slots: _slots, hedge: _hedge, ...before } = v.parse(v.looseObject({ slots: v.number(), hedge: v.number() }), await stored.ctx.storage.get('spec'));
+
+    await stored.ctx.storage.put('spec', before);
+    await earlier.add([{ item: 'c', argv: ['true'] }]);
+
+    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3']);
   });
 });
 

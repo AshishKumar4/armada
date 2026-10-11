@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, TaskStatusSchema } from '../../src/protocol';
+import { runKey, taskKey } from '../src/env';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
 import { bucket, namespace, state, world } from './harness';
@@ -14,23 +15,34 @@ const ready = () => {
   return namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }), used: async () => undefined }));
 };
 
-describe('a task\'s artifacts', () => {
-  test('are served as stored at /jobs/<id>/tasks/<i>/artifacts, and 404 when it kept none', async () => {
+describe('a task\'s files', () => {
+  test('are its kept run\'s, served as stored, an earlier Worker\'s where it kept them, and 404 for a task with none', async () => {
+    const id = '20261011120000-0123abcd';
+    const artifacts = bucket();
+
     const env = world({
-      ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' },
-      ARTIFACTS: bucket(new Map([['jobs/j1/tasks/0/artifacts.tar.gz', 'packed']])),
-      JOB: namespace(() => ({})),
+      ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts, ENVIRONMENTS: ready(),
+      JOB: namespace(() => job), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
     });
 
-    const ask = async (path: string) => await worker.fetch(new Request(`https://armada.test${path}`, { headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7' } }), env);
-    const kept = await ask('/jobs/j1/tasks/0/artifacts');
-    const none = await ask('/jobs/j1/tasks/1/artifacts');
-    const leaf = await ask('/jobs/j1/tasks/0/nothing');
-    await env.ARTIFACTS.put('jobs/j1/tasks/2/artifacts.tar.gz', 'typed', { httpMetadata: { contentType: 'application/gzip' } });
-    const typed = await ask('/jobs/j1/tasks/2/artifacts');
+    const job = new ArmadaJob(state().ctx, env);
 
-    expect({ kept: kept.status, body: await kept.text(), none: none.status, leaf: leaf.status, typed: typed.headers.get('content-type') })
-      .toEqual({ kept: 200, body: 'packed', none: 404, leaf: 404, typed: 'application/gzip' });
+    await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }, { item: 'c', argv: ['true'] }], run: { kind: 'command' } }));
+    await job.alarm();
+
+    for (const index of [0, 1, 2]) {
+      await job.claim('v1');
+      await job.accept('v1', index, 0, { slot: 0, attempt: 1 });
+      await job.complete('v1', { index, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false, artifacts: index === 1 ? undefined : true }, 1000);
+    }
+
+    await artifacts.put(runKey(id, 0, { vessel: 'v1', attempt: 1 }, 'artifacts'), 'packed', { httpMetadata: { contentType: 'application/gzip' } });
+    await artifacts.put(taskKey(id, 2, 'artifacts'), 'earlier');
+    const ask = async (path: string) => await worker.fetch(new Request(`https://armada.test${path}`, { headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7' } }), env);
+    const [kept, none, earlier, leaf, missing] = await Promise.all(['0/artifacts', '1/artifacts', '2/artifacts', '0/nothing', '3/artifacts'].map(async (path) => await ask(`/jobs/${id}/tasks/${path}`)));
+
+    expect({ kept: [kept?.status, await kept?.text(), kept?.headers.get('content-type')], none: none?.status, earlier: await earlier?.text(), leaf: leaf?.status, missing: missing?.status })
+      .toEqual({ kept: [200, 'packed', 'application/gzip'], none: 404, earlier: 'earlier', leaf: 404, missing: 404 });
   });
 });
 

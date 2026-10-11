@@ -16,6 +16,10 @@ export const USER_HOME = '/home/ci';
 /** The runner's own state in a container: the pack, the job's files, a function's bundle, the current task. */
 export const STATE = '/armada';
 
+/** Longer than a job may take, so only the job's end stops a container; one whose stop failed ends this long after its
+ *  last exec. */
+export const INACTIVITY_MS = 6 * 60 * 60_000;
+
 export const TASK = `${STATE}/task`;
 
 /** Where slot `slot` of a slotted container lives: its task dir (bound over `TASK` inside the slot's namespace), its
@@ -116,6 +120,11 @@ chown -R ci:ci /home/ci ${STATE}
 apt-get clean
 rm -rf /var/lib/apt/lists/*`;
 }
+
+/** As root, once a container has its checkout: the state dir owned by root, as `runnerLayer` leaves it the user's so
+ *  the user's checkout can remove the pack. A task runs as the user, and must not replace what root reads there: the
+ *  argv a launch sources as root, the mask file. */
+export const OWN_STATE = `chown root:root ${STATE} && chmod 755 ${STATE}`;
 
 /** As the user: the pack at /armada/pack into the checkout's repository (a new one while preparing), then the commit
  *  checked out on a local branch, as a GitHub runner's checkout leaves it, and clean. */
@@ -256,27 +265,38 @@ const mask = Buffer.from('***');
 const input = fs.openSync(file, 'r');
 const output = fs.openSync(file + '.masked', 'w');
 const chunk = Buffer.alloc(1 << 20);
+// The raw bytes not yet resolved: any secret starting in them may end in the next read.
 let carry = Buffer.alloc(0);
 for (;;) {
   const read = fs.readSync(input, chunk, 0, chunk.length, null);
-  let text = Buffer.concat([carry, chunk.subarray(0, read)]);
-  for (const secret of secrets) {
-    const parts = [];
-    let from = 0;
-    for (let at = text.indexOf(secret); at !== -1; at = text.indexOf(secret, from)) {
-      parts.push(text.subarray(from, at), mask);
-      from = at + secret.length;
+  const text = Buffer.concat([carry, chunk.subarray(0, read)]);
+  // A secret starting before the limit ends within this read; one starting past it waits for the next.
+  const limit = read === 0 ? text.length : Math.max(0, text.length - keep);
+  const next = secrets.map((secret) => text.indexOf(secret));
+  const parts = [];
+  let at = 0;
+  while (at < limit) {
+    // The leftmost match, the longest of those starting there: the secrets are longest first.
+    let found = -1;
+    let hit = 0;
+    for (const [index, secret] of secrets.entries()) {
+      if (next[index] !== -1 && next[index] < at) next[index] = text.indexOf(secret, at);
+      if (next[index] !== -1 && next[index] < limit && (found === -1 || next[index] < found)) {
+        found = next[index];
+        hit = secret.length;
+      }
     }
-    parts.push(text.subarray(from));
-    text = Buffer.concat(parts);
+    if (found === -1) break;
+    parts.push(text.subarray(at, found), mask);
+    at = found + hit;
   }
-  if (read === 0) {
-    fs.writeSync(output, text);
-    break;
+  if (at < limit) {
+    parts.push(text.subarray(at, limit));
+    at = limit;
   }
-  const cut = Math.max(0, text.length - keep);
-  fs.writeSync(output, text.subarray(0, cut));
-  carry = text.subarray(cut);
+  fs.writeSync(output, Buffer.concat(parts));
+  if (read === 0) break;
+  carry = text.subarray(at);
 }
 fs.closeSync(input);
 fs.closeSync(output);

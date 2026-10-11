@@ -1,4 +1,4 @@
-import { errorOf, INLINE_BYTES } from '../../src/protocol';
+import { errorOf } from '../../src/protocol';
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaFleet } from './fleet';
 import type { ArmadaWebhooks } from './hooks';
@@ -50,22 +50,13 @@ export const bundleKey = (digest: string): string => `code/${digest}.mjs`;
 /** Each of a task's stored files, by the name its route has. */
 const LEAVES = { output: 'output', log: 'log.gz', artifacts: 'artifacts.tar.gz' } as const;
 
-/** The R2 keys of a task's output, log and artifacts archive: a gang rank's other than 0 under its rank. */
-export const taskKey = (job: string, index: number, leaf: keyof typeof LEAVES, rank = 0): string =>
-  `jobs/${job}/tasks/${String(index)}/${rank === 0 ? '' : `rank${String(rank)}/`}${LEAVES[leaf]}`;
+/** The R2 keys of one run's output, log and artifacts archive: a run is a vessel's attempt at the task, so two copies
+ *  of a task, or two ranks of a gang, never write over each other's, and the task's files are its kept run's. */
+export const runKey = (job: string, index: number, { vessel, attempt }: { readonly vessel: string; readonly attempt: number }, leaf: keyof typeof LEAVES): string =>
+  `jobs/${job}/tasks/${String(index)}/${vessel}.${String(attempt)}/${LEAVES[leaf]}`;
 
-/** An R2 object into `key`: read whole when it is small, else streamed at its known size. */
-export async function copyInto(bucket: R2Bucket, key: string, source: R2ObjectBody, customMetadata?: Record<string, string>): Promise<void> {
-  if (source.size <= INLINE_BYTES) {
-    await bucket.put(key, await source.arrayBuffer(), { httpMetadata: source.httpMetadata, customMetadata });
-
-    return;
-  }
-
-  const known = new FixedLengthStream(source.size);
-
-  await Promise.all([source.body.pipeTo(known.writable), bucket.put(key, known.readable, { httpMetadata: source.httpMetadata, customMetadata })]);
-}
+/** Where an earlier Worker kept a task's files, under the task itself. */
+export const taskKey = (job: string, index: number, leaf: keyof typeof LEAVES): string => `jobs/${job}/tasks/${String(index)}/${LEAVES[leaf]}`;
 
 /** Bytes as text, or undefined when they are not UTF-8. */
 export function textOf(bytes: ArrayBuffer): string | undefined {

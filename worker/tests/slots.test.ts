@@ -29,10 +29,18 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
   const launched: { readonly script: string; readonly group: string }[] = [];
   const killed: string[] = [];
   const queue = [...claims];
+  // The files piped in, by path: a launch sources its task's argv and environment from one.
+  const files = new Map<string, string>();
   let given = 0;
 
-  const stored = state(container(async (argv, options) => {
-    if (argv[3] === 'launch') launched.push({ script: argv[2] ?? '', group: options?.env?.['ARMADA_CGROUP'] ?? '' });
+  const stored = state(container(async (argv) => {
+    if (argv[3] === 'launch') {
+      const file = files.get(/^\. (\S+)/u.exec(argv[2] ?? '')?.[1] ?? '') ?? '';
+      // The cgroup the task's own shell sees, read by sourcing its launch file as the launch does.
+      const group = Bun.spawnSync(['/bin/sh', '-c', `${file}\nprintf %s "$ARMADA_CGROUP"`]).stdout.toString();
+
+      launched.push({ script: argv[2] ?? '', group });
+    }
 
     if ((argv[2] ?? '').startsWith('set -eu\npid=')) killed.push(argv[2] ?? '');
 
@@ -43,7 +51,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
     if (slow !== undefined) await new Promise((resolve) => setTimeout(resolve, slow));
 
     return { exitCode: 0, stdout: endsOf.shift() ?? '0\n' };
-  }));
+  }, (argv, body) => { if (argv[3] === 'pipe-in') files.set(argv[4] ?? '', body); }));
 
   const job = {
     booted: async () => undefined,
@@ -108,12 +116,6 @@ describe('a slotted vessel', () => {
     });
 
     expect(completed.map((outcome) => [outcome.index, outcome.exitCode, outcome.reason] as const).sort((a, b) => a[0] - b[0])).toEqual([[0, 0, undefined], [1, 0, undefined], [7, 124, 'timeout']]);
-  });
-
-  test('a stored `current` an earlier Worker left is finished as slot 0', async () => {
-    const { completed } = await run({ spec: { slots: 1 }, ends: { 0: ['0\n'] }, put: { current: { claim: { index: 7, attempt: 1, argv: ['true'], secrets: [], duplicate: false }, startedAt: Date.now() } } });
-
-    expect(completed.map((outcome) => [outcome.index, outcome.exitCode, outcome.slot])).toEqual([[7, 0, 0]]);
   });
 
   test('one slot\'s slow answer does not idle the others: they launch and finish beside it', async () => {

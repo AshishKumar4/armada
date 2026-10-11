@@ -173,7 +173,7 @@ export function bucket(objects = new Map<string, string>()) {
 type Fake = DurableObjectNamespace | ReturnType<typeof bucket> | WorkerVersionMetadata | string;
 
 /** The bindings an object reaches, each answered in memory: the fleet always has room, the registry takes a job's
- *  end, and the bearer is a deployment's. */
+ *  end, and the bearer and the fleet's cap are a deployment's. */
 export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   const env: Partial<Env> = {};
 
@@ -181,6 +181,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
     FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARMADA_TOKEN: 't'.repeat(32),
+    FLEET_VCPUS: '1500',
     ARTIFACTS: bucket(),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
     ...bindings,

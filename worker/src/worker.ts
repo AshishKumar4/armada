@@ -12,6 +12,7 @@ import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, ty
 import { retentionOf } from './environments';
 import { driverSpec, eventOf, HookConfigSchema } from './hooks';
 import type { ArmadaFleet } from './fleet';
+import { fleetRefusal } from './job';
 
 export { ArmadaJob } from './job';
 
@@ -43,8 +44,9 @@ const JOB_ID = /^\d{14}-[0-9a-f]{8}$/u;
 const notFound = (): Response => Response.json({ error: 'not found' }, { status: 404 });
 
 /** An R2 object as the response body, or 404. */
-async function object(env: Env, key: string): Promise<Response> {
-  const found = await env.ARTIFACTS.get(key);
+/** The R2 object at `key`, or at `earlier`, where it was kept before, when there is none at `key`. */
+async function object(env: Env, key: string, earlier?: string): Promise<Response> {
+  const found = await env.ARTIFACTS.get(key) ?? (earlier === undefined ? null : await env.ARTIFACTS.get(earlier));
 
   if (found === null) return notFound();
   const headers = new Headers();
@@ -151,7 +153,7 @@ const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
   const spec = v.parse(JobSpecSchema, await request.json());
-  const refused = refusal(spec.run, spec.items, spec.pool, spec.slots);
+  const refused = refusal(spec.run, spec.items, spec.pool, spec.slots) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 
@@ -232,10 +234,10 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
   }
 
   if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log' && leaf !== 'artifacts')) return undefined;
-  // A task answered from the cache ran nothing: its output is the cached object itself.
-  const cached = leaf === 'output' ? await job.cachedFrom(Number(index)) : undefined;
+  const key = await job.fileOf(Number(index), leaf);
 
-  return await object(env, cached ?? taskKey(id, Number(index), leaf));
+  // A task an earlier Worker finished keeps its files under the task itself.
+  return key === null ? notFound() : await object(env, key, taskKey(id, Number(index), leaf));
 };
 
 /** `/secrets` lists the names set; `PUT /secrets/<name>` sets one from the body, `DELETE` removes it. No route answers

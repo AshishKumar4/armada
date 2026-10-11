@@ -160,15 +160,33 @@ export class Piped {
 }
 
 /** As root: the gang this container left, if any: its relay stopped, its DNAT rules gone, its hosts file and hostname
- *  the runner's own. */
-export const GANG_DOWN = String.raw`if [ -f ${STATE}/relay.pid ]; then kill "$(cat ${STATE}/relay.pid)" 2>/dev/null || true; rm -f ${STATE}/relay.pid; fi
+ *  the runner's own. The relay is waited out, killed after 2.5 s and given up on after 5: one still holding its ports
+ *  would pass the next gang's readiness check while the next relay died unable to bind them, and the gang would wait
+ *  on links nothing serves (#22). */
+export const GANG_DOWN = String.raw`relay_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  IFS= read -r relay_stat < "/proc/$1/stat" 2>/dev/null || return 1
+  case "$relay_stat" in *') Z '*|*') X '*) return 1;; esac
+}
+if [ -f ${STATE}/relay.pid ]; then
+  relay_pid="$(cat ${STATE}/relay.pid)"
+  kill "$relay_pid" 2>/dev/null || true
+  n=0
+  while relay_alive "$relay_pid"; do
+    n=$((n + 1))
+    [ "$n" -ne 50 ] || kill -KILL "$relay_pid" 2>/dev/null || true
+    [ "$n" -lt 100 ] || { echo "the previous gang relay $relay_pid did not stop" >&2; exit 1; }
+    sleep 0.05
+  done
+  rm -f ${STATE}/relay.pid
+fi
 iptables -t nat -F ARMADA_GANG 2>/dev/null || true
 if [ -f ${STATE}/hosts.mounted ]; then umount /etc/hosts; rm -f ${STATE}/hosts.mounted; fi
 hostname localhost`;
 
 /** As root: this container as rank $1 of a gang of $2, the relay given the Worker's origin, the job, the gang's token
  *  and each rank's vessel ($3...): the ranks' names in the hosts file, a DNAT of each other rank's address to OUT, and
- *  the relay listening. */
+ *  the relay it started listening on both ports itself, or the setup fails with the relay's log. */
 export const GANG_UP = String.raw`set -eu
 rank=$1 world=$2
 shift 2
@@ -186,9 +204,13 @@ done
 mount --bind ${STATE}/hosts /etc/hosts
 touch ${STATE}/hosts.mounted
 setsid python3 ${RELAY} "$rank" "$@" > ${RELAY_LOG} 2>&1 < /dev/null &
-echo $! > ${STATE}/relay.pid
+relay_pid=$!
+echo "$relay_pid" > ${STATE}/relay.pid
 n=0
-until ss -ltn | grep -q ':${String(RELAY_OUT)} ' && ss -ltn | grep -q ':${String(RELAY_IN)} '; do
+while :; do
+  relay_alive "$relay_pid" || { cat ${RELAY_LOG} >&2; exit 1; }
+  if ss -ltnp | grep ':${String(RELAY_OUT)} ' | grep -q "pid=$relay_pid," &&
+     ss -ltnp | grep ':${String(RELAY_IN)} ' | grep -q "pid=$relay_pid,"; then break; fi
   n=$((n + 1))
   [ "$n" -lt 200 ] || { cat ${RELAY_LOG} >&2; exit 1; }
   sleep 0.05
