@@ -46,15 +46,17 @@ interface Run {
   readonly launched?: number;
   readonly packed?: boolean;
   readonly gang?: Gang;
+  readonly startAllowed?: boolean;
 }
 
 /** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
-async function run(lost: number, { argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang }: Run = {}) {
+async function run(lost: number, { argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   const execs: (readonly string[])[] = [];
   const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
+  const started: { name: string; index: number; attempt: number; afterLaunch: boolean; stored: boolean }[] = [];
   const task = once({ index: 0, attempt: 1, argv: [...words], env: { ...env }, secrets: [], duplicate: false, gang });
   let waits = 0;
 
@@ -86,6 +88,12 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
     booted: async () => undefined,
     waiting: async () => undefined,
     claim: task.next,
+    started: async (name: string, index: number, attempt: number) => {
+      started.push({ name, index, attempt, afterLaunch: execs.some((argv) => argv[3] === 'launch'), stored: (await stored.ctx.storage.get('slot:0')) !== undefined });
+
+      return startAllowed;
+    },
+    stopped: async () => undefined,
     still: async () => true,
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
@@ -107,7 +115,7 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects, execs, envs, piped };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects, execs, envs, piped, started };
 }
 
 describe('a task\'s argv and environment', () => {
@@ -231,6 +239,18 @@ describe('a task that names secrets', () => {
 });
 
 describe('a gang rank', () => {
+  test('acknowledges its exact attempt only after the launch and current task are stored, and kills a refused late launch', async () => {
+    const gang = { rank: 0, job: 'job', vessels: ['v1', 'v2'], origin: 'https://armada.example', token: 't'.repeat(48) };
+    const accepted = await run(0, { gang });
+    const refused = await run(0, { gang, startAllowed: false });
+
+    expect(accepted.started).toEqual([{ name: 'v1', index: 0, attempt: 1, afterLaunch: true, stored: true }]);
+    expect(accepted.exits).toEqual([0]);
+    expect(refused.exits).toEqual([]);
+    expect(refused.execs.some((argv) => (argv[2] ?? '').includes('cgroup.kill'))).toBe(true);
+    expect(refused.failed).toEqual([]);
+  });
+
   test('waits for its gang, joins its network as its rank before it launches, and leaves it before a task of no gang', async () => {
     const ran: string[][] = [];
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: 'https://armada.example', token: 't'.repeat(48) };
@@ -245,7 +265,7 @@ describe('a gang rank', () => {
     }));
 
     const job = {
-      booted: async () => undefined, waiting: async () => undefined, claim: async () => claims.shift() ?? null, still: async () => true,
+      booted: async () => undefined, waiting: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
       accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
     };
 
@@ -286,6 +306,7 @@ describe('a gang rank', () => {
       const job = {
         booted: async () => undefined, waiting: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
         claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }).next,
+        started: async () => true,
         still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
         complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
       };

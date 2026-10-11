@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, TaskSchema, TimingsSchema, type HookConfig, type Json,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -152,8 +152,10 @@ const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
 /** `POST /jobs`: the job `created`, which the fleet has already admitted and counts open, made from the request's spec,
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
-  const spec = v.parse(JobSpecSchema, await request.json());
-  const refused = refusal(spec.run, spec.items, spec.pool, spec.slots) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
+  const body: unknown = await request.json();
+  const spec = v.parse(JobSpecSchema, body);
+  const requested = v.parse(v.object({ timeout: v.optional(v.number()) }), body);
+  const refused = deadlineRefusal(requested.timeout, spec.deadline) ?? refusal(spec.run, spec.items, spec.pool, spec.slots) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 
@@ -354,6 +356,8 @@ const environments: Handler = async (request, env, [key]) => {
 
   if (key === undefined) return Response.json(await registry.list());
 
+  if (key === 'inventory' && request.method === 'GET') return Response.json({ snapshots: await registry.inventory(), credentialsExpire: env.REGISTRY_CREDENTIALS_EXPIRE });
+
   if (key === 'resolve' && request.method === 'POST') {
     const resolved = await environmentKey(v.parse(v.object({ recipe: RecipeSchema }), await request.json()).recipe);
 
@@ -522,6 +526,9 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
   }
 }
 
+/** Longer than making a driver job takes: a claim older than this with no job is one whose making died. */
+const CLAIM_GRACE_MS = 5 * 60_000;
+
 /** A delivery the deployment cannot start a job for yet, with the status GitHub is answered. */
 class Refused extends Error {
   constructor(readonly status: 409 | 503, message: string) {
@@ -555,10 +562,13 @@ async function drive(request: Request, env: Env, { project, config, payload }: {
   const created = jobId();
   const prior = await hooks.claim(project, sha, created);
 
-  // A commit's driver that ended without a verdict may run again.
+  // A commit's driver that ended without a verdict may run again, as may one whose making died before its job was
+  // stored, once a making would have finished.
   if (prior !== null) {
-    if ((await env.JOB.getByName(prior).status())?.phase !== 'done') return ignored('already');
-    await hooks.unclaim(project, sha, prior);
+    const status = await env.JOB.getByName(prior.job).status();
+
+    if (status === null ? Date.now() - prior.at < CLAIM_GRACE_MS : status.phase !== 'done') return ignored('already');
+    await hooks.unclaim(project, sha, prior.job);
 
     if ((await hooks.claim(project, sha, created)) !== null) return ignored('already');
   }

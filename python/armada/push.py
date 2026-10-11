@@ -50,7 +50,7 @@ def find_project(here: str | None = None) -> Project | None:
         if file.exists():
             table = tomllib.loads(file.read_text()).get("tool", {}).get("armada", {})
             if "project" in table:
-                return Project(directory, str(table["project"]), [str(each) for each in table.get("tasks", ["armada"])])
+                return Project(directory, str(table["project"]), [str(each) for each in table.get("tasks", ["tasks"])])
         if directory.parent == directory:
             return None
         directory = directory.parent
@@ -85,9 +85,12 @@ def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str], 
     package's `__init__.py` included."""
     files: list[Path] = []
     owners: dict[str, Path] = {}
-    # A module of a name this project uses, imported from elsewhere (another project, or a folder's namespace package
-    # that has no file), is not this one's: Python would import that one again.
-    tops = {child.name for child in root.iterdir() if child.is_dir()} | {child.stem for child in root.glob("*.py")}
+    tops = {Path(folder).parts[0] for folder in folders}
+    # The SDK's own package name: a task folder of that name would shadow it here and in the container.
+    if __package__ in tops:
+        raise PushError(f"a task folder may not be named {__package__}, the SDK's package: rename it and its [tool.armada] tasks entry")
+    # A module of a task folder's name imported from elsewhere (another project, or a namespace package that has no
+    # file) is not this one's: Python would import that one again.
     for name in [name for name in sys.modules if name.split(".")[0] in tops]:
         source = getattr(sys.modules[name], "__file__", None)
         if not (isinstance(source, str) and Path(source).resolve().is_relative_to(root)):

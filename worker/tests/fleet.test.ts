@@ -1,9 +1,13 @@
 import { describe, expect, test } from 'bun:test';
+import { INACTIVITY_MS } from '../src/container';
 import { ArmadaFleet } from '../src/fleet';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { container, namespace, state, world } from './harness';
 
 const fleetOf = (vcpus: number) => new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: String(vcpus) }));
+
+/** A job's deadline, an hour from now. */
+const deadlineAt = Date.now() + 60 * 60_000;
 
 describe('the fleet', () => {
   test('grants a gang\'s ranks only once all of them fit, so two jobs\' gangs never each hold half of a full fleet', async () => {
@@ -11,23 +15,34 @@ describe('the fleet', () => {
     // Two jobs, each a gang of two 1-vCPU ranks, ask in turn.
     const granted = [];
 
-    for (const holder of ['a/v1', 'b/v1', 'a/v2', 'b/v2']) granted.push(await fleet.acquire(holder, 1, 2));
+    for (const holder of ['a/v1', 'b/v1', 'a/v2', 'b/v2']) granted.push(await fleet.acquire(holder, 1, { reserve: 2, deadlineAt }));
 
     await fleet.release('a/v1');
     await fleet.release('a/v2');
 
-    expect({ granted, after: [await fleet.acquire('b/v1', 1, 2), await fleet.acquire('b/v2', 1, 2)] }).toEqual({ granted: [true, false, true, false], after: [true, true] });
+    expect({ granted, after: [await fleet.acquire('b/v1', 1, { reserve: 2, deadlineAt }), await fleet.acquire('b/v2', 1, { reserve: 2, deadlineAt })] }).toEqual({ granted: [true, false, true, false], after: [true, true] });
   });
 
   test('keeps a container\'s vCPUs held until it is gone: until a stop that failed has had its container end', async () => {
     const fleet = fleetOf(4);
 
-    await fleet.acquire('a/v1', 4);
+    await fleet.acquire('a/v1', 4, { deadlineAt });
     await fleet.release('a/v1', 60_000);
-    const whileRunning = await fleet.acquire('b/v1', 4);
-    const later = await fleet.acquire('b/v1', 4, 4, Date.now() + 61_000);
+    const whileRunning = await fleet.acquire('b/v1', 4, { deadlineAt });
+    const later = await fleet.acquire('b/v1', 4, { deadlineAt, now: Date.now() + 61_000 });
 
     expect({ whileRunning, later }).toEqual({ whileRunning: false, later: true });
+  });
+
+  test('lets a holder\'s vCPUs lapse only after its job\'s deadline and a container\'s idle timeout', async () => {
+    const fleet = fleetOf(4);
+    const ends = Date.now() + 10 * 60 * 60_000;
+
+    await fleet.acquire('long/v1', 4, { deadlineAt: ends });
+    const beforeEnd = await fleet.acquire('b/v1', 4, { deadlineAt, now: ends - 1 });
+    const afterLease = await fleet.acquire('b/v1', 4, { deadlineAt, now: ends + INACTIVITY_MS + 1 });
+
+    expect({ beforeEnd, afterLease }).toEqual({ beforeEnd: false, afterLease: true });
   });
 });
 
@@ -44,7 +59,7 @@ describe('a vessel stopped while the fleet answers', () => {
         acquire: async () => {
           await answered.promise;
 
-          return await fleet.acquire('j/v1', 4);
+          return await fleet.acquire('j/v1', 4, { deadlineAt });
         },
         release: fleet.release.bind(fleet),
       })),
@@ -61,6 +76,6 @@ describe('a vessel stopped while the fleet answers', () => {
     answered.resolve(true);
     await alarm;
 
-    expect({ started, free: await fleet.acquire('other/v1', 4) }).toEqual({ started: false, free: true });
+    expect({ started, free: await fleet.acquire('other/v1', 4, { deadlineAt }) }).toEqual({ started: false, free: true });
   });
 });

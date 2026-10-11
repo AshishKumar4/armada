@@ -16,12 +16,14 @@
  *                as its evidence, extracted next to the run's report; one the task did not keep fails the run ungraded.
  */
 import * as v from 'valibot';
-import { BaseSchema, DEFAULT_BASE, JobSpecSchema, Project, SizeSchema } from './protocol';
+import { BaseSchema, CI_DEADLINE_SECONDS, DEFAULT_BASE, JobSpecSchema, Project, SizeSchema } from './protocol';
 
 const Path = v.pipe(v.string(), v.minLength(1), v.check((path) => !path.startsWith('/') && !path.split('/').includes('..'), 'a path inside the commit'));
 
 const ConfigSchema = v.object({
   name: Project,
+  /** The whole CI run's limit, plan and task jobs together, in seconds. */
+  deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), CI_DEADLINE_SECONDS),
   environment: v.object({
     base: v.optional(BaseSchema, DEFAULT_BASE),
     setup: v.optional(Path),

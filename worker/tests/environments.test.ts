@@ -71,6 +71,29 @@ describe('a deployment\'s hourly look at its environments', () => {
     return { stored, open, deleted, environments };
   };
 
+  test('the read-only destroy inventory includes ready snapshots and exact deletion debts without changing either', async () => {
+    const { stored, environments } = await deployment();
+    const now = Date.now();
+
+    await stored.ctx.storage.put('env:ready', { state: 'ready', generation: generation('ready'), lastUsed: now });
+    await stored.ctx.storage.put('debt:snapshot-old', { key: 'ready', since: now });
+    await stored.ctx.storage.put('debt:sha256:left', { key: 'gone', since: now });
+    expect((await environments.inventory()).sort((a, b) => a.localeCompare(b))).toEqual(['sha256:left', 'snapshot-a', 'snapshot-old', 'snapshot-ready']);
+    expect(await stored.ctx.storage.get<{ key: string; since: number }>('debt:snapshot-old')).toEqual({ key: 'ready', since: now });
+  });
+
+  test('GET /environments/inventory lists owned refs and credential expiry on the deployed wire', async () => {
+    const { environments } = await deployment();
+    const token = 't'.repeat(32);
+    const env = world({ ARMADA_TOKEN: token, REGISTRY_CREDENTIALS_EXPIRE: '2027-10-01T00:00:00Z', VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+
+    const answer = await worker.fetch(new Request('https://armada.test/environments/inventory', {
+      headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7' },
+    }), env);
+
+    expect(v.parse(v.object({ snapshots: v.array(v.string()), credentialsExpire: v.string() }), await answer.json())).toEqual({ snapshots: ['snapshot-a'], credentialsExpire: '2027-10-01T00:00:00Z' });
+  });
+
   test('keeps an environment while a job uses it and for the hour after the job ends, then deletes it and stops looking', async () => {
     const start = Date.now();
 

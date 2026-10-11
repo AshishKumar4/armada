@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
+import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
@@ -45,6 +45,9 @@ export interface VesselSpec {
    *  so two jobs' gangs never each hold part of what both need. Absent for an earlier Worker's spec, which reserves
    *  its own. */
   readonly reserve?: number;
+  /** When its job's deadline ends it, so the fleet holds its vCPUs no longer than it may run. Absent for an earlier
+   *  Worker's spec, whose jobs ended at six hours. */
+  readonly deadlineAt?: number;
 }
 
 /** A stored spec with its later fields filled: an earlier Worker's lacks `slots`, `slotMemoryBytes` and `runtime`. */
@@ -149,7 +152,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (state === 'waiting') {
         const fleet = this.env.FLEET.getByName(SINGLE);
 
-        if (!(await fleet.acquire(this.holder(spec), spec.vcpus, spec.reserve ?? spec.vcpus))) {
+        if (!(await fleet.acquire(this.holder(spec), spec.vcpus, { reserve: spec.reserve, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000 }))) {
           await job.waiting(spec.name);
           await this.ctx.storage.setAlarm(Date.now() + SLOT_RETRY_MS);
 
@@ -293,6 +296,13 @@ export class ArmadaVessel extends DurableObject<Env> {
         await this.launch(spec, container, claim, slot);
         current = { claim: kept, startedAt: Date.now() };
         await this.ctx.storage.put(slotKey(slot), current);
+
+        if (claim.gang !== undefined && !(await job.started(spec.name, claim.index, claim.attempt))) {
+          await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+          await this.ctx.storage.delete(slotKey(slot));
+          await job.stopped(spec.name, claim.index, { slot, attempt: claim.attempt });
+          continue;
+        }
       }
 
       const seconds = Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
@@ -321,7 +331,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
-      if (!(await job.still(spec.name, current.claim.index, slot))) {
+      if (!(await job.still(spec.name, current.claim.index, slot, current.claim.attempt))) {
         await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
 
         if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);

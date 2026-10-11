@@ -13,14 +13,12 @@ import * as v from 'valibot';
 import type { Fleet } from '../../src/protocol';
 import { INACTIVITY_MS } from './container';
 import type { Env } from './env';
-import { JOB_DEADLINE_MS } from './job';
 
 /** The jobs made last that the fleet keeps the ids of. */
 export const RECENT = 500;
 
-/** As long as a container may live, its job's deadline then its inactivity timeout, so only a dead holder's vCPUs lapse
- *  while its container may still run. */
-const LEASE_MS = JOB_DEADLINE_MS + INACTIVITY_MS;
+/** How long a hold lasts past its job's deadline: a container that would not stop runs this long more. */
+const LEASE_MS = INACTIVITY_MS;
 
 interface Hold {
   readonly vcpus: number;
@@ -53,13 +51,14 @@ interface Drained {
 }
 
 export class ArmadaFleet extends DurableObject<Env> {
-  /** Whether `holder` holds `vcpus` now; it keeps them until `release` or its lease. Its job keeps `reserve` from the
-   *  other jobs while it holds any: a holder is granted only once its job's whole reserve fits beside theirs, so the
-   *  ranks of two jobs' gangs never split the fleet between them and wait on each other forever. */
-  async acquire(holder: string, vcpus: number, reserve = vcpus, now = Date.now()): Promise<boolean> {
+  /** Whether `holder` holds `vcpus` now; it keeps them until `release`, or its lease ends past its job's `deadlineAt`.
+   *  Its job keeps `reserve` from the other jobs while it holds any: a holder is granted only once its job's whole
+   *  reserve fits beside theirs, so the ranks of two jobs' gangs never split the fleet between them and wait on each
+   *  other forever. */
+  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, now = Date.now() }: { readonly reserve?: number; readonly deadlineAt: number; readonly now?: number }): Promise<boolean> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: _replaced, ...others } = holds;
-    const wanted = { ...others, [holder]: { vcpus, until: now + LEASE_MS, reserve } };
+    const wanted = { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve } };
     const granted = [...needs(wanted).values()].reduce((sum, need) => sum + need, 0) <= Number(this.env.FLEET_VCPUS);
 
     await this.ctx.storage.put('holds', granted ? wanted : holds);

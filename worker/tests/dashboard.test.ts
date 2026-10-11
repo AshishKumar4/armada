@@ -124,6 +124,8 @@ describe('a job\'s status', () => {
     await gang.claim('v1');
     await gang.claim('v2');
     await gang.claim('v1');
+    await gang.started('v1', 0, 1);
+    await gang.started('v2', 0, 1);
     const [one, two] = [v.parse(JobStatusSchema, await plain.status()), v.parse(JobStatusSchema, await gang.status())];
 
     expect({ plain: one.running, gang: two.running }).toEqual({
@@ -137,9 +139,9 @@ describe('the fleet', () => {
   test('says each job\'s share of the vCPUs it holds, largest first, under its cap, and the tasks of every open job', async () => {
     const { fleet, json, ask } = deployment();
 
-    await fleet.acquire('20261008120000-aaaaaaaa/v1', 4);
-    await fleet.acquire('20261008120000-aaaaaaaa/v2', 4);
-    await fleet.acquire('20261008120001-bbbbbbbb/v1', 2);
+    await fleet.acquire('20261008120000-aaaaaaaa/v1', 4, { deadlineAt: Date.now() + 60 * 60_000 });
+    await fleet.acquire('20261008120000-aaaaaaaa/v2', 4, { deadlineAt: Date.now() + 60 * 60_000 });
+    await fleet.acquire('20261008120001-bbbbbbbb/v1', 2, { deadlineAt: Date.now() + 60 * 60_000 });
     // An open job of three tasks, counted whatever page of the list it is on.
     await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }, { item: 'c', argv: ['true'] }], run: { kind: 'command' } }) });
 

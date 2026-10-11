@@ -161,6 +161,24 @@ describe('the github webhook', () => {
     }).toEqual({ again: { note: 'duplicate' }, judged: { note: 'already' }, running: { note: 'already' }, done: ['started'], both: ['note', 'started'] });
   });
 
+  test('takes a commit whose claim has no job behind it once a making would have finished, and not before', async () => {
+    const object = await configured();
+
+    // A delivery that died between its claim and its job's making.
+    await object.claim('armada', SHA, 'never-made');
+    const soon = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-a' } });
+
+    setSystemTime(new Date(Date.now() + 6 * 60_000));
+
+    try {
+      const later = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-b' } });
+
+      expect({ soon: v.parse(Said, await soon.json()), later: Object.keys(v.parse(Said, await later.json())) }).toEqual({ soon: { note: 'already' }, later: ['started'] });
+    } finally {
+      setSystemTime();
+    }
+  });
+
   test('holds no place in the fleet for a push it cannot start: a Worker that does not know its commit, or a secret unset', async () => {
     const object = await configured();
     const open = new Set<string>();
@@ -192,7 +210,7 @@ describe('the github webhook', () => {
       await object.claim('armada', SHA, 'job-1');
       setSystemTime(new Date('2026-10-02T01:00:00Z'));
       await object.alarm();
-      expect({ redelivered: await object.seen('del-old'), driver: await object.claim('armada', SHA, 'job-2') }).toEqual({ redelivered: false, driver: 'job-1' });
+      expect({ redelivered: await object.seen('del-old'), driver: (await object.claim('armada', SHA, 'job-2'))?.job }).toEqual({ redelivered: false, driver: 'job-1' });
       setSystemTime(new Date('2026-10-08T02:00:00Z'));
       await object.alarm();
       expect(await object.claim('armada', SHA, 'job-3')).toBeNull();

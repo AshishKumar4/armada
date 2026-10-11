@@ -1,15 +1,16 @@
 #!/usr/bin/env bun
 /** The armada CLI; `armada --help` prints its usage. */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
-import { registryCredentials } from './registry';
+import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
+import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
-import { BaseSchema, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, deadlineRefusal, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -19,8 +20,11 @@ const USAGE = `armada runs a command over many inputs at once, on Cloudflare Con
 Usage:
   armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
                                        deploy armada to your Cloudflare account, logging in if needed
+  armada destroy --name=<name> [--account=<id>] [--force]
+                                       purge exactly this deployment; refuses open jobs unless forced;
+                                       R2 expires objects/uploads in 1 day; re-run to remove the empty bucket
   armada map [options] -- <command>    run the command once per item
-  armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
+  armada run <commit|worktree> [--deadline=S] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json; --json prints the
                                        progress to stderr and one JSON verdict object to stdout
   armada verdict <commit|worktree> [--json]
@@ -48,6 +52,8 @@ map options:
   --pool=N             the most containers at once (default 50)
   --slots=N            the tasks one container runs at once, each in its own slot (default 1)
   --timeout=S          a task's limit, in seconds (default 3600)
+  --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
+  --gang-start-timeout=S  all gang ranks must launch within this many seconds (default 300)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
   --speculative        let an idle container run a straggler again
@@ -66,6 +72,10 @@ deploy options:
   --keep=N             the environments whose snapshots stay beyond those open jobs use: the N most recently
                        used (default 3), and any used in the last hour; the rest are deleted
 
+run options:
+  --deadline=S         the whole CI run's limit, plan and tasks together, in seconds
+                       (default .armada.json's deadline, or 1800)
+
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
 The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
@@ -76,8 +86,9 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
-  ['run', { options: ['label=', 'secrets=', 'json'], words: 1 }],
+  ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['run', { options: ['deadline=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
@@ -146,6 +157,12 @@ async function map(): Promise<number> {
     throw new Error('map needs one of --times=N and --items=<file|->, and a command after --, as in: armada map --times=3 -- echo {item}');
   }
 
+  const timeout = whole('timeout');
+  const deadline = whole('deadline');
+  const refused = deadlineRefusal(timeout, deadline);
+
+  if (refused !== null) throw new Error(refused);
+
   const armada = connect();
   const began = Date.now();
   const target = option('commit');
@@ -153,9 +170,9 @@ async function map(): Promise<number> {
   const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target);
   const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
   const argv = argvOf(rest, base);
-  const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout: whole('timeout'), secrets: option('secrets')?.split(',').filter(Boolean) };
+  const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   const id = await job.id;
   let worst = 0;
@@ -381,6 +398,38 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   }
 
   return 0;
+}
+
+/** Destroy uses only this name's connection, never ARMADA_CONNECTION or the default deployment as a fallback.
+ * The inventory contains IDs, not credentials. Atomic replacements survive an interrupted purge. */
+async function destroy(name: string, force: boolean): Promise<number> {
+  const file = connectionFile(name);
+  const checkpoint = join(CONFIG_DIR, `${name}.destroy.json`);
+  const saved = existsSync(checkpoint) ? v.parse(DestroyStateSchema, JSON.parse(readFileSync(checkpoint, 'utf8'))) : null;
+  const connection = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))) : null;
+  const account = option('account') ?? saved?.account ?? connection?.account ?? accountOf();
+
+  mkdirSync(CONFIG_DIR, { recursive: true });
+
+  return await destroyDeployment(name, account, force, {
+    run: wranglerRan, fetch,
+    connection: () => connection,
+    load: () => saved,
+    save: (state) => {
+      const temporary = `${checkpoint}.${String(process.pid)}.tmp`;
+
+      writeFileSync(temporary, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+      renameSync(temporary, checkpoint);
+    },
+    removeConnection: () => {
+      if (!existsSync(file)) return;
+      rmSync(file);
+      console.log(`removed local connection ${file}`);
+    },
+    removeState: () => { rmSync(checkpoint, { force: true }); },
+    snapshot: deleteSnapshotWith, image: deleteImageWith, credentials: registryCredentials,
+    say: (message) => { console.log(message); }, now: Date.now,
+  });
 }
 
 /** How long a deploy waits for its first look, asking every FIRST_LOOK_WAIT_MS. For a moment after a deploy, `/health`
@@ -702,7 +751,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, { label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
+      return await runCI(connect(), target, { deadline: whole('deadline'), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');
@@ -749,6 +798,11 @@ async function main(): Promise<number> {
 
       return await deploy(name, whole('vcpus'), flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
     }
+
+    case 'destroy':
+      if (connection !== undefined || process.env['ARMADA_CONNECTION'] !== undefined) throw new Error('destroy takes --name, not --connection or ARMADA_CONNECTION');
+
+      return await destroy(destroyName(option('name')), flag('force'));
 
     case 'prune':
       return await pruneOn(connect(), whole('keep', 0));

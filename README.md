@@ -207,7 +207,8 @@ encoded in 9.1 s on 2 containers; the slowest encode took 6.4 s
 
 The Python SDK runs the same tasks over the same wire as the TypeScript one, so a job's results read the same from
 either side. Install it with `pip install "git+https://github.com/AshishKumar4/armada#subdirectory=python"`. A
-`[tool.armada]` table in `pyproject.toml` names the project and its tasks' folder:
+`[tool.armada]` table in `pyproject.toml` names the project and its tasks' folders, `["tasks"]` if it leaves them
+out. A folder may not be named `armada`, which is the SDK's own package:
 
 ```toml
 # pyproject.toml

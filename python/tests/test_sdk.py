@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from armada import Armada, Connection, Context, RequestError, SchemaError, ShellError, out_file, sh, task
-from armada.push import bundle_tasks, find_project
+from armada.push import PushError, bundle_tasks, find_project
 from armada.task import Envelope, RemoteError, _Value
 
 
@@ -100,6 +100,16 @@ def _ran(root: Path, task_id: str, item: object) -> tuple[int, str, str, str]:
 
 
 class TestBundle(unittest.TestCase):
+    def test_refuses_a_task_folder_named_like_the_sdk_and_leaves_it_importable(self) -> None:
+        import armada
+
+        with tempfile.TemporaryDirectory() as scratch:
+            Path(scratch, "armada").mkdir()
+            Path(scratch, "armada", "jobs.py").write_text("from armada import task\n\n@task(id='t')\ndef t(n, ctx):\n    return n\n")
+            with self.assertRaises(PushError):
+                bundle_tasks(Path(scratch), ["armada"])
+        self.assertIs(sys.modules["armada"], armada)
+
     def test_runs_as_its_container_does_a_package_with_relative_and_from_list_imports(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)

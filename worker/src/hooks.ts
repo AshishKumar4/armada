@@ -108,10 +108,10 @@ export class ArmadaWebhooks extends DurableObject<Env> {
     await this.ctx.storage.delete(`del:${delivery}`);
   }
 
-  /** Reserves the commit's driver for job `job` and answers null, or answers the job it already has. Storage alone, so
-   *  two deliveries of one commit never both get it. */
-  async claim(project: string, sha: string, job: string): Promise<string | null> {
-    const held = (await this.ctx.storage.get<{ readonly job: string }>(`driver:${project}/${sha}`))?.job;
+  /** Reserves the commit's driver for job `job` and answers null, or answers the job it already has and when it was
+   *  claimed. Storage alone, so two deliveries of one commit never both get it. */
+  async claim(project: string, sha: string, job: string): Promise<{ readonly job: string; readonly at: number } | null> {
+    const held = await this.ctx.storage.get<{ readonly job: string; readonly at: number }>(`driver:${project}/${sha}`);
 
     if (held !== undefined) return held;
     await this.ctx.storage.put(`driver:${project}/${sha}`, { job, at: Date.now() });

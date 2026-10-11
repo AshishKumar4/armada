@@ -334,6 +334,38 @@ describe('a task\'s retries', () => {
   });
 });
 
+describe('a job\'s deadlines', () => {
+  test('map jobs retain their six-hour deadline and gangs retain their five-minute start bound by default', async () => {
+    const { armada, jobs } = await fleet();
+
+    await echo.stream(['a'], { armada }).settled();
+
+    expect([...jobs.values()].map(({ spec }) => [spec.deadline, spec.gangStartTimeout])).toEqual([[21600, 300]]);
+  });
+
+  test('an explicit task timeout must fit the deadline, including the six-hour default, before anything is sent', async () => {
+    const { armada, seen } = await fleet();
+    const command = commandTask(recipe().spec, () => ['true'], { timeout: 1800 });
+    const tooLong = commandTask(recipe().spec, () => ['true'], { timeout: 21601 });
+    const before = seen.length;
+
+    expect(await settled(command.stream([1], { armada, deadline: 1799 }).settled())).toBe('Error: JobDeadlineTooShort: job deadline 1799 s is shorter than the task timeout 1800 s');
+    expect(await settled(tooLong.stream([1], { armada }).settled())).toBe('Error: JobDeadlineTooShort: job deadline 21600 s is shorter than the task timeout 21601 s');
+    expect(seen.length).toBe(before);
+    await command.stream([1], { armada, deadline: 1800 }).settled();
+  });
+
+  test('the whole-job and gang-start bounds travel with an array submission and a streamed submission', async () => {
+    const { armada, jobs } = await fleet();
+    const options = { armada, deadline: 120, gangStartTimeout: 15 };
+
+    await echo.stream(['a'], options).settled();
+    await echo.stream((function* items() { yield 'b'; })(), options).settled();
+
+    expect([...jobs.values()].map(({ spec }) => [spec.deadline, spec.gangStartTimeout])).toEqual([[120, 15], [120, 15]]);
+  });
+});
+
 describe('a task\'s cache', () => {
   test('travels with its job, and a result says whether it ran', async () => {
     const { armada, jobs } = await fleet();

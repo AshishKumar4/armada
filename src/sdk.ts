@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -232,6 +232,10 @@ export class Armada {
   }
 
   async create(spec: v.InferInput<typeof JobSpecSchema>): Promise<string> {
+    const refused = deadlineRefusal(spec.timeout, spec.deadline);
+
+    if (refused !== null) throw new Error(refused);
+
     return v.parse(v.object({ id: v.string() }), await this.post('/jobs', spec)).id;
   }
 

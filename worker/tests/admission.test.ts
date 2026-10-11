@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { Armada } from '../../src/sdk';
+import { PROTOCOL } from '../../src/protocol';
 import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
@@ -31,6 +32,21 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
 
 describe('a client and a Worker', () => {
+  test('refuses an explicit task timeout beyond its job deadline before making or retaining the job', async () => {
+    const { armada, env, fleet } = deployment();
+    const short = { ...spec, timeout: 1800, deadline: 1799 };
+
+    expect(await settled(armada.create(short))).toBe('Error: JobDeadlineTooShort: job deadline 1799 s is shorter than the task timeout 1800 s');
+    const request = new Request('https://armada.test/jobs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'armada-protocol': String(PROTOCOL) }, body: JSON.stringify(short) });
+    const answer = await worker.fetch(request, env);
+
+    expect(answer.status).toBe(400);
+    expect(v.parse(v.object({ error: v.string() }), await answer.json()).error).toBe('JobDeadlineTooShort: job deadline 1799 s is shorter than the task timeout 1800 s');
+    expect(await fleet.jobs()).toBe(0);
+    // A shorter job bound is still valid when no task timeout was explicitly requested.
+    expect(await settled(armada.create({ ...spec, deadline: 1799 }))).toBe('fulfilled');
+  });
+
   test('that speak versions of the wire too far apart say which one to update, and an older client the wire still fits is served', async () => {
     const { env, armada } = deployment();
 
@@ -43,11 +59,11 @@ describe('a client and a Worker', () => {
       return [answer.status, v.parse(v.object({ error: v.optional(v.string()) }), await answer.json()).error];
     };
 
-    expect({ older: await asked('2'), served: await asked('3'), newer: await asked('8'), same: (await armada.health()).protocol }).toEqual({
+    expect({ older: await asked('2'), served: await asked('3'), newer: await asked('9'), same: (await armada.health()).protocol }).toEqual({
       older: [426, 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin'],
       served: [404, 'no such job'],
       newer: [426, 'the deployed Worker is older than this armada client: run `armada deploy` to update it'],
-      same: 7,
+      same: 8,
     });
   });
 });
@@ -174,7 +190,7 @@ describe('a drained version', () => {
       const old = new Armada({ url: server.url.href, token: TOKEN, account: 'a' });
 
       expect({ jobs: await old.drain(), after: (await old.health()).jobs, admitted: await old.admit(), asked })
-        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 7', 'POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
+        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 8', 'POST /drain 7', 'POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
     } finally {
       await server.stop(true);
     }

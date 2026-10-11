@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 7;
+export const PROTOCOL = 8;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -253,6 +253,23 @@ export const SecretName = v.pipe(v.string(), v.regex(/^[A-Z_][A-Z0-9_]{0,63}$/u,
 /** The most a secret's value may hold, in bytes: it rides in a task's environment. */
 export const SECRET_BYTES = 32 * 1024;
 
+/** General map jobs retain their six-hour limit: wheel builds and preflight runs can legitimately take hours. */
+export const JOB_DEADLINE_SECONDS = 6 * 60 * 60;
+
+/** CI reports its own deadline below a typical runner's 40-minute timeout, leaving time to report and clean up. */
+export const CI_DEADLINE_SECONDS = 30 * 60;
+
+/** The time a gang gets to gather and launch all its ranks, even while those ranks keep heartbeating. */
+export const GANG_START_SECONDS = 5 * 60;
+
+/** A task timeout explicitly requested must fit the whole job's limit. An implicit task timeout does not prevent a
+ *  client from choosing a shorter whole-job bound, as CI does. */
+export function deadlineRefusal(timeout: number | undefined, deadline: number | undefined): string | null {
+  const bound = deadline ?? JOB_DEADLINE_SECONDS;
+
+  return timeout !== undefined && bound < timeout ? `JobDeadlineTooShort: job deadline ${String(bound)} s is shorter than the task timeout ${String(timeout)} s` : null;
+}
+
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,
   /** For a repository recipe: the commit each container checks out, packed against `base`. */
@@ -278,6 +295,10 @@ export const JobSpecSchema = v.object({
   hedge: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
   /** A task's own bound, in seconds. */
   timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
+  /** The whole job's bound, including environment preparation and container starts, in seconds. */
+  deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), JOB_DEADLINE_SECONDS),
+  /** A gang's bound to gather and launch every rank, in seconds, independent of its task timeout. */
+  gangStartTimeout: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), GANG_START_SECONDS),
   retries: v.optional(RetriesSchema),
   /** The deployment's secrets each task gets in its environment, by name. Only names travel and are kept. */
   secrets: v.optional(v.array(SecretName), []),
