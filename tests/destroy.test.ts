@@ -45,6 +45,7 @@ class Fleet implements DestroyIO {
   leaveNamespaces = false;
   otherReference = false;
   twoScriptPages = false;
+  directContainers = false;
 
   readonly fetch = fakeFetch((request) => this.answer(request));
   readonly now = () => NOW;
@@ -141,7 +142,7 @@ class Fleet implements DestroyIO {
 
     if (path === `${base}/workers/durable_objects/namespaces`) return this.envelope(this.namespaces);
 
-    if (path === `${base}/containers/applications`) return Response.json(this.applications);
+    if (path === `${base}/containers/applications`) return this.directContainers ? Response.json(this.applications) : Response.json({ success: true, result: this.applications, errors: [], messages: [], result_info: {} });
 
     if (path.startsWith(`${base}/containers/applications/`) && request.method === 'DELETE') {
       const id = path.split('/').at(-1);
@@ -195,6 +196,20 @@ class Fleet implements DestroyIO {
 }
 
 describe('destroy, against a fake wrangler and fake named deployment only', () => {
+  test('accepts the Containers v4 response envelope captured from the retired deployment account', async () => {
+    const fleet = new Fleet();
+
+    expect(await destroyDeployment(NAME, ACCOUNT, false, fleet)).toBe(0);
+    expect(fleet.applications.map((application) => application.id)).toEqual(['app-other']);
+  });
+
+  test('also accepts the legacy direct-array Containers response', async () => {
+    const fleet = new Fleet();
+
+    fleet.directContainers = true;
+    expect(await destroyDeployment(NAME, ACCOUNT, false, fleet)).toBe(0);
+  });
+
   test('records ownership before deleting the Worker, its namespaces, applications, snapshots, bucket, and local connection', async () => {
     const fleet = new Fleet();
 

@@ -85,8 +85,9 @@ class Cloudflare {
     if (answer.status === 404) return null;
     const body = v.parse(JsonSchema, await answer.json());
 
-    // Containers' API returns the result directly, unlike the other v4 APIs.
-    if (path.startsWith('/containers/')) {
+    // The live Containers endpoint uses the v4 envelope too. Older API clients also accept a direct array;
+    // support that legacy form, but never bypass a v4 success:false because the path names Containers.
+    if (path.startsWith('/containers/') && Array.isArray(body)) {
       if (!answer.ok) throw new Error(`Cloudflare GET ${path} answered ${String(answer.status)}: ${JSON.stringify(body)}`);
 
       return body;
