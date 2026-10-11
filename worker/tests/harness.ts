@@ -10,6 +10,7 @@ import { timingSafeEqual } from 'node:crypto';
 import * as v from 'valibot';
 import { JsonSchema, type Json } from '../../src/protocol';
 import type { Env } from '../src/env';
+import type { Generation } from '../src/environments';
 
 // workerd's constant-time comparison, which the Worker checks its bearer with.
 Object.assign(crypto.subtle, { timingSafeEqual: (left: Uint8Array, right: Uint8Array) => timingSafeEqual(left, right) });
@@ -120,11 +121,13 @@ export function namespace(named: (name: string) => object | undefined): DurableO
 }
 
 /** An R2 bucket in memory: what a test reads back of what was put, by key. */
-export function bucket(objects = new Map<string, string>()) {
+export function bucket(seeded: ReadonlyMap<string, string> = new Map()) {
+  // Bytes as R2 keeps them; a text seed is its UTF-8.
+  const objects = new Map([...seeded].map(([key, text]) => [key, new TextEncoder().encode(text)]));
   const kept = new Map<string, { readonly uploaded: Date; readonly customMetadata: Record<string, string>; readonly httpMetadata: R2HTTPMetadata }>();
 
   const object = (key: string) => ({
-    key, size: new TextEncoder().encode(objects.get(key) ?? '').byteLength, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {},
+    key, size: objects.get(key)?.byteLength ?? 0, uploaded: kept.get(key)?.uploaded ?? new Date(), customMetadata: kept.get(key)?.customMetadata ?? {},
     httpMetadata: kept.get(key)?.httpMetadata ?? {},
     writeHttpMetadata: (headers: Headers) => {
       const meta = kept.get(key)?.httpMetadata;
@@ -139,17 +142,26 @@ export function bucket(objects = new Map<string, string>()) {
     objects,
     /** When each object was put, and its type headers, which a test may move back or read. */
     kept,
+    /** An object's bytes as text, for a test that stored text. */
+    text: (key: string) => {
+      const bytes = objects.get(key);
+
+      return bytes === undefined ? undefined : new TextDecoder().decode(bytes);
+    },
     head: async (key: string) => objects.has(key) ? object(key) : null,
     get: async (key: string) => {
-      const text = objects.get(key);
+      const bytes = objects.get(key);
 
-      if (text === undefined) return null;
-      const bytes = new TextEncoder().encode(text);
+      if (bytes === undefined) return null;
+      const text = new TextDecoder().decode(bytes);
 
-      return { ...object(key), size: bytes.byteLength, body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<Json> => v.parse(JsonSchema, JSON.parse(text)), arrayBuffer: async () => bytes.buffer };
+      return {
+        ...object(key), body: new Blob([bytes]).stream(), text: async () => text, json: async (): Promise<Json> => v.parse(JsonSchema, JSON.parse(text)),
+        arrayBuffer: async () => bytes.slice().buffer,
+      };
     },
-    put: async (key: string, body: ReadableStream | string | ArrayBuffer | null, options: { readonly customMetadata?: Record<string, string>; readonly httpMetadata?: R2HTTPMetadata } = {}) => {
-      objects.set(key, await new Response(body).text());
+    put: async (key: string, body: ReadableStream | string | ArrayBuffer | Uint8Array | null, options: { readonly customMetadata?: Record<string, string>; readonly httpMetadata?: R2HTTPMetadata } = {}) => {
+      objects.set(key, new Uint8Array(await new Response(body).arrayBuffer()));
       kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {}, httpMetadata: options.httpMetadata ?? {} });
     },
     delete: async (key: string) => {
@@ -192,7 +204,19 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
 }
 
 /** What a container's exec answers: its exit code and output, or a throw for an exec the platform lost. */
-export type Answer = (argv: readonly string[], options?: ContainerExecOptions) => { readonly exitCode: number; readonly stdout: string } | Error | Promise<{ readonly exitCode: number; readonly stdout: string }>;
+/** An environment ready to start containers from. */
+export const READY: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
+
+/** A registry whose every environment is `READY`. */
+export const readyRegistry = () => namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation: READY }) }));
+
+/** Vessels that start, and stop, doing nothing. */
+export const idleVessels = () => namespace(() => ({ begin: async () => undefined, stop: async () => undefined }));
+
+/** An exec's answer: its exit code and its stdout, text, or the bytes a binary file is in `bytes`. */
+type Answered = { readonly exitCode: number; readonly stdout: string; readonly bytes?: Uint8Array };
+
+export type Answer = (argv: readonly string[], options?: ContainerExecOptions) => Answered | Error | Promise<Answered>;
 
 /** A container that has started, whose every exec `answer` decides; `received` is told what each exec's stdin was
  *  given, once it closes. */
@@ -208,7 +232,7 @@ export function container(answer: Answer, received?: (argv: readonly string[], b
 
       if (answered instanceof Error) throw answered;
 
-      const stdout = new TextEncoder().encode(answered.stdout);
+      const stdout = answered.bytes ?? new TextEncoder().encode(answered.stdout);
       const given: Uint8Array[] = [];
 
       const stdin = new WritableStream<Uint8Array>({
@@ -218,7 +242,7 @@ export function container(answer: Answer, received?: (argv: readonly string[], b
 
       return {
         stdin, stdout: new Blob([stdout]).stream(), exitCode: Promise.resolve(answered.exitCode),
-        output: async () => ({ exitCode: answered.exitCode, stdout: stdout.buffer, stderr: new ArrayBuffer(0) }),
+        output: async () => ({ exitCode: answered.exitCode, stdout: stdout.slice().buffer, stderr: new ArrayBuffer(0) }),
       };
     },
   };

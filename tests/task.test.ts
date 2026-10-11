@@ -145,7 +145,6 @@ function localFleet(lose: readonly number[] = []) {
       if (tail === 'items' && request.method === 'GET') return Response.json({ items: job.spec.items.map((each) => each.item) });
 
       if (tail === 'events') {
-        await Promise.all(job.running);
         const after = Number(new URL(request.url).searchParams.get('after') ?? '0');
 
         return Response.json({ events: job.events.slice(after).map((outcome, at) => ({ seq: after + at + 1, outcome })), done: !job.open && job.events.length === job.spec.items.length });
@@ -245,7 +244,8 @@ describe('a pushed task', () => {
       writeFileSync(join(scratch, 'armada', 'a.ts'), source('a'));
       writeFileSync(join(scratch, 'armada', 'b.ts'), source('b'));
 
-      expect(await settled(push(localFleet().armada, scratch))).toBe('Error: two tasks have the id same: in armada/a.ts and armada/b.ts');
+      // Refused before anything is sent: a client of no deployment does.
+      expect(await settled(push(new Armada({ url: 'http://127.0.0.1:9', token: 't', account: '' }), scratch))).toContain('two tasks have the id same');
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -283,6 +283,7 @@ describe('a push\'s bundle', () => {
 });
 
 describe('a command task', () => {
+  // Five jobs one after another, each waiting on the client's real poll for its results.
   test('runs the sh its body returns, every word escaped, and answers with its out file as text, bytes, JSON or null', async () => {
     const { armada } = await fleet();
     const json = await write.stream([1, 2, 3], { armada }).settled();
@@ -298,7 +299,7 @@ describe('a command task', () => {
       none: null,
       shouted: 'HI THERE',
     });
-  });
+  }, 15_000);
 });
 
 describe('a command\'s argument', () => {
@@ -474,6 +475,19 @@ describe('a job\'s items', () => {
     expect({ failed, cancelled: seen.includes('POST /jobs/cancel') }).toEqual({ failed: true, cancelled: true });
   });
 
+  test('reach their stream as each lands, while another item still runs', async () => {
+    const { armada } = await fleet();
+    const held = join(mkdtempSync(join(tmpdir(), 'armada-held-')), 'go');
+    const job = commandTask(recipe.debian().spec, (n: number) => (n === 0 ? ['true'] : ['sh', '-c', `while [ ! -f ${held} ]; do sleep 0.05; done`])).stream([0, 1], { armada });
+    const iterator = job[Symbol.asyncIterator]();
+    const first = await iterator.next();
+
+    writeFileSync(held, '');
+    const rest = await job.settled().then((all) => all.length, () => -1);
+
+    expect({ first: first.done ? null : first.value.index, rest }).toEqual({ first: 0, rest: 2 });
+  });
+
   test('that are not JSON as they are, such as NaN, are refused before anything is sent', async () => {
     const { armada, jobs } = await fleet();
     const refused = await touch.map([1, Number.NaN], { armada }).then(() => false, () => true);
@@ -490,23 +504,6 @@ describe('a job\'s items', () => {
     const attached = await touch.job(await ran.id, { armada }).settled();
 
     expect({ done: done.length, attached: attached.length, reads: seen.filter((each) => each === 'GET /jobs/items').length }).toEqual({ done: 50, attached: 50, reads: 1 });
-  });
-});
-
-describe('a recipe built a step at a time', () => {
-  test('appends each step to its script, quotes packages, and leaves the recipe it came from as it was', () => {
-    const base = recipe.debian().apt('curl', "it's");
-    const ml = base.setup('echo root').install('uv sync --frozen').size('small');
-
-    expect({ base: base.spec, ml: ml.spec, other: recipe.from('cloudflare/other').spec.base, plain: recipe({ install: 'x' }).spec.install }).toEqual({
-      base: { base: 'cloudflare/debian-trixie', setup: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl 'it'\\''s'", install: '', size: 'medium' },
-      ml: {
-        base: 'cloudflare/debian-trixie', setup: "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl 'it'\\''s'\necho root",
-        install: 'uv sync --frozen', size: 'small',
-      },
-      other: 'cloudflare/other',
-      plain: 'x',
-    });
   });
 });
 

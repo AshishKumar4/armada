@@ -4,16 +4,9 @@ import { JobSpecSchema, TaskStatusSchema } from '../../src/protocol';
 import { runKey, taskKey } from '../src/env';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
-import { bucket, namespace, state, world } from './harness';
+import { bucket, namespace, readyRegistry, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
-
-/** A registry whose one environment is always ready, for a job to run in. */
-const ready = () => {
-  const generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
-
-  return namespace(() => ({ ensure: async () => ({ kind: 'ready', generation }), used: async () => undefined }));
-};
 
 describe('a task\'s files', () => {
   test('are its kept run\'s, served as stored, an earlier Worker\'s where it kept them, and 404 for a task with none', async () => {
@@ -21,7 +14,7 @@ describe('a task\'s files', () => {
     const artifacts = bucket();
 
     const env = world({
-      ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts, ENVIRONMENTS: ready(),
+      ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts, ENVIRONMENTS: readyRegistry(),
       JOB: namespace(() => job), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
     });
 
@@ -52,7 +45,7 @@ describe('a task\'s status token', () => {
 
     const env = world({
       JOB: namespace((name) => (name === id ? running : undefined)),
-      ENVIRONMENTS: ready(),
+      ENVIRONMENTS: readyRegistry(),
       // v2's container cannot be destroyed, so its task may still run after the job ends.
       VESSEL: namespace((name) => ({ begin: async () => undefined, stop: async () => !name.endsWith('/v2') })),
     });
@@ -109,7 +102,7 @@ describe('a run its vessel lost track of', () => {
 
     const env = world({
       JOB: namespace(() => restarted),
-      ENVIRONMENTS: ready(),
+      ENVIRONMENTS: readyRegistry(),
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
     });
 
@@ -140,7 +133,7 @@ describe('a job an earlier Worker made', () => {
   test('refuses its tasks\' status, since none of its runs were recorded', async () => {
     const id = '20261010120000-89abcdef';
     const stored = state();
-    const env = world({ JOB: namespace(() => earlier), ENVIRONMENTS: ready(), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })) });
+    const env = world({ JOB: namespace(() => earlier), ENVIRONMENTS: readyRegistry(), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })) });
     const earlier = new ArmadaJob(stored.ctx, env);
 
     await earlier.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }), 'https://armada.test');

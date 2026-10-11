@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Json, Outcome } from '../../src/protocol';
-import { launchSlot, launchTask, slotTask, taskGroup, waitOn } from '../src/container';
+import { slotTask, taskGroup, waitOn } from '../src/container';
 import type { Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
@@ -149,31 +149,5 @@ describe('a slotted vessel', () => {
     await vessel.alarm();
 
     expect({ state: await stored.ctx.storage.get('state'), failed }).toEqual({ state: 'failed', failed: 1 });
-  });
-});
-
-describe('a slotted launch', () => {
-  test('isolates the slot: a private namespace, the slot task dir bound, fresh tmpfs, overlays, a capped cgroup', () => {
-    const script = launchSlot('/home/ci/work', 2, 512, ['/tmp', '/dev/shm']);
-
-    expect({
-      namespace: script.includes('unshare --mount --propagation private'),
-      point: script.includes('mkdir -p /armada/task\nmount --bind'),
-      bind: script.includes(`mount --bind ${slotTask(2)} /armada/task`),
-      siblings: script.indexOf('tmpfs /armada/slots') > script.indexOf('home-work'),
-      tmpfs: ['/tmp', '/dev/shm'].every((dir) => script.includes(`mount -t tmpfs -o mode=1777,size=6g tmpfs ${dir}`)),
-      workdir: script.includes('userxattr,lowerdir=/home/ci/work,upperdir=/armada/slots/2/upper,workdir=/armada/slots/2/work'),
-      home: script.includes('userxattr,lowerdir=/home/ci,upperdir=/armada/slots/2/home-upper,workdir=/armada/slots/2/home-work'),
-      memory: script.includes('echo 512 > /sys/fs/cgroup/armada/task-2/memory.max'),
-      inside: script.indexOf('cd /home/ci/work') > script.indexOf('unshare'),
-      user: script.includes('setpriv --reuid=ci'),
-      fallback: script.includes('echo 70 > /armada/slots/2/task/exit'),
-    }).toEqual({ namespace: true, point: true, bind: true, siblings: true, tmpfs: true, workdir: true, home: true, memory: true, inside: true, user: true, fallback: true });
-  });
-
-  test('leaves today\'s launch untouched: no namespace, no slot root, the shared task dir', () => {
-    const script = launchTask('/home/ci/work');
-
-    expect([script.includes('unshare'), script.includes('/armada/slots'), script.includes('memory.max'), script.includes('/armada/task')]).toEqual([false, false, false, true]);
   });
 });

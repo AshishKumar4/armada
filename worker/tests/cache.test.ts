@@ -1,12 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
 import { cacheKey, environmentKey, JobSpecSchema, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
-import type { Generation } from '../src/environments';
 import { runKey } from '../src/env';
 import { ArmadaJob, type Claim } from '../src/job';
-import { bucket, namespace, state, world } from './harness';
+import { bucket, namespace, readyRegistry, state, world } from './harness';
 
-const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
 
 const bundle = 'b'.repeat(64);
 
@@ -19,7 +17,7 @@ async function cachedJob(id: string, items: readonly Json[], artifacts: ReturnTy
   const job = new ArmadaJob(stored.ctx, world({
     ARTIFACTS: artifacts,
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
+    ENVIRONMENTS: readyRegistry(),
   }));
 
   await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items: items.map((item) => ({ item })), run: { kind: 'task', id: task, bundle }, cache: { days: 7 }, open, hedge, pool: 2 }));
@@ -71,7 +69,7 @@ describe('a cached task', () => {
     const third = await cachedJob('j3', [{ a: 1, b: 2 }], artifacts);
 
     expect({
-      first: first.begun, second: second.begun, events, output: artifacts.objects.get((await second.job.fileOf(1, 'output')) ?? ''),
+      first: first.begun, second: second.begun, events, output: artifacts.text((await second.job.fileOf(1, 'output')) ?? ''),
       key: artifacts.objects.has(await cacheKey(bundle, 'square', await environmentKey(v.parse(RecipeSchema, {})), { b: 2, a: 1 })), third: third.begun,
     }).toEqual({
       first: ['j1/v1', 'j1/v2'], second: ['j2/v1'], events: [{ index: 1, cached: true, value: '{"ok":true,"value":3}' }], output: '{"ok":true,"value":3}',
@@ -126,7 +124,7 @@ describe('a cached task', () => {
     held.resolve();
     await adding;
 
-    expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.objects.get((await open.job.fileOf(0, 'output')) ?? '') }).toEqual({
+    expect({ claimed, events: (await open.job.events(0)).events.map((event) => brief(event.outcome)), output: artifacts.text((await open.job.fileOf(0, 'output')) ?? '') }).toEqual({
       claimed: null, events: [{ index: 0, cached: true, value: '{"ok":true,"value":25}' }], output: '{"ok":true,"value":25}',
     });
   });

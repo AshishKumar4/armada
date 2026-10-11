@@ -14,7 +14,7 @@ print("local:", square.local(5))
 
 job = shout.stream(w for w in ["a", "b", "c"])
 for result in job:
-    print("stream:", result.index, result.value if result.ok else result.error)
+    print("stream:", result.index, result.value if result.ok else result.kind)
 
 print("bytes:", png.run(65))
 try:

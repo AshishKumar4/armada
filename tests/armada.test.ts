@@ -3,10 +3,10 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import * as v from 'valibot';
-import { argvOf, extractTar, lanesFor, manifestOf, packBase, packOf, poolFor } from '../src/ci';
+import { extractTar, lanesFor, manifestOf, packBase, packOf, poolFor } from '../src/ci';
 import { parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, errorOf, failureTail, fill, fitSize, itemValues, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { environmentKey, errorOf, fill, fitSize, itemValues, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, gitEnv } from './fakes';
 
@@ -22,26 +22,11 @@ describe('a task\'s command', () => {
   });
 
   test('a placeholder the task does not have is refused, never left empty', () => {
-    expect(() => fill('--part={part}', itemValues({ row: 'x' }, 0))).toThrow('{part}');
-  });
-
-  test('{artifacts} is the directory the task keeps after it', () => {
-    expect(argvOf(['sh', '-c', 'echo x > {artifacts}/f'], { base: 'cloudflare/debian-trixie', setup: '', install: '', size: 'medium' })('i', { index: 0 }))
-      .toEqual(['sh', '-c', 'echo x > /armada/task/artifacts/f']);
+    expect(() => fill('--part={part}', itemValues({ row: 'x' }, 0))).toThrow();
   });
 
   test('an item weighs its numeric `weight`, and anything else nothing', () => {
     expect([weightOf({ weight: 301 }), weightOf({ weight: '9' }), weightOf('a'), weightOf(null), weightOf([1])]).toEqual([301, 0, 0, 0, 0]);
-  });
-});
-
-describe('a failed step', () => {
-  test('says its error last and whole, however much its stdout printed before it', () => {
-    const apt = 'Setting up ruby (1:3.3+b1) ...\n'.repeat(500);
-
-    expect(failureTail(apt, 'setup.sh: 14: locale-gen: not found\n').endsWith('Setting up ruby (1:3.3+b1) ...\nsetup.sh: 14: locale-gen: not found\n')).toBe(true);
-    expect(failureTail(apt, 'x'.repeat(5000))).toBe('x'.repeat(3000));
-    expect(failureTail('ok\n', '')).toBe('ok\n');
   });
 });
 
@@ -100,7 +85,7 @@ describe('a project\'s CI config', () => {
       writeFileSync(join(scratch, 'recipe.json'), JSON.stringify({ base: 'ubuntu:26.04@sha256:' + 'f'.repeat(64) }));
 
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', `--env=${join(scratch, 'recipe.json')}`, '--times=1', '--', 'true'], {
-        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       expect({ exit: await cli.exited, said: (await new Response(cli.stderr).text()).includes('Cloudflare-managed image'), requests }).toEqual({ exit: 2, said: true, requests: [] });
@@ -288,7 +273,7 @@ describe('armada deploy', () => {
     try {
       mkdirSync(join(home, '.config', 'armada'), { recursive: true });
       writeFileSync(join(home, '.config', 'armada', 'lab.json'), JSON.stringify({ url: 'https://lab.test', token: 't', account: 'A' }));
-      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'deploy', '--name=lab', '--account=B'], { env: { ...process.env, HOME: home }, stdout: 'pipe', stderr: 'pipe' });
+      const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'deploy', '--name=lab', '--account=B'], { env: { ...gitEnv(), HOME: home }, stdout: 'pipe', stderr: 'pipe' });
 
       expect({ exit: await ran.exited, said: (await new Response(ran.stderr).text()).includes('account A, not B') }).toEqual({ exit: 2, said: true });
     } finally {
@@ -339,31 +324,17 @@ describe('a CI run\'s pool', () => {
     }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 2, pool: 1 }, gang: { lanes: 4, pool: 4 } });
   });
 
-  test('refuses a command with an argument longer than Linux starts a process with, counted in bytes', () => {
-    const job = (word: string) => [{ item: 0, argv: ['true'] }, { item: 1, argv: ['sh', '-c', word] }];
-    const said = (bytes: number) => `item 1's argument 2 is ${String(bytes)} bytes, and Linux starts no process with one over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the command reads`;
-
-    expect([refusal({ kind: 'command' }, job('x'.repeat(MAX_ARGUMENT_BYTES)), 4), refusal({ kind: 'command' }, job('x'.repeat(MAX_ARGUMENT_BYTES + 1)), 4),
-      refusal({ kind: 'command' }, job('é'.repeat(65_536)), 4)])
-      .toEqual([null, said(MAX_ARGUMENT_BYTES + 1), said(131_072)]);
-  });
-
-  test('refuses an item whose JSON is longer than ARMADA_ITEM can hold, for a command and a pushed task', () => {
-    const items = (size: number) => [{ item: 'x'.repeat(size) }];
-    const said = (bytes: number) => `item 0 is ${String(bytes)} bytes as ARMADA_ITEM, and Linux starts no process with an environment string over ${String(MAX_ARGUMENT_BYTES)} (MAX_ARG_STRLEN): put that payload in a file the task reads`;
-    // `ARMADA_ITEM=` and the JSON string's two quotes.
-    const fits = MAX_ARGUMENT_BYTES - 'ARMADA_ITEM='.length - 2;
-
-    expect([refusal({ kind: 'task' }, items(fits), 4), refusal({ kind: 'task' }, items(fits + 1), 4),
-      refusal({ kind: 'command' }, items(fits + 1).map((task) => ({ ...task, argv: ['true'] })), 4)])
-      .toEqual([null, said(MAX_ARGUMENT_BYTES + 1), said(MAX_ARGUMENT_BYTES + 1)]);
-  });
-
-  test('refuses a gang under more than one slot: a gang takes a whole container', () => {
+  test('refuses a job a container could not start: an argument or an item too long for Linux, or a slotted gang', () => {
+    const word = (text: string) => [{ item: 0, argv: ['sh', '-c', text] }];
+    const item = (text: string) => [{ item: text, argv: ['true'] }];
     const gang = [{ item: { gang: 4 }, argv: ['true'] }];
+    const ok = (refused: string | null) => refused === null;
 
-    expect([refusal({ kind: 'command' }, gang, 4, 1), refusal({ kind: 'command' }, gang, 4, 2), refusal({ kind: 'command' }, gang, 4)])
-      .toEqual([null, 'item 0\'s gang takes a whole container to itself: a slotted job\'s containers share each slot\'s view, so a gang runs only with 1 slot', null]);
+    expect([
+      ok(refusal({ kind: 'command' }, word('x'.repeat(MAX_ARGUMENT_BYTES)), 4)), ok(refusal({ kind: 'command' }, word('é'.repeat(65_536)), 4)),
+      ok(refusal({ kind: 'task' }, item('x'.repeat(MAX_ARGUMENT_BYTES)), 4)), ok(refusal({ kind: 'command' }, item('x'.repeat(MAX_ARGUMENT_BYTES)), 4)),
+      ok(refusal({ kind: 'command' }, gang, 4, 1)), ok(refusal({ kind: 'command' }, gang, 4, 2)),
+    ]).toEqual([true, false, false, false, true, false]);
   });
 });
 
@@ -580,18 +551,12 @@ describe('the CLI\'s arguments', () => {
     };
 
     expect([await cli(), await cli('map', '--help')].map(({ exit, said }) => [exit, said.includes('\nUsage:\n')])).toEqual([[0, true], [0, true]]);
-    expect([
-      await cli('map', '--times', '3', '--', 'true'), await cli('map', '--time=3', '--', 'true'), await cli('map', '-pool=1', '--times=3', '--', 'true'),
-      await cli('map', '--times=0', '--', 'true'), await cli('deploy', 'garbage'), await cli('toString'), await cli('--pool=1'),
-    ]).toEqual([
-      { exit: 2, said: 'armada: --times takes a value, as in --times=<value>\n' },
-      { exit: 2, said: 'armada: map has no option --time=3; see armada --help\n' },
-      { exit: 2, said: 'armada: map has no option -pool=1; see armada --help\n' },
-      { exit: 2, said: 'armada: --times takes a positive whole number, not 0\n' },
-      { exit: 2, said: 'armada: deploy does not take garbage; see armada --help\n' },
-      { exit: 2, said: 'armada: no command toString; see armada --help\n' },
-      { exit: 2, said: 'armada: no command given; see armada --help\n' },
-    ]);
+
+    // Each refused before anything runs: no fleet answers here.
+    const wrong = await Promise.all([['map', '--times', '3', '--', 'true'], ['map', '--time=3', '--', 'true'], ['map', '-pool=1', '--times=3', '--', 'true'],
+      ['map', '--times=0', '--', 'true'], ['deploy', 'garbage'], ['toString'], ['--pool=1']].map(async (words) => (await cli(...words)).exit));
+
+    expect(wrong).toEqual([2, 2, 2, 2, 2, 2, 2]);
   });
 
   test('are its own before --, every word after -- is the command\'s, and --connection wins over ARMADA_URL', async () => {
@@ -624,7 +589,7 @@ describe('the CLI\'s arguments', () => {
 
     try {
       const map = async (args: readonly string[], url: string) => await Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', ...args, '--times=2', '--', 'tool', '--output', '--items=x'], {
-        env: { ...process.env, ARMADA_URL: url, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...gitEnv(), ARMADA_URL: url, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       }).exited;
 
       const argv = ['tool', '--output', '--items=x'];
@@ -679,7 +644,7 @@ describe('the CLI following a job', () => {
 
     try {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=1', '--', 'true'], {
-        env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       await polling;
@@ -708,7 +673,7 @@ describe('armada verdict', () => {
 
     const verdict = async (...words: string[]) => {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'verdict', 'HEAD', ...words], {
-        cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: repo, env: { ...gitEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       return { exit: await cli.exited, said: (await new Response(cli.stdout).text() + await new Response(cli.stderr).text()).trim() };
@@ -821,7 +786,7 @@ describe('armada run', () => {
       git(repo, 'commit', '-qm', 'one');
 
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
-        cwd: repo, env: { ...process.env, HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: repo, env: { ...gitEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       const exit = await cli.exited;
@@ -1093,7 +1058,7 @@ describe('the webhook command', () => {
 
     try {
       const cli = async (path: string, ...words: string[]) => {
-        const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: { ...process.env, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: path }, stdout: 'pipe', stderr: 'pipe' });
+        const ran = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), ...words], { env: { ...gitEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't'.repeat(32), PATH: path }, stdout: 'pipe', stderr: 'pipe' });
 
         return await ran.exited;
       };

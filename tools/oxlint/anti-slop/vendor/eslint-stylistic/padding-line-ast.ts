@@ -3,9 +3,6 @@ import type { ESTree, SourceCode, Token as SyntaxToken, Comment, Location } from
 
 type Token = SyntaxToken | Comment;
 
-/** Line terminators recognized by the upstream padding matcher. */
-export const LINEBREAKS = new Set(["\r\n", "\r", "\n", "\u2028", "\u2029"]);
-
 /** Test a closing brace without treating comment text as punctuation. */
 export const isClosingBraceToken = (token: Token): boolean =>
   token.type === "Punctuator" && token.value === "}";

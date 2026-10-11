@@ -24,8 +24,12 @@ const TAIL_LINES = 60;
 
 const TIMINGS_FILE = 'timings.json';
 
+/** This process's environment without GIT_DIR and its like, which a hook that runs armada sets for its own repo. */
+const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
+
+/** Git in `cwd`'s repository. */
 function git(cwd: string, args: readonly string[], stdin?: Uint8Array): Buffer {
-  const ran = Bun.spawnSync(['git', ...args], { cwd, stdin: stdin ?? 'ignore', stdout: 'pipe', stderr: 'pipe' });
+  const ran = Bun.spawnSync(['git', ...args], { cwd, env: GIT_ENV, stdin: stdin ?? 'ignore', stdout: 'pipe', stderr: 'pipe' });
 
   if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString().trim()}`);
 
@@ -110,7 +114,7 @@ function recipeOf(repo: string, sha: string, config: Config, size: Size): Omit<R
 /** What the commit is packed against: the environment's commit, where this repository has it. A shallow clone (a CI
  *  runner's checkout) does not, and a pack from the root carries the whole commit. */
 export function packBase(repo: string, environment: string): string {
-  return environment !== 'root' && Bun.spawnSync(['git', 'cat-file', '-e', `${environment}^{commit}`], { cwd: repo }).exitCode === 0 ? environment : 'root';
+  return environment !== 'root' && Bun.spawnSync(['git', 'cat-file', '-e', `${environment}^{commit}`], { cwd: repo, env: GIT_ENV }).exitCode === 0 ? environment : 'root';
 }
 
 /** The commit from the root (with its history, or alone), or what it adds to the environment's commit. A `commit`

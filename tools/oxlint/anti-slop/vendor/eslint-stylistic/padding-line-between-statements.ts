@@ -16,7 +16,6 @@ import {
   isSingleLine,
   isTokenOnSameLine,
   isTopLevelExpressionStatement,
-  LINEBREAKS,
   skipChainExpression,
 } from './padding-line-ast.ts'
 
@@ -45,12 +44,6 @@ type NodeTest = (
 interface NodeTestObject {
   test: NodeTest
 }
-
-const LT = `[${Array.from(LINEBREAKS).join('')}]`
-const PADDING_LINE_SEQUENCE = new RegExp(
-  String.raw`^(\s*?${LT})\s*${LT}(\s*;?)$`,
-  'u',
-)
 
 function isSelectorOption(option: StatementOption): option is SelectorOption {
   return typeof option === 'object' && !Array.isArray(option)
@@ -305,22 +298,6 @@ function getActualLastToken(
   return isSemicolonLessStyle ? prevToken : semiToken
 }
 
-/**
- * This returns the concatenation of the first 2 captured strings.
- * @param _ Unused. Whole matched string.
- * @param trailingSpaces The trailing spaces of the first line.
- * @param indentSpaces The indentation spaces of the last line.
- * @returns The concatenation of trailingSpaces and indentSpaces.
- * @private
- */
-function replacerToRemovePaddingLines(
-  _: string,
-  trailingSpaces: string,
-  indentSpaces: string,
-): string {
-  return trailingSpaces + indentSpaces
-}
-
 function getReportLoc(node: ASTNode, sourceCode: SourceCode): Location {
   if (isSingleLine(node))
     return node.loc
@@ -347,53 +324,6 @@ function getReportLoc(node: ASTNode, sourceCode: SourceCode): Location {
  */
 function verifyForAny(): void {
   // Empty
-}
-
-/**
- * Check and report statements for `never` configuration.
- * This autofix removes blank lines between the given 2 statements.
- * However, if comments exist between 2 blank lines, it does not remove those
- * blank lines automatically.
- * @param context The rule context to report.
- * @param _ Unused. The previous node to check.
- * @param nextNode The next node to check.
- * @param paddingLines The array of token pairs that blank
- * lines exist between the pair.
- *
- * @private
- */
-function verifyForNever(
-  context: RuleContext,
-  _: ASTNode,
-  nextNode: ASTNode,
-  paddingLines: [Token, Token][],
-): void {
-  if (paddingLines.length === 0)
-    return
-
-  context.report({
-    node: nextNode,
-    messageId: 'unexpectedBlankLine',
-    loc: getReportLoc(nextNode, context.sourceCode),
-    fix(fixer) {
-      if (paddingLines.length >= 2)
-        return null
-
-      const paddingPair = paddingLines[0]
-      if (paddingPair === undefined)
-        throw new Error('Padding rule invariant: reported padding pair is missing')
-      const [prevToken, nextToken] = paddingPair
-      const start = prevToken.range[1]
-      const end = nextToken.range[0]
-      const text = context
-        .sourceCode
-        .text
-        .slice(start, end)
-        .replace(PADDING_LINE_SEQUENCE, replacerToRemovePaddingLines)
-
-      return fixer.replaceTextRange([start, end], text)
-    },
-  })
 }
 
 /**
@@ -468,13 +398,12 @@ function verifyForAlways(
 
 /**
  * Types of blank lines.
- * `any`, `never`, and `always` are defined.
+ * `any` and `always` are defined; upstream's `never` is not used here.
  * Those have `verify` method to check and report statements.
  * @private
  */
 const PaddingTypes = {
   any: { verify: verifyForAny },
-  never: { verify: verifyForNever },
   always: { verify: verifyForAlways },
 }
 
@@ -599,65 +528,9 @@ return {
     },
     fixable: 'whitespace',
     hasSuggestions: false,
-    // This is intentionally an array schema as you can pass 0..n config objects
-    schema: {
-      $defs: {
-        paddingType: {
-          type: 'string',
-          enum: Object.keys(PaddingTypes),
-        },
-        statementType: {
-          type: 'string',
-          enum: Object.keys(StatementTypes),
-        },
-        selectorOption: {
-          type: 'object',
-          properties: {
-            selector: {
-              type: 'string',
-            },
-            lineMode: {
-              type: 'string',
-              enum: ['any', 'singleline', 'multiline'],
-            },
-          },
-          required: ['selector'],
-          additionalProperties: false,
-        },
-        statementMatcher: {
-          anyOf: [
-            { $ref: '#/$defs/statementType' },
-            { $ref: '#/$defs/selectorOption' },
-          ],
-        },
-        statementOption: {
-          anyOf: [
-            { $ref: '#/$defs/statementMatcher' },
-            {
-              type: 'array',
-              items: { $ref: '#/$defs/statementMatcher' },
-              minItems: 1,
-              uniqueItems: true,
-              additionalItems: false,
-            },
-          ],
-        },
-      },
-      type: 'array',
-      additionalItems: false,
-      items: {
-        type: 'object',
-        properties: {
-          blankLine: { $ref: '#/$defs/paddingType' },
-          prev: { $ref: '#/$defs/statementOption' },
-          next: { $ref: '#/$defs/statementOption' },
-        },
-        additionalProperties: false,
-        required: ['blankLine', 'prev', 'next'],
-      },
-    },
+    // The options are the caller's (createPaddingLineRule), not the user's.
+    schema: [],
     messages: {
-      unexpectedBlankLine: 'Unexpected blank line before this statement.',
       expectedBlankLine: 'Expected blank line before this statement.',
     },
   },

@@ -12,25 +12,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from armada import Armada, Connection, Context, MapError, RequestError, SchemaError, ShellError, out_file, raw, recipe, sh, task
+from armada import Armada, Connection, Context, RequestError, SchemaError, ShellError, out_file, sh, task
 from armada.push import bundle_tasks, find_project
 from armada.task import Envelope, RemoteError, _Value
 
 
 class TestSh(unittest.TestCase):
-    def test_quotes_each_word_and_leaves_the_template_raw(self) -> None:
-        self.assertEqual(sh("echo {}", "a b").script, "echo 'a b'")
-        self.assertEqual(sh("echo {}", "plain_1").script, "echo plain_1")
-        self.assertEqual(sh("echo {}", "it's").script, "echo 'it'\\''s'")
-        self.assertEqual(sh("cp {} {}", ["a", "b"], out_file("/armada/task/out")).script, "cp a b /armada/task/out")
-        self.assertEqual(sh("echo $({})", sh("echo hi")).script, "echo $(echo hi)")
-
     def test_refuses_an_interpolation_inside_quotes(self) -> None:
         with self.assertRaises(ValueError):
             sh('echo "{}"', "word")
-
-    def test_raw_inserts_as_written(self) -> None:
-        self.assertEqual(raw("echo {}", "a b").script, "echo a b")
 
     def test_hands_each_word_to_the_program_unchanged(self) -> None:
         words = ["name\n", "a b", "it's", "$(echo pwned)"]
@@ -42,13 +32,6 @@ class TestSh(unittest.TestCase):
             sh("echo bad >&2; exit 3").run()
         self.assertEqual(raised.exception.exit_code, 3)
         self.assertIn("bad", str(raised.exception))
-
-
-class TestRecipe(unittest.TestCase):
-    def test_appends_steps_in_order(self) -> None:
-        built = recipe().apt("curl").setup("echo more").install("a").install("b").spec
-        self.assertEqual(built["setup"].split("\n")[-1], "echo more")
-        self.assertEqual(built["install"], "a\nb")
 
 
 def _ctx() -> Context:
@@ -228,17 +211,6 @@ class TestClient(unittest.TestCase):
 
 
 class TestTaskShapes(unittest.TestCase):
-    def test_result_and_maperror_shapes(self) -> None:
-        from armada.task import Meta, Ok, TimedOut
-
-        results = [
-            Ok(0, "a", Meta(1.0, 1, "v1", 0, ""), "x"),
-            TimedOut(1, "b", Meta(1.0, 1, "v1", 124, "tail")),
-        ]
-        raised = MapError(results)
-        self.assertIn("1 of 2", str(raised))
-        self.assertIn("timed out", str(raised))
-
     def test_retries_split_codes_from_names(self) -> None:
         from armada.task import _retries
 

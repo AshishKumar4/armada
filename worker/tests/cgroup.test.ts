@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { killOf, launchTask, TASK, TASK_GROUP, WAIT } from '../src/container';
+import { killOf, launchSlot, launchTask, slotTask, STATE, TASK, TASK_GROUP, WAIT, waitOn } from '../src/container';
 
 const host = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode === 0 && readFileSync('/proc/self/mounts', 'utf8').includes(' /sys/fs/cgroup cgroup2 ');
 
@@ -59,5 +59,19 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     expect(sh(WAIT, '1').stdout.toString().trim()).toBe('');
     expect(sh(killOf(TASK, TASK_GROUP)).exitCode).toBe(0);
     expect({ left: [alive('sleep 603'), alive('sleep 604')], group: existsSync(TASK_GROUP) }).toEqual({ left: [false, false], group: false });
+  });
+});
+
+describe.skipIf(!host)('a slotted task', () => {
+  test('runs as the user in its own mounts and capped group, sees its own task dir, and leaves the checkout as it was', () => {
+    const before = Bun.spawnSync(['ls', workdir]).stdout.toString();
+    const script = launchSlot(workdir, 2, 64 * 1024 * 1024, ['/dev/shm']);
+
+    expect(sh(script, 'sh', '-c', `id -u; cat /proc/self/cgroup; cat ${TASK_GROUP}-2/memory.max; touch here /dev/shm/scratch; ls ${TASK}; ls ${STATE}/slots | wc -l`).exitCode).toBe(0);
+    const exit = sh(waitOn(slotTask(2)), '20').stdout.toString().trim();
+    const log = readFileSync(`${slotTask(2)}/log`, 'utf8').trim().split('\n');
+
+    expect({ exit, log, checkout: Bun.spawnSync(['ls', workdir]).stdout.toString(), tmp: existsSync('/dev/shm/scratch') })
+      .toEqual({ exit: '0', log: [Bun.spawnSync(['id', '-u', 'ci']).stdout.toString().trim(), '0::/armada/task-2/runner', String(64 * 1024 * 1024), 'artifacts', 'log', 'pid', '0'], checkout: before, tmp: false });
   });
 });

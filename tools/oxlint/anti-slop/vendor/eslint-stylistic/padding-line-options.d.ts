@@ -2,7 +2,7 @@
 
 /* @checksum: 3QCTtOH6rJM5_AGJ58rGpeEaBEfaJz17MSCxWB4X_PU */
 
-export type PaddingType = 'any' | 'never' | 'always'
+export type PaddingType = 'any' | 'always'
 export type StatementOption =
   | StatementMatcher
   | [StatementMatcher, ...StatementMatcher[]]

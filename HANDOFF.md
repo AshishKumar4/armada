@@ -33,6 +33,8 @@
   - `python`: ruff with Dew's rules, the unit tests, and `mypy --strict`;
   - `lint`: Kinu's anti-slop rules, zero findings.
 - On this machine: `bun run typecheck`, `bun run lint`, `bun test tests/ worker/tests/`.
+- `bun run privileged` runs the root and cgroup tests a CI task cannot, in a privileged Docker container. It fails if
+  any of them skips. Run it before a release.
 - A red gate is a design problem. Don't add suppressions, ignores or exemptions.
 
 ## How to work

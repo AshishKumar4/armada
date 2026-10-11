@@ -6,17 +6,15 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { PROTOCOL } from '../../src/protocol';
 import { KEEP_MASK, MASK } from '../src/container';
-import type { Generation } from '../src/environments';
 import { ArmadaJob } from '../src/job';
 import { ArmadaSecrets } from '../src/secrets';
 import worker from '../src/worker';
-import { namespace, state, world } from './harness';
+import { idleVessels, namespace, readyRegistry, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
 
 const VALUE = 'sk-the-value-of-the-key';
 
-const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
 
 /** A deployment with one job object, whose storage is read back whole, and a request to it. */
 function deployment() {
@@ -25,8 +23,8 @@ function deployment() {
 
   const env = world({
     ARMADA_TOKEN: TOKEN, SECRETS: namespace(() => secrets), JOB: namespace(() => job),
-    VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
-    ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
+    VESSEL: idleVessels(),
+    ENVIRONMENTS: readyRegistry(),
   });
 
   const job = new ArmadaJob(kept.ctx, env);

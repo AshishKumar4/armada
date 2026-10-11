@@ -1,8 +1,8 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Recipe, Size } from '../../src/protocol';
+import { workdirOf, type Recipe, type Size } from '../../src/protocol';
 import { ArmadaPreparer, type Generation } from '../src/environments';
 import { container, namespace, state, world, type Answer } from './harness';
 
@@ -182,13 +182,15 @@ describe.skipIf(!root)('a preparation phase', () => {
     const stored = state(here());
 
     const preparer = new ArmadaPreparer(stored.ctx, world({
-      ENVIRONMENTS: namespace(() => ({ preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
+      ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
     }));
 
     // A setup that holds a lock while it runs, as apt-get holds dpkg's.
     const setup = `mkdir ${scratch}/lock || { echo "held by another setup" >&2; exit 100; }\necho ran >> ${scratch}/runs\nsleep 2\nrmdir ${scratch}/lock\n`;
 
     try {
+      // Where the runner layer, the phase before, leaves the setup's working directory.
+      mkdirSync(workdirOf(recipe), { recursive: true });
       await stored.ctx.storage.put('preparation', { key: 'k'.repeat(64), since: 0, recipe: { ...recipe, setup }, sha: null, phase: 'setup', seconds: {}, snapshot: null });
       // Two invocations of the phase's alarm at once: the platform delivers an alarm at least once.
       await Promise.all([preparer.alarm(), preparer.alarm()]);

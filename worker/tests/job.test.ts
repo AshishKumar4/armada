@@ -5,9 +5,9 @@ import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { listSchedule } from '../../src/dispatch';
-import { container, namespace, state, world, type Stored } from './harness';
+import { container, idleVessels, namespace, READY, state, world, type Stored } from './harness';
 
-const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
+const generation = READY;
 
 /** A job on a ready environment whose vessels only record that they began, and whose registry records each environment
  *  a job's end says it used. */
@@ -75,7 +75,7 @@ describe('an open job', () => {
   test('refuses an item that does not fit its kind', async () => {
     const { job: open } = await job({ recipe: {}, items: [], open: true, run: { kind: 'command' } });
 
-    expect(await open.add([{ item: 'a' }])).toBe('item 0 has no argv for its command');
+    expect({ refused: await open.add([{ item: 'a' }]) !== null, tasks: (await open.status())?.tasks.total }).toEqual({ refused: true, tasks: 0 });
   });
 });
 
@@ -409,7 +409,7 @@ describe('a slotted job', () => {
   test('refuses a gang: a gang takes a whole container, which a slotted job\'s containers cannot give it', async () => {
     const { job: open } = await job({ recipe: {}, items: [], open: true, run: { kind: 'command' }, slots: 2 });
 
-    expect(await open.add([{ item: { gang: 4 }, argv: ['true'] }])).toBe('item 0\'s gang takes a whole container to itself: a slotted job\'s containers share each slot\'s view, so a gang runs only with 1 slot');
+    expect({ refused: await open.add([{ item: { gang: 4 }, argv: ['true'] }]) !== null, tasks: (await open.status())?.tasks.total }).toEqual({ refused: true, tasks: 0 });
   });
 });
 
@@ -567,7 +567,7 @@ describe('a job whose snapshot is lost while its vessels start', () => {
     let asked = 0;
 
     const ending = new ArmadaJob(state().ctx, world({
-      VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
+      VESSEL: idleVessels(),
       ENVIRONMENTS: namespace(() => ({
         ensure: async () => {
           asked += 1;

@@ -1,14 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, type Outcome } from '../../src/protocol';
-import type { Generation, Readiness } from '../src/environments';
+import type { Readiness } from '../src/environments';
 import { ArmadaJob } from '../src/job';
 import { ArmadaVessel } from '../src/vessel';
-import { container, namespace, state, world, type Stored } from './harness';
+import { container, idleVessels, namespace, READY, readyRegistry, state, world, type Stored } from './harness';
 
 const SECRET = 'tok-3f9a1c-secret';
 
-const generation: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
+const generation = READY;
 
 interface Running {
   readonly job: ArmadaJob;
@@ -20,7 +20,7 @@ async function running(readiness: Readiness = { kind: 'ready', generation }): Pr
   const stored = state();
 
   const job = new ArmadaJob(stored.ctx, world({
-    VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })),
+    VESSEL: idleVessels(),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => readiness })),
   }));
 
@@ -91,7 +91,7 @@ describe('a job\'s env', () => {
 
   test('of a job created before it had a key of its own reaches its claims while it runs, and is gone once it ends', async () => {
     const stored = state();
-    const job = new ArmadaJob(stored.ctx, world({ VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })) }));
+    const job = new ArmadaJob(stored.ctx, world({ VESSEL: idleVessels() }));
     const { items, env, ...kept } = v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } });
 
     await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { kind: 'command' } }));
@@ -166,7 +166,7 @@ describe('a job\'s env', () => {
 
     const job = new ArmadaJob(jobState.ctx, world({
       VESSEL: namespace((name) => name === 'j1/v1' ? vessel : { begin: async () => undefined, stop: async () => undefined }),
-      ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
+      ENVIRONMENTS: readyRegistry(),
     }));
 
     vessel = new ArmadaVessel(vesselState.ctx, world({ JOB: namespace(() => job) }));
