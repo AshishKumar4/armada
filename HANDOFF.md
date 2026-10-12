@@ -63,7 +63,10 @@
 ## Deployments (account f44999d1ddda7012e9a87729eba250f1)
 - `armada-v2` is Kinu's production CI. `armada-dew3` is Dew's, and `nimbus-armada-v2` is Nimbus's.
   - Don't deploy to them, roll them back, prune them or change their secrets. Each owner redeploys from `main`.
-  - A same-wire deploy takes over running jobs, so a redeploy needs the owner's go-ahead.
+  - A deploy whose Worker serves every client the deployed one does, and whose Durable Objects call each other as the
+    deployed one's do (`contractOf`), takes over running jobs; otherwise it drains them first. Either way a redeploy
+    needs the owner's go-ahead. On 2026-10-12 a takeover of armada-dew3 across an interface change, before this check,
+    let objects on the old code misread the new calls for minutes: its fleet dropped every hold.
 - `connection.json`, `armada-kinu.json`, `armada-kinu-v1.json` and `armada-dew.json` belong to deployments that are
   gone. Leave them alone; an agent may still read one. Dew's `armada-dew2.destroy.json` is its own unfinished destroy.
 

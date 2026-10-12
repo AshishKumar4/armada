@@ -1,11 +1,12 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { extractTar, lanesFor, poolFor, remainingDeadline } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
+import { contractOf } from '../src/contract';
 import { deploymentConfig } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
@@ -257,23 +258,49 @@ describe('a task\'s stored artifacts', () => {
 });
 
 describe('a deploy', () => {
-  const health = (protocol: number, oldest?: number, driver = 2): Health => ({ ok: true, driver, protocol, oldest, vcpus: 0, jobs: 0 });
+  const health = (protocol: number, oldest?: number, driver = 2, contract = 'this'): Health => ({ ok: true, driver, protocol, oldest, vcpus: 0, jobs: 0, contract });
 
   test('reads the oldest wire a Worker serves: said, else 3 since protocol 4, else only its own', () => {
     expect([servedFloor(health(7, 5)), servedFloor(health(6)), servedFloor(health(4)), servedFloor(health(2))]).toEqual([5, 3, 3, 2]);
   });
 
-  test('drains only what this Worker could not take over: forced, unanswering, newer, below the floor, other driver', () => {
+  test('drains only what this Worker could not take over: forced, unanswering, newer, below the floor, other driver, other interface', () => {
     expect([
-      mustDrain(health(PROTOCOL, 3), true),
-      mustDrain(null, false),
-      mustDrain(health(PROTOCOL + 1, 3), false),
-      mustDrain(health(PROTOCOL - 1, 2), false),
-      mustDrain(health(PROTOCOL - 1), false),
-      mustDrain(health(PROTOCOL), false),
-      mustDrain(health(PROTOCOL, 3), false),
-      mustDrain(health(PROTOCOL - 1, 3, 1), false),
-    ]).toEqual([true, true, true, true, false, false, false, true]);
+      mustDrain(health(PROTOCOL, 3), true, 'this'),
+      mustDrain(null, false, 'this'),
+      mustDrain(health(PROTOCOL + 1, 3), false, 'this'),
+      mustDrain(health(PROTOCOL - 1, 2), false, 'this'),
+      mustDrain(health(PROTOCOL - 1), false, 'this'),
+      mustDrain(health(PROTOCOL), false, 'this'),
+      mustDrain(health(PROTOCOL, 3), false, 'this'),
+      mustDrain(health(PROTOCOL - 1, 3, 1), false, 'this'),
+      // Serves every client this one does, but its objects call each other by another interface, or one it does not
+      // say: armada-dew3's redeploy of 2026-10-12, taken over, lost its fleet's holds to the old objects.
+      mustDrain(health(PROTOCOL - 1, 3, 2, 'earlier'), false, 'this'),
+      mustDrain({ ...health(PROTOCOL - 1, 3), contract: undefined }, false, 'this'),
+    ]).toEqual([true, true, true, true, false, false, false, true, true, true]);
+  });
+
+  test('fingerprints the interface its Durable Objects call each other by: the same for a comment or a method\'s body, another for a public method\'s arguments', () => {
+    const copy = mkdtempSync(join(tmpdir(), 'armada-contract-'));
+    const root = join(import.meta.dir, '..');
+
+    try {
+      for (const part of ['worker', 'src', 'package.json']) cpSync(join(root, part), join(copy, part), { recursive: true, filter: (from) => !from.includes('node_modules') && !from.includes('dashboard') && !from.includes('tests') });
+      symlinkSync(join(root, 'node_modules'), join(copy, 'node_modules'));
+      const fleet = join(copy, 'worker', 'src', 'fleet.ts');
+      const original = readFileSync(fleet, 'utf8');
+      const before = contractOf(copy);
+
+      writeFileSync(fleet, original.replace('  async used(): Promise<number> {', '  /** Edited. */\n  async used(): Promise<number> {\n    await this.ctx.storage.sync();'));
+      const inner = contractOf(copy);
+
+      writeFileSync(fleet, original.replace('async release(holder: string, afterMs = 0): Promise<void> {', 'async release(holder: string, afterMs = 0, why = \'\'): Promise<void> {\n    void why;'));
+
+      expect({ inner: inner === before, outer: contractOf(copy) === before }).toEqual({ inner: true, outer: false });
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
   });
 });
 
@@ -282,12 +309,12 @@ describe('a deployment\'s wrangler config', () => {
     const template = readFileSync(join(import.meta.dir, '..', 'worker', 'wrangler.jsonc'), 'utf8');
     // The same template laid out otherwise: no comments, its keys in another order, one line.
     const reordered = JSON.stringify(Object.fromEntries(Object.entries(v.parse(v.record(v.string(), JsonSchema), Bun.JSONC.parse(template))).reverse()));
-    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/home/o\'brien/"armada"\\worker.ts', dashboard: '/tmp/dash', bucket: 'armada-x-artifacts', vcpus: 64, sha: 'b'.repeat(40) };
+    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/home/o\'brien/"armada"\\worker.ts', dashboard: '/tmp/dash', bucket: 'armada-x-artifacts', vcpus: 64, sha: 'b'.repeat(40), contract: 'c'.repeat(64) };
     const read = (text: string) => v.parse(v.looseObject({ name: v.string(), account_id: v.string(), main: v.string(), assets: v.looseObject({ directory: v.string() }), vars: v.record(v.string(), v.string()), r2_buckets: v.array(v.looseObject({ bucket_name: v.string() })), durable_objects: JsonSchema }), JSON.parse(deploymentConfig(text, deployment)));
     const [laid, other] = [read(template), read(reordered)];
 
     expect({ same: laid, name: laid.name, account: laid.account_id, main: laid.main, assets: laid.assets.directory, vars: laid.vars, buckets: laid.r2_buckets.map((each) => each.bucket_name), schema: '$schema' in laid })
-      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40) }, buckets: ['armada-x-artifacts'], schema: false });
+      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64) }, buckets: ['armada-x-artifacts'], schema: false });
   });
 });
 

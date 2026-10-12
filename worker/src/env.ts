@@ -29,6 +29,8 @@ export interface Env {
   readonly FLEET_VCPUS: string;
   /** The commit `armada deploy` built this Worker from, written into the deployed vars. */
   readonly ARMADA_SHA?: string;
+  /** The interface its Durable Objects call each other by (`contractOf`), written into the deployed vars. */
+  readonly ARMADA_CONTRACT?: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
   /** How many of the most recently used environments keep their snapshots beyond those open jobs use

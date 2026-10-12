@@ -545,6 +545,9 @@ export const HealthSchema = v.object({
   ok: v.boolean(), driver: v.number(), protocol: v.number(), oldest: v.optional(v.number()), vcpus: v.number(), jobs: v.number(),
   /** The commit the deployed Worker was built from, `armada deploy`'s ARMADA_SHA var — absent on a Worker before it. */
   sha: v.optional(v.string()),
+  /** The fingerprint of the interface its Durable Objects call each other by (`contractOf`), `armada deploy`'s
+   *  ARMADA_CONTRACT var — absent on a Worker before it. */
+  contract: v.optional(v.string()),
   /** When the registry credentials a `--keep` deploy gave the Worker expire, an ISO date; absent without them. */
   keepUntil: v.optional(v.string()),
 });
@@ -557,11 +560,13 @@ export function servedFloor(health: Health): number {
   return health.oldest ?? (health.protocol >= 4 ? 3 : health.protocol);
 }
 
-/** Whether the deployed Worker of `health` is drained before this one replaces it: when the deploy is told so, when
- *  it cannot be asked what it serves, when this Worker would refuse a client it serves — its wire newer than this
- *  one's, or its floor older than this one's — or when its containers run under another driver. */
-export function mustDrain(health: Health | null, force: boolean): boolean {
-  return force || health === null || health.protocol > PROTOCOL || servedFloor(health) < OLDEST_CLIENT || health.driver !== DRIVER;
+/** Whether the deployed Worker of `health` is drained before one of interface `contract` (`contractOf`) replaces it:
+ *  when the deploy is told so, when it cannot be asked what it serves, when this Worker would refuse a client it
+ *  serves — its wire newer than this one's, or its floor older than this one's — when its containers run under another
+ *  driver, or when its Durable Objects call each other by another interface, or one it does not say. Its objects keep
+ *  running its code for minutes after the deploy, so they would read the new objects' calls by the old interface. */
+export function mustDrain(health: Health | null, force: boolean, contract: string): boolean {
+  return force || health === null || health.protocol > PROTOCOL || servedFloor(health) < OLDEST_CLIENT || health.driver !== DRIVER || health.contract !== contract;
 }
 
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });

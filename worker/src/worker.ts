@@ -433,7 +433,8 @@ async function route(request: Request, env: Env): Promise<Response> {
 
     // JSON leaves out what this Worker has not: its commit, and a `--keep` deploy's credentials.
     return Response.json({
-      ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs(), sha: env.ARMADA_SHA === '' ? undefined : env.ARMADA_SHA, keepUntil,
+      ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await fleet.jobs(), sha: env.ARMADA_SHA === '' ? undefined : env.ARMADA_SHA,
+      contract: env.ARMADA_CONTRACT === '' ? undefined : env.ARMADA_CONTRACT, keepUntil,
     } satisfies Health);
   }
 
