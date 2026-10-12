@@ -1,8 +1,8 @@
-# armada handoff, 2026-10-10
+# armada handoff, 2026-10-12
 
 ## Repository
 - https://github.com/AshishKumar4/armada, public, MIT.
-- `main` is wire 7. It holds the work below, and the fixes for every issue filed so far (#1 to #21).
+- `main` is wire 9. It holds the work below, and the fixes for every issue filed so far (#1 to #37).
 - Worktrees are under `/mnt/local/armada-wt/`; `core` is the integration branch. `/mnt/local/armada` is a shared
   checkout other agents use; don't edit it. Other agents' clones may add worktrees here too (`fix-long-commands` is
   Dew's).
@@ -13,14 +13,22 @@
 - `src/`: the client.
   - `cli.ts`, `sdk.ts`, `task.ts`. A task's `output` checks each answer when it lands and types it.
   - `ci.ts` (`armada run`), `dispatch.ts` (`listSchedule`), `dashboard.ts` (`armada dashboard`).
-  - `protocol.ts`: `PROTOCOL` 7, `OLDEST_CLIENT` 3, `DRIVER` 2.
+  - `protocol.ts`: `PROTOCOL` 9, `OLDEST_CLIENT` 3, `DRIVER` 2, `PACKER` 3. A repository recipe's environment is keyed
+    by the client's packer, so a client never builds on an environment an earlier one prepared (#34).
 - `worker/src/`:
   - `job.ts`: one Durable Object per job. It owns the queue, vessels, slots, gangs, stragglers and retries.
+  - `placement.ts`: how an `efficient` job packs its tasks: their estimates, which task fits beside a container's,
+    how many containers its open tasks fill, and what its runs used. `estimates.ts`: one Durable Object per task
+    class, holding its runs' use and each item's record.
   - `vessel.ts`: drives one container and its slots. `container.ts`: starting one, and the launch scripts.
   - `environments.ts`: the registry of environments, their preparation, retention and pruning.
-  - `runs.ts`: each task run that may still be going, which `/status/<job>/<index>` lists (#21).
+  - `runs.ts`: each task run that may still be going, which `/status/<job>/<index>` lists (#21), and which a
+    packing job's pool counts.
   - `hooks.ts`: webhook CI. `worker.ts`: the routes.
-  - `fleet.ts`, `relay.ts`, `secrets.ts`, `timings.ts`, `tasks.ts`.
+  - `fleet.ts`: the deployment's vCPU cap. Vessels and preparers both hold their containers' vCPUs in it.
+  - `tasks.ts`: pushed task ids and every hold on a bundle (the ids, and each open job's pin). Its alarm alone deletes
+    a bundle nothing holds.
+  - `relay.ts`, `secrets.ts`, `timings.ts`.
 - `worker/dashboard/`: the dashboard. `armada deploy` builds it into the Worker's assets.
 - `python/`: the Python SDK. `lean/`: the scheduler proofs.
 - `tools/oxlint/anti-slop/`: Kinu's lint rules, vendored. `upstream.json` names the commit.
@@ -47,6 +55,10 @@
 - Commit messages are `type: text`, at most 80 characters, with no first person.
 - Push `main` only as a fast-forward, after a green run on that exact commit.
 - Connection files live in `~/.config/armada/<name>.json`.
+- A Durable Object's SQL statement binds at most 100 parameters, and a string is at most 2 MB. Bun's SQLite allows
+  far more, so the tests' storage holds both bounds; a statement past them fails only in production otherwise.
+- A finish or a stop in a vessel keeps each step in its slot's record before the next (`Current`), so a restarted
+  vessel takes it up where it was. Keep new steps in that record.
 
 ## Deployments (account f44999d1ddda7012e9a87729eba250f1)
 - `armada-v2` is Kinu's production CI. `armada-dew3` is Dew's, and `nimbus-armada-v2` is Nimbus's.
@@ -86,9 +98,30 @@
 ## Open work
 - A Python body without an `output` that answers a tuple gets a list back, though its type says tuple. Its answer
   crosses the wire as JSON.
+- Three waits poll where a state change could wake them: a vessel asks the fleet for capacity every 5 s, a gang's
+  ranks ask every 1 s whether it formed, and a job finds its environment ready at its next 15 s watchdog. Each costs
+  latency, at most its interval; waking the waiters needs a durable register-then-check handshake.
+- The retry budgets are fixed counts: `INFRA_ATTEMPTS` 3, `REPLACEMENTS` 8 (or the pool for losses before a task),
+  `LOST_WAITS` 3. The hedging thresholds read a task's weight as seconds.
+- The Lean models are simpler than the code: the fleet's leases and the answer policy (a copy's red replaces a
+  landing green) differ. Their proofs hold for the models only.
+- Containers end mid-task with "Network connection lost" in both modes, and the cause is not in armada's data. On
+  2026-10-12, packed jobs lost 6 of 32 containers and unpacked ones about 6 of 150. A packed container's loss takes
+  more tasks with it; whether packing raises the rate needs more runs and the platform's own telemetry.
 - Not proved: the LPT 4/3 bound. Only the differential test ties the Lean model to the TypeScript `listSchedule`.
 - Kinu's starts take longer than a small snapshot's: a median of 1.8 s against 0.3 s. The 100 ms start poll cuts the
   part that waited for the next whole second. The rest is its 4.8 GiB snapshots; smaller environments would help.
 
 ## Measured numbers
-All are in the README's "Measured" section, dated, each with the command that reproduces it.
+All are in the README's "Measured" section, dated, each with the command that reproduces it, but packing's below.
+
+Packing, 2026-10-12 on `armada-ci`: Dew's and Kinu's recorded CI tasks replayed as `medium` tasks that use the same
+CPU, memory and time (`armada map --items=<file> --pool=24 --mode=<mode>`; the inputs are not in the repo).
+
+| Workload | `fast` | `efficient`, items recorded |
+|---|---|---|
+| Dew, 200 tasks | 1,260 s wall, 24 containers, 29,005 container-seconds | 1,292 s wall (+2.5%), 10 containers, 10,795 container-seconds (-63%) |
+| Kinu, 92 tasks | 600 s wall, 26 containers, 2 lost | 956 s wall, 22 containers, 5 lost, one under its longest task |
+
+A packed task ran 1 to 3% slower than alone. A job's first run of items it has no record of packs by its class's
+95th percentile of memory: Kinu's first packed run took 591 s on 24 containers.
