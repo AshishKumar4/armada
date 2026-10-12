@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
+import { deploymentConfig } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
@@ -514,12 +515,9 @@ async function install(account: string, name: string, file: string, { vcpus, tok
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
 
   await buildDashboard(DASHBOARD);
-  writeFileSync(config, readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8').replace('"name": "armada",', `"name": "${name}",\n  "account_id": "${account}",`)
-    .replace('"main": "src/worker.ts"', `"main": "${join(ROOT, 'worker', 'src', 'worker.ts')}"`).replace('"$schema": "../node_modules/wrangler/config-schema.json",', '')
-    .replace('"directory": "../dist/dashboard"', `"directory": "${DASHBOARD}"`)
-    .replace('"bucket_name": "armada-artifacts"', `"bucket_name": "${bucket}"`)
-    .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`)
-    .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${sourceSha()}"`));
+  writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, sha: sourceSha(),
+  }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));
   const secretsFile = join(tmpdir(), `armada-secrets-${String(process.pid)}.json`);
