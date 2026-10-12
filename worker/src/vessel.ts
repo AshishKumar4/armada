@@ -201,12 +201,22 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** The container started from the job's snapshot and given what its tasks need, each phase timed (`Boot`, #32). One
-   *  granted under an earlier Worker, which kept no grant of its own, waited 0. */
+   *  granted under an earlier Worker, which kept no grant of its own, waited 0. Each start made again is kept as it is
+   *  made, so a boot this object takes up again after it restarted mid-start tells the starts made before, and its own. */
   private async boot(spec: VesselSpec): Promise<void> {
     const container = this.container();
     const requested = (await this.ctx.storage.get<number>('requested')) ?? Date.now();
     const granted = (await this.ctx.storage.get<number>('granted')) ?? requested;
-    const restarts = await startAndAnswer(container, { containerSnapshot: { id: spec.snapshot }, instance: spec.instance, enableInternet: true, entrypoint: ENTRYPOINT }, START_MS, INACTIVITY_MS);
+    const before = await this.ctx.storage.get<string[]>('restarts');
+    const restarts = before === undefined ? [] : [...before, 'this vessel restarted during the start'];
+
+    const restarted = async (why: string): Promise<void> => {
+      restarts.push(why);
+      await this.ctx.storage.put('restarts', restarts);
+    };
+
+    await this.ctx.storage.put('restarts', restarts);
+    await startAndAnswer(container, { containerSnapshot: { id: spec.snapshot }, instance: spec.instance, enableInternet: true, entrypoint: ENTRYPOINT }, { ms: START_MS, inactivityMs: INACTIVITY_MS, restarted });
     const answered = Date.now();
 
     await must(container, 'the tmpfs mounts', ['/bin/sh', '-c', mounts(spec.tmpfs)], { ms: EXEC_MS });
@@ -232,6 +242,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     }
 
     await this.ctx.storage.put('state', 'working' satisfies State);
+    await this.ctx.storage.delete('restarts');
     await this.env.JOB.getByName(spec.jobId).booted(spec.name, answered - granted, { waitMs: granted - requested, startMs: answered - granted, restarts, setupMs: Date.now() - answered });
   }
 

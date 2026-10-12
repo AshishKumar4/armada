@@ -20,7 +20,7 @@ describe('startAndAnswer', () => {
 
     machine.start = (options) => { starts += 1; start(options); };
 
-    await startAndAnswer(machine, { entrypoint: ['sleep', 'infinity'], enableInternet: false }, 30_000, 60_000);
+    await startAndAnswer(machine, { entrypoint: ['sleep', 'infinity'], enableInternet: false }, { ms: 30_000, inactivityMs: 60_000 });
 
     expect({ firsts, starts }).toEqual({ firsts: 2, starts: 2 });
   });

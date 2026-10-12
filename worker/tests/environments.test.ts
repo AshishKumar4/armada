@@ -434,15 +434,15 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
   /** An account that holds three snapshots, full with a, b and c, a used 5 hours ago, b 4 and c 3; `pinned` are the
    *  keys open jobs run on. A preparation of `new` has reached its snapshot, which the platform takes only while the
    *  account has room, or refuses with `refusal`. */
-  const full = async (pinned: readonly string[], refusal = FULL) => {
+  const full = async (pinned: readonly string[], { refusal = FULL, credentials = 'user:secret', open = async () => pinned.map((key) => `job-${key}`) }: { readonly refusal?: string; readonly credentials?: string; readonly open?: () => Promise<string[]> } = {}) => {
     const stored = state();
     const fake = await registry(['a', 'b', 'c']);
 
     globalThis.fetch = fakeFetch(fake.answer);
 
     const environments = new ArmadaEnvironments(stored.ctx, world({
-      KEEP_ENVIRONMENTS: '3', REGISTRY_CREDENTIALS: 'user:secret',
-      FLEET: namespace(() => ({ open: async () => pinned.map((key) => `job-${key}`) })),
+      KEEP_ENVIRONMENTS: '3', REGISTRY_CREDENTIALS: credentials === '' ? undefined : credentials,
+      FLEET: namespace(() => ({ open })),
       JOB: namespace((id: string) => ({ environment: async () => id.slice('job-'.length) })),
       PREPARER: namespace(() => ({ begin: async () => undefined })),
     }));
@@ -472,7 +472,7 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
 
     await preparing.ctx.storage.put('preparation', { key: 'new', since, recipe, sha: null, phase: 'snapshot', seconds: {}, snapshot: null });
 
-    return { environments, preparer, fake, readiness: async () => await environments.ensure('new', recipe, null), taken: () => taken };
+    return { stored, environments, preparer, fake, readiness: async () => await environments.ensure('new', recipe, null), taken: () => taken };
   };
 
   test('frees the least recently used environment no open job uses, and the jobs waiting on it wait for the snapshot taken again', async () => {
@@ -496,11 +496,43 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
     setSystemTime(Date.now() + 31 * MINUTE);
     await pinned.preparer.alarm();
     const ended = await pinned.readiness();
-    const other = await full([], 'internal error; reference = abc');
+    const other = await full([], { refusal: 'internal error; reference = abc' });
 
     await other.preparer.alarm();
 
     expect({ waiting, ended: ended.kind === 'failed' && /held by open jobs/u.test(ended.reason), left: pinned.fake.left(), other: (await other.readiness()).kind, otherLeft: other.fake.left() })
       .toEqual({ waiting: 'preparing', ended: true, left: ['a', 'b', 'c'], other: 'failed', otherLeft: ['a', 'b', 'c'] });
+  });
+
+  test('asks again where asking for room failed, owes a delete that failed with a look due for it, and says when it has no credentials to delete with', async () => {
+    let asked = 0;
+
+    // The fleet does not answer the first ask for its open jobs; then none is open.
+    const flaky = await full([], { open: async () => {
+      asked += 1;
+
+      if (asked === 1) throw new Error('the fleet object was reset');
+
+      return [];
+    } });
+
+    await flaky.preparer.alarm();
+    const afterFailedAsk = (await flaky.readiness()).kind;
+
+    // The eviction's digest delete fails: its tags are gone, its manifest is owed, and a look is due.
+    flaky.fake.refuseNextDigest();
+    await flaky.preparer.alarm();
+    const owed = [...(await flaky.stored.ctx.storage.list({ prefix: 'debt:' })).keys()].length;
+    const look = await flaky.stored.ctx.storage.getAlarm();
+
+    const bare = await full([], { credentials: '' });
+
+    await bare.preparer.alarm();
+    setSystemTime(Date.now() + 31 * MINUTE);
+    await bare.preparer.alarm();
+    const ended = await bare.readiness();
+
+    expect({ afterFailedAsk, owed, look: look !== null, ended: ended.kind === 'failed' && /no registry credentials/u.test(ended.reason) })
+      .toEqual({ afterFailedAsk: 'preparing', owed: 1, look: true, ended: true });
   });
 });

@@ -406,4 +406,20 @@ describe('a vessel\'s boot', () => {
 
     expect(booted).toEqual([{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }]);
   });
+
+  test('taken up again after its object restarted mid-start, tells the starts made before and its own', async () => {
+    const booted: Boot[] = [];
+
+    const stored = state(container((argv) => ({ exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' })));
+
+    const vessel = new ArmadaVessel(stored.ctx, world({
+      JOB: namespace(() => ({ booted: async (_name: string, _bootMs: number, boot: Boot) => { booted.push(boot); }, claim: async () => null, retired: async () => undefined })),
+    }));
+
+    // Granted, its first start killed as it came up, and then the object restarted before the second answered.
+    await stored.ctx.storage.put({ spec, state: 'booting', requested: Date.now() - 2000, granted: Date.now() - 1000, restarts: ['killed as it came up (137)'] });
+    await vessel.alarm();
+
+    expect(booted.map((boot) => boot.restarts)).toEqual([['killed as it came up (137)', 'this vessel restarted during the start']]);
+  });
 });

@@ -168,21 +168,21 @@ export class ArmadaEnvironments extends DurableObject<Env> {
   /** The account refused a snapshot of `key` for its storage (#30): this frees one snapshot of this deployment's, an
    *  owed delete first, else the least recently used environment no open job uses, past the kept count and the recent
    *  hour. A full account fails every job that needs a new environment, which is worse than preparing an older one again.
-   *  Whether a snapshot was deleted. */
-  async makeRoom(key: string): Promise<boolean> {
+   *  Whether a snapshot was deleted, else why none could be. */
+  async makeRoom(key: string): Promise<Room> {
     const credentials = this.env.REGISTRY_CREDENTIALS;
 
-    if (credentials === undefined) return false;
+    if (credentials === undefined) return 'no credentials';
     const listed = await this.list();
     const used = await this.openKeys();
 
-    if (await this.settle(credentials, used)) return true;
+    if (await this.settle(credentials, used)) return 'freed';
 
     for (const candidate of expired(listed, used, Date.now(), { keep: 0, recentMs: 0 }).filter((each) => each.key !== key).toReversed()) {
-      if (await this.evict(credentials, candidate) === true) return true;
+      if (await this.evict(credentials, candidate) === true) return 'freed';
     }
 
-    return false;
+    return 'held';
   }
 
   /** The keys open jobs use: their vessels, a replacement's included, start from those until the jobs end. */
@@ -204,12 +204,9 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     return await this.delete(credentials, snapshot, key);
   }
 
-  /** A snapshot made for `key` that no environment records: a preparation's that failed after its snapshot. A look is
-   *  due for it, if none is. */
+  /** A snapshot made for `key` that no environment records: a preparation's that failed after its snapshot. */
   async orphaned(snapshot: string, key: string): Promise<void> {
     await this.owe(snapshot, key);
-
-    if ((await this.ctx.storage.getAlarm()) === null) await this.lookAgain();
   }
 
   /** Deletes the owed snapshots, but those of a key an open job uses: a job holds its generation, so a vessel it starts
@@ -255,8 +252,11 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     }
   }
 
+  /** `ref`'s delete owed for `key`, and a look due for it, if none is: whatever path owed it, the debt is settled. */
   private async owe(ref: string, key: string): Promise<void> {
     await this.ctx.storage.put(`debt:${ref}`, { key, since: Date.now() } satisfies Debt);
+
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
   }
 
   /** The preparation of `key` begun `since` is under way: its preparer beats, so it is not taken for lost. */
@@ -293,6 +293,10 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     await this.ctx.storage.delete(`env:${key}`);
   }
 }
+
+/** What `makeRoom` did: deleted a snapshot, found every one it may delete held by an open job, or could delete none for
+ *  want of registry credentials. */
+export type Room = 'freed' | 'held' | 'no credentials';
 
 /** What a prune keeps beyond the environments open jobs use: the `keep` most recently used of the rest, and each used
  *  within `recentMs`. */
@@ -338,8 +342,15 @@ interface Preparation {
   readonly started?: number;
   readonly seconds: Record<string, number>;
   readonly snapshot: Generation['snapshot'] | null;
-  /** When the account first refused its snapshot for storage (`roomFor`); absent until then. */
+  /** When the account first refused its snapshot for storage (`roomFor`), and why the registry last made no room;
+   *  absent until then. */
   readonly refused?: number;
+  readonly room?: Room | 'failed';
+}
+
+/** A phase not done yet: its alarm takes it up again in `retryInMs`. */
+interface Pending {
+  readonly retryInMs: number;
 }
 
 /** How the platform refuses a snapshot when the account's snapshot storage is full (armada-dew3, 2026-10-12, #30). */
@@ -395,8 +406,6 @@ export class ArmadaPreparer extends DurableObject<Env> {
     try {
       const step = await this.step(preparation);
 
-      if (step === 'running') return await this.ctx.storage.setAlarm(Date.now());
-
       if ('retryInMs' in step) return await this.ctx.storage.setAlarm(Date.now() + step.retryInMs);
       made = step.snapshot ?? made;
       const seconds = { ...preparation.seconds, [preparation.phase]: (Date.now() - (preparation.started ?? began)) / 1000 };
@@ -417,9 +426,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
     }
   }
 
-  /** One phase, or a slice of one whose command still runs; when to take a refused snapshot again; the snapshot once
-   *  there is one. */
-  private async step(preparation: Preparation): Promise<'running' | { readonly retryInMs: number } | { readonly snapshot?: Generation['snapshot'] }> {
+  /** One phase done (with the snapshot once there is one), or how soon to take it up again: at once for a command that
+   *  still runs, in a moment for a snapshot the account refused. */
+  private async step(preparation: Preparation): Promise<Pending | { readonly snapshot?: Generation['snapshot'] }> {
     const { recipe } = preparation;
     const container = this.container();
     const workdir = workdirOf(recipe);
@@ -429,7 +438,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       case 'base':
         return await this.command(preparation, {
           doing: 'the runner layer', asUser: false, argv: ['/bin/sh', '-c', runnerLayer(workdir)],
-          inputs: async () => { await startAndAnswer(container, { image: recipe.base, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ['sleep', 'infinity'] }, 300_000, LEASE_MS); },
+          inputs: async () => { await startAndAnswer(container, { image: recipe.base, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ['sleep', 'infinity'] }, { ms: 300_000, inactivityMs: LEASE_MS }); },
         });
 
       case 'setup':
@@ -484,17 +493,31 @@ export class ArmadaPreparer extends DurableObject<Env> {
   /** The account's snapshot storage is full: the registry frees what this deployment can (`makeRoom`), and the snapshot
    *  is taken again in a moment from the same container, while the jobs waiting on it wait on. Refused for
    *  `ROOM_WAIT_MS`, the preparation fails and says what holds the storage. */
-  private async roomFor(preparation: Preparation, refusal: string): Promise<{ readonly retryInMs: number }> {
+  private async roomFor(preparation: Preparation, refusal: string): Promise<Pending> {
     const refused = preparation.refused ?? Date.now();
 
     if (Date.now() - refused >= ROOM_WAIT_MS) {
-      throw new Error(`${refusal} It was refused for ${String(ROOM_WAIT_MS / 60_000)} min while this deployment deleted the snapshots no open job uses: the rest of the account's snapshot storage is held by open jobs, other deployments or other apps (armada prune on another deployment, or a higher limit from Cloudflare, makes room)`);
+      const minutes = String(ROOM_WAIT_MS / 60_000);
+
+      throw new Error(preparation.room === 'no credentials'
+        ? `${refusal} It was refused for ${minutes} min, and this deployment has no registry credentials to delete its own snapshots with (armada deploy mints them)`
+        : `${refusal} It was refused for ${minutes} min while this deployment deleted the snapshots no open job uses: the rest of the account's snapshot storage is held by open jobs, other deployments or other apps (armada prune on another deployment, or a higher limit from Cloudflare, makes room)`);
     }
 
-    const freed = await this.env.ENVIRONMENTS.getByName(SINGLE).makeRoom(preparation.key);
-
-    console.log(JSON.stringify({ preparation: preparation.key, refused: refusal, freed }));
+    // Kept before the registry is asked, so a failed ask still counts toward the bound.
     await this.ctx.storage.put('preparation', { ...preparation, refused } satisfies Preparation);
+    let room: Room | 'failed';
+
+    try {
+      room = await this.env.ENVIRONMENTS.getByName(SINGLE).makeRoom(preparation.key);
+    } catch (cause) {
+      // Asking again next time is the answer to an ask that failed: the container is still worth its snapshot.
+      room = 'failed';
+      console.error(JSON.stringify({ preparation: preparation.key, makingRoom: said({ cause }) }));
+    }
+
+    console.log(JSON.stringify({ preparation: preparation.key, refused: refusal, room }));
+    await this.ctx.storage.put('preparation', { ...preparation, refused, room } satisfies Preparation);
 
     return { retryInMs: ROOM_RETRY_MS };
   }
@@ -502,7 +525,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
   /** A phase's command, run once in its container whatever alarms see it: the first gives the container its inputs and
    *  launches the command detached, and each waits on it for a slice. A launch or a wait whose exec the platform lost is
    *  made again; three lost in a row, and the container is lost. */
-  private async command(preparation: Preparation, { doing, inputs, argv, asUser, env, cwd }: Command): Promise<'running' | Record<string, never>> {
+  private async command(preparation: Preparation, { doing, inputs, argv, asUser, env, cwd }: Command): Promise<Pending | Record<string, never>> {
     const container = this.container();
     const dir = phaseDir(preparation.phase);
     let { started } = preparation;
@@ -547,7 +570,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       if (Date.now() - started > stepMs(preparation.recipe.size)) throw new Error(`${doing} ran longer than ${String(stepMs(preparation.recipe.size) / 60_000)} min`);
     }
 
-    return 'running';
+    return { retryInMs: 0 };
   }
 
   private async done(preparation: Preparation): Promise<void> {
