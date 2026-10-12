@@ -6,7 +6,7 @@ import * as v from 'valibot';
 import { extractTar, lanesFor, poolFor, remainingDeadline } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
-import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
+import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, JsonSchema, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
@@ -140,13 +140,17 @@ describe('grading a CI run', () => {
     expect({ problems: graded.problems, rows: graded.rows.length, reds: graded.reds.map((each) => each.name) }).toEqual({ problems: [], rows: 3, reds: ['two'] });
   });
 
-  test('a file is timed at what all its rows report for it, and not at all where a row of it was red or reused', () => {
-    const rows = [
-      row('a#1/2', 0, { 'a.test.ts': 2 }), row('a#2/2', 0, { 'a.test.ts': 3 }), row('b', 0, { 'b.test.ts': 4, 'c.test.ts': 1 }),
-      row('c', 1, { 'c.test.ts': 5 }), { ...row('d', 0, { 'd.test.ts': 6 }), cached: 'abc123' }, row('e'),
-    ];
+  test('a file is timed at what all its rows report for it, and not at all where a row of it, by its timings or its plan entry, was red or reused', () => {
+    const split = (file: string) => ({ rows: [1, 2].map((part) => ({ name: `${file}#${String(part)}/2`, files: [file] })) });
 
-    expect(fileTimings(rows)).toEqual({ 'a.test.ts': 5, 'b.test.ts': 4 });
+    const graded = grade([
+      { name: 'a', entry: split('a.test.ts'), rows: [row('a.test.ts#1/2', 0, { 'a.test.ts': 2 }), row('a.test.ts#2/2', 0, { 'a.test.ts': 3 })], artifacts: null },
+      { name: 'b', entry: {}, rows: [row('b', 0, { 'b.test.ts': 4, 'c.test.ts': 1 }), row('c', 1, { 'c.test.ts': 5 }), { ...row('d', 0, { 'd.test.ts': 6 }), cached: 'abc123' }, row('e')], artifacts: null },
+      // A row cut off before its verdict timed nothing, and its file's other row holds only part of the file (#36).
+      { name: 'f', entry: split('f.test.ts'), rows: [row('f.test.ts#1/2', 0, { 'f.test.ts': 2 }), row('f.test.ts#2/2', 124)], artifacts: null },
+    ]);
+
+    expect({ problems: graded.problems, files: graded.files }).toEqual({ problems: [], files: { 'a.test.ts': 5, 'b.test.ts': 4 } });
   });
 
   test('a task that exits nonzero fails every row it reported green; one it reported red keeps its own exit', () => {

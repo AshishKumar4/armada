@@ -13,7 +13,7 @@ import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { listSchedule } from './dispatch';
-import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { expectedOf, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
@@ -778,7 +778,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
     // The usage of a narrowed run is not the commit's either: it would size the next full run down to a part's needs.
     await armada.post(`/timings/${config.name}`, {
-      rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: fileTimings(graded.rows), usage,
+      rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: graded.files, usage,
     });
   } else {
     note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
