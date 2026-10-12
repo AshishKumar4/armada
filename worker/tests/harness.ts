@@ -44,8 +44,10 @@ await mock.module('cloudflare:workers', () => ({
   },
 }));
 
-// Imported once the mock is in place: the store extends its DurableObject.
+// Imported once the mock is in place: they extend its DurableObject.
 const { ArmadaEstimates } = await import('../src/estimates');
+
+const { ArmadaTasks } = await import('../src/tasks');
 
 /** A key, or the keys, a storage call names. */
 const many = (key: string | readonly string[]): key is readonly string[] => Array.isArray(key);
@@ -169,9 +171,11 @@ export function bucket(seeded: ReadonlyMap<string, string> = new Map()) {
       objects.set(key, new Uint8Array(await new Response(body).arrayBuffer()));
       kept.set(key, { uploaded: new Date(), customMetadata: options.customMetadata ?? {}, httpMetadata: options.httpMetadata ?? {} });
     },
-    delete: async (key: string) => {
-      objects.delete(key);
-      kept.delete(key);
+    delete: async (keys: string | readonly string[]) => {
+      for (const key of [keys].flat()) {
+        objects.delete(key);
+        kept.delete(key);
+      }
     },
     // A `delimiter` folds the keys under each next segment into one of `delimitedPrefixes`, as R2 does.
     list: async ({ prefix = '', delimiter }: { readonly prefix?: string; readonly delimiter?: string } = {}) => {
@@ -190,9 +194,12 @@ export function bucket(seeded: ReadonlyMap<string, string> = new Map()) {
 type Fake = DurableObjectNamespace | ReturnType<typeof bucket> | WorkerVersionMetadata | string;
 
 /** The bindings an object reaches, each answered in memory: the fleet always has room, the registry takes a job's
- *  end, and the bearer and the fleet's cap are a deployment's. */
+ *  end, the task registry is the deployment's own, and the bearer and the fleet's cap are a deployment's. */
 export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   const env: Partial<Env> = {};
+  let tasks: InstanceType<typeof ArmadaTasks> | undefined;
+  // The world itself, which its own task registry reaches, once it is whole.
+  let whole: Env;
 
   Object.assign(env, {
     FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true })),
@@ -200,6 +207,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
     ARMADA_TOKEN: 't'.repeat(32),
     FLEET_VCPUS: '1500',
     ARTIFACTS: bucket(),
+    TASKS: namespace(() => tasks ??= new ArmadaTasks(state().ctx, whole)),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
     // A store with nothing learned yet, each time it is asked: every task runs alone.
     ESTIMATES: namespace(() => new ArmadaEstimates(state().ctx, world({}))),
@@ -207,7 +215,9 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   });
 
   // SAFETY: the objects reach only these bindings, each constructed above or by the test with the members they call.
-  return env as Env;
+  whole = env as Env;
+
+  return whole;
 }
 
 /** An environment ready to start containers from. */

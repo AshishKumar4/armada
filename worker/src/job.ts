@@ -80,8 +80,9 @@ const vesselName = (number: number): string => `v${String(number)}`;
 /** A name a job gives its vessels (`vesselName`), or an earlier Worker gave a replacement, `r` and its number. */
 export const VESSEL_NAME = /^[vr][1-9]\d*$/u;
 
-/** What a job owes once it is done (`settleUp`): its close to the fleet, and its environment's use to the registry. */
-type Owed = 'closed' | 'used';
+/** What a job owes once it is done (`settleUp`): its close to the fleet, its environment's use to the registry, and
+ *  its hold on its bundle to the task registry. */
+type Owed = 'closed' | 'used' | 'unpinned';
 
 /** The states of a vessel that is alive: waiting for the fleet, starting, or taking tasks. */
 const ALIVE = `('waiting', 'booting', 'working')`;
@@ -1135,12 +1136,12 @@ export class ArmadaJob extends DurableObject<Env> {
     // Reading the spec moves the env of a job an earlier Worker created out of it, so this deletes that env too.
     await this.spec();
     await this.ctx.storage.delete('env');
-    await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now(), owed: ['closed', 'used'] satisfies Owed[] });
+    await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now(), owed: ['closed', 'used', 'unpinned'] satisfies Owed[] });
     await this.settleUp();
   }
 
-  /** What the done job still owes, said: its close to the fleet, its environment's use up to now to the registry, and
-   *  its runs' use to their classes' stores (`send`). Each is idempotent and said again at the next alarm until it is
+  /** What the done job still owes, said: its close to the fleet, its environment's use up to now to the registry, its
+   *  hold on its bundle, and its runs' use to their classes' stores (`send`). Each is idempotent and said again at the next alarm until it is
    *  taken; the alarm stays until all are. */
   private async settleUp(): Promise<void> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
@@ -1148,6 +1149,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const taken = await Promise.allSettled(owed.map(async (each) => {
       if (each === 'closed') await this.env.FLEET.getByName(SINGLE).closed(id);
+      else if (each === 'unpinned') await this.env.TASKS.getByName(SINGLE).unpin(id);
       // The environment was in use until now: its recent hour starts here (`ArmadaEnvironments.used`).
       else await this.env.ENVIRONMENTS.getByName(SINGLE).used(await this.environment());
     }));

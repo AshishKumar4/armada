@@ -108,37 +108,18 @@ const tasks: Handler = async (request, env) => {
   const refused = await env.TASKS.getByName(SINGLE).publish(push);
 
   if (refused !== null) return Response.json({ error: refused }, { status: 409 });
-  await sweepBundles(env);
 
   return Response.json({ pushed: push.ids.length });
 };
-
-/** How long a bundle no task id points to is kept: past any job that could still be starting containers from it. */
-const BUNDLE_GRACE_MS = 7 * 24 * 3600 * 1000;
-
-/** Deletes the bundles no task id points to that are older than BUNDLE_GRACE_MS. */
-async function sweepBundles(env: Env): Promise<void> {
-  const current = new Set(await env.TASKS.getByName(SINGLE).current());
-
-  for (let cursor: string | undefined; ;) {
-    const page = await env.ARTIFACTS.list({ prefix: 'code/', cursor });
-
-    for (const bundle of page.objects) {
-      const digest = bundle.key.slice('code/'.length, -'.mjs'.length);
-
-      if (!current.has(digest) && Date.now() - bundle.uploaded.getTime() > BUNDLE_GRACE_MS) await env.ARTIFACTS.delete(bundle.key);
-    }
-
-    if (!page.truncated) return;
-    cursor = page.cursor;
-  }
-}
 
 /** `/bundles/<digest>`: a pushed project's bundle, stored once under the digest of its bytes. */
 const bundles: Handler = async (request, env, [digest]) => {
   if (!v.is(Digest, digest)) return undefined;
 
-  if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(bundleKey(digest))) === null ? 404 : 200 });
+  const registry = env.TASKS.getByName(SINGLE);
+
+  // A bundle the sweep took is not there, whatever R2 says, so the client uploads it again (`ArmadaTasks.retire`).
+  if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(bundleKey(digest))) === null || await registry.taken(digest) ? 404 : 200 });
 
   if (request.method !== 'PUT') return undefined;
   const bytes = await request.arrayBuffer();
@@ -146,6 +127,7 @@ const bundles: Handler = async (request, env, [digest]) => {
 
   if (actual !== digest) return Response.json({ error: `the bundle's digest is ${actual}, not ${digest}` }, { status: 400 });
   await env.ARTIFACTS.put(bundleKey(digest), bytes);
+  await registry.uploaded(digest);
 
   return Response.json({ stored: digest });
 };
@@ -188,7 +170,19 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
     if ((await env.ARTIFACTS.head(await packKey(spec.recipe.repo.project, spec.commit))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
   }
 
-  await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin);
+  const registry = env.TASKS.getByName(SINGLE);
+  // The job holds its bundle from its last check until it ends (`ArmadaJob.settleUp`), or its making fails.
+  const pinned = spec.run.kind === 'task' && spec.run.bundle !== undefined ? await registry.pin(created, spec.run.bundle) : null;
+
+  if (pinned !== null) return Response.json({ error: pinned }, { status: 409 });
+
+  try {
+    await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin);
+  } catch (cause) {
+    await registry.unpin(created);
+
+    throw cause;
+  }
 
   return Response.json({ id: created });
 }
