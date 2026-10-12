@@ -7,7 +7,7 @@ import { bucket, namespace, state, world } from './harness';
 const TOKEN = 't'.repeat(32);
 
 /** A deployment whose R2 is in memory, and a request to it; each of `held` holds the next R2 delete until it returns. */
-function deployment(held: (() => Promise<void>)[] = [], open: Readonly<Record<string, string>> = {}) {
+function deployment(held: (() => Promise<void>)[] = [], open: Readonly<Record<string, string | null>> = {}) {
   const stored = bucket();
   const remove = stored.delete;
 
@@ -112,6 +112,23 @@ describe('a push', () => {
     await due();
 
     expect({ running, ended: present() }).toEqual({ running: true, ended: false });
+  });
+
+  test('holds nothing for a job the fleet still lists once it is done, nor for one whose end adopted the rest', async () => {
+    const [first, second, third] = ['first', 'second', 'third'].map((text) => new TextEncoder().encode(`export const v = '${text}';\n`));
+    const [one = '', two = '', three = ''] = [first, second, third].map((bytes) => digestOf(bytes ?? new Uint8Array()));
+    // job-done ended, though the fleet has not heard; job-new pinned its bundle, and the fleet lists it still.
+    const { artifacts, ask, due, registry } = deployment([], { 'job-done': null, 'job-new': two });
+
+    for (const [digest, bytes] of [[one, first], [two, second], [three, third]] as const) await ask(`/bundles/${digest}`, 'PUT', bytes);
+    expect(await registry.pin('job-new', two)).toBeNull();
+    // The first retirement is at job-new's end: adopting then pins nothing it lets go.
+    await registry.unpin('job-new');
+    await due();
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: one, ids: ['square'] }));
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: three, ids: ['square'] }));
+
+    expect([one, two, three].map((digest) => artifacts.objects.has(`code/${digest}.mjs`))).toEqual([false, false, true]);
   });
 
   test('deletes again, at its alarm, a bundle R2 did not delete, and takes no push of it meanwhile', async () => {

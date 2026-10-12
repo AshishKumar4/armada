@@ -65,6 +65,8 @@ export class ArmadaTasks extends DurableObject<Env> {
 
   /** Job `job` ended: its bundle is retired, and deleted once nothing else holds it. */
   async unpin(job: string): Promise<void> {
+    // Adopted first, so adopting cannot pin again what this lets go.
+    await this.adopt();
     const bundle = await this.ctx.storage.get<string>(`pin:${job}`);
 
     if (bundle === undefined) return;
@@ -140,8 +142,11 @@ export class ArmadaTasks extends DurableObject<Env> {
     await this.ctx.blockConcurrencyWhile(async () => {
       if ((await this.ctx.storage.get<boolean>('adopted')) === true) return;
 
-      for (const job of await this.env.FLEET.getByName(SINGLE).open()) {
-        const bundle = await this.env.JOB.getByName(job).bundle();
+      const open = await this.env.FLEET.getByName(SINGLE).open();
+      const bundles = await Promise.all(open.map(async (job) => await this.env.JOB.getByName(job).bundle()));
+
+      for (const [at, job] of open.entries()) {
+        const bundle = bundles[at] ?? null;
 
         if (bundle !== null && (await this.ctx.storage.get(`pin:${job}`)) === undefined) await this.ctx.storage.put(`pin:${job}`, bundle);
       }

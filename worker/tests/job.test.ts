@@ -406,6 +406,17 @@ describe('an open job whose pool its narrower vessels fill', () => {
   });
 });
 
+describe('a pushed task\'s job', () => {
+  test('holds its bundle while it runs, and none once it is done', async () => {
+    const { job: pushed } = await job({ recipe: {}, items: [{ item: 1 }], run: { kind: 'task', id: 'square', bundle: 'b'.repeat(64), runtime: 'node' } });
+    const running = await pushed.bundle();
+
+    await finish(pushed, 'v1');
+
+    expect({ running, done: await pushed.bundle() }).toEqual({ running: 'b'.repeat(64), done: null });
+  });
+});
+
 describe('a job that ended', () => {
   test('says so to the fleet and the registry until each has taken it, its alarm kept until then', async () => {
     const closed: string[] = [];
@@ -416,7 +427,7 @@ describe('a job that ended', () => {
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
       ENVIRONMENTS: readyRegistry(),
       FLEET: namespace(() => ({
-        acquire: async () => true, release: async () => undefined, opened: async () => undefined, admits: async () => true, reserve: async () => true,
+        acquire: async () => true, release: async () => undefined, opened: async () => undefined, admits: async () => true, reserve: async () => true, open: async () => [],
         closed: async (id: string) => {
           if (refuse) throw new Error('the fleet is not answering');
           closed.push(id);
