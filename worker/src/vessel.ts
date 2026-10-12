@@ -98,6 +98,8 @@ interface Current {
    *  restarted on the way takes its finish up from there (`finish`). */
   readonly ending?: Ending;
   readonly outcome?: Outcome;
+  /** Set once its job no longer wants it: a restarted object stops it again and tells its job (`stopTask`). */
+  readonly stopping?: true;
 }
 
 /** How one slot's loop ended its slice: the slice ran out, the job had no task for it, or how long to wait for one. */
@@ -322,6 +324,11 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
+      if (current?.stopping === true) {
+        await this.stopTask(spec, slot, current);
+        continue;
+      }
+
       if (current === undefined) {
         // A container the platform is stopping takes no new task: the vessel fails, and the job replaces it.
         const stopping = (await must(container, 'the stop check', ['/bin/sh', '-c', STOPPED], { ms: EXEC_MS })).stdout.trim();
@@ -342,9 +349,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         started();
 
         if (claim.gang !== undefined && !(await job.started(spec.name, claim.index, claim.attempt))) {
-          await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
-          await this.ctx.storage.delete(slotKey(slot));
-          await job.stopped(spec.name, claim.index, { slot, attempt: claim.attempt });
+          await this.stopTask(spec, slot, current);
           continue;
         }
       }
@@ -375,15 +380,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
-      if (!(await job.still(spec.name, current.claim.index, slot, current.claim.attempt))) {
-        await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
-
-        if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
-        await this.ctx.storage.delete(slotKey(slot));
-        await this.clear(spec, slot);
-        // A copy stopped for its twin's answer, which waits until this one can no longer end red.
-        await job.stopped(spec.name, current.claim.index, { slot, attempt: current.claim.attempt });
-      }
+      if (!(await job.still(spec.name, current.claim.index, slot, current.claim.attempt))) await this.stopTask(spec, slot, current);
     }
 
     return 'reslice';
@@ -547,6 +544,27 @@ export class ArmadaVessel extends DurableObject<Env> {
   override async webSocketError(...[socket, error]: Parameters<NonNullable<DurableObject['webSocketError']>>): Promise<void> {
     await this.pipes.get(socket)?.closed(1006, `failed: ${said({ cause: error })}`);
     this.pipes.delete(socket);
+  }
+
+  /** `current`'s task stopped, its job no longer wanting it: killed, its log kept for a gang's rank, its slot cleared, and
+   *  its job told, which a copy's twin waits on to report its answer. The slot keeps it until its job has it, so an
+   *  object restarted on the way stops it again and tells its job, which takes the word once; a container that stopped
+   *  holds nothing to kill. */
+  private async stopTask(spec: SlotSpec, slot: number, current: Current): Promise<void> {
+    const { dir, group } = layoutOf(spec, slot);
+
+    await this.ctx.storage.put(slotKey(slot), { ...current, stopping: true } satisfies Current);
+
+    if (this.ctx.container?.running === true) {
+      await must(this.container(), 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+
+      // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
+      if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
+    }
+
+    await this.clear(spec, slot);
+    await this.env.JOB.getByName(spec.jobId).stopped(spec.name, current.claim.index, { slot, attempt: current.claim.attempt });
+    await this.ctx.storage.delete(slotKey(slot));
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. Each step is

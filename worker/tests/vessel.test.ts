@@ -231,6 +231,46 @@ describe('a vessel restarted while it finishes a task', () => {
   });
 });
 
+describe('a vessel restarted while it stops a task its job no longer wants', () => {
+  test('stops it again and tells its job, which hears of it once', async () => {
+    const stopped: number[] = [];
+    const reached = Promise.withResolvers<void>();
+    const claims: Claim[] = [{ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: true }];
+    let told = false;
+
+    const stored = state(container((argv) => {
+      if (argv[3] === 'wait') return { exitCode: 0, stdout: '' };
+
+      return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+    }));
+
+    const job = {
+      booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false,
+      retired: async () => undefined, vesselFailed: async () => undefined, accept: async () => true, complete: async () => undefined,
+      // The object restarts while its job is told: the first telling never answers.
+      stopped: async (_name: string, index: number) => {
+        if (!told) {
+          told = true;
+          reached.resolve();
+
+          return await new Promise<never>(() => undefined);
+        }
+
+        stopped.push(index);
+      },
+    };
+
+    const env = world({ JOB: namespace(() => job), ARTIFACTS: bucket() });
+    const before = new ArmadaVessel(stored.ctx, env);
+
+    await before.begin(spec);
+    await Promise.race([before.alarm(), reached.promise]);
+    await new ArmadaVessel(stored.ctx, env).alarm();
+
+    expect(stopped).toEqual([0]);
+  });
+});
+
 describe('a pushed task\'s answer', () => {
   test('is the body\'s value or its command\'s, as its runner wrote; none where it wrote none; and a marker the platform lost loses the run', async () => {
     const said = await Promise.all([{ exitCode: 0, stdout: 'value\n' }, { exitCode: 0, stdout: 'command\n' }, { exitCode: 1, stdout: '' }, new Error('Network connection lost.')]
