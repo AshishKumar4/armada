@@ -15,8 +15,8 @@ interface Entry {
   readonly runtime?: 'node' | 'python';
 }
 
-/** A bundle the sweep took: `deleting` while its delete is out, `deleted` once it is gone, until it is uploaded again.
- *  No push or job takes it meanwhile, and its HEAD says it is not there, so a client uploads it again. */
+/** A bundle the sweep took: `deleting` until the alarm has deleted it, `deleted` once it is gone, until it is uploaded
+ *  again. No push or job takes it meanwhile, and its HEAD says it is not there, so a client uploads it again. */
 type Swept = 'deleting' | 'deleted';
 
 /** The R2 keys one delete takes at most. */
@@ -108,12 +108,14 @@ export class ArmadaTasks extends DurableObject<Env> {
       await this.ctx.storage.put(`swept:${bundle}`, 'deleting' satisfies Swept);
     }
 
-    await this.sweep();
+    if (doomed.length > 0) await this.ctx.storage.setAlarm(Date.now());
   }
 
-  /** Deletes every bundle marked `deleting`. One whose delete R2 did not take stays marked, and the alarm deletes it
-   *  again: no push or job takes it meanwhile. */
-  private async sweep(): Promise<void> {
+  /** Deletes every bundle marked `deleting`. The alarm alone deletes, and the platform runs one alarm at a time and
+   *  runs it again when the object restarted in it, so one delete of a bundle is out at a time, and none is left
+   *  undone. One whose delete R2 did not take stays marked, deleted again at a later alarm: no push or job takes it
+   *  meanwhile. */
+  override async alarm(): Promise<void> {
     const deleting = [...await this.ctx.storage.list<Swept>({ prefix: 'swept:' })].flatMap(([key, swept]) => swept === 'deleting' ? [key.slice('swept:'.length)] : []);
 
     try {
@@ -128,10 +130,6 @@ export class ArmadaTasks extends DurableObject<Env> {
       console.error(JSON.stringify({ bundles: deleting.length, deleting: String(cause) }));
       await this.ctx.storage.setAlarm(Date.now() + DELETE_RETRY_MS);
     }
-  }
-
-  override async alarm(): Promise<void> {
-    await this.sweep();
   }
 
   /** The bundles of the jobs open when this registry began to keep their holds, which an earlier Worker made and pinned

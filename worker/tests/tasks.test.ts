@@ -29,13 +29,24 @@ function deployment(held: (() => Promise<void>)[] = [], open: Readonly<Record<st
 
   const env = world({ ARMADA_TOKEN: TOKEN, ARTIFACTS: artifacts, TASKS: namespace(() => registry) });
 
+  /** The registry's alarm, run as the platform runs it once it is due: cleared, then handled. */
+  const due = async () => {
+    const at = await registryState.ctx.storage.getAlarm();
+
+    if (at === null || at > Date.now()) return;
+    await registryState.ctx.storage.deleteAlarm();
+    await registry.alarm();
+  };
+
   const ask = async (path: string, method: string, body?: string | Uint8Array) => {
     const answer = await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env);
+
+    await due();
 
     return [answer.status, answer.headers.get('content-type')?.includes('json') === true ? await answer.json() : null];
   };
 
-  return { artifacts, ask, registry, registryState };
+  return { artifacts, ask, due, registry, registryState };
 }
 
 const digestOf = (bytes: Uint8Array) => new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
@@ -64,7 +75,7 @@ describe('a push', () => {
   });
 
   test('deletes a bundle once no id runs from it and no open job holds it, and keeps the rest', async () => {
-    const { artifacts, ask, registry } = deployment();
+    const { artifacts, ask, due, registry } = deployment();
     const [first, second, third] = ['first', 'second', 'third'].map((text) => new TextEncoder().encode(`export const v = '${text}';\n`));
     const [one = '', two = '', three = ''] = [first, second, third].map((bytes) => digestOf(bytes ?? new Uint8Array()));
     const present = () => [one, two, three].map((digest) => artifacts.objects.has(`code/${digest}.mjs`));
@@ -80,6 +91,7 @@ describe('a push', () => {
     const pushed = present();
 
     await registry.unpin('job-1');
+    await due();
 
     expect({ running, pushed, ended: present() }).toEqual({ running: [true, true, true], pushed: [true, false, true], ended: [false, false, true] });
   });
@@ -87,7 +99,7 @@ describe('a push', () => {
   test('keeps the bundle of a job an earlier Worker made, which holds no pin, until that job ends', async () => {
     const [first, second] = ['first', 'second'].map((text) => new TextEncoder().encode(`export const v = '${text}';\n`));
     const [one = '', two = ''] = [first, second].map((bytes) => digestOf(bytes ?? new Uint8Array()));
-    const { artifacts, ask, registry } = deployment([], { 'job-old': one });
+    const { artifacts, ask, due, registry } = deployment([], { 'job-old': one });
     const present = () => artifacts.objects.has(`code/${one}.mjs`);
 
     await ask(`/bundles/${one}`, 'PUT', first);
@@ -97,6 +109,7 @@ describe('a push', () => {
     const running = present();
 
     await registry.unpin('job-old');
+    await due();
 
     expect({ running, ended: present() }).toEqual({ running: true, ended: false });
   });
