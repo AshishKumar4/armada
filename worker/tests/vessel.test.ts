@@ -173,18 +173,23 @@ describe('a finished task', () => {
 });
 
 describe('a vessel restarted while it finishes a task', () => {
-  test('takes the finish up where it was, and its job is told the task\'s outcome once', async () => {
+  /** A vessel whose one task exits 0, restarted while its job is told the outcome, which the first telling never
+   *  answers; when `stops`, the platform stops its container at that moment. What its job accepted and was told. */
+  async function restartedMidFinish(stops: boolean) {
     const completed: Outcome[] = [];
     const accepted: number[] = [];
     const reached = Promise.withResolvers<void>();
     const claims: Claim[] = [{ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }];
-    let first = true;
+    let stopped = false;
+    let told = false;
 
-    const stored = state(container((argv) => {
+    const box = container((argv) => {
+      if (stopped) return new Error('exec() cannot be called on a container that is not running.');
+
       if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
 
       return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
-    }));
+    });
 
     const job = {
       booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
@@ -194,10 +199,10 @@ describe('a vessel restarted while it finishes a task', () => {
 
         return true;
       },
-      // The object restarts while its job is told: the call never answers.
       complete: async (_name: string, outcome: Outcome) => {
-        if (first) {
-          first = false;
+        if (!told) {
+          told = true;
+          stopped = stops;
           reached.resolve();
 
           return await new Promise<never>(() => undefined);
@@ -207,6 +212,7 @@ describe('a vessel restarted while it finishes a task', () => {
       },
     };
 
+    const stored = state(Object.defineProperty(box, 'running', { get: () => !stopped }));
     const env = world({ JOB: namespace(() => job), ARTIFACTS: bucket() });
     const before = new ArmadaVessel(stored.ctx, env);
 
@@ -217,7 +223,11 @@ describe('a vessel restarted while it finishes a task', () => {
 
     for (let alarm = 0; alarm < 3; alarm += 1) await after.alarm();
 
-    expect({ accepted, completed: completed.map((outcome) => [outcome.index, outcome.exitCode]) }).toEqual({ accepted: [0], completed: [[0, 0]] });
+    return { accepted, completed: completed.map((outcome) => [outcome.index, outcome.exitCode]) };
+  }
+
+  test('takes the finish up where it was, its container running or stopped by the platform meanwhile, and its job is told the task\'s outcome once', async () => {
+    expect(await Promise.all([false, true].map(restartedMidFinish))).toEqual([false, true].map(() => ({ accepted: [0], completed: [[0, 0]] })));
   });
 });
 

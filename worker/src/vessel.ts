@@ -603,10 +603,12 @@ export class ArmadaVessel extends DurableObject<Env> {
     };
   }
 
-  /** A slot's task cleared (`clearTask`) once its answer is read, before its job counts the slot free. */
+  /** A slot's task cleared (`clearTask`) once its answer is read, before its job counts the slot free. A container that
+   *  stopped holds nothing to clear: a finish taken up after the platform stopped it completes all the same. */
   private async clear(spec: SlotSpec, slot: number): Promise<void> {
     const { group, isolated } = layoutOf(spec, slot);
 
+    if (this.ctx.container?.running !== true) return;
     await must(this.container(), 'clearing the task', ['/bin/sh', '-c', clearTask(group, isolated ? slotRoot(slot) : TASK), 'clear'], { ms: EXEC_MS });
   }
 

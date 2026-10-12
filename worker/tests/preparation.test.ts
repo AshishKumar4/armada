@@ -84,10 +84,9 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
 }
 
 describe('a preparation\'s container', () => {
-  /** A preparer of `recipe` whose phases all exit 0 at once, under a fleet of 4 vCPUs, its container's every exec told
-   *  to `started`, and one that will not stop once it is snapshotted when `stops` is false. */
-  function preparing(stops: boolean) {
-    const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }));
+  /** A preparer of `recipe` whose phases all exit 0 at once, under `fleet`, its container's every exec told to
+   *  `started`, and one that will not stop once it is snapshotted when `stops` is false. */
+  function preparing(stops: boolean, fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }))) {
     const machine = answering('setup', 0);
     const started: string[] = [];
     const generations: Generation[] = [];
@@ -140,13 +139,18 @@ describe('a preparation\'s container', () => {
     expect({ waiting, prepared: generations.length, held: await fleet.used() }).toEqual({ waiting: { started: 0, retry: true }, prepared: 1, held: 0 });
   });
 
-  test('holds its vCPUs past its end while it will not stop, as a vessel\'s does', async () => {
+  test('holds its vCPUs past its end while it will not stop, as a vessel\'s does, apart from the next attempt at its environment', async () => {
     const { fleet, generations, preparer, run } = preparing(false);
 
     await preparer.begin('k'.repeat(64), Date.now(), { recipe, sha: null });
     await run();
+    // The next attempt at the same environment finds the fleet full of the one that will not stop.
+    const next = preparing(true, fleet);
 
-    expect({ prepared: generations.length, held: await fleet.used() }).toEqual({ prepared: 1, held: 4 });
+    await next.preparer.begin('k'.repeat(64), Date.now() + 1, { recipe, sha: null });
+    await next.preparer.alarm();
+
+    expect({ prepared: generations.length, held: await fleet.used(), next: next.started.length }).toEqual({ prepared: 1, held: 4, next: 0 });
   });
 });
 

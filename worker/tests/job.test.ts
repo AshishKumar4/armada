@@ -446,7 +446,8 @@ describe('a run landing whose vessel restarted', () => {
     await open.complete('v1', { ...exited(0, 'v1'), attempt }, 1000);
     await open.complete('v1', { ...exited(0, 'v1'), attempt }, 1000);
 
-    expect({ asked, events: (await open.events(0)).events.length }).toEqual({ asked: [true, true], events: 1 });
+    expect({ asked, events: (await open.events(0)).events.length, tasks: (await open.status())?.vessels.find((vessel) => vessel.name === 'v1')?.tasks })
+      .toEqual({ asked: [true, true], events: 1, tasks: 1 });
   });
 });
 

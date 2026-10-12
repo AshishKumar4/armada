@@ -180,6 +180,8 @@ export class ArmadaJob extends DurableObject<Env> {
       attempts INTEGER NOT NULL DEFAULT 0, infra INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0, not_before INTEGER NOT NULL DEFAULT 0,
       vessel TEXT, started INTEGER, dup TEXT)`);
     this.sql.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT NOT NULL, at INTEGER)');
+    // Each run whose answer a vessel gave, by its task, attempt, vessel and slot: counted on its vessel once.
+    this.sql.exec('CREATE TABLE IF NOT EXISTS answered (run TEXT PRIMARY KEY)');
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vessels (name TEXT PRIMARY KEY, state TEXT NOT NULL, tasks INTEGER NOT NULL DEFAULT 0,
       boot_ms INTEGER, busy_ms INTEGER NOT NULL DEFAULT 0, error TEXT, beat INTEGER NOT NULL)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS members (idx INTEGER NOT NULL, rank INTEGER NOT NULL, vessel TEXT NOT NULL, state TEXT NOT NULL,
@@ -925,7 +927,10 @@ export class ArmadaJob extends DurableObject<Env> {
       await this.land(kept, member === undefined ? 'landing' : 'running');
     }
 
-    this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
+    // A run counts once on its vessel, however often its vessel, restarted mid-finish, says how it ended.
+    const counted = this.sql.exec('INSERT OR IGNORE INTO answered (run) VALUES (?) RETURNING run', `${String(outcome.index)}/${String(outcome.attempt)}/${name}/${String(outcome.slot ?? 0)}`).toArray().length > 0;
+
+    if (counted) this.sql.exec('UPDATE vessels SET tasks = tasks + 1, busy_ms = busy_ms + ?, beat = ? WHERE name = ?', busyMs, Date.now(), name);
     await this.settle();
   }
 
