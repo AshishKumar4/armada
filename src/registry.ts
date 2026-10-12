@@ -42,25 +42,25 @@ export type Deletion = { readonly kind: 'deleted' | 'absent' } | { readonly kind
 
 const CATALOG = 'https://registry.cloudflare.com/v2/_catalog?tags=true';
 
-/** A bound on the catalog's pages, past any account's: 100,000 names. */
-const CATALOG_PAGES = 100;
-
-/** The repository whose catalog entry lists `name`, a tag or a digest. The registry's link names the next page's cursor
- *  as `last`, without the angle brackets RFC 8288 gives a link. */
+/** The repository whose catalog entry lists `name`, a tag or a digest, read page by page to the catalog's end. The
+ *  registry's link names the next page's cursor as `last`, without the angle brackets RFC 8288 gives a link; a cursor
+ *  named again would page in a cycle, and is refused. */
 async function repositoryOf(authorization: string, name: string): Promise<string | undefined> {
+  const seen = new Set<string>();
   let cursor: string | undefined;
 
-  for (let page = 0; page < CATALOG_PAGES; page += 1) {
+  for (;;) {
     const listed = await fetch(cursor === undefined ? CATALOG : `${CATALOG}&last=${cursor}`, { headers: { authorization } });
     const catalog = v.parse(Catalog, await listed.json());
     const found = Object.entries(catalog.repositories).find(([, names]) => names?.includes(name) === true)?.[0];
     const next = /[?&]last=([^&;>\s]+)/u.exec(listed.headers.get('link') ?? '')?.[1];
 
-    if (found !== undefined || next === undefined || next === cursor) return found;
+    if (found !== undefined || next === undefined) return found;
+
+    if (seen.has(next)) throw new Error(`the registry's catalog pages in a cycle at ${next}`);
+    seen.add(next);
     cursor = next;
   }
-
-  throw new Error(`the registry's catalog ran past ${String(CATALOG_PAGES)} pages`);
 }
 
 /** Deletes the snapshot `ref` with the registry `credentials` (`user:password`): a snapshot id, or the digest an earlier

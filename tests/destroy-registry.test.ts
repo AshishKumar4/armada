@@ -98,3 +98,27 @@ describe('exact registry references journalled by destroy', () => {
     expect(journal).toEqual([]);
   });
 });
+
+describe('the registry\'s catalog', () => {
+  /** A catalog of `pages` pages, one name each, the last naming the digest; each page's link names the next, or
+   *  `cycle`'s page once the last is reached. */
+  const paged = (pages: number, cycle?: number) => fakeFetch((request) => {
+    const url = new URL(request.url);
+
+    if (url.pathname !== '/v2/_catalog') return new Response(null, { status: 404 });
+    const page = Number(url.searchParams.get('last') ?? '-1') + 1;
+    const next = page + 1 < pages ? page : cycle;
+    const headers = next === undefined ? undefined : { link: `</v2/_catalog?n=1&last=${String(next)}&tags=true>; rel="next"` };
+
+    return Response.json({ repositories: { 'account/snapshots': [page + 1 === pages && cycle === undefined ? digest : `name-${String(page)}`] } }, { headers });
+  });
+
+  test('is read to its end, however many pages, and a cursor named again is refused rather than paged forever', async () => {
+    globalThis.fetch = paged(150);
+    const found = await deleteSnapshotWith('user:fake', digest, async () => undefined);
+
+    globalThis.fetch = paged(3, 0);
+
+    expect({ found, cycle: await settled(deleteSnapshotWith('user:fake', digest, async () => undefined)) }).toEqual({ found: { kind: 'deleted' }, cycle: expect.stringContaining('cycle') });
+  });
+});
