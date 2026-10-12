@@ -40,6 +40,9 @@ export interface Reading {
   readonly items: Readonly<Record<string, ItemUsage>>;
 }
 
+/** The most parameters one statement of a Durable Object's SQL binds. */
+const MAX_BINDINGS = 100;
+
 /** The samples a class's estimate is of, its newest: enough for its quantiles, few enough to read whole at each
  *  answer. */
 const SAMPLES = 200;
@@ -107,12 +110,18 @@ export class ArmadaEstimates extends DurableObject<Env> {
 
   /** The class's estimate, and the records of `items` it holds. */
   async read(items: readonly string[]): Promise<Reading> {
-    // The keys as one JSON parameter, however many: a statement binds at most 100.
-    const held = this.sql.exec<{ key: string; cores: number; memory: number; disk: number; alone: number }>(
-      'SELECT key, cores, memory, disk, alone FROM items WHERE key IN (SELECT value FROM json_each(?))', JSON.stringify(items),
-    ).toArray().map((row): [string, ItemUsage] => [row.key, { cores: row.cores, memory: row.memory, disk: row.disk, alone: row.alone === 1 }]);
+    const held: Record<string, ItemUsage> = {};
 
-    return { estimate: this.estimate(), items: Object.fromEntries(held) };
+    // The platform's bound on one statement's parameters.
+    for (let at = 0; at < items.length; at += MAX_BINDINGS) {
+      const chunk = items.slice(at, at + MAX_BINDINGS);
+
+      for (const row of this.sql.exec<{ key: string; cores: number; memory: number; disk: number; alone: number }>(
+        `SELECT key, cores, memory, disk, alone FROM items WHERE key IN (${chunk.map(() => '?').join(', ')})`, ...chunk,
+      ).toArray()) held[row.key] = { cores: row.cores, memory: row.memory, disk: row.disk, alone: row.alone === 1 };
+    }
+
+    return { estimate: this.estimate(), items: held };
   }
 
   /** What runs of the class used, and the items found to run alone; then the class's estimate. A run already recorded is

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { ArmadaEstimates, MIN_SAMPLES } from '../src/estimates';
+import { ArmadaEstimates, itemKey, MIN_SAMPLES } from '../src/estimates';
 import { state, world } from './harness';
 
 const GIB = 2 ** 30;
@@ -41,12 +41,12 @@ describe('a class\'s estimates', () => {
 
     expect((await store.read(['a', 'b', 'unknown'])).items).toEqual({ a: { cores: 2, memory: 2 * GIB, disk: 300, alone: false }, b: { cores: 0.5, memory: GIB, disk: 50, alone: true } });
   });
-  test('reads every item it is asked for, however many, as the platform binds a statement\'s parameters', async () => {
+  test('reads every item it is asked for, however many, as the platform bounds a statement', async () => {
     const store = new ArmadaEstimates(state().ctx, world({}));
-    const runs = Array.from({ length: 250 }, (_, at) => ({ run: `j/${String(at)}/1/v1`, item: `i${String(at)}`, cores: 1, memory: GIB, disk: 1 }));
+    const keys = await Promise.all(Array.from({ length: 40_000 }, async (_, at) => await itemKey({ item: at, argv: ['work'] })));
 
-    await store.record(runs);
+    await store.record(keys.slice(0, 250).map((item, at) => ({ run: `j/${String(at)}/1/v1`, item, cores: 1, memory: GIB, disk: 1 })));
 
-    expect(Object.keys((await store.read(runs.map((run) => run.item))).items).length).toBe(250);
+    expect(Object.keys((await store.read(keys)).items).length).toBe(250);
   });
 });

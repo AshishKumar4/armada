@@ -86,8 +86,10 @@ export function state(held?: Container): Stored {
     deleteAlarm: async () => { alarm = null; },
     sql: {
       exec: (query: string, ...bindings: SQLQueryBindings[]) => {
-        // The platform's own bound: a statement binds at most 100 parameters.
+        // The platform's own bounds: a statement binds at most 100 parameters, and a string is at most 2 MB.
         if (bindings.length > 100) throw new Error(`too many SQL variables: ${String(bindings.length)}`);
+
+        if (bindings.some((each) => v.is(v.pipe(v.string(), v.minLength(2_000_001)), each))) throw new Error('string or blob too big');
         const rows = db.query(query).all(...bindings);
 
         return {
