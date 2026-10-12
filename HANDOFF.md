@@ -49,14 +49,29 @@
 - Connection files live in `~/.config/armada/<name>.json`.
 
 ## Deployments (account f44999d1ddda7012e9a87729eba250f1)
-- `armada-v2` is Kinu's production CI. `armada-dew2` is Dew's, and `nimbus-armada-v2` is Nimbus's.
+- `armada-v2` is Kinu's production CI. `armada-dew3` is Dew's, and `nimbus-armada-v2` is Nimbus's.
   - Don't deploy to them, roll them back, prune them or change their secrets. Each owner redeploys from `main`.
   - A same-wire deploy takes over running jobs, so a redeploy needs the owner's go-ahead.
 - `connection.json`, `armada-kinu.json`, `armada-kinu-v1.json` and `armada-dew.json` belong to deployments that are
-  gone. Leave them alone; an agent may still read one.
-- The account's snapshots are limited, and a full account refuses every new environment: "snapshot resource limits
-  were exceeded". On 2026-10-10 it held 66 GiB: the three deployments' 45 GiB, and 21.5 GiB that no armada
-  deployment records. The account's other container apps (Kinu's devboxes, Dew's live preview) make snapshots too.
+  gone. Leave them alone; an agent may still read one. Dew's `armada-dew2.destroy.json` is its own unfinished destroy.
+
+## Account limits (measured 2026-10-12)
+- Every container app in the account shares 1,500 concurrent vCPUs, 6 TiB of memory and 30 TB of disk
+  (`GET /accounts/<id>/containers/me`). A start past them fails: "Account resource limit exceeded".
+- A deployment's fleet cap (`--vcpus`, default 1,500) counts only its own containers. On 2026-10-12, `armada-dew3`
+  (cap 5,000) ran 375 `medium` containers, all 1,500 vCPUs, and `armada-v2`'s starts failed with that error.
+  Caps that sum past 1,500 let one deployment starve the others.
+- The snapshot limit is not documented. New snapshots were refused at 66 GiB on 2026-10-10 and at about 70 GiB on
+  2026-10-12. After the cleanup below, the account held 60.8 GiB: `armada-v2` 19.2, `nimbus-armada-v2` 16.3,
+  `armada-dew3` 16.2, Dew's live preview 8.6, Kinu's devbox staging 0.6.
+- No container app uses an image from the account's registry: all 11 start from Cloudflare's `node-24-trixie`.
+  Cloudflare keeps a `btrfs-chain` artifact of each image, and the registry refuses to delete one (409
+  `SINGLETON_ARTIFACT_EXISTS`), even with its image gone. 32 of them (39.9 GiB) remain. Whether images count
+  against the snapshot limit is not known.
+- The 2026-10-12 cleanup deleted:
+  - Dew's live preview's 4 untagged snapshot manifests (12.3 GiB). Its own snapshot replacement left them.
+  - Every image in the 68 image repositories (344 manifests).
+  - The R2 buckets of the gone test deployments `armada-ui`, `armada-pr` and `armada-ci`.
 - Deleting a snapshot's registry manifest does not stop containers starting from it: on 2026-10-10, 83 containers
   started from one deleted minutes before. Whether such a delete frees the account's quota is not known.
 
