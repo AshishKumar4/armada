@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { RecipeSchema, sha256 } from '../../src/protocol';
+import { PACKER, RecipeSchema, sha256 } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
 import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
 import worker from '../src/worker';
@@ -543,14 +543,15 @@ describe('a pack base (#34)', () => {
 
     await stored.ctx.storage.put('env:shallow', at('shallow', 'a'.repeat(40), true));
     await stored.ctx.storage.put('env:full', at('full', 'b'.repeat(40), false));
-    // As an earlier Worker recorded it, with no word of its history: the root's pack it came from was whole.
+    // As an earlier Worker recorded it, with no word of its history. Only an earlier client's recipe keys it, which has
+    // no packer (`RecipeSchema`), and that client's packs are whole, as they always were taken to be.
     const { shallow: _unrecorded, ...earlier } = { ...generation('earlier'), sha: 'c'.repeat(40) };
 
     await stored.ctx.storage.put('env:earlier', { state: 'ready', generation: earlier, lastUsed: 0 });
     // One being prepared from a depth-1 clone's pack.
     const recipe = v.parse(RecipeSchema, { repo: { project: 'p', checkout: '/home/ci/work', history: 'full', manifest: [] } });
 
-    await environments.ensure('preparing', recipe, { sha: 'd'.repeat(40), base: 'root', packer: 2, shallow: ['e'.repeat(40)] });
+    await environments.ensure('preparing', recipe, { sha: 'd'.repeat(40), base: 'root', packer: PACKER, shallow: ['e'.repeat(40)] });
     const bases = await Promise.all((['shallow', 'full', 'earlier', 'preparing'] as const).flatMap((key) => (['full', 'commit'] as const).map(async (history) => await environments.base(key, history))));
 
     expect(bases).toEqual(['root', 'a'.repeat(40), 'b'.repeat(40), 'b'.repeat(40), 'c'.repeat(40), 'c'.repeat(40), 'root', 'd'.repeat(40)]);

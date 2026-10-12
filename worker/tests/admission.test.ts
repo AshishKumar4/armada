@@ -59,11 +59,11 @@ describe('a client and a Worker', () => {
       return [answer.status, v.parse(v.object({ error: v.optional(v.string()) }), await answer.json()).error];
     };
 
-    expect({ older: await asked('2'), served: await asked('3'), newer: await asked('9'), same: (await armada.health()).protocol }).toEqual({
+    expect({ older: await asked('2'), served: await asked('3'), newer: await asked(String(PROTOCOL + 1)), same: (await armada.health()).protocol }).toEqual({
       older: [426, 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin'],
       served: [404, 'no such job'],
       newer: [426, 'the deployed Worker is older than this armada client: run `armada deploy` to update it'],
-      same: 8,
+      same: PROTOCOL,
     });
   });
 });
@@ -165,7 +165,7 @@ describe('a drained version', () => {
 
   test('is drained, and read, by a client of any version, which a deploy across a version bump needs', async () => {
     const { env } = deployment();
-    const asked = async (path: string, method: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '9' } }), env)).status;
+    const asked = async (path: string, method: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL + 1) } }), env)).status;
 
     expect([await asked('/drain', 'POST'), await asked('/health', 'GET'), await asked('/drain', 'DELETE'), await asked('/jobs', 'POST')]).toEqual([200, 200, 200, 426]);
   });
@@ -190,7 +190,7 @@ describe('a drained version', () => {
       const old = new Armada({ url: server.url.href, token: TOKEN, account: 'a' });
 
       expect({ jobs: await old.drain(), after: (await old.health()).jobs, admitted: await old.admit(), asked })
-        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: ['POST /drain 8', 'POST /drain 7', 'POST /drain 6', 'POST /drain 5', 'POST /drain 4', 'POST /drain 3', 'POST /drain 2', 'GET /health 2', 'DELETE /drain 2'] });
+        .toEqual({ jobs: 1, after: 0, admitted: undefined, asked: [...Array.from({ length: PROTOCOL - 1 }, (_, at) => `POST /drain ${String(PROTOCOL - at)}`), 'GET /health 2', 'DELETE /drain 2'] });
     } finally {
       await server.stop(true);
     }

@@ -95,6 +95,8 @@ export interface Graded {
   /** Every answer's rows, in order, one for one. */
   readonly rows: readonly VerdictRow[];
   readonly reds: readonly VerdictRow[];
+  /** Each file's seconds in the run (`fileTimings`). */
+  readonly files: Readonly<Record<string, number>>;
 }
 
 /** How a run ended: not graded when anything was short, else failed when a row is red, else passed. */
@@ -111,17 +113,18 @@ const UNGRADED_EXIT = 2;
 type Flag = (problem: string, row?: VerdictRow) => void;
 
 /** Each file's seconds in a run: the sum of the timings its rows report for it, so a file a plan splits over several
- *  rows is timed whole. A file a red row reports, or a row whose proof was reused, is left out: its other rows hold only
- *  part of its time. */
-export function fileTimings(rows: readonly VerdictRow[]): Record<string, number> {
+ *  rows is timed whole. A file of a red row, or of a row whose proof was reused, is left out, whether the row timed it
+ *  or only its plan entry declared it: its other rows hold only part of its time. */
+function fileTimings(rows: readonly { readonly row: VerdictRow; readonly declared: readonly string[] }[]): Record<string, number> {
   const files: Record<string, number> = {};
   const partial = new Set<string>();
 
-  for (const row of rows) {
-    for (const [file, seconds] of Object.entries(row.timings ?? {})) {
-      if (row.exitCode !== 0 || row.cached !== undefined) partial.add(file);
-      files[file] = (files[file] ?? 0) + seconds;
-    }
+  for (const { row, declared } of rows) {
+    const timed = Object.entries(row.timings ?? {});
+
+    if (row.exitCode !== 0 || row.cached !== undefined) for (const file of [...declared, ...timed.map(([each]) => each)]) partial.add(file);
+
+    for (const [file, seconds] of timed) files[file] = (files[file] ?? 0) + seconds;
   }
 
   return Object.fromEntries(Object.entries(files).filter(([file]) => !partial.has(file)));
@@ -132,6 +135,8 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
   const named = new Map<VerdictRow, string>();
   const reported: VerdictRow[] = [];
   const seen = new Map<string, string>();
+  // The files each row's plan entry declares for it.
+  const declared = new Map<VerdictRow, readonly string[]>();
 
   const flag: Flag = (problem, row) => {
     problems.push(problem);
@@ -145,9 +150,13 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       continue;
     }
 
+    const files = new Map((answer.entry.rows ?? []).map((want) => expectedOf(want)).map(({ name, files: each }) => [name, each ?? []]));
+
     for (const row of answer.rows) {
       const name = rowName(row);
       const owner = seen.get(name);
+
+      declared.set(row, files.get(name) ?? []);
 
       if (name === '') flag(`${answer.name} reported a row with no name`, row);
       else if (owner !== undefined) flag(`${name} was reported by both ${owner} and ${answer.name}`, row);
@@ -162,13 +171,15 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
     coverage(answer, flag);
   }
 
-  const rows = reported.map((row) => {
+  const graded = reported.map((row) => {
     const problem = named.get(row);
 
-    return problem === undefined ? row : { ...row, exitCode: row.exitCode === 0 ? UNGRADED_EXIT : row.exitCode, problem };
+    return { row: problem === undefined ? row : { ...row, exitCode: row.exitCode === 0 ? UNGRADED_EXIT : row.exitCode, problem }, declared: declared.get(row) ?? [] };
   });
 
-  return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0) };
+  const rows = graded.map(({ row }) => row);
+
+  return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0), files: fileTimings(graded) };
 }
 
 /** A task whose plan entry names its rows reported exactly those, and each green one exactly its declared files'

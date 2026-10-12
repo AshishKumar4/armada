@@ -1,7 +1,7 @@
 /** The GitHub webhook's checks: its signature gate, the event filter, the two dedupes, and the driver job's spec —
  *  exercised through `webhooked` with the DO's own methods on in-memory storage. */
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import worker from '../src/worker';
@@ -241,43 +241,62 @@ describe('the github webhook', () => {
 });
 
 describe('the driver script', () => {
-  /** The driver against stub tools: curl answers each status post `posted`, git does nothing but leave the commit's
-   *  `bunfig.toml` in the checkout, and `armada run` (bun on the CLI) exits `ran`. The driver's exit, each status it
-   *  posted, and, for each bun it ran but the install, which it was, where it started, the GitHub token it held, and
-   *  whether that directory had the commit's bunfig.toml. */
+  /** The driver against a GitHub of local repositories: armada at its deployed commit, and the commit under test, which
+   *  holds a `bunfig.toml` with a preload. curl answers each status post `posted`, and `armada run` (bun on the CLI)
+   *  exits `ran`. The driver's exit, each status it posted, each commit it fetched and from where, and, for each bun it
+   *  ran but the install, which it was, the GitHub token it held, and how many of the commit's files were on disk. */
   function drive(ran: number, posted: number) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-driver-'));
     const bin = join(scratch, 'bin');
+    const github = join(scratch, 'github');
+    const home = join(scratch, 'home');
     const script = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG)).items[0]?.argv?.[2] ?? '';
+    const gitEnv = { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${github}/.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/' };
+
+    /** A repository of GitHub's, `owner/name.git`, of one commit of `files`: that commit. */
+    const repository = (name: string, files: Readonly<Record<string, string>>): string => {
+      const dir = join(github, name);
+      const git = (...args: string[]) => Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, env: gitEnv }).stdout.toString().trim();
+
+      mkdirSync(dir, { recursive: true });
+      git('init', '-q');
+
+      for (const [file, text] of Object.entries(files)) writeFileSync(join(dir, file), text);
+      git('add', '.');
+      git('commit', '-qm', 'one');
+
+      return git('rev-parse', 'HEAD');
+    };
+
+    const deployed = repository('AshishKumar4/armada.git', { 'package.json': '{}' });
+    const commit = repository('owner/armada.git', { 'bunfig.toml': 'preload = ["./x.ts"]\n', 'x.ts': 'console.log(process.env.ARMADA_TOKEN)\n' });
 
     mkdirSync(bin);
+    mkdirSync(home);
     writeFileSync(join(bin, 'curl'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/posted\nprintf '${String(posted)}'\n`);
-    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/git\n`);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/git\nexec ${Bun.which('git') ?? 'git'} "$@"\n`);
     writeFileSync(join(bin, 'bun'), `#!/bin/sh
 case "$1" in install) exit 0 ;; -e) kind=count ;; *) kind=cli ;; esac
-printf '%s %s %s %s\\n' "$kind" "$(pwd)" "\${GITHUB_TOKEN:-none}" "$([ -f bunfig.toml ] && echo bunfig || echo clean)" >> ${scratch}/bun
+printf '%s %s %s\\n' "$kind" "\${GITHUB_TOKEN:-none}" "$(find "$HOME" -name bunfig.toml -o -name x.ts | wc -l | tr -d ' ')" >> ${scratch}/bun
 case "$1" in -e) echo '6 of 6 rows green'; exit 0 ;; esac
 exit ${String(ran)}
 `);
-    // What a commit under test may hold: a preload bun runs where it starts.
-    mkdirSync(join(scratch, 'repo'));
-    writeFileSync(join(scratch, 'repo', 'bunfig.toml'), 'preload = ["./x.ts"]\n');
 
     for (const tool of ['curl', 'git', 'bun']) chmodSync(join(bin, tool), 0o755);
 
     try {
       const env = {
-        PATH: `${bin}:/usr/bin:/bin`, HOME: scratch, ARMADA_GITHUB_SECRET: 'GITHUB_TOKEN', GITHUB_TOKEN: 'gh', ARMADA_URL: 'https://armada.test', ARMADA_TOKEN: TOKEN,
-        ARMADA_REPO: 'owner/armada', ARMADA_COMMIT: SHA, ARMADA_DEPLOYED: 'b'.repeat(40), TARGET_URL: 'https://armada.test/ui',
+        ...gitEnv, PATH: `${bin}:/usr/bin:/bin`, HOME: home, ARMADA_GITHUB_SECRET: 'GITHUB_TOKEN', GITHUB_TOKEN: 'gh', ARMADA_URL: 'https://armada.test', ARMADA_TOKEN: TOKEN,
+        ARMADA_REPO: 'owner/armada', ARMADA_COMMIT: commit, ARMADA_DEPLOYED: deployed, TARGET_URL: 'https://armada.test/ui',
       };
 
       const exit = Bun.spawnSync(['/bin/sh', '-c', script], { env, stdout: 'pipe', stderr: 'pipe' }).exitCode;
       const states = readFileSync(join(scratch, 'posted'), 'utf8').match(/"state":"\w+"/gu) ?? [];
-      const buns = readFileSync(join(scratch, 'bun'), 'utf8').trim().split('\n').map((line) => line.replaceAll(scratch, '~').split(' '));
+      const buns = readFileSync(join(scratch, 'bun'), 'utf8').trim().split('\n').map((line) => line.split(' '));
       // Each commit it fetched, and from where.
       const fetched = readFileSync(join(scratch, 'git'), 'utf8').split('\n').flatMap((line) => /fetch -q (?:--depth 1 )?(\S+) (\S+)/u.exec(line)?.slice(1) ?? []);
 
-      return { exit, states, buns, fetched, verdict: existsSync(join(scratch, 'repo', 'verdict.json')) ? 'in the checkout' : 'outside it' };
+      return { exit, states, buns, fetched, deployed, commit };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -291,11 +310,12 @@ exit ${String(ran)}
     ]);
   });
 
-  test('fetches armada at the deployed commit and the commit under test, and runs none of its code where its credentials are (#33)', () => {
-    expect(drive(0, 201)).toMatchObject({
-      fetched: ['https://github.com/AshishKumar4/armada.git', 'b'.repeat(40), 'https://github.com/owner/armada.git', SHA],
-      buns: [['cli', '~/run', 'none', 'clean'], ['count', '~/run', 'gh', 'clean']],
-      verdict: 'outside it',
+  test('fetches armada at the deployed commit and the commit under test, and puts none of its files where its credentials are (#33)', () => {
+    const { fetched, buns, deployed, commit } = drive(0, 201);
+
+    expect({ fetched, buns }).toEqual({
+      fetched: ['https://github.com/AshishKumar4/armada.git', deployed, 'https://github.com/owner/armada.git', commit],
+      buns: [['cli', 'none', '0'], ['count', 'gh', '0']],
     });
   });
 });

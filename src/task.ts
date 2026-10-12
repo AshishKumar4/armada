@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -41,7 +41,7 @@ export type Arrived<T> = T extends Uint8Array ? Uint8Array : T;
 /** An environment's recipe: a base image, a root `setup` script, a user `install` script and a size. */
 export type Recipe = RecipeSpec & {
   /** The commit a repository recipe checks out, which `armada run` and `map --commit` set. */
-  readonly commit?: { readonly sha: string; readonly base: string; readonly packer?: number };
+  readonly commit?: v.InferInput<typeof CommitSchema>;
 };
 
 export interface RecipeOptions {

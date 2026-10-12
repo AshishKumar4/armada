@@ -783,17 +783,19 @@ describe('a gang task', () => {
     }
   });
 
-  test('all claims handed out still have a deadline until every actual launch is acknowledged', async () => {
+  test('all claims handed out still have a deadline, the job\'s next alarm once they are, until every actual launch is acknowledged', async () => {
     const began = Date.now();
 
     try {
       setSystemTime(began);
-      const { job: open, stopped } = await job({ ...gang(4), gangStartTimeout: 10 });
+      const { job: open, stopped, stored } = await job({ ...gang(4), gangStartTimeout: 10 });
 
+      setSystemTime(began + 1_000);
       await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
+      expect(await stored.ctx.storage.getAlarm()).toBe(began + 11_000);
 
       for (const name of ['v1', 'v2', 'v3']) expect(await open.started(name, 0, 1)).toBe(true);
-      setSystemTime(began + 10_000);
+      setSystemTime(began + 11_000);
       await open.alarm();
 
       expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { error: 'GangStartDeadlineExceeded', tail: 'gang start deadline exceeded after 10 s: not every rank launched (pending ranks 3)' } }] });
@@ -862,6 +864,30 @@ describe('a gang task', () => {
 
     expect({ early, outcomes, stillRank0: await red.still('v1', 0) })
       .toEqual({ early: 0, outcomes: [['v1', 0, 'v1 said this', true], ['v2', 3, 'rank 1 of 2:\nv2 said this', false]], stillRank0: false });
+  });
+
+  test('is lost when fewer vessels are left than its ranks and no replacement may start, while the rest of the job runs on', async () => {
+    const plain = ['a', 'b', 'c', 'd'].map((name) => ({ item: { name, weight: 1 }, argv: ['true'] }));
+    const { job: lossy } = await job({ recipe: {}, items: [...plain, { item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+    const alive = ['v1', 'v2'];
+
+    // Eight vessels lost under tasks spend the job's replacements.
+    for (let lost = 1; lost <= 8; lost += 1) {
+      const vessel = alive.shift() ?? '';
+
+      await lossy.claim(vessel);
+      await lossy.vesselFailed(vessel, 'container lost', { gone: true });
+      alive.push(`r${String(lost)}`);
+    }
+
+    await finish(lossy, 'r7');
+    await finish(lossy, 'r7');
+    await formed(lossy, ['r7', 'r8']);
+    await lossy.vesselFailed('r8', 'container lost', { gone: true });
+    const { events, done } = await lossy.events(0);
+
+    expect({ done, events: events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.reason ?? null]) })
+      .toEqual({ done: true, events: [[0, 'failed', 'lost'], [1, 'failed', 'lost'], [2, 'exited', null], [3, 'exited', null], [4, 'failed', 'lost']] });
   });
 
   test('is lost whole with any rank: the others stop, and it forms again from the vessels left and a replacement', async () => {

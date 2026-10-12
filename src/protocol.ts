@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 8;
+export const PROTOCOL = 9;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -61,6 +61,15 @@ export const BaseSchema = v.pipe(
 
 export const DEFAULT_BASE = 'cloudflare/debian-trixie';
 
+/** The packer this client is. A pack is stored under the packer that made it, so one an earlier client made is never
+ *  served for this client's, and an earlier client's packs keep their own key: packer 2's `commit` checkout packs could
+ *  lack objects, and only packer 3 sends a pack's shallow boundary (#34). It keys the environments a client's packs
+ *  prepare (`RecipeSchema`). */
+export const PACKER = 3;
+
+/** A pack's packer: absent for a pack an earlier client made. */
+export const Packer = v.optional(v.pipe(v.number(), v.integer(), v.minValue(2)));
+
 /**
  * What every container of a job starts from: a base image started by name, the runner's layer, then the recipe's
  * own `setup` (as root) and `install` (as the user, in the work directory, after any checkout), snapshotted once.
@@ -78,6 +87,9 @@ export const RecipeSchema = v.object({
     /** `full` carries the commit's whole history; `commit` only its tree. */
     history: v.picklist(['full', 'commit']),
     manifest: ManifestSchema,
+    /** The packer of the packs that prepare the environment and build on it, absent for an earlier client's. It is in
+     *  the key, so a pack that sends its boundary never builds on an environment whose own boundary is not known (#34). */
+    packer: Packer,
   })),
 });
 
@@ -85,14 +97,6 @@ export type Recipe = v.InferOutput<typeof RecipeSchema>;
 
 /** What a job's pack holds: `root`, the commit with its history, or what it adds to the environment's commit. */
 export const PackBase = v.union([v.literal('root'), Sha]);
-
-/** The packer this client is. A pack is stored under the packer that made it, so one an earlier client made (whose
- *  `commit` checkout packs could lack objects) is never served for this client's, and an earlier client's packs keep
- *  their own key. */
-export const PACKER = 2;
-
-/** A pack's packer: absent for a pack an earlier client made. */
-export const Packer = v.optional(v.pipe(v.number(), v.integer(), v.minValue(2)));
 
 /** Where a task's container keeps what armada gives it: the job's files, the pushed tasks' bundle, the file a task
  *  writes its output to, and the file the runner says there which kind of answer that is. */

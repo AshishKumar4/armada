@@ -6,8 +6,8 @@ import * as v from 'valibot';
 import { extractTar, lanesFor, poolFor, remainingDeadline } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
-import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, JsonSchema, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
+import { environmentKey, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
@@ -32,7 +32,7 @@ describe('a task\'s command', () => {
 });
 
 describe('an environment', () => {
-  test('is keyed by the recipe\'s own text and the driver, so a fixed script is a new environment', async () => {
+  test('is keyed by the recipe\'s own text, the driver and its packs\' packer, so a fixed script is a new environment', async () => {
     const recipe: Recipe = { base: 'cloudflare/debian-trixie', setup: 'apt-get install -y git', install: '', size: 'medium' };
     const repo = { project: 'app', checkout: '/home/ci/work/app/app', history: 'full' as const, manifest: [{ path: 'bun.lock', id: 'a'.repeat(40) }, { path: 'package.json', id: 'b'.repeat(40) }] };
     const key = await environmentKey(recipe);
@@ -43,10 +43,13 @@ describe('an environment', () => {
       repo: await environmentKey({ ...recipe, repo }),
       reordered: await environmentKey({ ...recipe, repo: { ...repo, manifest: [...repo.manifest].reverse() } }),
       relocked: await environmentKey({ ...recipe, repo: { ...repo, manifest: [{ path: 'bun.lock', id: 'd'.repeat(40) }, ...repo.manifest.slice(1)] } }),
+      // A client that sends its packs' boundary never shares an environment an earlier client prepared (#34), as the
+      // Worker keys the recipe it parsed.
+      packed: await environmentKey(v.parse(RecipeSchema, { ...recipe, repo: { ...repo, packer: PACKER } })),
     };
 
-    expect({ fixed: keys.fixed === key, rebased: keys.rebased === key, repo: keys.repo === key, reordered: keys.reordered === keys.repo, relocked: keys.relocked === keys.repo })
-      .toEqual({ fixed: false, rebased: false, repo: false, reordered: true, relocked: false });
+    expect({ fixed: keys.fixed === key, rebased: keys.rebased === key, repo: keys.repo === key, reordered: keys.reordered === keys.repo, relocked: keys.relocked === keys.repo, packed: keys.packed === keys.repo })
+      .toEqual({ fixed: false, rebased: false, repo: false, reordered: true, relocked: false, packed: false });
   });
 
   test('a row\'s estimate is the median of its last five green runs: one slow run moves nothing, and old ones age out', () => {
@@ -140,13 +143,17 @@ describe('grading a CI run', () => {
     expect({ problems: graded.problems, rows: graded.rows.length, reds: graded.reds.map((each) => each.name) }).toEqual({ problems: [], rows: 3, reds: ['two'] });
   });
 
-  test('a file is timed at what all its rows report for it, and not at all where a row of it was red or reused', () => {
-    const rows = [
-      row('a#1/2', 0, { 'a.test.ts': 2 }), row('a#2/2', 0, { 'a.test.ts': 3 }), row('b', 0, { 'b.test.ts': 4, 'c.test.ts': 1 }),
-      row('c', 1, { 'c.test.ts': 5 }), { ...row('d', 0, { 'd.test.ts': 6 }), cached: 'abc123' }, row('e'),
-    ];
+  test('a file is timed at what all its rows report for it, and not at all where a row of it, by its timings or its plan entry, was red or reused', () => {
+    const split = (file: string) => ({ rows: [1, 2].map((part) => ({ name: `${file}#${String(part)}/2`, files: [file] })) });
 
-    expect(fileTimings(rows)).toEqual({ 'a.test.ts': 5, 'b.test.ts': 4 });
+    const graded = grade([
+      { name: 'a', entry: split('a.test.ts'), rows: [row('a.test.ts#1/2', 0, { 'a.test.ts': 2 }), row('a.test.ts#2/2', 0, { 'a.test.ts': 3 })], artifacts: null },
+      { name: 'b', entry: {}, rows: [row('b', 0, { 'b.test.ts': 4, 'c.test.ts': 1 }), row('c', 1, { 'c.test.ts': 5 }), { ...row('d', 0, { 'd.test.ts': 6 }), cached: 'abc123' }, row('e')], artifacts: null },
+      // A row cut off before its verdict timed nothing, and its file's other row holds only part of the file (#36).
+      { name: 'f', entry: split('f.test.ts'), rows: [row('f.test.ts#1/2', 0, { 'f.test.ts': 2 }), row('f.test.ts#2/2', 124)], artifacts: null },
+    ]);
+
+    expect({ problems: graded.problems, files: graded.files }).toEqual({ problems: [], files: { 'a.test.ts': 5, 'b.test.ts': 4 } });
   });
 
   test('a task that exits nonzero fails every row it reported green; one it reported red keeps its own exit', () => {
@@ -257,14 +264,14 @@ describe('a deploy', () => {
 
   test('drains only what this Worker could not take over: forced, unanswering, newer, below the floor, other driver', () => {
     expect([
-      mustDrain(health(7, 3), true),
+      mustDrain(health(PROTOCOL, 3), true),
       mustDrain(null, false),
-      mustDrain(health(9, 3), false),
-      mustDrain(health(6, 2), false),
-      mustDrain(health(6), false),
-      mustDrain(health(7), false),
-      mustDrain(health(7, 3), false),
-      mustDrain(health(6, 3, 1), false),
+      mustDrain(health(PROTOCOL + 1, 3), false),
+      mustDrain(health(PROTOCOL - 1, 2), false),
+      mustDrain(health(PROTOCOL - 1), false),
+      mustDrain(health(PROTOCOL), false),
+      mustDrain(health(PROTOCOL, 3), false),
+      mustDrain(health(PROTOCOL - 1, 3, 1), false),
     ]).toEqual([true, true, true, true, false, false, false, true]);
   });
 });
@@ -368,11 +375,11 @@ describe('uploading a pack', () => {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
       expect(await armada.uploadPack('app', { sha: 'a'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
-      expect(seen.splice(0)).toEqual(['HEAD root?packer=2', 'PUT root?packer=2']);
+      expect(seen.splice(0)).toEqual([`HEAD root?packer=${String(PACKER)}`, `PUT root?packer=${String(PACKER)}`]);
       expect(await armada.uploadPack('app', { sha: 'b'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
       expect(seen).toEqual([
-        'HEAD root?packer=2', 'POST root?packer=2&uploads', 'PUT root?packer=2&upload=u1&part=1', 'PUT root?packer=2&upload=u1&part=2',
-        'PUT root?packer=2&upload=u1&part=3', 'POST root?packer=2&upload=u1',
+        `HEAD root?packer=${String(PACKER)}`, `POST root?packer=${String(PACKER)}&uploads`, `PUT root?packer=${String(PACKER)}&upload=u1&part=1`, `PUT root?packer=${String(PACKER)}&upload=u1&part=2`,
+        `PUT root?packer=${String(PACKER)}&upload=u1&part=3`, `POST root?packer=${String(PACKER)}&upload=u1`,
       ]);
       expect(sent).toEqual([PACK_PART, PACK_PART, 5]);
     } finally {
@@ -408,7 +415,7 @@ describe('uploading a pack', () => {
         failed = errorOf({ cause }).message;
       }
 
-      expect({ failed: failed.includes('the part was cut off'), last: seen.at(-1) }).toEqual({ failed: true, last: 'DELETE ?packer=2&upload=u1' });
+      expect({ failed: failed.includes('the part was cut off'), last: seen.at(-1) }).toEqual({ failed: true, last: `DELETE ?packer=${String(PACKER)}&upload=u1` });
     } finally {
       globalThis.fetch = original;
     }
@@ -779,6 +786,8 @@ interface Runner {
   readonly refuse?: number;
   /** The task job, counted from 1, whose results the runner no longer has. */
   readonly lose?: number;
+  /** Run from a bare clone, with no checkout, as the webhook driver fetches a commit. */
+  readonly bare?: boolean;
 }
 
 describe('armada run', () => {
@@ -889,8 +898,10 @@ describe('armada run', () => {
       git(repo, 'add', '.');
       git(repo, 'commit', '-qm', 'one');
 
+      if (runner.bare === true) git(scratch, 'clone', '-q', '--bare', repo, 'repo.git');
+
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
-        cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: runner.bare === true ? join(scratch, 'repo.git') : repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       const exit = await cli.exited;
@@ -1065,15 +1076,17 @@ describe('armada run', () => {
     expect({ exit: ran.exit, secrets }).toEqual({ exit: 0, secrets: [[], ['CACHE_TOKEN']] });
   });
 
-  test('a local plan runs in the checkout of the commit, with its target and timings filled, no plan job, and no bearer', async () => {
-    const printed = JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] });
-    // The plan checks what it was given: the timings file the runner answered, and the default target; and that the
-    // deployment's bearer the CLI holds is not among it, since a plan is the commit's own code (#33).
-    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && [ -z "\${ARMADA_TOKEN:-}" ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
-    const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planConfig: { command, local: true } });
+  test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job; a bare repository plans in a container (#33)', async () => {
+    const plan = { include: [{ name: 'a', rows: ['x'] }] };
+    // The plan checks what it was given: the timings file the runner answered, and the default target.
+    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${JSON.stringify(plan)}'`, 'plan', '{timings}', '{target}'];
+    const verdict = { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] };
+    const ran = await Promise.all([false, true].map(async (bare) => await run([], plan, verdict, { planConfig: { command, local: true }, bare })));
 
-    expect({ exit: ran.exit, jobs: ran.commands.length, task: ran.commands[0]?.slice(-2), here: ran.stdout.includes('plan run here') })
-      .toEqual({ exit: 0, jobs: 1, task: ['task', '/armada/task/out'], here: true });
+    expect(ran.map(({ exit, commands }) => ({ exit, jobs: commands.length, task: commands.at(-1)?.slice(-2) }))).toEqual([
+      { exit: 0, jobs: 1, task: ['task', '/armada/task/out'] },
+      { exit: 0, jobs: 2, task: ['task', '/armada/task/out'] },
+    ]);
   });
 
   test('a task that exits 0 with a red row among its rows is named RED as it lands, with the row', async () => {
