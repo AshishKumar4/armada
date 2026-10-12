@@ -775,13 +775,15 @@ interface Runner {
   readonly exitOf?: (item: Json) => number;
   /** The task job, counted from 1, whose creation the runner refuses. */
   readonly refuse?: number;
+  /** The task job, counted from 1, whose results the runner no longer has. */
+  readonly lose?: number;
 }
 
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, refuse } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, refuse, lose } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -844,6 +846,8 @@ describe('armada run', () => {
         }
 
         const job = pathname.split('/')[2] ?? '';
+
+        if (lose !== undefined && job === (lose === 1 ? 'tasks' : `tasks-${String(lose)}`) && !pathname.endsWith('/cancel')) return Response.json({ error: 'no such job' }, { status: 404 });
 
         if (pathname.endsWith('/events')) {
           // A task job of artifacts lands each task with its archive.
@@ -944,18 +948,23 @@ describe('armada run', () => {
     const gang = await run([], { include: [{ name: 'a' }, { name: 'g', environment: 'py314', gang: 6 }] }, {}, { ...environments, config: { ...environments.config, pool: 8 }, taskConfig: { verdict: false }, exitOf });
     const three: Json = { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }, { name: 'c', environment: 'py312' }] };
     const crowded = await run([], three, {}, { ...environments, config: { ...environments.config, pool: 2 }, taskConfig: { verdict: false }, exitOf });
-    const report = reportOf(crowded.report);
+    // A gang wider than the pool counts whole toward what the plan needs.
+    const wide = await run([], { include: [{ name: 'a' }, { name: 'g', environment: 'py314', gang: 6 }] }, {}, { ...environments, config: { ...environments.config, pool: 4 }, taskConfig: { verdict: false }, exitOf });
+    const said = [crowded, wide].map((ran) => reportOf(ran.report).problems.find((problem) => problem.includes('containers')) ?? '');
 
-    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool)], crowded: [crowded.exit, taskJobs(crowded.bodies).length, report.graded], said: report.problems.some((problem) => problem.includes('pool of 2')) })
-      .toEqual({ gang: [0, [1, 6]], crowded: [2, 0, 'not graded'], said: true });
+    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool)], refused: [crowded, wide].map((ran) => [ran.exit, taskJobs(ran.bodies).length, reportOf(ran.report).graded]), need: said.map((problem) => /need (\d+) containers/u.exec(problem)?.[1]) })
+      .toEqual({ gang: [0, [1, 6]], refused: [[2, 0, 'not graded'], [2, 0, 'not graded']], need: ['3', '7'] });
   });
 
   test('is not graded, and leaves no task job running, when the plan names an unknown environment or a task job does not start (#31)', async () => {
     const unknown = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py399' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf });
     const refused = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf, refuse: 2 });
+    // The runner loses the second job's results while it is followed.
+    const lost = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf, lose: 2 });
 
     expect([unknown, refused].map((ran) => ({ exit: ran.exit, started: taskJobs(ran.bodies).length, cancelled: ran.cancelled, graded: reportOf(ran.report).graded })))
       .toEqual([{ exit: 2, started: 0, cancelled: [], graded: 'not graded' }, { exit: 2, started: 2, cancelled: ['tasks'], graded: 'not graded' }]);
+    expect({ exit: lost.exit, cancelled: lost.cancelled.toSorted((left, right) => left.localeCompare(right)) }).toEqual({ exit: 2, cancelled: ['tasks', 'tasks-2'] });
     expect(reportOf(unknown.report).problems.some((problem) => problem.includes('py399'))).toBe(true);
   });
 

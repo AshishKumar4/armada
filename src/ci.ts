@@ -147,6 +147,23 @@ interface Followed {
   cancel(): Promise<void>;
 }
 
+/** Cancels each of `jobs` that was created, saying which and why, and saying any a cancel did not reach, whose
+ *  containers then run on to their deadline. */
+async function cancelEach(jobs: readonly Followed[], why: string): Promise<void> {
+  await Promise.all(jobs.map(async (job) => {
+    const [created] = await Promise.allSettled([job.id]);
+
+    if (created.status === 'rejected') return;
+    console.error(`armada: ${why}: cancelling job ${created.value}`);
+
+    try {
+      await job.cancel();
+    } catch (cause) {
+      console.error(`armada: cancelling job ${created.value} failed: ${errorOf({ cause }).message}`);
+    }
+  }));
+}
+
 /** `body`, while it follows `jobs`: interrupting the CLI (Ctrl-C, or a CI job cancelled) cancels every one of them,
  *  rather than leaving their containers to run for an answer nobody reads, and exits 2 once all are cancelled. `jobs`
  *  is read when the interrupt comes, so a body that starts jobs adds each as it starts it, its creation still in
@@ -157,19 +174,7 @@ export async function cancelOnInterrupt<T>(jobs: readonly Followed[], body: () =
   const interruption: Interruption = { cancelling: null };
 
   const cancel = async (signal: NodeJS.Signals): Promise<never> => {
-    await Promise.all(jobs.map(async (job) => {
-      const [created] = await Promise.allSettled([job.id]);
-
-      if (created.status === 'rejected') return;
-      console.error(`armada: ${signal}: cancelling job ${created.value}`);
-
-      try {
-        await job.cancel();
-      } catch (cause) {
-        console.error(`armada: cancelling job ${created.value} failed: ${errorOf({ cause }).message}`);
-      }
-    }));
-
+    await cancelEach(jobs, signal);
     process.exit(2);
   };
 
@@ -371,24 +376,26 @@ export async function onCommit(armada: Armada, target: string): Promise<OnCommit
 /** The containers each of a run's environments' task jobs runs on, all at once within the pool: each on at least its
  *  widest gang (and 1), and the rest of the pool given to them in proportion to their estimated seconds (their tasks'
  *  count where any has no estimate), D'Hondt, up to what each can use. One job gets the pool as `lanesFor` would. When
- *  their least is past the pool, how many containers they need instead. */
+ *  more than one job's widest gangs together pass the pool, how many containers they need instead. */
 export function sharesFor(pool: number, slots: number, groups: readonly { readonly estimates: readonly (number | undefined)[]; readonly ranks: readonly number[] }[]): number[] | { readonly need: number } {
   const known = groups.every(({ estimates }) => estimates.every((estimate) => estimate !== undefined));
 
   const sized = groups.map(({ estimates, ranks }) => {
-    const widest = Math.min(pool, Math.max(1, ...ranks));
+    const widest = Math.max(1, ...ranks);
+    const least = Math.min(pool, widest);
     const total = ranks.reduce((sum, each) => sum + each, 0);
     const weight = known ? estimates.reduce((sum: number, estimate, at) => sum + (estimate ?? 0) * (ranks[at] ?? 1), 0) : total;
 
-    return { least: widest, most: Math.max(widest, Math.ceil(total / slots)), weight };
+    return { widest, least, most: Math.max(least, Math.ceil(total / slots)), weight };
   });
 
-  const need = sized.reduce((sum, job) => sum + job.least, 0);
+  const need = sized.reduce((sum, job) => sum + job.widest, 0);
 
-  if (need > pool) return { need };
+  // One job's gang past the pool is the Worker's to refuse, by name, as in a run of one environment.
+  if (sized.length > 1 && need > pool) return { need };
   const shares = sized.map((job) => job.least);
 
-  for (let left = pool - need; left > 0; left -= 1) {
+  for (let left = pool - shares.reduce((sum, each) => sum + each, 0); left > 0; left -= 1) {
     // The next container goes to the job with the most weight for each container it would then hold.
     const next = sized.reduce((best, job, at) => {
       const held = shares[at] ?? job.least;
@@ -585,9 +592,13 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     const remote = planTask.stream([{}], { ...options, deadline: planDeadline, pool: 1 });
 
     planJob = remote;
-    planId = await remote.id;
-    note(`plan job ${planId}`);
-    const [planned] = await cancelOnInterrupt([remote], async () => await follow(remote, began, { name: () => 'plan', say: exitWord, note }));
+
+    const [planned] = await cancelOnInterrupt([remote], async () => {
+      planId = await remote.id;
+      note(`plan job ${planId}`);
+
+      return await follow(remote, began, { name: () => 'plan', say: exitWord, note });
+    });
 
     if (planned?.kind !== 'ok') return await ungraded(`the plan command did not print a plan\n${planned === undefined ? (await remote.status()).problems.join('\n') : planned.meta.tail}`);
 
@@ -734,7 +745,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
 
     // A job that did not start leaves the run ungraded, and the others, started with it and not yet followed, end.
     if (refused !== undefined) {
-      await Promise.allSettled(started.map(async (job) => { await job.cancel(); }));
+      await cancelEach(started, 'a task job did not start');
 
       return { refused: errorOf({ cause: refused.reason }).message };
     }
@@ -747,7 +758,14 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
       jobs.push({ ...each, id });
     }
 
-    return { landed: (await Promise.all(jobs.map(followed))).flat() };
+    try {
+      return { landed: (await Promise.all(jobs.map(followed))).flat() };
+    } catch (cause) {
+      // A job that could not be followed to its end leaves the run without an answer: none of its jobs runs on for it.
+      await cancelEach(started, 'a task job could not be followed');
+
+      throw cause;
+    }
   });
 
   if ('refused' in tasked) return await ungraded(`a task job did not start, so the run's task jobs were cancelled: ${tasked.refused}`);

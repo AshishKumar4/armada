@@ -174,7 +174,8 @@ async function map(): Promise<number> {
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const options = { armada, pool: whole('pool'), slots: whole('slots'), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
-  const id = await job.id;
+  // An interrupt while the job is made cancels it once it is.
+  const id = await cancelOnInterrupt([job], async () => await job.id);
   let worst = 0;
   const metas: Meta[] = [];
 
