@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -492,7 +492,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
   private async finish(spec: SlotSpec, slot: number, current: Current, { exitCode, reason }: Ending): Promise<void> {
     const container = this.container();
-    const { dir, group } = layoutOf(spec, slot);
+    const { dir, group, isolated } = layoutOf(spec, slot);
     const { index, attempt } = current.claim;
     const rank = current.claim.gang?.rank ?? 0;
     const job = this.env.JOB.getByName(spec.jobId);
@@ -508,7 +508,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
-    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group)]) ?? '');
+    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, isolated ? slotRoot(slot) : undefined)]) ?? '');
 
     await must(container, 'packing the artifacts', ['/bin/sh', '-c', `if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts .; fi`], { ms: EXEC_MS });
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.

@@ -92,6 +92,8 @@ class Meta:
     cpu_seconds: float | None = None
     artifacts: bool = False
     cached: bool = False
+    oom_killed: bool = False
+    disk_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -330,11 +332,13 @@ class Job(Generic[In, Out]):
     def _result(self, index: int, outcome: Mapping[str, Json]) -> Result[In, Out]:
         item = self._item(index)
         peak = maybe_number_of(outcome, "peakMemory")
+        disk = maybe_number_of(outcome, "diskBytes")
         meta = Meta(
             seconds=number_of(outcome, "seconds", 0), attempt=int(number_of(outcome, "attempt", 1)), container=text_of(outcome, "vessel"),
             exit_code=int(number_of(outcome, "exitCode", 0)), tail=text_of(outcome, "tail"),
             peak_memory=None if peak is None else int(peak), cpu_seconds=maybe_number_of(outcome, "cpuSeconds"),
             artifacts=outcome.get("artifacts") is True, cached=outcome.get("cached") is True,
+            oom_killed=outcome.get("oomKilled") is True, disk_bytes=None if disk is None else int(disk),
         )
         if outcome.get("kind") == "failed":
             if outcome.get("reason") == "cancelled":

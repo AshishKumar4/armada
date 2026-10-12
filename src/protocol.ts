@@ -342,6 +342,10 @@ export const OutcomeSchema = v.object({
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),
+  /** The kernel killed a process of the task's for want of memory. */
+  oomKilled: v.optional(v.boolean()),
+  /** The bytes its writes left on the container's disk, for a task in a slot of its own: its overlays and task dir. */
+  diskBytes: v.optional(v.number()),
   /** Answered from the job's cache: nothing ran. */
   cached: v.optional(v.boolean()),
 });

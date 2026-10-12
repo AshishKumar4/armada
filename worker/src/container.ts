@@ -3,7 +3,7 @@
  * scheduling policy, so each start names what it starts from (the recipe's base image while preparing, an environment
  * snapshot otherwise) and its instance: no image to build, push or roll out.
  */
-import { ARTIFACTS_PATH, detach, failureTail, SIZES, type Size } from '../../src/protocol';
+import { ARTIFACTS_PATH, detach, failureTail, SIZES, type Outcome, type Size } from '../../src/protocol';
 import { said } from './env';
 
 /** The unprivileged user every task runs as. The exec's own `user` option fails on this runtime (`internal error`), so
@@ -237,14 +237,20 @@ mkdir -p ${STATE}/phases
 mkdir "$dir" 2>/dev/null || exit 0
 setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
-/** `group`'s task's cgroup after it exited: its peak memory in bytes, then its CPU time in microseconds. */
-export const usageOf = (group: string): string => String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat`;
+/** `group`'s task's cgroup after it exited: its peak memory in bytes, its CPU time in microseconds, and how many of its
+ *  processes the kernel killed for memory; then, for a task in a slot of its own, the bytes its writes left on the
+ *  container's disk under the slot's `root` (its overlays and its task dir). */
+export const usageOf = (group: string, root?: string): string =>
+  String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat; sed -n 's/^oom_kill //p' ${group}/memory.events${root === undefined ? '' : `; du -sxb ${root} | cut -f1`}`;
 
-/** `usageOf`'s answer, or nothing for a group already gone. */
-export function usageFrom(stdout: string): { peakMemory?: number; cpuSeconds?: number } {
-  const [memory, cpu] = stdout.trim().split('\n').map(Number);
+/** `usageOf`'s answer, or nothing for a group already gone. An answer from before the kills and the disk were read
+ *  carries neither. */
+export function usageFrom(stdout: string): Pick<Outcome, 'peakMemory' | 'cpuSeconds' | 'oomKilled' | 'diskBytes'> {
+  const [memory, cpu, killed, disk] = stdout.trim().split('\n').map(Number);
 
-  return memory !== undefined && cpu !== undefined && Number.isFinite(memory) && Number.isFinite(cpu) ? { peakMemory: memory, cpuSeconds: cpu / 1e6 } : {};
+  if (memory === undefined || cpu === undefined || !Number.isFinite(memory) || !Number.isFinite(cpu)) return {};
+
+  return { peakMemory: memory, cpuSeconds: cpu / 1e6, oomKilled: killed !== undefined && killed > 0 ? true : undefined, diskBytes: disk !== undefined && Number.isFinite(disk) ? disk : undefined };
 }
 
 /** The shortest secret masked: a shorter one would hide ordinary text. */

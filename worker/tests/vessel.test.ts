@@ -157,11 +157,13 @@ describe('a container the platform is stopping', () => {
 });
 
 describe('a finished task', () => {
-  test('reports its cgroup\'s peak memory and CPU seconds, and lands without them when they cannot be read', async () => {
-    const [measured] = (await run(0, { usage: { exitCode: 0, stdout: '734003200\n2500000\n' } })).completed;
+  test('reports its cgroup\'s peak memory, CPU seconds and memory kills, and lands without them when they cannot be read', async () => {
+    const [measured] = (await run(0, { usage: { exitCode: 0, stdout: '734003200\n2500000\n0\n' } })).completed;
+    const [killed] = (await run(0, { usage: { exitCode: 0, stdout: '12884901888\n9000000\n1\n' } })).completed;
     const [lost] = (await run(0, { usage: new Error('Network connection lost.') })).completed;
 
-    expect([measured, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds])).toEqual([[0, 734003200, 2.5], [0, undefined, undefined]]);
+    expect([measured, killed, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds, outcome.oomKilled ?? false]))
+      .toEqual([[0, 734003200, 2.5, false], [0, 12884901888, 9, true], [0, undefined, undefined, false]]);
   });
 });
 
