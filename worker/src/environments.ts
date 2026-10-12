@@ -353,6 +353,8 @@ interface Preparation {
   readonly phase: Phase;
   /** When the phase's command was given its inputs; absent until then. */
   readonly started?: number;
+  /** The execs the platform lost in a row in this phase, across its slices; absent for none. */
+  readonly lost?: number;
   readonly seconds: Record<string, number>;
   readonly snapshot: Generation['snapshot'] | null;
   /** When the account first refused its snapshot for storage (`roomFor`), and why the registry last made no room;
@@ -537,7 +539,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
   /** A phase's command, run once in its container whatever alarms see it: the first gives the container its inputs and
    *  launches the command detached, and each waits on it for a slice. A launch or a wait whose exec the platform lost is
-   *  made again; three lost in a row, and the container is lost. */
+   *  made again; three lost in a row, in one slice or across them, and the container is lost. Past its bound, the phase
+   *  fails, however its execs went. */
   private async command(preparation: Preparation, { doing, inputs, argv, asUser, env, cwd }: Command): Promise<Pending | Record<string, never>> {
     const container = this.container();
     const dir = phaseDir(preparation.phase);
@@ -549,7 +552,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.put('preparation', { ...preparation, started } satisfies Preparation);
     }
 
-    let lost = 0;
+    let lost = preparation.lost ?? 0;
 
     // An exec's output, or null where the platform lost it and it is to be made again.
     const attempt = async (what: string, exec: readonly string[], options: Exec): Promise<string | null> => {
@@ -558,8 +561,10 @@ export class ArmadaPreparer extends DurableObject<Env> {
       if (answered.status === 'rejected') {
         lost += 1;
 
-        if (lost < LOST_EXECS) return null;
-        throw new Error(`${what} failed to run`, { cause: answered.reason });
+        if (lost >= LOST_EXECS) throw new Error(`${what} failed to run`, { cause: answered.reason });
+        await this.ctx.storage.put('preparation', { ...preparation, started, lost } satisfies Preparation);
+
+        return null;
       }
 
       if (answered.value.exitCode !== 0) throw new Error(`${what} exited ${String(answered.value.exitCode)}: ${failureTail(answered.value.stdout, answered.value.stderr)}`);
@@ -570,17 +575,21 @@ export class ArmadaPreparer extends DurableObject<Env> {
     const until = Date.now() + SLICE_MS;
 
     while (Date.now() < until) {
+      if (Date.now() - started > stepMs(preparation.recipe.size)) throw new Error(`${doing} ran longer than ${String(stepMs(preparation.recipe.size) / 60_000)} min`);
+
       if ((await attempt(`launching ${doing}`, ['/bin/sh', '-c', LAUNCH_PHASE, 'launch', preparation.phase, ...asUser ? AS_USER : [], ...argv], { env, cwd, ms: EXEC_MS })) === null) continue;
       const exit = await attempt('the wait', ['/bin/sh', '-c', waitOn(dir), 'wait', String(WAIT_SECONDS)], { ms: (WAIT_SECONDS + 30) * 1000 });
 
       if (exit === null) continue;
-      lost = 0;
+
+      if (lost > 0) {
+        lost = 0;
+        await this.ctx.storage.put('preparation', { ...preparation, started, lost } satisfies Preparation);
+      }
 
       if (exit === '0') return {};
 
       if (exit !== '') throw new Error(`${doing} exited ${exit}: ${(await run(container, ['tail', '-c', '3000', `${dir}/log`], { ms: EXEC_MS })).stdout}`);
-
-      if (Date.now() - started > stepMs(preparation.recipe.size)) throw new Error(`${doing} ran longer than ${String(stepMs(preparation.recipe.size) / 60_000)} min`);
     }
 
     return { retryInMs: 0 };

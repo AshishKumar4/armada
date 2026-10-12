@@ -439,6 +439,39 @@ describe('a preparation under way', () => {
   });
 });
 
+describe('a preparation phase whose every exec times out', () => {
+  test('loses its container after three in a row, though each takes a slice, and never outlives its bound', async () => {
+    const start = Date.now();
+    const failures: string[] = [];
+    let now = start;
+
+    try {
+      setSystemTime(start);
+
+      // Each exec runs out its own bound, longer than a slice, and the platform gives no answer.
+      const stored = state(container(() => {
+        now += 90_000;
+        setSystemTime(now);
+
+        return new Error('the exec timed out');
+      }));
+
+      const preparer = new ArmadaPreparer(stored.ctx, world({
+        ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
+      }));
+
+      await stored.ctx.storage.put('preparation', { key: 'k'.repeat(64), since: start, recipe: v.parse(RecipeSchema, { setup: 'true' }), sha: null, phase: 'setup', started: start, seconds: {}, snapshot: null });
+      let alarms = 0;
+
+      for (; alarms < 20 && failures.length === 0; alarms += 1) await preparer.alarm();
+
+      expect({ alarms, failed: failures.map((reason) => reason.includes('failed to run')) }).toEqual({ alarms: 3, failed: [true] });
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
 describe('a snapshot the account refuses for its storage (#30)', () => {
   const realFetch = globalThis.fetch;
 
