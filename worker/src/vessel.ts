@@ -95,13 +95,14 @@ interface Current {
   readonly claim: Omit<Claim, 'env'>;
   readonly startedAt: number;
   /** How it ended, once it did; the outcome its job is told, once its answer is read and stored, or null where its job
-   *  keeps another answer; whether its job no longer wants it; and whether its slot was cleared since. Each is kept
-   *  before the next step, so an object restarted on the way takes its finish or its stop up from its last (`finish`,
-   *  `stopTask`), and reads nothing a clear took. */
+   *  keeps another answer; whether its job no longer wants it; and, for a stop, that what it keeps of the task is read.
+   *  Each is kept before the next step, so an object restarted on the way takes its finish or its stop up from its last
+   *  (`finish`, `stopTask`). Once its files are read, only the clear, which may be made again, and its job's word are
+   *  left: a restart reads nothing a clear took. */
   readonly ending?: Ending;
   readonly outcome?: Outcome | null;
   readonly stopping?: true;
-  readonly cleared?: true;
+  readonly read?: true;
 }
 
 /** How one slot's loop ended its slice: the slice ran out, the job had no task for it, or how long to wait for one. */
@@ -554,27 +555,23 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  holds nothing to kill. */
   private async stopTask(spec: SlotSpec, slot: number, current: Current): Promise<void> {
     const { dir, group } = layoutOf(spec, slot);
-    const stopping: Current = { ...current, stopping: true };
 
-    if (current.cleared !== true) await this.ctx.storage.put(slotKey(slot), stopping);
+    if (current.read !== true) {
+      await this.ctx.storage.put(slotKey(slot), { ...current, stopping: true } satisfies Current);
 
-    if (current.cleared !== true && this.ctx.container?.running === true) {
-      await must(this.container(), 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
+      if (this.ctx.container?.running === true) {
+        await must(this.container(), 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
 
-      // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
-      if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
+        // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
+        if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
+      }
+
+      await this.ctx.storage.put(slotKey(slot), { ...current, stopping: true, read: true } satisfies Current);
     }
 
-    await this.clearOnce(spec, slot, stopping);
+    await this.clear(spec, slot);
     await this.env.JOB.getByName(spec.jobId).stopped(spec.name, current.claim.index, { slot, attempt: current.claim.attempt });
     await this.ctx.storage.delete(slotKey(slot));
-  }
-
-  /** `current`'s slot cleared (`clear`), once: kept as cleared, so an object restarted after reads nothing it took. */
-  private async clearOnce(spec: SlotSpec, slot: number, current: Current): Promise<void> {
-    if (current.cleared === true) return;
-    await this.clear(spec, slot);
-    await this.ctx.storage.put(slotKey(slot), { ...current, cleared: true } satisfies Current);
   }
 
   /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. Each step is
@@ -585,10 +582,9 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     if (current.ending === undefined) await this.ctx.storage.put(slotKey(slot), ended);
     const outcome = current.outcome === undefined ? await this.answer(spec, slot, ended, ending) : current.outcome;
-    const read: Current = { ...ended, outcome };
 
-    if (current.outcome === undefined) await this.ctx.storage.put(slotKey(slot), read);
-    await this.clearOnce(spec, slot, read);
+    if (current.outcome === undefined) await this.ctx.storage.put(slotKey(slot), { ...ended, outcome } satisfies Current);
+    await this.clear(spec, slot);
 
     if (outcome !== null) await this.env.JOB.getByName(spec.jobId).complete(spec.name, outcome, outcome.seconds * 1000);
     await this.ctx.storage.delete(slotKey(slot));

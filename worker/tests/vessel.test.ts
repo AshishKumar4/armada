@@ -232,19 +232,32 @@ describe('a vessel restarted while it finishes a task', () => {
 });
 
 describe('a vessel restarted while it stops a task its job no longer wants', () => {
-  test('tells its job, which hears of it once, and reads nothing of the task it cleared', async () => {
+  /** A gang rank its job no longer wants, its vessel restarted at `at`: its clear, which removes the task's files
+   *  before its answer is lost, or its word to its job, never answered. What its job heard, once the new object ran. */
+  async function restartedMidStop(at: 'clear' | 'stopped') {
     const stopped: number[] = [];
     const reached = Promise.withResolvers<void>();
     const gang = { rank: 1, job: 'job', vessels: ['v1', 'v2'], origin: 'https://origin', token: 't'.repeat(48) };
     const claims: Claim[] = [{ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }];
-    let told = false;
+    let restarted = false;
     let cleared = false;
 
-    // Once the task is cleared, its files are gone: a read of them fails, as on a real container.
-    const stored = state(container((argv) => {
-      cleared ||= argv[3] === 'clear';
+    const restart = async (): Promise<never> => {
+      restarted = true;
+      reached.resolve();
 
-      if (cleared && argv[3] !== 'clear' && (argv[2] ?? '').includes('/armada/task')) return { exitCode: 1, stdout: '' };
+      return await new Promise<never>(() => undefined);
+    };
+
+    // Once the task is cleared, its files are gone: a read of them fails, as on a real container.
+    const stored = state(container(async (argv) => {
+      const clearing = argv[3] === 'clear';
+
+      cleared ||= clearing;
+
+      if (clearing && at === 'clear' && !restarted) return await restart();
+
+      if (cleared && !clearing && (argv[2] ?? '').includes('/armada/task')) return { exitCode: 1, stdout: '' };
 
       if (argv[3] === 'wait') return { exitCode: 0, stdout: '' };
 
@@ -255,15 +268,8 @@ describe('a vessel restarted while it stops a task its job no longer wants', () 
       booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false,
       retired: async () => undefined, accept: async () => true, complete: async () => undefined,
       vesselFailed: async (_name: string, error: string) => { throw new Error(error); },
-      // The object restarts while its job is told: the first telling never answers.
       stopped: async (_name: string, index: number) => {
-        if (!told) {
-          told = true;
-          reached.resolve();
-
-          return await new Promise<never>(() => undefined);
-        }
-
+        if (at === 'stopped' && !restarted) return await restart();
         stopped.push(index);
       },
     };
@@ -275,7 +281,11 @@ describe('a vessel restarted while it stops a task its job no longer wants', () 
     await Promise.race([before.alarm(), reached.promise]);
     await new ArmadaVessel(stored.ctx, env).alarm();
 
-    expect(stopped).toEqual([0]);
+    return stopped;
+  }
+
+  test('tells its job, which hears of it once, and reads nothing of the task it cleared, wherever it restarted', async () => {
+    expect(await Promise.all((['clear', 'stopped'] as const).map(restartedMidStop))).toEqual([[0], [0]]);
   });
 });
 
