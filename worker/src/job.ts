@@ -1281,6 +1281,13 @@ export class ArmadaJob extends DurableObject<Env> {
     };
   }
 
+  /** The pushed bundle the job runs from, or null for a command job, or one never made. */
+  async bundle(): Promise<string | null> {
+    const run = (await this.spec())?.run;
+
+    return run?.kind === 'task' ? run.bundle ?? null : null;
+  }
+
   async status(): Promise<JobStatus | null> {
     const id = await this.ctx.storage.get<string>('id');
 

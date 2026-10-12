@@ -7,7 +7,7 @@ import { bucket, namespace, state, world } from './harness';
 const TOKEN = 't'.repeat(32);
 
 /** A deployment whose R2 is in memory, and a request to it; each of `held` holds the next R2 delete until it returns. */
-function deployment(held: (() => Promise<void>)[] = []) {
+function deployment(held: (() => Promise<void>)[] = [], open: Readonly<Record<string, string>> = {}) {
   const stored = bucket();
   const remove = stored.delete;
 
@@ -18,7 +18,15 @@ function deployment(held: (() => Promise<void>)[] = []) {
     },
   });
 
-  const registry = new ArmadaTasks(state().ctx, world({ ARTIFACTS: artifacts }));
+  const registryState = state();
+
+  // The jobs open before the registry kept holds, each with its bundle, as an earlier Worker made them.
+  const registry = new ArmadaTasks(registryState.ctx, world({
+    ARTIFACTS: artifacts,
+    FLEET: namespace(() => ({ open: async () => Object.keys(open) })),
+    JOB: namespace((job: string) => ({ bundle: async () => open[job] ?? null })),
+  }));
+
   const env = world({ ARMADA_TOKEN: TOKEN, ARTIFACTS: artifacts, TASKS: namespace(() => registry) });
 
   const ask = async (path: string, method: string, body?: string | Uint8Array) => {
@@ -27,7 +35,7 @@ function deployment(held: (() => Promise<void>)[] = []) {
     return [answer.status, answer.headers.get('content-type')?.includes('json') === true ? await answer.json() : null];
   };
 
-  return { artifacts, ask, registry };
+  return { artifacts, ask, registry, registryState };
 }
 
 const digestOf = (bytes: Uint8Array) => new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
@@ -74,6 +82,40 @@ describe('a push', () => {
     await registry.unpin('job-1');
 
     expect({ running, pushed, ended: present() }).toEqual({ running: [true, true, true], pushed: [true, false, true], ended: [false, false, true] });
+  });
+
+  test('keeps the bundle of a job an earlier Worker made, which holds no pin, until that job ends', async () => {
+    const [first, second] = ['first', 'second'].map((text) => new TextEncoder().encode(`export const v = '${text}';\n`));
+    const [one = '', two = ''] = [first, second].map((bytes) => digestOf(bytes ?? new Uint8Array()));
+    const { artifacts, ask, registry } = deployment([], { 'job-old': one });
+    const present = () => artifacts.objects.has(`code/${one}.mjs`);
+
+    await ask(`/bundles/${one}`, 'PUT', first);
+    await ask(`/bundles/${two}`, 'PUT', second);
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: one, ids: ['square'] }));
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: two, ids: ['square'] }));
+    const running = present();
+
+    await registry.unpin('job-old');
+
+    expect({ running, ended: present() }).toEqual({ running: true, ended: false });
+  });
+
+  test('deletes again, at its alarm, a bundle R2 did not delete, and takes no push of it meanwhile', async () => {
+    const [first, second] = ['first', 'second'].map((text) => new TextEncoder().encode(`export const v = '${text}';\n`));
+    const [one = '', two = ''] = [first, second].map((bytes) => digestOf(bytes ?? new Uint8Array()));
+    const { artifacts, ask, registry, registryState } = deployment([async () => { throw new Error('R2 is not answering'); }]);
+
+    await ask(`/bundles/${one}`, 'PUT', first);
+    await ask(`/bundles/${two}`, 'PUT', second);
+    await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: one, ids: ['square'] }));
+    const retired = await ask('/tasks', 'POST', JSON.stringify({ project: 'one', bundle: two, ids: ['square'] }));
+    const meanwhile = { kept: artifacts.objects.has(`code/${one}.mjs`), push: (await ask('/tasks', 'POST', JSON.stringify({ project: 'two', bundle: one, ids: ['cube'] })))[0], alarm: (await registryState.ctx.storage.getAlarm()) !== null };
+
+    await registry.alarm();
+
+    expect({ retired: retired[0], meanwhile, deleted: !artifacts.objects.has(`code/${one}.mjs`), there: (await ask(`/bundles/${one}`, 'HEAD'))[0] })
+      .toEqual({ retired: 200, meanwhile: { kept: true, push: 409, alarm: true }, deleted: true, there: 404 });
   });
 
   test('takes no push or job of a bundle while it is deleted, and says it is not there until it is uploaded again', async () => {

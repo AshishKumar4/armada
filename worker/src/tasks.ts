@@ -6,7 +6,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type { Push } from '../../src/protocol';
-import { bundleKey, type Env } from './env';
+import { bundleKey, SINGLE, type Env } from './env';
 
 interface Entry {
   readonly project: string;
@@ -21,6 +21,9 @@ type Swept = 'deleting' | 'deleted';
 
 /** The R2 keys one delete takes at most. */
 const DELETE_KEYS = 1000;
+
+/** How soon deletes R2 did not take are made again. */
+const DELETE_RETRY_MS = 60_000;
 
 export class ArmadaTasks extends DurableObject<Env> {
   /** Records a push, or says why it is refused. The bundles its project's ids ran from before are retired, and deleted
@@ -88,6 +91,8 @@ export class ArmadaTasks extends DurableObject<Env> {
    *  those are is decided, and they are marked taken, in one step no push or pin comes between, since only storage is
    *  awaited until then; whatever comes after is refused until the bundle is uploaded again. */
   private async retire(bundles: readonly string[]): Promise<void> {
+    await this.adopt();
+
     for (const bundle of new Set(bundles)) await this.ctx.storage.put(`retired:${bundle}`, true);
 
     const held = new Set([
@@ -103,8 +108,47 @@ export class ArmadaTasks extends DurableObject<Env> {
       await this.ctx.storage.put(`swept:${bundle}`, 'deleting' satisfies Swept);
     }
 
-    for (let at = 0; at < doomed.length; at += DELETE_KEYS) await this.env.ARTIFACTS.delete(doomed.slice(at, at + DELETE_KEYS).map(bundleKey));
+    await this.sweep();
+  }
 
-    for (const bundle of doomed) await this.ctx.storage.put(`swept:${bundle}`, 'deleted' satisfies Swept);
+  /** Deletes every bundle marked `deleting`. One whose delete R2 did not take stays marked, and the alarm deletes it
+   *  again: no push or job takes it meanwhile. */
+  private async sweep(): Promise<void> {
+    const deleting = [...await this.ctx.storage.list<Swept>({ prefix: 'swept:' })].flatMap(([key, swept]) => swept === 'deleting' ? [key.slice('swept:'.length)] : []);
+
+    try {
+      for (let at = 0; at < deleting.length; at += DELETE_KEYS) {
+        const batch = deleting.slice(at, at + DELETE_KEYS);
+
+        await this.env.ARTIFACTS.delete(batch.map(bundleKey));
+
+        for (const bundle of batch) await this.ctx.storage.put(`swept:${bundle}`, 'deleted' satisfies Swept);
+      }
+    } catch (cause) {
+      console.error(JSON.stringify({ bundles: deleting.length, deleting: String(cause) }));
+      await this.ctx.storage.setAlarm(Date.now() + DELETE_RETRY_MS);
+    }
+  }
+
+  override async alarm(): Promise<void> {
+    await this.sweep();
+  }
+
+  /** The bundles of the jobs open when this registry began to keep their holds, which an earlier Worker made and pinned
+   *  nothing, pinned once, before it first decides a bundle is free. Nothing else comes in meanwhile. */
+  private async adopt(): Promise<void> {
+    if ((await this.ctx.storage.get<boolean>('adopted')) === true) return;
+
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if ((await this.ctx.storage.get<boolean>('adopted')) === true) return;
+
+      for (const job of await this.env.FLEET.getByName(SINGLE).open()) {
+        const bundle = await this.env.JOB.getByName(job).bundle();
+
+        if (bundle !== null && (await this.ctx.storage.get(`pin:${job}`)) === undefined) await this.ctx.storage.put(`pin:${job}`, bundle);
+      }
+
+      await this.ctx.storage.put('adopted', true);
+    });
   }
 }

@@ -111,9 +111,10 @@ export function state(held?: Container): Stored {
 
   const ctx: Partial<DurableObjectState> = {};
 
-  Object.assign(ctx, { storage, container: held, waitUntil: (promise: Promise<unknown>) => { pending.push(promise); } });
+  // A block runs at once: the objects here take no event while a test awaits one.
+  Object.assign(ctx, { storage, container: held, waitUntil: (promise: Promise<unknown>) => { pending.push(promise); }, blockConcurrencyWhile: async <T>(run: () => Promise<T>) => await run() });
 
-  // SAFETY: the objects call only these storage methods, `container` and `waitUntil`, each constructed above.
+  // SAFETY: the objects call only these storage methods, `container`, `waitUntil` and `blockConcurrencyWhile`, each constructed above.
   return { ctx: ctx as DurableObjectState, dump, pending };
 }
 
@@ -202,7 +203,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   let whole: Env;
 
   Object.assign(env, {
-    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true })),
+    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true, open: async () => [] })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARMADA_TOKEN: 't'.repeat(32),
     FLEET_VCPUS: '1500',
