@@ -34,8 +34,8 @@ export interface DestroyIO {
   readonly save: (state: DestroyState) => void;
   readonly removeConnection: () => void;
   readonly removeState: () => void;
-  readonly snapshot: (credentials: string, ref: string, remember: (digest: string) => void) => Promise<Deletion>;
-  readonly image: (credentials: string, repository: string, tag: string, remember: (digest: string) => void) => Promise<Deletion>;
+  readonly snapshot: (credentials: string, ref: string, remember: (digest: string) => Promise<void>) => Promise<Deletion>;
+  readonly image: (credentials: string, repository: string, tag: string, remember: (digest: string) => Promise<void>) => Promise<Deletion>;
   readonly credentials: (account: string, token: string) => Promise<string>;
   readonly say: (message: string) => void;
   readonly now: () => number;
@@ -188,7 +188,7 @@ class ManifestJournal {
 
   constructor(private readonly state: DestroyState, private readonly io: DestroyIO) {}
 
-  readonly remember = (digest: string) => {
+  readonly remember = async (digest: string): Promise<void> => {
     this.digest = digest;
 
     if (!this.state.snapshots.includes(digest)) this.state.snapshots.push(digest);

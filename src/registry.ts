@@ -64,8 +64,9 @@ async function repositoryOf(authorization: string, name: string): Promise<string
 }
 
 /** Deletes the snapshot `ref` with the registry `credentials` (`user:password`): a snapshot id, or the digest an earlier
- *  delete left. The snapshot tag goes last of the tags, so a failure before it leaves the snapshot findable by its id. */
-export async function deleteSnapshotWith(credentials: string, ref: string, remember?: (digest: string) => void): Promise<Deletion> {
+ *  delete left. The snapshot tag goes last of the tags, so a failure before it leaves the snapshot findable by its id;
+ *  its manifest's digest is kept (`remember`) before any tag goes, so a failure after them leaves it findable by that. */
+export async function deleteSnapshotWith(credentials: string, ref: string, remember: (digest: string) => Promise<void>): Promise<Deletion> {
   const authorization = `Basic ${btoa(credentials)}`;
   const name = ref.startsWith('sha256:') ? ref : `rootfs-snapshot-${await sha256(ref)}`;
   const repository = await repositoryOf(authorization, name);
@@ -97,8 +98,7 @@ export async function deleteSnapshotWith(credentials: string, ref: string, remem
   const parsed = v.safeParse(Manifest, body);
   const set = parsed.success ? parsed.output.annotations['io.cloudflare.cloudchamber.snapshot_set_id'] : undefined;
 
-  // A CLI purge journals this before removing any tag: an interrupted/network-lost DELETE must not strand a digest.
-  remember?.(digest);
+  await remember(digest);
 
   for (const tag of set === undefined ? [name] : [`rootfs-set-${await sha256(set)}`, name]) {
     const refused = await remove(tag);
@@ -113,7 +113,7 @@ export async function deleteSnapshotWith(credentials: string, ref: string, remem
 
 /** Only the exact repository/tag captured from the deployment's application, never a prefix catalog sweep.
  * The digest is journalled before tag deletion, just like a snapshot's, so a retry finds an untagged manifest. */
-export async function deleteImageWith(credentials: string, repository: string, tag: string, remember?: (digest: string) => void): Promise<Deletion> {
+export async function deleteImageWith(credentials: string, repository: string, tag: string, remember: (digest: string) => Promise<void>): Promise<Deletion> {
   const authorization = `Basic ${btoa(credentials)}`;
   const url = `https://registry.cloudflare.com/v2/${repository}/manifests/${encodeURIComponent(tag)}`;
   const headers = { authorization, accept: ACCEPT };
@@ -124,7 +124,7 @@ export async function deleteImageWith(credentials: string, repository: string, t
   if (!read.ok) throw new Error(`reading image ${repository}:${tag} answered ${String(read.status)}`);
   const digest = read.headers.get('docker-content-digest') ?? `sha256:${await sha256(await read.text())}`;
 
-  remember?.(digest);
+  await remember(digest);
   const untagged = await fetch(url, { method: 'DELETE', headers });
 
   if (!untagged.ok && untagged.status !== 404) throw new Error(`deleting image tag ${repository}:${tag} answered ${String(untagged.status)}`);

@@ -75,7 +75,7 @@ class Fleet implements DestroyIO {
     if (!this.refs.has(ref)) return { kind: 'absent' };
     const digest = ref.startsWith('sha256:') ? ref : `sha256:${ref}`;
 
-    remember(digest);
+    await remember(digest);
     this.refs.add(digest);
     this.refs.delete(ref);
 

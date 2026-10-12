@@ -29,7 +29,7 @@ describe('exact registry references journalled by destroy', () => {
       return new Response(null, { status: 204 });
     });
 
-    expect(await deleteSnapshotWith('user:fake', 'owned-snapshot', (ref) => { events.push(`remember ${ref}`); })).toEqual({ kind: 'deleted' });
+    expect(await deleteSnapshotWith('user:fake', 'owned-snapshot', async (ref) => { events.push(`remember ${ref}`); })).toEqual({ kind: 'deleted' });
     expect(events).toEqual([
       `remember ${digest}`, `DELETE /v2/account/snapshots/manifests/${set}`,
       `DELETE /v2/account/snapshots/manifests/${snapshot}`, `DELETE /v2/account/snapshots/manifests/${digest}`,
@@ -59,10 +59,10 @@ describe('exact registry references journalled by destroy', () => {
       return new Response(null, { status: 204 });
     });
 
-    expect(await settled(deleteSnapshotWith('user:fake', 'owned-snapshot', (ref) => { remembered.push(ref); }))).toContain('answer lost');
+    expect(await settled(deleteSnapshotWith('user:fake', 'owned-snapshot', async (ref) => { remembered.push(ref); }))).toContain('answer lost');
     expect(remembered).toEqual([digest]);
-    expect(await deleteSnapshotWith('user:fake', 'owned-snapshot')).toEqual({ kind: 'absent' });
-    expect(await deleteSnapshotWith('user:fake', digest)).toEqual({ kind: 'deleted' });
+    expect(await deleteSnapshotWith('user:fake', 'owned-snapshot', async () => undefined)).toEqual({ kind: 'absent' });
+    expect(await deleteSnapshotWith('user:fake', digest, async () => undefined)).toEqual({ kind: 'deleted' });
     expect(names.size).toBe(0);
   });
 
@@ -79,7 +79,7 @@ describe('exact registry references journalled by destroy', () => {
       return new Response(null, { status: 204 });
     });
 
-    expect(await deleteImageWith('user:fake', repository, 'owned-tag', (ref) => { events.push(`remember ${ref}`); })).toEqual({ kind: 'deleted' });
+    expect(await deleteImageWith('user:fake', repository, 'owned-tag', async (ref) => { events.push(`remember ${ref}`); })).toEqual({ kind: 'deleted' });
     expect(events).toEqual([`remember ${digest}`, `DELETE /v2/${repository}/manifests/owned-tag`, `DELETE /v2/${repository}/manifests/${digest}`]);
   });
 
@@ -93,7 +93,7 @@ describe('exact registry references journalled by destroy', () => {
       return new Response(null, { status: 404 });
     });
 
-    expect(await deleteImageWith('user:fake', 'account/armada-dew2-armadavessel', 'owned-tag', (ref) => { journal.push(ref); })).toEqual({ kind: 'absent' });
+    expect(await deleteImageWith('user:fake', 'account/armada-dew2-armadavessel', 'owned-tag', async (ref) => { journal.push(ref); })).toEqual({ kind: 'absent' });
     expect(methods).toEqual(['GET']);
     expect(journal).toEqual([]);
   });

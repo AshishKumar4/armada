@@ -198,6 +198,7 @@ async function registry(keys: readonly string[], options: { readonly pageSize?: 
   const tags = new Map<string, string>();
   const manifests = new Map<string, string>();
   let refuseDigest = false;
+  let loseDigest = false;
 
   for (const key of keys) {
     const digest = `sha256:${await sha256(`manifest-${key}`)}`;
@@ -231,7 +232,11 @@ async function registry(keys: readonly string[], options: { readonly pageSize?: 
     if (request.method === 'GET') return Response.json({ annotations: { 'io.cloudflare.cloudchamber.snapshot_set_id': `set-${key}` } }, { headers: { 'docker-content-digest': digest } });
 
     if (!ref.startsWith('sha256:')) tags.delete(ref);
-    else if (refuseDigest) {
+    else if (loseDigest) {
+      loseDigest = false;
+
+      throw new TypeError('Network connection lost.');
+    } else if (refuseDigest) {
       refuseDigest = false;
 
       return new Response('busy', { status: 503 });
@@ -240,7 +245,11 @@ async function registry(keys: readonly string[], options: { readonly pageSize?: 
     return new Response(null, { status: 204 });
   };
 
-  return { tags, manifests, answer, left: () => [...manifests.values()].sort(), refuseNextDigest: () => { refuseDigest = true; } };
+  return {
+    tags, manifests, answer, left: () => [...manifests.values()].sort(),
+    refuseNextDigest: () => { refuseDigest = true; },
+    loseNextDigest: () => { loseDigest = true; },
+  };
 }
 
 describe('a deployment that keeps one environment', () => {
@@ -391,6 +400,17 @@ describe('a snapshot no environment records any more', () => {
     await environments.prune({ keep: 5, recentMs: 0 });
 
     expect({ owed: owed.map((name) => name.startsWith('debt:sha256:')), tags, left: fake.left() }).toEqual({ owed: [true], tags: 4, left: ['k-first', 'k-second'] });
+  });
+
+  test('a digest delete lost once the tags are gone owes the digest all the same, and the next prune deletes that', async () => {
+    const { environments, fake } = await deployment([]);
+    await environments.orphaned('snapshot-made', 'other');
+    fake.loseNextDigest();
+    await environments.prune({ keep: 5, recentMs: 0 });
+    const tags = fake.tags.size;
+    await environments.prune({ keep: 5, recentMs: 0 });
+
+    expect({ tags, left: fake.left() }).toEqual({ tags: 4, left: ['k-first', 'k-second'] });
   });
 });
 

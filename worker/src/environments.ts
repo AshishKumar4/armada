@@ -21,7 +21,7 @@ type Entry = v.InferOutput<typeof EnvironmentEntrySchema>;
 
 export type Readiness =
   | { readonly kind: 'ready'; readonly generation: Generation }
-  | { readonly kind: 'preparing'; readonly since: number }
+  | { readonly kind: 'preparing' }
   | { readonly kind: 'failed'; readonly reason: string };
 
 /** A preparation whose preparer has not been heard from in this long was lost: the next job asks again. Its preparer
@@ -40,7 +40,6 @@ const FAILURE_HOLD_MS = 5 * 60_000;
  *  its id, or the digest a delete left once the tags were gone. */
 interface Debt {
   readonly key: string;
-  readonly since: number;
 }
 
 /** The environment every command runs under: the runner's defaults, then the job's own. */
@@ -74,7 +73,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
       return { kind: 'ready', generation: entry.generation };
     }
 
-    if (preparing(entry, now)) return { kind: 'preparing', since: entry.since };
+    if (preparing(entry, now)) return { kind: 'preparing' };
 
     if (entry?.state === 'failed' && now - entry.at < FAILURE_HOLD_MS) return { kind: 'failed', reason: entry.reason };
 
@@ -86,7 +85,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     // object on the same account started one at once.
     await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow });
 
-    return { kind: 'preparing', since: now };
+    return { kind: 'preparing' };
   }
 
   /** A job that ran on the key's environment ended: its recent hour starts now. */
@@ -137,11 +136,13 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     }
   }
 
-  /** The next look, in an hour, while an environment is ready or a snapshot's delete is owed. */
+  /** The next look, in an hour, while an environment is ready or a snapshot's delete is owed; else none, whatever an
+   *  owed delete since settled had set. */
   private async lookAgain(): Promise<void> {
     const owed = (await this.ctx.storage.list({ prefix: 'debt:', limit: 1 })).size > 0;
 
     if (owed || (await this.list()).some(({ entry }) => entry.state === 'ready')) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
+    else await this.ctx.storage.deleteAlarm();
   }
 
   /** Deletes the snapshots of the environments past those `retention` keeps (`expired`) with the deployment's
@@ -234,18 +235,23 @@ export class ArmadaEnvironments extends DurableObject<Env> {
   }
 
   /** Deletes the snapshot `ref`, or owes what is left of it: the snapshot when the delete failed before its tags went,
-   *  the manifest's digest when it failed after. Whether it is gone. */
+   *  the manifest's digest, owed before any tag goes, when it failed after. Whether it is gone. */
   private async delete(credentials: string, ref: string, key: string): Promise<boolean> {
+    let digest: string | undefined;
+
     try {
-      const deleted = await deleteSnapshotWith(credentials, ref);
+      const deleted = await deleteSnapshotWith(credentials, ref, async (found) => {
+        digest = found;
+        await this.owe(found, key);
+      });
 
       if (deleted.kind === 'left') {
-        await this.owe(deleted.digest, key);
         console.error(JSON.stringify({ snapshot: ref, key, owed: deleted.digest, error: deleted.reason }));
 
         return false;
       }
 
+      if (digest !== undefined) await this.ctx.storage.delete(`debt:${digest}`);
       console.log(JSON.stringify({ snapshot: ref, key, deleted: deleted.kind }));
 
       return deleted.kind === 'deleted';
@@ -259,7 +265,7 @@ export class ArmadaEnvironments extends DurableObject<Env> {
 
   /** `ref`'s delete owed for `key`, and a look due for it, if none is: whatever path owed it, the debt is settled. */
   private async owe(ref: string, key: string): Promise<void> {
-    await this.ctx.storage.put(`debt:${ref}`, { key, since: Date.now() } satisfies Debt);
+    await this.ctx.storage.put(`debt:${ref}`, { key } satisfies Debt);
 
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
   }
