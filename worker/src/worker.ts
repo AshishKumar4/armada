@@ -45,7 +45,6 @@ const JOB_ID = /^\d{14}-[0-9a-f]{8}$/u;
 
 const notFound = (): Response => Response.json({ error: 'not found' }, { status: 404 });
 
-/** An R2 object as the response body, or 404. */
 /** The R2 object at `key`, or at `earlier`, where it was kept before, when there is none at `key`. */
 async function object(env: Env, key: string, earlier?: string): Promise<Response> {
   const found = await env.ARTIFACTS.get(key) ?? (earlier === undefined ? null : await env.ARTIFACTS.get(earlier));

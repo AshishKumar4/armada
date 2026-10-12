@@ -381,17 +381,25 @@ function estimateOf(entry: PlanEntry, name: string, timings: Timings): number | 
   return entry.weight ?? (rows.every((estimate) => estimate !== undefined) ? rows.reduce((sum, estimate) => sum + estimate, 0) : undefined);
 }
 
-/** The fewest containers, up to `most`, that finish these tasks as soon as `most` would, queued longest first: every
- *  container that runs more than one task must finish a fifth of the longest task's time before it does. */
-export function poolFor(estimates: readonly number[], most: number): number {
-  const longest = Math.max(0, ...estimates);
-  const queue = [...estimates].sort((left, right) => right - left);
+/** How far past its tasks' estimates a container that runs more than one is planned to run: 88% of rows, and 89% of
+ *  pairs of rows, ran within a quarter of their estimate (252,742 rows of armada's and Kinu's runs on this machine,
+ *  2026-10-04 to 2026-10-12). */
+const ESTIMATE_ERROR = 1.25;
 
-  for (let pool = 1; pool < most; pool += 1) {
+/** The fewest containers, up to `most`, that finish these tasks, queued longest first, as soon as `most` would. A
+ *  container that runs one task finishes at its estimate; one that runs more, `ESTIMATE_ERROR` past their sum. */
+export function poolFor(estimates: readonly number[], most: number): number {
+  const queue = estimates.toSorted((left, right) => right - left);
+
+  const finish = (pool: number): number => {
     const { lanes, loads } = listSchedule(queue, Array.from({ length: pool }, () => 0));
 
-    if (loads.every((load, machine) => (lanes[machine]?.length ?? 0) === 1 || load <= longest * 0.8)) return pool;
-  }
+    return Math.max(0, ...loads.map((load, machine) => (lanes[machine]?.length ?? 0) > 1 ? load * ESTIMATE_ERROR : load));
+  };
+
+  const soonest = finish(most);
+
+  for (let pool = 1; pool < most; pool += 1) if (finish(pool) <= soonest) return pool;
 
   return most;
 }

@@ -327,15 +327,18 @@ describe('a size', () => {
 });
 
 describe('a CI run\'s pool', () => {
-  test('is the fewest containers that finish as soon as the most would, with a fifth of the longest task to spare', () => {
+  test('is the fewest containers that finish as soon as the most would, a container of more than one task a quarter over its estimate', () => {
     const tail = Array.from({ length: 89 }, (_, index) => 20 + index % 40);
 
     expect({
       oneLong: poolFor([500, ...tail], 60),
       even: poolFor(Array.from({ length: 30 }, () => 300), 60),
+      // Twelve containers take three tasks on some; ten take three on each, and finish as soon.
       capped: poolFor(Array.from({ length: 30 }, () => 300), 12),
       pairs: poolFor([100, 40, 40, 40, 40], 5),
-    }).toEqual({ oneLong: 10, even: 30, capped: 12, pairs: 3 });
+      // Four containers run two 60s on one, past the 100: three run two on two, and finish as soon.
+      fewer: poolFor([100, 60, 60, 60, 60], 4),
+    }).toEqual({ oneLong: 10, even: 30, capped: 10, pairs: 3, fewer: 3 });
   });
 
   test('sizes lanes for a slotted run and rounds them up into containers', () => {
