@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -103,8 +103,10 @@ export const recipe: RecipeOf = Object.assign((options: RecipeOptions = {}) => n
 export interface MapOptions {
   /** The most containers at once. Default 50. */
   readonly pool?: number;
-  /** The tasks one container runs at once, each in its own slot. Default 1. */
+  /** The tasks one container runs at once, each in its own slot. Default 1; more turns `mode`'s packing off. */
   readonly slots?: number;
+  /** How the job places its tasks (`ModeSchema`). Default `efficient`. */
+  readonly mode?: Mode;
   /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
   readonly deadline?: number;
   /** The limit for a gang to gather and launch all its ranks, in seconds. Default 300. */
@@ -408,7 +410,7 @@ abstract class Base<I extends Json, O> {
     const { commit, ...environment } = this.recipe;
 
     const spec = {
-      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       deadline: options.deadline, gangStartTimeout: options.gangStartTimeout,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,

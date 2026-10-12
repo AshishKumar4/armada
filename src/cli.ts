@@ -10,7 +10,7 @@ import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './regi
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
-import { BaseSchema, deadlineRefusal, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, deadlineRefusal, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -50,7 +50,9 @@ map options:
   --commit=<rev>       run in the commit's checkout, in the environment its .armada.json names
   --size=<size>        each container's size: micro, mini, small or medium (default medium)
   --pool=N             the most containers at once (default 50)
-  --slots=N            the tasks one container runs at once, each in its own slot (default 1)
+  --slots=N            the tasks one container runs at once, each in its own slot (default 1; more turns packing off)
+  --mode=<mode>        efficient packs tasks into containers by their measured use; fast runs one a container
+                       (default efficient)
   --timeout=S          a task's limit, in seconds (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
   --gang-start-timeout=S  all gang ranks must launch within this many seconds (default 300)
@@ -87,7 +89,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'mode=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
@@ -172,7 +174,8 @@ async function map(): Promise<number> {
   const argv = argvOf(rest, base);
   const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const mode = option('mode');
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   const id = await job.id;
   let worst = 0;

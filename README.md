@@ -187,9 +187,18 @@ encoded in 9.1 s on 2 containers; the slowest encode took 6.4 s
 - Schemas can be valibot, zod or arktype (any [Standard Schema](https://standardschema.dev)). Items and answers are
   plain JSON, or bytes for an answer. A `Date`, a `Map`, `any` or `unknown` is a type error.
 - An output can be up to 4.995 GiB, R2's limit for one upload, and `job.outputStream(i)` streams it.
-- `map(items, { pool, slots, label, env, files, tmpfs })` sets a job's options.
-- `slots` runs that many tasks at once in each container, each with its own files, `/tmp` and an even share of the
-  memory. Slots share the network, so two tasks cannot bind one fixed port, and a gang cannot run in slots.
+- `map(items, { pool, slots, mode, label, env, files, tmpfs })` sets a job's options.
+- A job packs its tasks into containers by what they use, so it holds fewer containers. This is `mode: 'efficient'`,
+  the default. armada records each task's CPU, peak memory and disk, by its task and environment and by its item. A
+  container takes another task only while their recorded use fits its vCPUs, memory and disk. A task armada has not
+  measured yet runs alone, and so does a gang's rank.
+- Each packed task has its own files and `/tmp`, and all of them share one memory cap, so a task past its estimate is
+  killed rather than the container. A task that fails beside others, killed for memory, red or past its timeout, runs
+  again alone, before its own retries. Its result says how the packed run ended. If it then passes, its item always
+  runs alone after that.
+- `mode: 'fast'` runs one task a container. Packed tasks share the network, so tasks that bind one fixed port need it.
+- `slots` runs exactly that many tasks at once in each container, each with an even share of the memory, and turns
+  packing off. A gang cannot run in slots.
 - A task takes a `timeout`. `speculative` lets an idle container rerun a straggler, and `hedge` runs that many of the
   heaviest items twice from the start. Either way the first answer is kept.
 - `retries` reruns an item only for the failures you name. With `retries: { attempts: 3, backoffSeconds: 5,
@@ -315,7 +324,8 @@ for the other.
 | `task.name` | `name` | The entry key that names a task. |
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
-| `task.slots` | `1` | The tasks one container runs at once, each in its own slot. |
+| `task.slots` | `1` | The tasks one container runs at once, each in its own slot. More than one turns packing off. |
+| `task.mode` | `efficient` | `efficient` packs tasks into containers by their recorded use; `fast` runs one a container. |
 | `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept, so a slow container holds the run up no longer than the other copy takes. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 | `task.secrets` | `[]` | The secrets each task gets in its environment, by name (`armada secret set <name>`). |
@@ -375,7 +385,7 @@ A client and a Worker too far apart in version refuse each other's requests, and
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--mode=efficient|fast] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

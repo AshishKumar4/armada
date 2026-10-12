@@ -569,14 +569,15 @@ describe('the CLI\'s arguments', () => {
       // Each otherwise a valid map but for the word it names, refused before any request reaches the deployment.
       const wrong = await Promise.all(([
         [['map', '--times', '3', '--', 'true'], '--times'], [['map', '--times=3', '--time=3', '--', 'true'], '--time'], [['map', '-pool=1', '--times=3', '--', 'true'], '-pool'],
-        [['map', '--times=0', '--', 'true'], '--times'], [['deploy', 'garbage'], 'garbage'], [['toString'], 'toString'], [['--pool=1'], 'no command'],
+        [['map', '--times=0', '--', 'true'], '--times'], [['map', '--mode=slow', '--times=1', '--', 'true'], 'slow'], [['deploy', 'garbage'], 'garbage'], [['toString'], 'toString'],
+        [['--pool=1'], 'no command'],
       ] as const).map(async ([words, named]) => {
         const ran = await cli(...words);
 
         return [ran.exit, ran.said.includes(named)];
       }));
 
-      expect({ wrong, requests }).toEqual({ wrong: Array.from({ length: 7 }, () => [2, true]), requests: [] });
+      expect({ wrong, requests }).toEqual({ wrong: Array.from({ length: 8 }, () => [2, true]), requests: [] });
     } finally {
       await server.stop(true);
     }
@@ -617,11 +618,11 @@ describe('the CLI\'s arguments', () => {
 
       const argv = ['tool', '--output', '--items=x'];
       // Nothing listens on port 9: the named connection's server is the only one that can answer.
-      const exits = [await map([], server.url.href), await map([`--connection=${named}`], 'http://127.0.0.1:9')];
+      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast'], 'http://127.0.0.1:9')];
       const job = { items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false };
 
       expect({ exits, jobs }).toMatchObject({ exits: [0, 0], jobs: [job, job] });
-      expect(v.parse(JobSpecSchema, jobs[0]).deadline).toBe(21600);
+      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode }) => [deadline, mode])).toEqual([[21600, 'efficient'], [21600, 'fast']]);
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });

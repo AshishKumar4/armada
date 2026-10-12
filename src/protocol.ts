@@ -270,6 +270,13 @@ export function deadlineRefusal(timeout: number | undefined, deadline: number | 
   return timeout !== undefined && bound < timeout ? `JobDeadlineTooShort: job deadline ${String(bound)} s is shorter than the task timeout ${String(timeout)} s` : null;
 }
 
+/** How a job places its tasks. `efficient` runs as many tasks in each container as their measured use fits, each in a
+ *  slot of its own, so the job holds fewer containers; a task not measured yet runs alone, and one that fails beside
+ *  others runs again alone. `fast` runs one task a container. */
+export const ModeSchema = v.picklist(['efficient', 'fast']);
+
+export type Mode = v.InferOutput<typeof ModeSchema>;
+
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,
   /** For a repository recipe: the commit each container checks out, packed against `base`. */
@@ -290,9 +297,7 @@ export const JobSpecSchema = v.object({
   /** The tasks one container runs at once, each isolated in its own slot: the job's lanes are pool × slots. More than
    *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
-  /** `efficient` runs as many tasks in each container as their measured use fits, each in a slot of its own, so the job
-   *  holds fewer containers; a task not yet measured runs alone. `fast` runs one task a container. */
-  mode: v.optional(v.picklist(['efficient', 'fast']), 'efficient'),
+  mode: v.optional(ModeSchema, 'efficient'),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow

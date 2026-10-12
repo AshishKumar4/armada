@@ -57,14 +57,14 @@ const ConfigSchema = v.object({
   /** `local` runs the plan in this checkout where it is the commit itself and clean, as a CI runner's is, rather than
    *  in a container whose start can take a minute; elsewhere the plan runs in a container as ever. */
   plan: v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)), local: v.optional(v.boolean(), false) }),
-  /** The task job's own settings (`slots`, `speculative`, `hedge`, `timeout`, `secrets`) are a job's, as a job spec has
-   *  them. */
+  /** The task job's own settings (`slots`, `mode`, `speculative`, `hedge`, `timeout`, `secrets`) are a job's, as a job
+   *  spec has them. */
   task: v.object({
     command: v.pipe(v.array(v.string()), v.minLength(1)),
     /** The matrix key that names a task; `name`, else the first string-valued key, by default. */
     name: v.optional(v.string()),
     verdict: v.optional(v.boolean(), true),
-    ...v.pick(JobSpecSchema, ['slots', 'speculative', 'hedge', 'timeout', 'secrets']).entries,
+    ...v.pick(JobSpecSchema, ['slots', 'mode', 'speculative', 'hedge', 'timeout', 'secrets']).entries,
   }),
 });
 

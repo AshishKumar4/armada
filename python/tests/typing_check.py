@@ -129,3 +129,9 @@ def held(error: MapError[int, str]) -> list[Result[int, str]]:
 def followed(job: Job[int, str]) -> None:
     assert_type(job.status(), JobStatus)
     assert_type(job.summary(), Summary)
+
+
+# A job's mode is "efficient" or "fast": mypy refuses any other word.
+def placed(items: list[int]) -> None:
+    assert_type(square.stream(items, mode="fast"), Job[int, int])
+    square.map(items, mode="slow")  # type: ignore[arg-type]
