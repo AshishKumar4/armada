@@ -100,7 +100,6 @@ export class ArmadaFleet extends DurableObject<Env> {
     return Object.fromEntries(Object.entries(holds ?? {}).filter(([, hold]) => hold.until > now));
   }
 
-  /** A job not yet done. */
   /** Admits `job` unless `version` is drained, and counts it open in the same step: a drain then sees every job it
    *  did not refuse. */
   async reserve(version: string, job: string): Promise<boolean> {
