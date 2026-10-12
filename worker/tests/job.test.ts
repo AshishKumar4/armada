@@ -924,6 +924,21 @@ describe('a gang task', () => {
       .toEqual({ done: true, events: [[0, 'failed', 'lost'], [1, 'failed', 'lost'], [2, 'exited', null], [3, 'exited', null], [4, 'failed', 'lost']] });
   });
 
+  test('runs on to its answer when a rank that exited green retires its vessel before the others land', async () => {
+    const { job: open } = await job(gang(2));
+
+    await formed(open, ['v1', 'v2']);
+    await land(open, 'v2', 0, { exitCode: 0 });
+    // Nothing is queued for v2 any more: it retires while rank 0 still runs.
+    expect(await open.claim('v2')).toBeNull();
+    await open.retired('v2');
+    const still = await open.still('v1', 0);
+
+    await land(open, 'v1', 0, { exitCode: 0 });
+
+    expect({ still, events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.exitCode]) }).toEqual({ still: true, events: [[0, 'exited', 0]] });
+  });
+
   test('is lost whole with any rank: the others stop, and it forms again from the vessels left and a replacement', async () => {
     const { job: lossy, begun } = await job(gang(2));
 

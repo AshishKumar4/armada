@@ -348,6 +348,32 @@ describe('a CI run\'s pool', () => {
   });
 });
 
+describe('a repository recipe', () => {
+  test('keys its environment by this client\'s packer, however its caller wrote it, as it resolves and as its job starts', async () => {
+    const sent: unknown[] = [];
+    const original = globalThis.fetch;
+
+    globalThis.fetch = fakeFetch(async (request) => {
+      sent.push(await request.json());
+
+      return new URL(request.url).pathname === '/jobs' ? Response.json({ id: 'j1' }) : Response.json({ key: 'k', base: 'root' });
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+      const recipe = v.parse(RecipeSchema, { repo: { project: 'app', checkout: '/home/ci/work', history: 'full', manifest: [] } });
+
+      await armada.resolve(recipe);
+      await armada.create({ recipe, items: [{ item: 1, argv: ['true'] }], run: { kind: 'command' } });
+      const packers = sent.map((body) => v.parse(v.object({ recipe: v.object({ repo: v.object({ packer: v.optional(v.number()) }) }) }), body).recipe.repo.packer);
+
+      expect(packers).toEqual([PACKER, PACKER]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
 describe('uploading a pack', () => {
   test('one no larger than a part goes in one PUT; a larger one in equal parts, then completes', async () => {
     const seen: string[] = [];

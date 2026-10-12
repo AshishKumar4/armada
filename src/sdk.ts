@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -55,6 +55,12 @@ export function connect(): Armada {
   if (!existsSync(file)) throw new Error(named === undefined ? 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN' : `no connection file at ${file}`);
 
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
+}
+
+/** `recipe` as this client sends it: a repository recipe's environment is one this client's packs prepare (`PACKER`),
+ *  whoever wrote the recipe. */
+function ownPacker(recipe: v.InferInput<typeof RecipeSchema>): v.InferInput<typeof RecipeSchema> {
+  return recipe.repo === undefined ? recipe : { ...recipe, repo: { ...recipe.repo, packer: PACKER } };
 }
 
 /** A failed response in one line: the Worker's own error, or the status and the title or first line of any other page,
@@ -168,7 +174,7 @@ export class Armada {
 
   /** A recipe's environment key, and what a commit for it should be packed against. */
   async resolve(recipe: Recipe): Promise<{ readonly key: string; readonly base: string }> {
-    return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe }));
+    return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe: ownPacker(recipe) }));
   }
 
   /** Stores a commit's pack once, under this client's `PACKER` and its shallow boundary (`CommitSchema`); `pack` is
@@ -239,7 +245,7 @@ export class Armada {
 
     if (refused !== null) throw new Error(refused);
 
-    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', spec)).id;
+    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', { ...spec, recipe: ownPacker(spec.recipe) })).id;
   }
 
   async add(id: string, items: readonly Task[]): Promise<void> {

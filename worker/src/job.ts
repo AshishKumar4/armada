@@ -1077,9 +1077,9 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** Done once the job is closed, no task is queued or running, and no vessel can still take one. The job grows to what
-   *  its open tasks need, within its capacity (`grow`), so an open task that needs more containers at once than its
-   *  capacity never runs, and is lost: every open task once its capacity is spent. A task whose cache read is still out
-   *  is settled by the method that reads it. */
+   *  its open tasks need, within its capacity (`grow`), so a task still to start that needs more containers at once than
+   *  its capacity never runs, and is lost: every one once its capacity is spent. A running task holds its own, and a
+   *  gang's rank that ended may leave. A task whose cache read is still out is settled by the method that reads it. */
   private async settle(): Promise<void> {
     const spec = await this.spec();
 
@@ -1090,7 +1090,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const capacity = await this.capacity(spec);
     // A job without its environment is waiting for it prepared again, and vessels for its open tasks with it.
     const awaiting = (await this.ctx.storage.get<Generation>('environment')) === undefined;
-    const stranded = awaiting ? [] : this.sql.exec<{ idx: number; ranks: number }>(`SELECT idx, ${RANKS} AS ranks FROM tasks WHERE ${OPEN} AND ${RANKS} > ?`, capacity).toArray();
+    const stranded = awaiting ? [] : this.sql.exec<{ idx: number; ranks: number }>(`SELECT idx, ${RANKS} AS ranks FROM tasks WHERE state IN ('queued', 'forming') AND ${RANKS} > ?`, capacity).toArray();
 
     if (stranded.length > 0) {
       // Why the vessels are not there, in their own last distinct failures, most recent first.

@@ -133,10 +133,9 @@ function fileTimings(rows: readonly { readonly row: VerdictRow; readonly declare
 export function grade(answers: readonly TaskAnswer[]): Graded {
   const problems: string[] = [];
   const named = new Map<VerdictRow, string>();
-  const reported: VerdictRow[] = [];
+  // Each row reported, with the files its plan entry declares for it.
+  const reported: { readonly row: VerdictRow; readonly declared: readonly string[] }[] = [];
   const seen = new Map<string, string>();
-  // The files each row's plan entry declares for it.
-  const declared = new Map<VerdictRow, readonly string[]>();
 
   const flag: Flag = (problem, row) => {
     problems.push(problem);
@@ -156,12 +155,10 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       const name = rowName(row);
       const owner = seen.get(name);
 
-      declared.set(row, files.get(name) ?? []);
-
       if (name === '') flag(`${answer.name} reported a row with no name`, row);
       else if (owner !== undefined) flag(`${name} was reported by both ${owner} and ${answer.name}`, row);
       else seen.set(name, answer.name);
-      reported.push(row);
+      reported.push({ row, declared: files.get(name) ?? [] });
 
       for (const path of row.artifacts ?? []) {
         if (answer.artifacts?.has(path) !== true) flag(`${answer.name}: ${rowName(row)} names evidence ${path} its task did not keep`, row);
@@ -171,10 +168,10 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
     coverage(answer, flag);
   }
 
-  const graded = reported.map((row) => {
+  const graded = reported.map(({ row, declared }) => {
     const problem = named.get(row);
 
-    return { row: problem === undefined ? row : { ...row, exitCode: row.exitCode === 0 ? UNGRADED_EXIT : row.exitCode, problem }, declared: declared.get(row) ?? [] };
+    return { row: problem === undefined ? row : { ...row, exitCode: row.exitCode === 0 ? UNGRADED_EXIT : row.exitCode, problem }, declared };
   });
 
   const rows = graded.map(({ row }) => row);
