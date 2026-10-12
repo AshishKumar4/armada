@@ -197,7 +197,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
     ARTIFACTS: bucket(),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
     // A store with nothing learned yet: every task runs alone until its class is.
-    ESTIMATES: namespace(() => ({ read: async () => ({ samples: [], items: {} }), record: async () => undefined })),
+    ESTIMATES: namespace(() => ({ read: async () => ({ estimate: null, items: {} }), record: async () => null })),
     ...bindings,
   });
 

@@ -1,29 +1,30 @@
 import { describe, expect, test } from 'bun:test';
-import { ArmadaEstimates, classEstimate, MIN_SAMPLES } from '../src/estimates';
+import { ArmadaEstimates, MIN_SAMPLES } from '../src/estimates';
 import { state, world } from './harness';
 
 const GIB = 2 ** 30;
 
 describe('a class\'s estimates', () => {
-  test('keep its newest samples, and each item\'s most memory and disk, alone once found to run alone', async () => {
+  test('count each run once, however often it is delivered, and estimate from enough of the newest', async () => {
     const store = new ArmadaEstimates(state().ctx, world({}));
+    const run = (at: number, memory: number) => ({ run: `j/${String(at)}/1/v1`, item: `i${String(at)}`, cores: at / 10, memory, disk: at * 1000 });
+    const few = Array.from({ length: MIN_SAMPLES - 1 }, (_, at) => run(at, GIB));
 
-    await store.record([{ item: 'a', cores: 1, memory: 2 * GIB, disk: 100 }, { item: 'b', cores: 0.5, memory: GIB, disk: 50 }]);
-    await store.record([{ item: 'a', cores: 2, memory: GIB, disk: 300 }], ['b']);
-    await store.record(Array.from({ length: 250 }, (_, at) => ({ item: `x${String(at)}`, cores: 1, memory: GIB, disk: 1 })));
-    const read = await store.read(['a', 'b', 'unknown']);
+    const below = await store.record(few);
+    // The same runs again, as a send whose answer was lost, or two sends at once: no new sample.
+    const again = await store.record(few);
+    const enough = await store.record([run(MIN_SAMPLES - 1, 2 * GIB), ...Array.from({ length: 300 }, (_, at) => run(100 + at, 3 * GIB))]);
 
-    expect({ samples: read.samples.length, items: read.items }).toEqual({
-      samples: 200,
-      items: { a: { cores: 2, memory: 2 * GIB, disk: 300, alone: false }, b: { cores: 0.5, memory: GIB, disk: 50, alone: true } },
-    });
+    // The newest 200 of 308 are runs 200 to 399: cores 20 to 39.9, whose 90th percentile by rank is 38; 3 GiB each.
+    expect({ below, again, enough }).toEqual({ below: null, again: null, enough: { cores: 38, memory: 3 * GIB, disk: 399_000 } });
   });
 
-  test('estimate a class from enough samples only: its 90th percentile of cores, 95th of memory, and most disk', () => {
-    const samples = Array.from({ length: 20 }, (_, at) => ({ cores: at / 10, memory: (at + 1) * GIB, disk: at * 1000 }));
+  test('keep each item\'s most memory and disk and its latest cores, and alone once found to run alone', async () => {
+    const store = new ArmadaEstimates(state().ctx, world({}));
 
-    expect({ few: classEstimate(samples.slice(0, MIN_SAMPLES - 1)), enough: classEstimate(samples) }).toEqual({
-      few: null, enough: { cores: 1.8, memory: 20 * GIB, disk: 19_000 },
-    });
+    await store.record([{ run: 'j/0/1/v1', item: 'a', cores: 1, memory: 2 * GIB, disk: 100 }, { run: 'j/1/1/v1', item: 'b', cores: 0.5, memory: GIB, disk: 50 }]);
+    await store.record([{ run: 'j/0/2/v1', item: 'a', cores: 2, memory: GIB, disk: 300 }], ['b']);
+
+    expect((await store.read(['a', 'b', 'unknown'])).items).toEqual({ a: { cores: 2, memory: 2 * GIB, disk: 300, alone: false }, b: { cores: 0.5, memory: GIB, disk: 50, alone: true } });
   });
 });

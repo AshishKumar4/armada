@@ -38,6 +38,11 @@ export class Runs {
     this.sql.exec('DELETE FROM runs WHERE vessel = ?', vessel);
   }
 
+  /** How many runs may still be going. */
+  count(): number {
+    return Number(this.sql.exec('SELECT COUNT(*) AS n FROM runs').one()['n']);
+  }
+
   of(index: number): { vessel: string; slot: number; attempt: number; started: number }[] {
     return this.sql.exec<{ vessel: string; slot: number; attempt: number; started: number }>('SELECT vessel, slot, attempt, started FROM runs WHERE idx = ? ORDER BY started', index).toArray();
   }

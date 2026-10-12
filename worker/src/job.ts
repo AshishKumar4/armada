@@ -31,7 +31,8 @@ import {
 import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { classOf, itemKey, Learned, roomOf, tasksMemoryOf, type Usage } from './estimates';
+import { classOf, itemKey, tasksMemoryOf } from './estimates';
+import { Placement, type Load } from './placement';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
 import type { VesselSpec } from './vessel';
@@ -95,13 +96,6 @@ const WATCHDOG_MS = 15_000;
 /** A vessel that has not been heard from in this long, while booting or working, is lost. */
 const SILENT_MS = { waiting: 60 * 60_000, booting: 8 * 60_000, working: 4 * 60_000 } as const;
 
-/** What a packing job's vessel runs now (`loadOf`), and whether it holds a gang's rank still to start. */
-interface Load extends Usage {
-  readonly tasks: number;
-  readonly whole: boolean;
-  readonly joined: boolean;
-}
-
 /** One run of a task: its index, which attempt it is, and whether it is a copy of a run already going. */
 interface Attempt {
   readonly index: number;
@@ -129,9 +123,6 @@ const STRAGGLER_WEIGHTS = 1.5;
 const STANDBY_MS = 60_000;
 
 
-/** How a run beside other tasks ended when the kernel killed it for memory (`packedFailure`). */
-const KILLED_FOR_MEMORY = 'killed for memory';
-
 /** Whether a job packs its tasks into its containers by their measured use: in `efficient` mode, unless it fixed its
  *  slots. */
 const packs = (spec: Pick<Kept, 'mode' | 'slots'>): boolean => spec.mode === 'efficient' && spec.slots === 1;
@@ -155,8 +146,8 @@ export class ArmadaJob extends DurableObject<Env> {
 
   private readonly runs = new Runs(this.ctx.storage.sql);
 
-  /** What its tasks' classes used, as its store and its own tasks tell (`estimates.ts`). */
-  private readonly learned = new Learned(this.ctx.storage.sql);
+  /** How its tasks are packed into its containers, in efficient mode (`placement.ts`). */
+  private readonly placement = new Placement(this.ctx.storage.sql);
 
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
@@ -182,13 +173,6 @@ export class ArmadaJob extends DurableObject<Env> {
 
     for (const column of ['dup', 'slot', 'dup_slot']) {
       if (!tasks.includes(column)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column} INTEGER`);
-    }
-
-    // A task's class and item key (`estimates.ts`), what it is expected to use once looked up, whether it runs alone, and
-    // whether it ran beside another task.
-    // And how its run beside other tasks failed, once it is to run alone for it (`packedFailure`).
-    for (const [column, type] of [['class', 'TEXT'], ['ikey', 'TEXT'], ['looked', 'INTEGER'], ['est_cores', 'REAL'], ['est_mem', 'REAL'], ['est_disk', 'REAL'], ['alone', 'INTEGER'], ['shared', 'INTEGER'], ['packed_failure', 'TEXT']]) {
-      if (!tasks.includes(column ?? '')) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column ?? ''} ${type ?? ''}`);
     }
 
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
@@ -218,9 +202,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const keys = await Promise.all(items.map(async (task) => await itemKey(task)));
     const first = this.count('1 = 1');
 
-    for (const [at, task] of items.entries()) {
-      this.sql.exec('INSERT INTO tasks (idx, item, weight, state, class, ikey) VALUES (?, ?, ?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued', classOf(spec, task, key), keys[at] ?? null);
-    }
+    for (const [at, task] of items.entries()) this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued');
+    this.placement.add(items.map((task, at) => ({ index: first + at, class: classOf(spec, task, key), item: keys[at] ?? '' })));
 
     return items.map((_, at) => first + at);
   }
@@ -238,7 +221,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const added = await this.insert(items, spec, (await this.ctx.storage.get<string>('key')) ?? '');
 
     await this.answerFromCache(spec, added);
-    await this.estimate(spec);
+    await this.look(spec);
     await this.grow();
     await this.settle();
 
@@ -278,7 +261,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const spec = await this.spec();
     const phase = await this.ctx.storage.get<Phase>('phase');
 
-    if (spec === undefined || phase === undefined || phase === 'done') return;
+    if (spec === undefined || phase === undefined) return;
+
+    if (phase === 'done') return await this.deliver();
     this.requeueUnread();
 
     const deadline = spec.deadline ?? JOB_DEADLINE_SECONDS;
@@ -289,6 +274,9 @@ export class ArmadaJob extends DurableObject<Env> {
       await this.watchGangs(spec);
 
       if ((await this.ctx.storage.get<Phase>('phase')) !== 'done') await this.watch();
+      // The queue and what it needs change between alarms: estimates come in, and tasks land or are lost.
+      await this.look(spec);
+      await this.grow();
       await this.send();
     }
 
@@ -339,59 +327,20 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     await this.ctx.storage.put('environment', readiness.generation);
-    await this.estimate(spec);
+    await this.look(spec);
     await this.grow();
     await this.settle();
   }
 
-  /** Each task not looked up yet, estimated from its class's store and what this job learned of the class (`Learned`):
-   *  its own record where its item ran before, else its class's estimate. One left without either runs alone, and is
-   *  estimated once its class is learned (`learn`). Only a job that packs its tasks looks. */
-  private async estimate(spec: Kept): Promise<void> {
-    if (!packs(spec)) return;
-    const unlooked = this.sql.exec<{ idx: number; class: string; ikey: string }>('SELECT idx, class, ikey FROM tasks WHERE looked IS NULL AND class IS NOT NULL AND ikey IS NOT NULL').toArray();
-
-    for (const cls of new Set(unlooked.map((row) => row.class))) {
-      const rows = unlooked.filter((row) => row.class === cls);
-      const read = await this.env.ESTIMATES.getByName(cls).read(rows.map((row) => row.ikey));
-
-      this.learned.seed(cls, read.samples);
-      const learnt = this.learned.estimate(cls);
-
-      for (const row of rows) {
-        const own = read.items[row.ikey];
-        const expected = own ?? learnt;
-
-        this.sql.exec('UPDATE tasks SET looked = 1, alone = ?, est_cores = ?, est_mem = ?, est_disk = ? WHERE idx = ?',
-          own?.alone === true ? 1 : 0, expected?.cores ?? null, expected?.memory ?? null, expected?.disk ?? null, row.idx);
-      }
-    }
+  /** Each task not looked up yet given what its class's store holds of it (`Placement.look`): only a job that packs its
+   *  tasks looks. */
+  private async look(spec: Kept): Promise<void> {
+    if (packs(spec)) await this.placement.look(this.env.ESTIMATES);
   }
 
-  /** What a landed run of a task used, learned for its class, and the class's tasks without an estimate estimated by
-   *  it once there is one. Only a run measured whole, its disk included, which a task in a slot of its own is. */
-  private learn(outcome: Outcome): void {
-    const { cpuSeconds, peakMemory, diskBytes, seconds } = outcome;
-
-    if (cpuSeconds === undefined || peakMemory === undefined || diskBytes === undefined || seconds <= 0) return;
-    const task = this.sql.exec<{ class: string | null; ikey: string | null }>('SELECT class, ikey FROM tasks WHERE idx = ?', outcome.index).toArray()[0];
-
-    if (task?.class === null || task?.class === undefined || task.ikey === null) return;
-    this.learned.add(task.class, task.ikey, { cores: cpuSeconds / seconds, memory: peakMemory, disk: diskBytes });
-    const learnt = this.learned.estimate(task.class);
-
-    if (learnt === null) return;
-    this.sql.exec('UPDATE tasks SET est_cores = ?, est_mem = ?, est_disk = ? WHERE class = ? AND looked = 1 AND est_mem IS NULL AND alone = 0',
-      learnt.cores, learnt.memory, learnt.disk, task.class);
-  }
-
-  /** What the job learned, sent to its classes' stores; a store that does not answer has it at the next send. */
+  /** What the job's runs used, delivered to their classes' stores (`Placement.flush`). */
   private async send(): Promise<void> {
-    try {
-      await this.learned.flush(this.env.ESTIMATES);
-    } catch (cause) {
-      console.error(JSON.stringify({ estimates: said({ cause }) }));
-    }
+    await this.placement.flush(this.env.ESTIMATES);
   }
 
   /**
@@ -471,27 +420,12 @@ export class ArmadaJob extends DurableObject<Env> {
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
   }
 
-  /** The containers the open tasks, and `hedged` copies of them, need at once, up to the pool. One task each (a gang's
-   *  each rank) over the slots a fixed container carries. Packing, over the heaviest tasks the pool runs at once: one
-   *  each for a task that takes a container whole (one not estimated yet, one that runs alone, a gang's rank, a hedged
-   *  copy), and for the rest as many as their estimates fill, by whichever of cores, memory or disk fills first. */
+  /** The containers the open tasks, and `hedged` copies of them, need at once, up to the pool: one each (a gang's each
+   *  rank) over the slots a fixed container carries; packing, as many as their estimates fill (`Placement.containers`). */
   private needed(spec: Kept, hedged = 0): number {
-    if (!packs(spec)) return Math.min(spec.pool, Math.ceil((Number(this.sql.exec(NEEDED).one()['n']) + hedged) / spec.slots));
-    const room = roomOf(spec.recipe.size);
+    if (packs(spec)) return this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged });
 
-    const open = this.sql.exec<{ cores: number | null; memory: number | null; disk: number | null; ranks: number; whole: number }>(
-      `SELECT est_cores AS cores, est_mem AS memory, est_disk AS disk,
-        CASE WHEN json_type(item, '$.item.gang') = 'integer' THEN json_extract(item, '$.item.gang') ELSE 1 END AS ranks,
-        CASE WHEN alone IS NOT 0 OR est_mem IS NULL OR json_type(item, '$.item.gang') = 'integer' THEN 1 ELSE 0 END AS whole
-      FROM tasks WHERE ${OPEN} ORDER BY weight DESC, idx LIMIT ?`, spec.pool,
-    ).toArray();
-
-    const packed = open.filter((task) => task.whole === 0);
-    const sum = (field: 'cores' | 'memory' | 'disk') => packed.reduce((total, task) => total + (task[field] ?? 0), 0);
-    const fill = Math.max(sum('cores') / room.cores, sum('memory') / room.memory, sum('disk') / room.disk);
-    const whole = open.filter((task) => task.whole === 1).reduce((total, task) => total + task.ranks, 0);
-
-    return Math.min(spec.pool, whole + hedged + Math.ceil(fill));
+    return Math.min(spec.pool, Math.ceil((Number(this.sql.exec(NEEDED).one()['n']) + hedged) / spec.slots));
   }
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
@@ -586,9 +520,9 @@ export class ArmadaJob extends DurableObject<Env> {
     // A packing job's vessel already running a task takes only what fits beside it (`fitting`), and nothing beside a
     // task that takes it whole; this slot then ends, and the vessel runs on. One holding a gang's rank still to start
     // takes that rank's claim (`rank`).
-    const load = packs(spec) ? this.loadOf(name) : null;
+    const load = packs(spec) ? this.placement.loadOf(name) : null;
 
-    if (load !== null && load.tasks > 0 && !load.joined) return this.fitting(spec, env, { name, slot, now }, load);
+    if (load !== null && load.runs > 0 && !load.joined) return this.fitting(spec, env, { name, slot, now }, load);
     // No await between finding no forming gang and creating one: simultaneous first claims would all miss `rank`,
     // then only the first form it, with the others retiring against the now-empty queue instead of joining.
     const ganged = this.rank(spec, env, name);
@@ -652,41 +586,19 @@ export class ArmadaJob extends DurableObject<Env> {
     return null;
   }
 
-  /** What vessel `name` runs now, in a packing job: how many tasks, their estimates summed, and whether one takes the
-   *  container whole: one whose use is not known yet, one that runs alone, or a gang's rank. */
-  private loadOf(name: string): Load {
-    const held = this.sql.exec<{ tasks: number; cores: number | null; memory: number | null; disk: number | null; whole: number | null }>(
-      `SELECT COUNT(*) AS tasks, SUM(est_cores) AS cores, SUM(est_mem) AS memory, SUM(est_disk) AS disk,
-        MAX(CASE WHEN alone IS NOT 0 OR est_mem IS NULL OR json_type(item, '$.item.gang') = 'integer' THEN 1 ELSE 0 END) AS whole
-      FROM tasks WHERE state IN ('running', 'landing') AND (vessel = ? OR dup = ?)`, name, name,
-    ).one();
-
-    const ranks = this.sql.exec<{ state: string }>(`SELECT state FROM members WHERE vessel = ? AND state IN ('joined', 'ready', 'starting', 'running', 'landing')`, name).toArray();
-
-    return {
-      tasks: held.tasks + ranks.length, cores: held.cores ?? 0, memory: held.memory ?? 0, disk: held.disk ?? 0, whole: held.whole === 1 || ranks.length > 0,
-      joined: ranks.some((rank) => rank.state === 'joined' || rank.state === 'ready'),
-    };
-  }
-
-  /** The heaviest queued task whose estimate fits beside `load` on vessel `name`, in what its container gives its
-   *  tasks (`roomOf`), handed out to `slot`; or null when none does, or `load` takes the container whole. The task and
-   *  every task it now runs beside are `shared`, which their ends read (`complete`). A gang, a task that runs alone or
-   *  one not estimated yet only ever goes to an empty vessel. */
+  /** The queued task that fits beside what vessel `name` runs (`load`), within the job's pool of runs, handed out to
+   *  `slot` beside them (`Placement.fit`); or null when none does. */
   private fitting(spec: Kept, env: Record<string, string>, { name, slot, now }: { readonly name: string; readonly slot: number; readonly now: number }, load: Load): Claim | null {
-    if (load.whole) return null;
-    const room = roomOf(spec.recipe.size);
+    const index = this.placement.fit(load, spec.recipe.size, { runs: this.runs.count(), pool: spec.pool, now });
+
+    if (index === null) return null;
 
     const next = this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1, shared = 1 WHERE idx = (
-        SELECT idx FROM tasks WHERE state = 'queued' AND not_before <= ? AND looked = 1 AND alone = 0 AND est_mem IS NOT NULL
-          AND json_type(item, '$.item.gang') IS NOT 'integer' AND est_cores <= ? AND est_mem <= ? AND est_disk <= ?
-        ORDER BY weight DESC, idx LIMIT 1) RETURNING idx, item, attempts`,
-      name, now, slot, now, room.cores - load.cores, room.memory - load.memory, room.disk - load.disk,
+      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1 WHERE idx = ? AND state = 'queued' RETURNING idx, item, attempts`, name, now, slot, index,
     ).toArray()[0];
 
     if (next === undefined) return null;
-    this.sql.exec(`UPDATE tasks SET shared = 1 WHERE state IN ('running', 'landing') AND (vessel = ? OR dup = ?)`, name, name);
+    this.placement.beside(name, next.idx, next.attempts);
 
     return this.claimOf(spec, env, next.item, { index: next.idx, attempt: next.attempts, duplicate: false });
   }
@@ -871,18 +783,11 @@ export class ArmadaJob extends DurableObject<Env> {
   /** `outcome` as its task's final one, if the task is still `from`: appended, and a green answer of a cached task kept
    *  in the cache, now that no other copy can end it red. A gang's is not: its answer is rank 0's alone. */
   private async land(outcome: Outcome, from: 'running' | 'landing'): Promise<void> {
-    const task = this.sql.exec<{ item: string; packed_failure: string | null; class: string | null; ikey: string | null }>(
-      `UPDATE tasks SET state = ? WHERE idx = ? AND state = ? RETURNING item, packed_failure, class, ikey`, outcome.kind, outcome.index, from,
-    ).toArray()[0];
+    const task = this.sql.exec<{ item: string }>(`UPDATE tasks SET state = ? WHERE idx = ? AND state = ? RETURNING item`, outcome.kind, outcome.index, from).toArray()[0];
 
     if (task === undefined) return;
-    const after = task.packed_failure;
-
-    // Green alone after it failed beside others, its item runs alone from now on; but one killed for memory, whose own
-    // record now holds the memory it reached, which packs it apart from what it would not fit beside.
-    if (after !== null && after !== KILLED_FOR_MEMORY && outcome.kind === 'exited' && outcome.exitCode === 0 && task.class !== null && task.ikey !== null) {
-      this.learned.alone(task.class, task.ikey);
-    }
+    // A task that ran again alone after failing beside others says how (`Placement.landed`).
+    const after = this.placement.landed(outcome.index, outcome);
 
     this.append(after === null ? outcome : { ...outcome, aloneAfter: after });
     const spec = await this.spec();
@@ -895,21 +800,6 @@ export class ArmadaJob extends DurableObject<Env> {
     const scope = { bundle: spec.run.bundle, task: spec.run.id, environment: (await this.ctx.storage.get<string>('key')) ?? '' };
 
     await keep(this.env.ARTIFACTS, scope, { item, days: spec.cache.days, output: runKey(id, outcome.index, outcome, 'output'), marker: outcome.answer });
-  }
-
-  /** How `outcome` ended, when it is a run beside other tasks in its container (`shared`), not a copy's, that ended red,
-   *  past its timeout or killed for memory, and its task has not run alone since: it then runs again alone (`complete`).
-   *  Null for any other: one cancelled, or lost, which the platform's retries took already. */
-  private packedFailure(outcome: Outcome): string | null {
-    const task = this.sql.exec<{ shared: number | null; dup: string | null; packed_failure: string | null }>('SELECT shared, dup, packed_failure FROM tasks WHERE idx = ?', outcome.index).toArray()[0];
-
-    if (task?.shared !== 1 || task.dup !== null || task.packed_failure !== null || outcome.reason === 'cancelled' || outcome.reason === 'lost') return null;
-
-    if (outcome.reason === 'timeout') return 'past its timeout';
-
-    if (outcome.kind !== 'exited' || outcome.exitCode === 0) return null;
-
-    return outcome.oomKilled === true ? KILLED_FOR_MEMORY : `exit ${String(outcome.exitCode)}`;
   }
 
   /** The task an answer lands for, with its retries: a plain task landing on `name`, or a gang's, running. */
@@ -927,17 +817,18 @@ export class ArmadaJob extends DurableObject<Env> {
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
     const retries = (await this.spec())?.retries;
 
-    if (member === undefined) this.learn(outcome);
+    if (member === undefined) this.placement.learn(`${(await this.ctx.storage.get<string>('id')) ?? ''}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, outcome.index, outcome);
     // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
     const task = kept === null ? undefined : this.landing(name, kept.index, member !== undefined);
-    const packed = kept !== null && task !== undefined && member === undefined ? this.packedFailure(kept) : null;
+    const packed = kept !== null && task !== undefined && member === undefined ? this.placement.packedFailure(name, kept) : null;
 
     const named = kept !== null && kept.exitCode !== 0
       && (retries?.exitCodes.includes(kept.exitCode) === true || (kept.error !== undefined && retries?.errors.includes(kept.error) === true));
 
     if (kept !== null && packed !== null) {
       // It failed beside other tasks in its container: it runs again alone, before any retry of its own.
-      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, alone = 1, shared = 0, packed_failure = ?, not_before = 0 WHERE idx = ?`, packed, kept.index);
+      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, not_before = 0 WHERE idx = ?`, kept.index);
+      this.placement.alone(kept.index, packed);
     } else if (kept !== null && task !== undefined && retries !== undefined && named && task.retries + 1 < retries.attempts) {
       const backoff = retries.backoffSeconds * 1000 * 2 ** task.retries;
 
@@ -1181,7 +1072,14 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.env.FLEET.getByName(SINGLE).closed((await this.ctx.storage.get<string>('id')) ?? '');
     // The environment was in use until now: its recent hour starts here (`ArmadaEnvironments.used`).
     await this.env.ENVIRONMENTS.getByName(SINGLE).used(await this.environment());
+    await this.deliver();
+  }
+
+  /** What the job's runs used, delivered after its end: its alarm stays until every class's store has it. */
+  private async deliver(): Promise<void> {
     await this.send();
+
+    if (this.placement.pending()) await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
   }
 
   /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */
