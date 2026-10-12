@@ -1291,7 +1291,7 @@ describe('asking the runner', () => {
 });
 
 describe('the webhook command', () => {
-  test('add creates the GitHub hook, then stores its secret; add again updates that hook; list shows no secret; remove deletes both', async () => {
+  test('add stores a secret, has GitHub sign with it, then stores it again with the hook; add again updates that hook; list shows no secret; remove deletes both', async () => {
     const calls: { method: string; path: string; body: unknown }[] = [];
     // The deployment's configs, as its route keeps them: the list answers what the last POST stored, secret out.
     let stored: { repo: string; pullRequests: boolean; hook?: number } | null = null;
@@ -1322,10 +1322,18 @@ describe('the webhook command', () => {
 
     const scratch = mkdtempSync(join(tmpdir(), 'armada-hook-'));
 
-    // A stub `gh`: signed in, and a hook create or update answers id 77 while remembering every call.
+    // A stub `gh`: signed in; a hook create or update answers id 77, and the repo's hooks list it once it was made; every
+    // call is remembered.
     const bin = join(scratch, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "$@" >> ${scratch}/gh-calls\nif [ "$1" = "api" ]; then echo 77; fi\nexit 0\n`);
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh
+echo "$@" >> ${scratch}/gh-calls
+case "$*" in
+  "api repos/owner/armada/hooks --jq"*) [ -e ${scratch}/made ] && echo 77 ;;
+  *config*) touch ${scratch}/made; echo 77 ;;
+esac
+exit 0
+`);
     chmodSync(join(bin, 'gh'), 0o755);
 
     try {
@@ -1342,13 +1350,15 @@ describe('the webhook command', () => {
       const listed = await cli('webhook', 'list');
       const removed = await cli('webhook', 'remove', 'armada');
       const ghCalls = existsSync(join(scratch, 'gh-calls')) ? readFileSync(join(scratch, 'gh-calls'), 'utf8') : '';
-      const posted = calls.filter(({ method, path }) => method === 'POST' && path === '/webhooks/armada').map(({ body }) => v.parse(v.object({ secret: v.string(), hook: v.number() }), body));
+      const posted = calls.filter(({ method, path }) => method === 'POST' && path === '/webhooks/armada').map(({ body }) => v.parse(v.object({ secret: v.string(), hook: v.optional(v.number()) }), body));
 
       expect({ added: added.exit, again: again.exit }).toEqual({ added: 0, again: 0 });
       expect(added.said).toContain('created GitHub hook 77');
       expect(again.said).toContain('updated GitHub hook 77');
-      // Each add stored the secret it gave GitHub, with the hook's id, so the two never differ.
-      expect(posted.map(({ hook }) => hook)).toEqual([77, 77]);
+      // Each add stored its secret, the hook it knew of with it, before GitHub signed with it, and again after, with the
+      // hook's id: the second add found the hook at the deployment's URL.
+      expect(posted.map(({ hook }) => hook)).toEqual([undefined, 77, 77, 77]);
+      expect([posted[0]?.secret === posted[1]?.secret, posted[2]?.secret === posted[3]?.secret, posted[1]?.secret === posted[2]?.secret]).toEqual([true, true, false]);
       expect(posted.every(({ secret }) => /^[0-9a-f]{48}$/u.test(secret) && ghCalls.includes(`config[secret]=${secret}`))).toBe(true);
       expect(ghCalls).toContain('repos/owner/armada/hooks/77 -X PATCH');
       expect(listed.said).toContain('armada  owner/armada');
@@ -1456,11 +1466,12 @@ describe('the webhook command', () => {
         .toEqual({ exit: 0, hasUrl: true, hasSecret: true, steps: true });
       expect({ exit: refused.exit, said: refused.said.includes('updating its secret needs gh signed in'), posts: posted.length }).toEqual({ exit: 2, said: true, posts: 1 });
 
-      // Signed in, but GitHub refuses the update: the deployment keeps the secret GitHub still signs with.
+      // Signed in, but GitHub refuses the update: the deployment took the new secret beside the one GitHub still signs
+      // with, and keeps both until an add ends the change.
       writeFileSync(join(bin, 'gh'), '#!/bin/sh\nif [ "$1" = "auth" ]; then exit 0; fi\necho "HTTP 404: Not Found" >&2\nexit 1\n');
       const unmade = await add();
 
-      expect({ exit: unmade.exit, said: unmade.said.includes('updating GitHub hook 77 on owner/armada failed'), posts: posted.length }).toEqual({ exit: 2, said: true, posts: 1 });
+      expect({ exit: unmade.exit, said: unmade.said.includes('updating GitHub hook 77 on owner/armada failed'), posts: posted.length }).toEqual({ exit: 2, said: true, posts: 2 });
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });

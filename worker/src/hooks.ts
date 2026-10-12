@@ -66,14 +66,25 @@ const DRIVER_MS = 7 * 24 * 60 * 60_000;
 
 const PRUNE_MS = 24 * 60 * 60_000;
 
+/** A project's config as kept: the one last stored, and the secrets of those before it that GitHub may still sign
+ *  with, until the config is stored again with its own secret (`configure`). */
+export interface KeptHook extends HookConfig {
+  readonly earlier?: readonly string[];
+}
+
 export class ArmadaWebhooks extends DurableObject<Env> {
-  /** Stores or replaces a project's config. */
+  /** Stores or replaces a project's config. A new signing secret is taken beside the ones before it, since GitHub signs
+   *  with one of them until its hook is updated; storing the config again with the same secret says it is, and drops
+   *  them. A secret's change that stopped between its steps (`webhook add`) refuses no delivery. */
   async configure(project: string, config: HookConfig): Promise<void> {
-    await this.ctx.storage.put(`config:${project}`, config);
+    const prior = await this.configOf(project);
+    const earlier = prior === undefined || prior.secret === config.secret ? [] : [...prior.earlier ?? [], prior.secret];
+
+    await this.ctx.storage.put(`config:${project}`, { ...config, earlier } satisfies KeptHook);
   }
 
-  async configOf(project: string): Promise<HookConfig | undefined> {
-    return await this.ctx.storage.get<HookConfig>(`config:${project}`);
+  async configOf(project: string): Promise<KeptHook | undefined> {
+    return await this.ctx.storage.get<KeptHook>(`config:${project}`);
   }
 
   /** Every project's config, its signing secret left out. */

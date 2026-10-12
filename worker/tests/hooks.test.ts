@@ -87,9 +87,31 @@ describe('the github webhook', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]).not.toHaveProperty('secret');
     expect(listed[0]?.repo).toBe('owner/armada');
-    expect(await object.configOf('armada')).toEqual(CONFIG);
+    expect(await object.configOf('armada')).toEqual({ ...CONFIG, earlier: [] });
     expect(await object.remove('armada')).toEqual({ repo: 'owner/armada' });
     expect(await object.configOf('armada')).toBeUndefined();
+  });
+
+  test('takes a delivery signed with a secret before a new one until the config is stored again with it', async () => {
+    const object = await configured();
+    const next = 'n'.repeat(48);
+    const later = 'l'.repeat(48);
+
+    const signedWith = async (secret: string, id: string) => {
+      const body = JSON.stringify(pushed('refs/heads/feature'));
+
+      return (await deliver(object, pushed('refs/heads/feature'), { headers: { 'X-Hub-Signature-256': await sign(secret, body), 'X-GitHub-Delivery': id } })).status;
+    };
+
+    // A change GitHub never took, then another: GitHub may sign with any of the three.
+    await object.configure('armada', { ...CONFIG, secret: next });
+    await object.configure('armada', { ...CONFIG, secret: later });
+    const changing = [await signedWith(SECRET, 'a'), await signedWith(next, 'b'), await signedWith(later, 'c')];
+
+    // GitHub signs with the last one now, and the config is stored again with it.
+    await object.configure('armada', { ...CONFIG, secret: later, hook: 77 });
+
+    expect({ changing, settled: [await signedWith(SECRET, 'd'), await signedWith(next, 'e'), await signedWith(later, 'f')] }).toEqual({ changing: [200, 200, 200], settled: [401, 401, 200] });
   });
 
   test('accepts a good signature, and refuses a bad, a missing, or a wrong-secret one', async () => {

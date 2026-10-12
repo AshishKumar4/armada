@@ -640,9 +640,11 @@ async function secret(armada: Armada, verb: string | undefined, name: string | u
   return 0;
 }
 
-/** `webhook add` makes the project's GitHub hook with `gh` (signed in for the repo), or updates the one the CLI made
- *  before, and then stores the same signing secret on the deployment, so the two never differ. Without gh, a new
- *  project's config is stored and the hook's settings printed, the secret once, to add by hand. `webhook remove`
+/** `webhook add` stores the project's config with a new signing secret on the deployment, which takes it beside the
+ *  ones before it; makes the project's GitHub hook with `gh` (signed in for the repo), or updates the one at the
+ *  deployment's URL, to sign with it; then stores the config again, which drops the secrets before it. A run that stops
+ *  between the steps leaves the deployment taking every secret GitHub may sign with, and the next run ends the change.
+ *  Without gh, the config is stored and the hook's settings printed, the secret once, to add by hand. `webhook remove`
  *  deletes both. */
 async function webhook(armada: Armada, verb: string | undefined, project: string | undefined): Promise<number> {
   const listed = async () => v.parse(WebhooksSchema, await (await armada.call('/webhooks')).json()).webhooks;
@@ -689,19 +691,29 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
   const settings = ['-F', 'active=true', '-F', 'config[content_type]=json', '-F', `config[url]=${url}`, '-F', `config[secret]=${signing}`, ...events.flatMap((event) => ['-f', `events[]=${event}`])];
   // Checked as the deployment will, before GitHub signs with a secret the deployment might then refuse.
   const proposed = v.parse(HookConfigSchema, { repo, branches: option('branches')?.split(',').filter(Boolean), pullRequests, tokenSecret: option('token-secret'), secret: signing });
-  const known = (await listed()).find((each) => each.project === project && each.repo === repo)?.hook;
   const signedIn = gh(['auth', 'status']).out !== null;
+  // The hook that delivers to the deployment's URL, whatever the deployment recorded: a run that made one and stopped
+  // before recording it finds it here.
+  const atUrl = signedIn ? gh(['api', `repos/${repo}/hooks`, '--jq', `[.[] | select(.config.url == ${JSON.stringify(url)}) | .id][0] // empty`]).out : null;
+  const known = atUrl === null || !/^\d+$/u.test(atUrl) ? (await listed()).find((each) => each.project === project && each.repo === repo)?.hook : Number(atUrl);
+
+  const store = async (hook: number | undefined) => {
+    await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...proposed, hook }) });
+  };
 
   // A hook GitHub already signs with another secret is updated first, or the deployment would refuse its deliveries.
   if (known !== undefined && !signedIn) throw new Error(`${project} has GitHub hook ${String(known)} on ${repo}: updating its secret needs gh signed in for ${repo} (gh auth login)`);
 
+  await store(known);
   const made = known === undefined ? ['api', `repos/${repo}/hooks`, '-F', 'name=web', ...settings, '--jq', '.id'] : ['api', `repos/${repo}/hooks/${String(known)}`, '-X', 'PATCH', ...settings, '--jq', '.id'];
   const answered = signedIn ? gh(made).out : null;
   const hook = answered === null || !/^\d+$/u.test(answered) ? undefined : Number(answered);
 
-  // A hook whose update failed still signs with its old secret: storing the new one would refuse its deliveries.
-  if (known !== undefined && hook === undefined) throw new Error(`updating GitHub hook ${String(known)} on ${repo} failed, as gh said above; the deployment's secret is unchanged`);
-  await armada.call(`/webhooks/${project}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...proposed, hook }) });
+  // A hook whose update failed still signs with a secret before this one, which the deployment still takes.
+  if (known !== undefined && hook === undefined) throw new Error(`updating GitHub hook ${String(known)} on ${repo} failed, as gh said above; the deployment takes its secrets until webhook add runs again`);
+
+  // GitHub signs with the new secret now: the deployment takes it alone.
+  if (hook !== undefined) await store(hook);
   console.log(`configured ${project}: ${repo} builds ${pullRequests ? 'pushes and pull requests' : 'pushes'} at ${url}`);
 
   if (hook !== undefined) {

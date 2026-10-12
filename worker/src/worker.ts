@@ -511,7 +511,10 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
   const body = await request.text();
   const signature = request.headers.get('X-Hub-Signature-256') ?? '';
 
-  if (!(await signed(config.secret, signature, body))) return Response.json({ error: 'bad signature' }, { status: 401 });
+  // Signed with its secret, or one GitHub may still sign with while the secret changes (`ArmadaWebhooks.configure`).
+  if (!(await Promise.all([config.secret, ...config.earlier ?? []].map(async (secret) => await signed(secret, signature, body)))).includes(true)) {
+    return Response.json({ error: 'bad signature' }, { status: 401 });
+  }
 
   // A delivery GitHub sends again is answered by its commit's driver (`drive`): its job, its verdict, or a new driver
   // where the last ended with neither, so a redelivery once a refusal's cause is fixed is taken.
