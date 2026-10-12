@@ -233,6 +233,12 @@ cd ${workdir}
 exec "$@"' ns ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
+/** As root: slot `slot`'s task ended, and its answer was read: all it left running ends, and all it wrote, its overlays
+ *  and its task dir, is gone, so what the slot held is free before its job counts it free. */
+export const clearSlot = (slot: number): string => String.raw`set -eu
+${endGroup(taskGroup(slot))}
+rm -rf ${slotRoot(slot)}`;
+
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
  *  nothing while it runs. */
 export function waitOn(dir: string): string {

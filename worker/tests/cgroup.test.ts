@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { killOf, launchSlot, launchTask, slotRoot, slotTask, STATE, TASK, TASK_GROUP, taskGroup, usageFrom, usageOf, WAIT, waitOn } from '../src/container';
+import { clearSlot, killOf, launchSlot, launchTask, slotRoot, slotTask, STATE, TASK, TASK_GROUP, taskGroup, usageFrom, usageOf, WAIT, waitOn } from '../src/container';
 
 const host = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode === 0 && readFileSync('/proc/self/mounts', 'utf8').includes(' /sys/fs/cgroup cgroup2 ');
 
@@ -102,5 +102,16 @@ describe.skipIf(!host)('packed tasks', () => {
       sh(`echo max > ${taskGroup(0)}/../memory.max; [ ! -e ${taskGroup(0)}/../memory.swap.max ] || echo max > ${taskGroup(0)}/../memory.swap.max`);
     }
     // Each task holds its memory for 4 s, one after another starts.
+  }, 30_000);
+
+  test('a cleared slot keeps nothing its task left: no process it detached, no file it wrote, no group', () => {
+    const slot = 2;
+
+    expect(sh(launchSlot(workdir, slot, { memoryBytes: 64 * 1024 * 1024 }, []), 'sh', '-c', 'setsid sleep 300 & echo x > left').exitCode).toBe(0);
+    expect(sh(waitOn(slotTask(slot)), '20').stdout.toString().trim()).toBe('0');
+    const before = [alive('sleep 300'), existsSync(`${slotRoot(slot)}/upper/left`)];
+
+    expect(sh(clearSlot(slot)).exitCode).toBe(0);
+    expect({ before, after: [alive('sleep 300'), existsSync(slotRoot(slot)), existsSync(taskGroup(slot))] }).toEqual({ before: [true, true], after: [false, false, false] });
   }, 30_000);
 });

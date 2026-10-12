@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Json, Outcome } from '../../src/protocol';
-import { slotTask, taskGroup, waitOn } from '../src/container';
+import { clearSlot, slotTask, taskGroup, waitOn } from '../src/container';
 import type { Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
@@ -28,6 +28,8 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
   const completed: Outcome[] = [];
   const launched: { readonly script: string; readonly group: string }[] = [];
   const killed: string[] = [];
+  // Each slot cleared and each answer completed, in order, by slot.
+  const effects: (readonly ['cleared' | 'completed', number | undefined])[] = [];
   const queue = [...claims];
   // The files piped in, by path: a launch sources its task's argv and environment from one.
   const files = new Map<string, string>();
@@ -43,6 +45,8 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
     }
 
     if ((argv[2] ?? '').startsWith('set -eu\npid=')) killed.push(argv[2] ?? '');
+
+    if (argv[3] === 'clear') effects.push(['cleared', Array.from({ length: 16 }, (_, slot) => slot).find((slot) => clearSlot(slot) === argv[2])]);
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     const endsOf = ends[slotOf(argv[2] ?? '')] ?? [];
@@ -73,7 +77,10 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
     still: async (_name: string, index: number) => still(index),
     stopped: async () => undefined,
     accept: async () => true,
-    complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
+    complete: async (_name: string, outcome: Outcome) => {
+      completed.push(outcome);
+      effects.push(['completed', outcome.slot]);
+    },
     retired: async () => undefined,
     vesselFailed: async () => undefined,
   };
@@ -86,7 +93,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
 
   for (let alarm = 0; alarm < 6; alarm += 1) await vessel.alarm();
 
-  return { claimed, completed, launched, killed };
+  return { claimed, completed, launched, killed, effects };
 }
 
 describe('a slotted vessel', () => {
@@ -100,6 +107,12 @@ describe('a slotted vessel', () => {
       overlay: launched.every((each) => each.script.includes('lowerdir=/home/ci/work')),
       groups: launched.map((each) => each.group).toSorted(),
     }).toEqual({ slots: [0, 1, 2], own: [true, true, true], isolated: true, overlay: true, groups: [taskGroup(0), taskGroup(1), taskGroup(2)].toSorted() });
+  });
+
+  test('clears each slot, all its task left running and all it wrote, before its job counts the slot free', async () => {
+    const { effects } = await run({ tasks: 6 });
+
+    expect([0, 1, 2].map((slot) => effects.filter(([, at]) => at === slot).map(([what]) => what))).toEqual([0, 1, 2].map(() => ['cleared', 'completed', 'cleared', 'completed']));
   });
 
   test('a slot the job drops is killed alone: the others run on to their answers', async () => {

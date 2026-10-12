@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { boundaryOf, BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Outcome } from '../../src/protocol';
 import {
-  ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  clearSlot, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import type { Claim, Gang } from './job';
@@ -370,6 +370,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
         await this.ctx.storage.delete(slotKey(slot));
+        await this.clear(spec, slot);
         // A copy stopped for its twin's answer, which waits until this one can no longer end red.
         await job.stopped(spec.name, current.claim.index, { slot, attempt: current.claim.attempt });
       }
@@ -551,7 +552,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
     if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
 
-    if (!(await job.accept(spec.name, index, exitCode, { slot, attempt }))) return;
+    if (!(await job.accept(spec.name, index, exitCode, { slot, attempt }))) return await this.clear(spec, slot);
     const seconds = (Date.now() - current.startedAt) / 1000;
 
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
@@ -575,7 +576,14 @@ export class ArmadaVessel extends DurableObject<Env> {
       index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, error, ...usage,
     };
 
+    await this.clear(spec, slot);
     await job.complete(spec.name, outcome, seconds * 1000);
+  }
+
+  /** An isolated slot cleared (`clearSlot`) once its task's answer is read, before its job counts the slot free. A
+   *  shared container's one task is cleared as the next launches. */
+  private async clear(spec: SlotSpec, slot: number): Promise<void> {
+    if (layoutOf(spec, slot).isolated) await must(this.container(), 'clearing the slot', ['/bin/sh', '-c', clearSlot(slot), 'clear'], { ms: EXEC_MS });
   }
 
   /** What a command printed, or null, said in the log, when it could not run: for what a task's outcome reads but
