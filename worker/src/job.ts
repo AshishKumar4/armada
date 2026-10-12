@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -583,7 +583,7 @@ export class ArmadaJob extends DurableObject<Env> {
       this.sql.exec(`UPDATE tasks SET state = 'running', started = ?, attempts = attempts + 1, vessel = (SELECT vessel FROM members WHERE idx = ? AND rank = 0)
         WHERE idx = ?`, Date.now(), mine.idx, mine.idx);
       this.sql.exec(`UPDATE members SET state = 'ready' WHERE idx = ?`, mine.idx);
-      token = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      token = hex(crypto.getRandomValues(new Uint8Array(24)));
     }
 
     return this.rankClaim(spec, env, name, { index: mine.idx, item: task.item, token });

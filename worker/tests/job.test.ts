@@ -519,7 +519,7 @@ describe('a job whose environment\'s snapshot the platform no longer has', () =>
     await vessels.get('missing/v1')?.vessel.alarm();
     const lost = await missing.status();
 
-    await environments.prepared({ key, snapshot: { id: 'fresh', size: 1 }, sha: null, created: 1, seconds: {} });
+    await environments.prepared({ ...READY, key, snapshot: { id: 'fresh', size: 1 }, created: 1 });
     // A late start from the lost snapshot cannot undo the environment that replaced it.
     await environments.lost(key, 'gone');
     await missing.alarm();
@@ -536,7 +536,7 @@ describe('a job whose environment\'s snapshot the platform no longer has', () =>
 });
 
 describe('a job whose snapshot is lost while its vessels start', () => {
-  const snapshotOf = (id: string): Generation => ({ key: 'k'.repeat(64), snapshot: { id, size: 1 }, sha: null, created: 0, seconds: {} });
+  const snapshotOf = (id: string): Generation => ({ ...READY, snapshot: { id, size: 1 } });
 
   test('refills its pool from the new snapshot for each late start from the old one, spending no replacement', async () => {
     let ready: Generation | undefined = snapshotOf('gone');

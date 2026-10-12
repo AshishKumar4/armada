@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { RecipeSchema } from '../../src/protocol';
+import { RecipeSchema, sha256 } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
 import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
 import worker from '../src/worker';
@@ -16,18 +16,16 @@ async function fire(stored: ReturnType<typeof state>, environments: ArmadaEnviro
   await environments.alarm();
 }
 
-const generation = (key: string): Generation => ({ key, snapshot: { id: `snapshot-${key}`, size: 1 }, sha: null, created: 0, seconds: {} });
+const generation = (key: string): Generation => ({ key, snapshot: { id: `snapshot-${key}`, size: 1 }, sha: null, shallow: false, created: 0, seconds: {} });
 
 const ready = (key: string, lastUsed: number) => ({ key, entry: { state: 'ready' as const, generation: generation(key), lastUsed } });
-
-const hex = async (value: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
 describe('the environments a prune deletes', () => {
   const now = Date.now();
 
   const entries = [
     ready('newest', now - 5 * MINUTE), ready('busy', now - 20 * MINUTE), ready('second', now - 2 * HOUR), ready('third', now - 3 * HOUR),
-    ready('running', now - 9 * HOUR), { key: 'building', entry: { state: 'preparing' as const, sha: null, since: now } },
+    ready('running', now - 9 * HOUR), { key: 'building', entry: { state: 'preparing' as const, sha: null, shallow: false, since: now } },
     { key: 'broken', entry: { state: 'failed' as const, at: now, reason: 'no' } },
   ];
 
@@ -202,11 +200,11 @@ async function registry(keys: readonly string[], options: { readonly pageSize?: 
   let refuseDigest = false;
 
   for (const key of keys) {
-    const digest = `sha256:${await hex(`manifest-${key}`)}`;
+    const digest = `sha256:${await sha256(`manifest-${key}`)}`;
 
     manifests.set(digest, key);
-    tags.set(`rootfs-snapshot-${await hex(`snapshot-${key}`)}`, digest);
-    tags.set(`rootfs-set-${await hex(`set-${key}`)}`, digest);
+    tags.set(`rootfs-snapshot-${await sha256(`snapshot-${key}`)}`, digest);
+    tags.set(`rootfs-set-${await sha256(`set-${key}`)}`, digest);
   }
 
   const answer = (request: Request): Response => {
@@ -536,3 +534,26 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
       .toEqual({ afterFailedAsk: 'preparing', owed: 1, look: true, ended: true });
   });
 });
+
+describe('a pack base (#34)', () => {
+  test('is a shallow environment\'s commit only for a pack of its commit\'s tree; a pack of full history goes from the root', async () => {
+    const stored = state();
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => undefined })) }));
+    const at = (key: string, sha: string, shallow: boolean) => ({ state: 'ready', generation: { ...generation(key), sha, shallow }, lastUsed: 0 });
+
+    await stored.ctx.storage.put('env:shallow', at('shallow', 'a'.repeat(40), true));
+    await stored.ctx.storage.put('env:full', at('full', 'b'.repeat(40), false));
+    // As an earlier Worker recorded it, with no word of its history: the root's pack it came from was whole.
+    const { shallow: _unrecorded, ...earlier } = { ...generation('earlier'), sha: 'c'.repeat(40) };
+
+    await stored.ctx.storage.put('env:earlier', { state: 'ready', generation: earlier, lastUsed: 0 });
+    // One being prepared from a depth-1 clone's pack.
+    const recipe = v.parse(RecipeSchema, { repo: { project: 'p', checkout: '/home/ci/work', history: 'full', manifest: [] } });
+
+    await environments.ensure('preparing', recipe, { sha: 'd'.repeat(40), base: 'root', packer: 2, shallow: ['e'.repeat(40)] });
+    const bases = await Promise.all((['shallow', 'full', 'earlier', 'preparing'] as const).flatMap((key) => (['full', 'commit'] as const).map(async (history) => await environments.base(key, history))));
+
+    expect(bases).toEqual(['root', 'a'.repeat(40), 'b'.repeat(40), 'b'.repeat(40), 'c'.repeat(40), 'c'.repeat(40), 'root', 'd'.repeat(40)]);
+  });
+});
+

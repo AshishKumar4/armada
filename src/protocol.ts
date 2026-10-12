@@ -271,10 +271,22 @@ export function deadlineRefusal(timeout: number | undefined, deadline: number | 
   return timeout !== undefined && bound < timeout ? `JobDeadlineTooShort: job deadline ${String(bound)} s is shorter than the task timeout ${String(timeout)} s` : null;
 }
 
+/** For a repository recipe: the commit each container checks out, packed against `base`. `shallow` is the pack's
+ *  boundary, the commits it holds whose parents it does not (`boundaryOf`): the commit itself for a `commit` history, a
+ *  shallow clone's own boundary for a `full` one (#34). */
+export const CommitSchema = v.object({ sha: Sha, base: PackBase, packer: Packer, shallow: v.optional(v.array(Sha)) });
+
+export type Commit = v.InferOutput<typeof CommitSchema>;
+
+/** The boundary a commit's checkout marks shallow, so git walks only what its repository holds. A commit an earlier
+ *  client sent carries none, and its pack is what its history implies: a `commit` history's, the commit's tree alone. */
+export function boundaryOf(commit: { readonly sha: string; readonly shallow?: readonly string[] | undefined }, history: 'full' | 'commit'): readonly string[] {
+  return commit.shallow ?? (history === 'commit' ? [commit.sha] : []);
+}
+
 export const JobSpecSchema = v.object({
   recipe: RecipeSchema,
-  /** For a repository recipe: the commit each container checks out, packed against `base`. */
-  commit: v.optional(v.object({ sha: Sha, base: PackBase, packer: Packer })),
+  commit: v.optional(CommitSchema),
   items: v.pipe(v.array(TaskSchema), v.maxLength(MAX_TASKS)),
   /** An open job takes more items until it is closed. */
   open: v.optional(v.boolean(), false),
@@ -443,6 +455,9 @@ export const GenerationSchema = v.object({
   snapshot: v.object({ id: v.string(), size: v.number() }),
   /** The commit whose checkout and install it holds, for a repository recipe. */
   sha: v.nullable(v.string()),
+  /** Its commit's history stops short of the root: prepared from a shallow pack, so never the base of a pack of `full`
+   *  history, whose objects it may not hold (#34). Absent from an earlier Worker's, which recorded none. */
+  shallow: v.optional(v.boolean(), false),
   created: v.number(),
   /** Seconds each preparation phase took. */
   seconds: v.record(v.string(), v.number()),
@@ -451,7 +466,7 @@ export const GenerationSchema = v.object({
 /** An environment in the deployment's registry: being prepared, ready, or failed a while ago. */
 export const EnvironmentEntrySchema = v.variant('state', [
   /** A preparation: begun `since`, its preparer last heard from at `beat`. */
-  v.object({ state: v.literal('preparing'), sha: v.nullable(v.string()), since: v.number(), beat: v.optional(v.number()) }),
+  v.object({ state: v.literal('preparing'), sha: v.nullable(v.string()), shallow: v.optional(v.boolean(), false), since: v.number(), beat: v.optional(v.number()) }),
   v.object({ state: v.literal('ready'), generation: GenerationSchema, lastUsed: v.number() }),
   v.object({ state: v.literal('failed'), at: v.number(), reason: v.string() }),
 ]);
@@ -552,6 +567,14 @@ function sortedKeys(value: Json): Json {
   return isJsonObject(value) ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : 1)).map(([key, each]) => [key, sortedKeys(each)])) : value;
 }
 
+/** `bytes` in lowercase hex. */
+export const hex = (bytes: ArrayBuffer | Uint8Array): string => [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+
+/** SHA-256 of `text` as UTF-8, in hex, with WebCrypto, which both Bun and the Workers runtime have. */
+export async function sha256(text: string): Promise<string> {
+  return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+}
+
 /** JSON with every object's keys sorted, so two equal items read the same. */
 export function canonical(value: Json): string {
   return JSON.stringify(sortedKeys(value));
@@ -560,9 +583,7 @@ export function canonical(value: Json): string {
 /** The R2 key a pushed task's answer is cached under: its bundle, its id, its environment and its item decide it. A
  *  bundle holds every task of its project, so the id tells apart two tasks with the same recipe and item. */
 export async function cacheKey(bundle: string, task: string, environment: string, item: Json): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${bundle}\n${task}\n${environment}\n${canonical(item)}`));
-
-  return `cache/${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+  return `cache/${await sha256(`${bundle}\n${task}\n${environment}\n${canonical(item)}`)}`;
 }
 
 /** One environment per driver and recipe: base, scripts, size and, for a repository, its key files. */
@@ -574,9 +595,8 @@ export async function environmentKey(recipe: Recipe): Promise<string> {
 
   // The size keys by its instance type, as the instance type did before sizes were named.
   const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[recipe.size].instance, repo];
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(inputs)));
 
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return await sha256(JSON.stringify(inputs));
 }
 
 /** Where a job's commands run: the checkout, or the user's work directory. */

@@ -1,4 +1,4 @@
-import { errorOf } from '../../src/protocol';
+import { errorOf, hex, sha256 } from '../../src/protocol';
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaFleet } from './fleet';
 import type { ArmadaWebhooks } from './hooks';
@@ -39,9 +39,13 @@ export interface Env {
 }
 
 /** The R2 key of a commit's pack: from the root, or what it adds to an environment's commit, under its packer
- *  (`PACKER`), or under the key an earlier client's pack has always had. */
-export const packKey = (project: string, sha: string, base: string, packer: number | undefined): string =>
-  `packs/${project}/${sha}.${base}${packer === undefined ? '' : `.p${String(packer)}`}.pack`;
+ *  (`PACKER`), or under the key an earlier client's pack has always had; and its shallow boundary as sent, so a pack
+ *  of a shallow clone is never served for one with more history (#34). */
+export async function packKey(project: string, { sha, base, packer, shallow = [] }: { readonly sha: string; readonly base: string; readonly packer?: number | undefined; readonly shallow?: readonly string[] | undefined }): Promise<string> {
+  const boundary = shallow.length === 0 ? '' : `.s${(await sha256([...shallow].sort().join(','))).slice(0, 16)}`;
+
+  return `packs/${project}/${sha}.${base}${packer === undefined ? '' : `.p${String(packer)}`}${boundary}.pack`;
+}
 
 /** The R2 key of a pushed bundle, by the digest of its bytes. It is kept while a task id points to it, and for a week
  *  after, for the jobs still running it (`sweepBundles`). */
@@ -95,7 +99,7 @@ export function equal(expected: string, supplied: string): boolean {
 export async function hmac(key: string, message: string): Promise<string> {
   const imported = await crypto.subtle.importKey('raw', new TextEncoder().encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
 
-  return [...new Uint8Array(await crypto.subtle.sign('HMAC', imported, new TextEncoder().encode(message)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return hex(await crypto.subtle.sign('HMAC', imported, new TextEncoder().encode(message)));
 }
 
 /** What a job's tasks get as ARMADA_STATUS_TOKEN: it reads that job's tasks at `/status/<job>/<index>` and nothing else.

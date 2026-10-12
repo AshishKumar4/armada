@@ -6,14 +6,15 @@
  * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the green rows' timings
  * stored on the runner. Exits 0 when every planned row ran once and passed, 1 when one was red, 2 when not graded.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config, type Environment } from './config';
+import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
+import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { listSchedule } from './dispatch';
 import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Manifest, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, unconnected, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -23,37 +24,6 @@ const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
 const TAIL_LINES = 60;
 
 const TIMINGS_FILE = 'timings.json';
-
-/** This process's environment without GIT_DIR and its like, which a hook that runs armada sets for its own repo. */
-const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
-
-/** Git in `cwd`'s repository. */
-function git(cwd: string, args: readonly string[], stdin?: Uint8Array): Buffer {
-  const ran = Bun.spawnSync(['git', ...args], { cwd, env: GIT_ENV, stdin: stdin ?? 'ignore', stdout: 'pipe', stderr: 'pipe' });
-
-  if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString().trim()}`);
-
-  return ran.stdout;
-}
-
-interface Commit {
-  readonly sha: string;
-  /** A repository holding it, to read and pack it from. */
-  readonly repo: string;
-}
-
-/** The commit a target names; a worktree must be committed, since the commit is what is proved. */
-function resolveCommit(target: string): Commit {
-  if (existsSync(target) && statSync(target).isDirectory()) {
-    const dirty = git(target, ['status', '--porcelain']).toString().trim();
-
-    if (dirty !== '') throw new Error(`${target} has uncommitted changes; armada proves a commit, so commit them first:\n${dirty}`);
-
-    return { sha: git(target, ['rev-parse', 'HEAD']).toString().trim(), repo: target };
-  }
-
-  return { sha: git(process.cwd(), ['rev-parse', '--verify', `${target}^{commit}`]).toString().trim(), repo: process.cwd() };
-}
 
 /** A plan run on this machine: the checkout and commit it runs in, its command, the run's target and timings, and the
  *  config's env. */
@@ -103,39 +73,6 @@ export function localPlan({ repo, sha, command, target, timings, env, deadlineAt
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-/** The commit's paths that key `environment`: its `key` globs and its two recipe scripts. Records are NUL-ended, so
- *  a path git would otherwise quote (non-ASCII, a tab or a newline in it) is read as it is. */
-export function manifestOf(repo: string, sha: string, environment: Environment): Manifest {
-  const globs = [...environment.key, environment.setup ?? '', environment.install ?? ''].filter((glob) => glob !== '').map((glob) => new Bun.Glob(glob));
-
-  return git(repo, ['ls-tree', '-r', '-z', '--full-tree', sha]).toString().split('\0').flatMap((record) => {
-    const tab = record.indexOf('\t');
-    const path = record.slice(tab + 1);
-    const id = record.slice(0, tab).split(' ')[2] ?? '';
-
-    return tab !== -1 && globs.some((glob) => glob.match(path)) ? [{ path, id }] : [];
-  });
-}
-
-/** What the commit is packed against: the environment's commit, where this repository has it. A shallow clone (a CI
- *  runner's checkout) does not, and a pack from the root carries the whole commit. */
-export function packBase(repo: string, environment: string): string {
-  return environment !== 'root' && Bun.spawnSync(['git', 'cat-file', '-e', `${environment}^{commit}`], { cwd: repo, env: GIT_ENV }).exitCode === 0 ? environment : 'root';
-}
-
-/** The commit from the root (with its history, or alone), or what it adds to the environment's commit. A `commit`
- *  checkout holds the environment commit's tree and nothing of its history, so the pack is every object of the
- *  commit's tree that tree lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the
- *  base, which the checkout never received. */
-export function packOf(repo: string, sha: string, base: string, history: Config['history']): Blob {
-  const listed = (...args: string[]) => git(repo, ['rev-list', '--objects', ...args]).toString().split('\n').filter((line) => line !== '');
-  const id = (line: string) => line.split(' ')[0] ?? '';
-  const held = new Set(history === 'commit' && base !== 'root' ? listed('--no-walk', base).map(id) : []);
-  const objects = history === 'commit' ? listed('--no-walk', sha).filter((line) => !held.has(id(line))) : listed(sha, ...base === 'root' ? [] : ['--not', base]);
-
-  return new Blob([new Uint8Array(git(repo, ['-c', 'pack.threads=4', 'pack-objects', '--stdout', '-q'], new TextEncoder().encode(objects.map((line) => `${line}\n`).join(''))))]);
 }
 
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
@@ -365,9 +302,10 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
 
   const resolved = await armada.resolve(recipe);
   const base = packBase(repo, resolved.base);
-  const spec: OnCommit = { recipe: { ...recipe, commit: { sha, base, packer: PACKER } }, env: config.env, tmpfs: config.tmpfs };
+  const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
+  const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs };
 
-  return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
+  return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, commit, () => packOf(repo, sha, base, config.history)) };
 }
 
 /** A commit's job fields, its pack uploaded. */
