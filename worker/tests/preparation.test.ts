@@ -84,23 +84,49 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
 }
 
 describe('a preparation\'s container', () => {
-  test('starts once the fleet has room for it, as a job\'s does, and gives it back at its end', async () => {
+  /** A preparer of `recipe` whose phases all exit 0 at once, under a fleet of 4 vCPUs, its container's every exec told
+   *  to `started`, and one that will not stop once it is snapshotted when `stops` is false. */
+  function preparing(stops: boolean) {
     const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }));
     const machine = answering('setup', 0);
     const started: string[] = [];
+    const generations: Generation[] = [];
+    let snapshotted = false;
 
-    const stored = state(Object.assign(container((argv, options) => {
+    const box = container((argv, options) => {
       started.push(argv[0] ?? '');
 
       return machine(argv, options);
-    }), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+    });
 
-    const generations: Generation[] = [];
+    const destroy = box.destroy.bind(box);
+
+    const stored = state(Object.assign(box, {
+      snapshotContainer: async () => {
+        snapshotted = true;
+
+        return { id: 'snapshot', size: 1 };
+      },
+      destroy: async () => {
+        if (snapshotted && !stops) throw new Error('the container did not stop');
+        await destroy();
+      },
+    }));
 
     const preparer = new ArmadaPreparer(stored.ctx, world({
       FLEET: namespace(() => fleet),
       ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, prepared: async (generation: Generation) => { generations.push(generation); } })),
     }));
+
+    const run = async () => {
+      for (let alarm = 0; alarm < 40 && generations.length === 0; alarm += 1) await preparer.alarm();
+    };
+
+    return { fleet, stored, started, generations, preparer, run };
+  }
+
+  test('starts once the fleet has room for it, as a job\'s does, and gives it back at its end', async () => {
+    const { fleet, stored, started, generations, preparer, run } = preparing(true);
 
     // A job's container holds the whole fleet.
     await fleet.acquire('job/v1', 4, { deadlineAt: Date.now() + 60_000 });
@@ -109,10 +135,18 @@ describe('a preparation\'s container', () => {
     const waiting = { started: started.length, retry: (await stored.ctx.storage.getAlarm() ?? 0) > Date.now() };
 
     await fleet.release('job/v1');
-
-    for (let alarm = 0; alarm < 40 && generations.length === 0; alarm += 1) await preparer.alarm();
+    await run();
 
     expect({ waiting, prepared: generations.length, held: await fleet.used() }).toEqual({ waiting: { started: 0, retry: true }, prepared: 1, held: 0 });
+  });
+
+  test('holds its vCPUs past its end while it will not stop, as a vessel\'s does', async () => {
+    const { fleet, generations, preparer, run } = preparing(false);
+
+    await preparer.begin('k'.repeat(64), Date.now(), { recipe, sha: null });
+    await run();
+
+    expect({ prepared: generations.length, held: await fleet.used() }).toEqual({ prepared: 1, held: 4 });
   });
 });
 

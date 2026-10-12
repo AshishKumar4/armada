@@ -388,6 +388,24 @@ describe('an open job given a gang wider than its vessels reserved', () => {
   });
 });
 
+describe('an open job whose pool its narrower vessels fill', () => {
+  test('lets them leave for vessels as wide as its new gang, rather than hold their places waiting for it', async () => {
+    const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], open: true, run: { kind: 'command' }, pool: 2, mode: 'fast' });
+
+    await finish(open, 'v1');
+    await finish(open, 'v2');
+    await open.add([{ item: { gang: 2 }, argv: ['true'] }]);
+    const left = [await open.claim('v1'), await open.claim('v2')];
+
+    await open.retired('v1');
+    await open.retired('v2');
+    await open.alarm();
+    const ranks = await formed(open, ['v3', 'v4']);
+
+    expect({ left, begun, ranks: ['v3', 'v4'].map((name) => ranks[name]?.gang?.rank) }).toEqual({ left: [null, null], begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4'], ranks: [0, 1] });
+  });
+});
+
 describe('a job that ended', () => {
   test('says so to the fleet and the registry until each has taken it, its alarm kept until then', async () => {
     const closed: string[] = [];

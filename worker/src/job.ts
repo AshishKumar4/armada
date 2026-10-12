@@ -569,8 +569,8 @@ export class ArmadaJob extends DurableObject<Env> {
     if (ganged !== undefined) return await ganged;
 
     if (full) {
-      // An empty vessel stays for the work its job has yet to run, and takes it as a run ends.
-      if (this.count(`state IN ('queued', 'forming')`) > 0) return { waitMs: WAIT_MS };
+      // An empty vessel stays for the work its job has yet to run that it may take, and takes it as a run ends.
+      if (this.count(`state IN ('queued', 'forming') AND ${this.covered(name)}`) > 0) return { waitMs: WAIT_MS };
 
       if (!this.busy(name)) this.beat(name, 'done');
 
@@ -596,7 +596,8 @@ export class ArmadaJob extends DurableObject<Env> {
     ).toArray()[0];
 
     if (next !== undefined) return this.claimOf(spec, env, next.item, { index: next.idx, attempt: next.attempts, duplicate: false });
-    const [later] = this.sql.exec<{ at: number | null }>(`SELECT MIN(not_before) AS at FROM tasks WHERE state = 'queued'`).toArray();
+    // A vessel waits only for a task it may take: one too wide for it leaves its place to a vessel that reserves it.
+    const [later] = this.sql.exec<{ at: number | null }>(`SELECT MIN(not_before) AS at FROM tasks WHERE state = 'queued' AND ${this.covered(name)}`).toArray();
 
     // At most a minute at a time, so a waiting vessel still beats.
     if (later?.at !== null && later?.at !== undefined) return { waitMs: Math.min(60_000, Math.max(1000, later.at - now)) };
