@@ -5,7 +5,7 @@ import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { listSchedule } from '../../src/dispatch';
-import { container, idleVessels, namespace, READY, runOf, state, world, type Stored } from './harness';
+import { container, idleVessels, namespace, READY, readyRegistry, runOf, state, world, type Stored } from './harness';
 
 const generation = READY;
 
@@ -363,6 +363,36 @@ describe('a job past its replacements', () => {
 
     expect({ spent, after: begun.length, events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind]) })
       .toEqual({ spent: 10, after: 11, events: [[0, 'exited'], [1, 'exited'], [2, 'exited']] });
+  });
+});
+
+describe('a job that ended', () => {
+  test('says so to the fleet and the registry until each has taken it, its alarm kept until then', async () => {
+    const closed: string[] = [];
+    let refuse = true;
+    const stored = state();
+
+    const ended = new ArmadaJob(stored.ctx, world({
+      VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
+      ENVIRONMENTS: readyRegistry(),
+      FLEET: namespace(() => ({
+        acquire: async () => true, release: async () => undefined, opened: async () => undefined, admits: async () => true, reserve: async () => true,
+        closed: async (id: string) => {
+          if (refuse) throw new Error('the fleet is not answering');
+          closed.push(id);
+        },
+      })),
+    }));
+
+    await ended.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }));
+    await ended.alarm();
+    await finish(ended, 'v1');
+    const owed = await stored.ctx.storage.getAlarm();
+
+    refuse = false;
+    await ended.alarm();
+
+    expect({ done: (await ended.events(0)).done, owed: owed !== null, closed, after: await stored.ctx.storage.getAlarm() }).toEqual({ done: true, owed: true, closed: ['j1'], after: null });
   });
 });
 

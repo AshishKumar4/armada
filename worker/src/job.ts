@@ -80,6 +80,9 @@ const vesselName = (number: number): string => `v${String(number)}`;
 /** A name a job gives its vessels (`vesselName`), or an earlier Worker gave a replacement, `r` and its number. */
 export const VESSEL_NAME = /^[vr][1-9]\d*$/u;
 
+/** What a job owes once it is done (`settleUp`): its close to the fleet, and its environment's use to the registry. */
+type Owed = 'closed' | 'used';
+
 /** The states of a vessel that is alive: waiting for the fleet, starting, or taking tasks. */
 const ALIVE = `('waiting', 'booting', 'working')`;
 
@@ -276,7 +279,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (spec === undefined || phase === undefined) return;
 
-    if (phase === 'done') return await this.deliver();
+    if (phase === 'done') return await this.settleUp();
     this.requeueUnread();
 
     const deadline = spec.deadline ?? JOB_DEADLINE_SECONDS;
@@ -1128,19 +1131,36 @@ export class ArmadaJob extends DurableObject<Env> {
     // Reading the spec moves the env of a job an earlier Worker created out of it, so this deletes that env too.
     await this.spec();
     await this.ctx.storage.delete('env');
-    await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now() });
-    await this.ctx.storage.deleteAlarm();
-    await this.env.FLEET.getByName(SINGLE).closed((await this.ctx.storage.get<string>('id')) ?? '');
-    // The environment was in use until now: its recent hour starts here (`ArmadaEnvironments.used`).
-    await this.env.ENVIRONMENTS.getByName(SINGLE).used(await this.environment());
-    await this.deliver();
+    await this.ctx.storage.put({ phase: 'done' satisfies Phase, finishedAt: Date.now(), owed: ['closed', 'used'] satisfies Owed[] });
+    await this.settleUp();
   }
 
-  /** What the job's runs used, delivered after its end: its alarm stays until every class's store has it. */
-  private async deliver(): Promise<void> {
+  /** What the done job still owes, said: its close to the fleet, its environment's use up to now to the registry, and
+   *  its runs' use to their classes' stores (`send`). Each is idempotent and said again at the next alarm until it is
+   *  taken; the alarm stays until all are. */
+  private async settleUp(): Promise<void> {
+    const id = (await this.ctx.storage.get<string>('id')) ?? '';
+    const owed = (await this.ctx.storage.get<Owed[]>('owed')) ?? [];
+
+    const taken = await Promise.allSettled(owed.map(async (each) => {
+      if (each === 'closed') await this.env.FLEET.getByName(SINGLE).closed(id);
+      // The environment was in use until now: its recent hour starts here (`ArmadaEnvironments.used`).
+      else await this.env.ENVIRONMENTS.getByName(SINGLE).used(await this.environment());
+    }));
+
+    const left = owed.filter((each, at) => {
+      const told = taken[at];
+
+      if (told?.status === 'rejected') console.error(JSON.stringify({ job: id, owed: each, error: String(told.reason) }));
+
+      return told?.status !== 'fulfilled';
+    });
+
+    await this.ctx.storage.put('owed', left);
     await this.send();
 
-    if (this.placement.pending()) await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
+    if (left.length > 0 || this.placement.pending()) await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
+    else await this.ctx.storage.deleteAlarm();
   }
 
   /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */
