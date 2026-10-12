@@ -492,6 +492,14 @@ export class MissingSnapshot extends Error {
   }
 }
 
+/** A start the platform refused because the account runs as many containers as its limits allow. No start succeeds
+ *  until another container ends, so the start ends at once, and its starter waits for room as it does for its fleet's. */
+export class AccountFull extends Error {
+  constructor(ended: string, options: ErrorOptions) {
+    super(`the container's start ended: ${ended}`, options);
+  }
+}
+
 /** How long a start may take to answer, the container's inactivity timeout once it does, and who hears of each start
  *  made again. */
 interface Starting {
@@ -503,7 +511,8 @@ interface Starting {
 /** The container's first answer, started with `options`. An exec, or `setInactivityTimeout`, right after a start can be
  *  refused as not started or not running yet, and a start can end before it answers: each is waited out, starting
  *  again where the container is gone, up to `ms`, and `restarted` told why each start before it ended. A start the
- *  platform ends because its snapshot is gone throws `MissingSnapshot`. */
+ *  platform ends because its snapshot is gone throws `MissingSnapshot`, and one it ends because the account is full,
+ *  `AccountFull`. */
 export async function startAndAnswer(container: Container, options: ContainerStartupOptions, { ms, inactivityMs, restarted = async () => undefined }: Starting): Promise<void> {
   const deadline = Date.now() + ms;
   const snapshot = options.containerSnapshot?.id ?? '';
@@ -512,6 +521,8 @@ export async function startAndAnswer(container: Container, options: ContainerSta
 
   // The platform's only word of a deleted snapshot: its monitor ends the start so (armada-v2, 2026-10-09).
   const gone = (): boolean => snapshot !== '' && ended.includes(`Snapshot "${snapshot}" was not found`);
+  // And of a full account (1,429 starts on 2026-10-10 to 12).
+  const full = (): boolean => ended.includes('Account resource limit exceeded');
 
   const watch = (): void => {
     detach(container.monitor().then(() => { ended = 'the container exited'; }), (error) => { ended = said({ cause: error }); });
@@ -540,6 +551,8 @@ export async function startAndAnswer(container: Container, options: ContainerSta
     }
 
     await scheduler.wait(START_POLL_MS);
+
+    if (full()) throw new AccountFull(ended, { cause: first.reason });
 
     // A container still starting is not running either; only one whose start ended, or was killed, is started again,
     // and one whose snapshot is gone never is.

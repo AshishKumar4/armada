@@ -12,7 +12,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
 import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
-import { AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
+import { AccountFull, AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
 import { CAPACITY_RETRY_MS, letGo } from './fleet';
 
@@ -448,6 +448,13 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.put('preparation', { ...advanced, phase: next } satisfies Preparation);
       await this.ctx.storage.setAlarm(Date.now());
     } catch (cause) {
+      // The account had no room for its container: its hold goes back, and it asks the fleet again in a moment.
+      if (cause instanceof AccountFull) {
+        await letGo(this.ctx, this.env, { holder: holderOf(preparation), inactivityMs: LEASE_MS });
+
+        return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
+      }
+
       await this.ctx.storage.delete('preparation');
       // The preparation failed already, whatever its container does.
       await letGo(this.ctx, this.env, { holder: holderOf(preparation), inactivityMs: LEASE_MS });

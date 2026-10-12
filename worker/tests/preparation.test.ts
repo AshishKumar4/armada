@@ -15,6 +15,15 @@ interface Prepared {
   readonly failures: string[];
 }
 
+/** The registry a preparer reports to, keeping what it heard. */
+function registry({ generations, failures }: Prepared) {
+  return namespace(() => ({
+    beat: async () => undefined,
+    prepared: async (generation: Generation) => { generations.push(generation); },
+    preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); },
+  }));
+}
+
 /** A preparation of `recipe` at `size` in a container `answer` answers, its alarms run until it ends (or `alarms` run
  *  out). */
 async function prepare(answer: Answer, alarms = 40, size: Size = 'medium', stops = true): Promise<Prepared> {
@@ -37,13 +46,7 @@ async function prepare(answer: Answer, alarms = 40, size: Size = 'medium', stops
     },
   }));
 
-  const preparer = new ArmadaPreparer(stored.ctx, world({
-    ENVIRONMENTS: namespace(() => ({
-      beat: async () => undefined,
-      prepared: async (generation: Generation) => { generations.push(generation); },
-      preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); },
-    })),
-  }));
+  const preparer = new ArmadaPreparer(stored.ctx, world({ ENVIRONMENTS: registry({ generations, failures }) }));
 
   await preparer.begin('k'.repeat(64), 0, { recipe: { ...recipe, size }, sha: null });
 
@@ -85,17 +88,32 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
 
 describe('a preparation\'s container', () => {
   /** A preparer of `recipe` whose phases all exit 0 at once, under `fleet`, its container's every exec told to
-   *  `started`, and one that will not stop once it is snapshotted when `stops` is false. */
-  function preparing(stops: boolean, fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }))) {
+   *  `started`, one that will not stop once it is snapshotted when `stops` is false, and its first `refused` starts
+   *  refused because the account is full. */
+  function preparing(stops: boolean, fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' })), refused = 0) {
     const machine = answering('setup', 0);
     const started: string[] = [];
     const generations: Generation[] = [];
+    const failures: string[] = [];
     let snapshotted = false;
+    let full = refused;
 
-    const box = container((argv, options) => {
+    // The platform ends a start past the account's limit, and says why only through the container's monitor.
+    const box = Object.assign(container((argv, options) => {
       started.push(argv[0] ?? '');
 
+      if (full > 0 && (argv[2] ?? '').includes('echo ready')) {
+        full -= 1;
+
+        return new Error('The container has not been started');
+      }
+
       return machine(argv, options);
+    }), {
+      monitor: async () => {
+        if (full > 0) throw new Error('Account resource limit exceeded');
+        await new Promise<never>(() => undefined);
+      },
     });
 
     const destroy = box.destroy.bind(box);
@@ -112,16 +130,13 @@ describe('a preparation\'s container', () => {
       },
     }));
 
-    const preparer = new ArmadaPreparer(stored.ctx, world({
-      FLEET: namespace(() => fleet),
-      ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, prepared: async (generation: Generation) => { generations.push(generation); } })),
-    }));
+    const preparer = new ArmadaPreparer(stored.ctx, world({ FLEET: namespace(() => fleet), ENVIRONMENTS: registry({ generations, failures }) }));
 
     const run = async () => {
       for (let alarm = 0; alarm < 40 && generations.length === 0; alarm += 1) await preparer.alarm();
     };
 
-    return { fleet, stored, started, generations, preparer, run };
+    return { fleet, stored, started, generations, failures, preparer, run };
   }
 
   test('starts once the fleet has room for it, as a job\'s does, and gives it back at its end', async () => {
@@ -137,6 +152,19 @@ describe('a preparation\'s container', () => {
     await run();
 
     expect({ waiting, prepared: generations.length, held: await fleet.used() }).toEqual({ waiting: { started: 0, retry: true }, prepared: 1, held: 0 });
+  });
+
+  test('waits for room when the account is full, as for its fleet, and is prepared once there is', async () => {
+    Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
+    const { fleet, stored, generations, failures, preparer, run } = preparing(true, undefined, 1);
+
+    await preparer.begin('k'.repeat(64), Date.now(), { recipe, sha: null });
+    await preparer.alarm();
+    const refused = { held: await fleet.used(), again: (await stored.ctx.storage.getAlarm() ?? 0) > Date.now() };
+
+    await run();
+
+    expect({ refused, failures, prepared: generations.length, held: await fleet.used() }).toEqual({ refused: { held: 0, again: true }, failures: [], prepared: 1, held: 0 });
   });
 
   test('holds its vCPUs past its end while it will not stop, as a vessel\'s does, apart from the next attempt at its environment', async () => {

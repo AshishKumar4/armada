@@ -542,6 +542,47 @@ describe('a vessel\'s boot', () => {
     expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }] });
   });
 
+  test('waits for room when the account is full, as for its fleet, spending no replacement, and boots once there is', async () => {
+    Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
+    const moved: string[] = [];
+    const released: string[] = [];
+    const failed: string[] = [];
+    let starts = 0;
+    let full = true;
+
+    // The platform ends a start past the account's limit, and says why only through the container's monitor.
+    const box = Object.assign(container((argv) => {
+      if ((argv[2] ?? '').includes('echo ready')) return full ? new Error('The container has not been started') : { exitCode: 0, stdout: 'ready\n' };
+
+      return { exitCode: 0, stdout: '' };
+    }), {
+      start: () => { starts += 1; },
+      monitor: async () => {
+        if (full) throw new Error('Account resource limit exceeded');
+        await new Promise<never>(() => undefined);
+      },
+    });
+
+    const vessel = new ArmadaVessel(state(box).ctx, world({
+      FLEET: namespace(() => ({ acquire: async () => true, release: async (holder: string) => { released.push(holder); } })),
+      JOB: namespace(() => ({
+        moved: async (_name: string, to: string) => { moved.push(to); }, booted: async () => undefined, claim: async () => null, retired: async () => undefined,
+        vesselFailed: async (_name: string, error: string) => { failed.push(error); },
+      })),
+    }));
+
+    await vessel.begin(spec);
+    await vessel.alarm();
+    const refused = { starts, moved: [...moved], released: [...released] };
+
+    full = false;
+    await vessel.alarm();
+
+    expect({ refused, failed, moved }).toEqual({
+      refused: { starts: 1, moved: ['booting', 'waiting'], released: ['job/v1'] }, failed: [], moved: ['booting', 'waiting', 'booting'],
+    });
+  });
+
   test('taken up again after its object restarted mid-start, tells the starts made before and its own', async () => {
     const booted: Boot[] = [];
 

@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { boundaryOf, BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Outcome } from '../../src/protocol';
 import {
-  clearTask, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  AccountFull, clearTask, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import { CAPACITY_RETRY_MS, letGo } from './fleet';
@@ -197,11 +197,24 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (await this.work(spec)) await this.ctx.storage.setAlarm(Date.now());
     } catch (cause) {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
+
+      if (cause instanceof AccountFull) return await this.waitForRoom(spec);
       console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said({ cause }) }));
       const gone = await this.end('failed', spec);
 
       await job.vesselFailed(spec.name, said({ cause }), { gone, missing: cause instanceof MissingSnapshot ? cause.snapshot : undefined });
     }
+  }
+
+  /** The account had no room for the container: its fleet's hold goes back, and it waits for room again, as for its
+   *  fleet's. Its boot counts the wait from its request to its next grant (`Boot.waitMs`), so the start it gave up is
+   *  no start of its own. */
+  private async waitForRoom(spec: VesselSpec): Promise<void> {
+    await letGo(this.ctx, this.env, { holder: this.holder(spec), inactivityMs: INACTIVITY_MS });
+    await this.ctx.storage.delete('restarts');
+    await this.ctx.storage.put('state', 'waiting' satisfies State);
+    await this.env.JOB.getByName(spec.jobId).moved(spec.name, 'waiting');
+    await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
   }
 
   /** The vessel ended as `state`: it takes up no task again, its container goes, and its capacity returns once the
