@@ -251,12 +251,14 @@ describe('the driver script', () => {
     const github = join(scratch, 'github');
     const home = join(scratch, 'home');
     const script = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG)).items[0]?.argv?.[2] ?? '';
+    // Git where this machine has it, which a container's runner layer builds into /usr/local.
+    const realGit = Bun.which('git') ?? 'git';
     const gitEnv = { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${github}/.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/' };
 
     /** A repository of GitHub's, `owner/name.git`, of one commit of `files`: that commit. */
     const repository = (name: string, files: Readonly<Record<string, string>>): string => {
       const dir = join(github, name);
-      const git = (...args: string[]) => Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, env: gitEnv }).stdout.toString().trim();
+      const git = (...args: string[]) => Bun.spawnSync([realGit, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, env: gitEnv }).stdout.toString().trim();
 
       mkdirSync(dir, { recursive: true });
       git('init', '-q');
@@ -274,7 +276,7 @@ describe('the driver script', () => {
     mkdirSync(bin);
     mkdirSync(home);
     writeFileSync(join(bin, 'curl'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/posted\nprintf '${String(posted)}'\n`);
-    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/git\nexec ${Bun.which('git') ?? 'git'} "$@"\n`);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/git\nexec ${realGit} "$@"\n`);
     writeFileSync(join(bin, 'bun'), `#!/bin/sh
 case "$1" in install) exit 0 ;; -e) kind=count ;; *) kind=cli ;; esac
 printf '%s %s %s\\n' "$kind" "\${GITHUB_TOKEN:-none}" "$(find "$HOME" -name bunfig.toml -o -name x.ts | wc -l | tr -d ' ')" >> ${scratch}/bun
