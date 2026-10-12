@@ -194,7 +194,13 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
 
-    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(vessels)').toArray().some((column) => column.name === 'boot')) this.sql.exec('ALTER TABLE vessels ADD COLUMN boot TEXT');
+    const vessels = this.sql.exec<{ name: string }>('PRAGMA table_info(vessels)').toArray().map((column) => column.name);
+
+    if (!vessels.includes('boot')) this.sql.exec('ALTER TABLE vessels ADD COLUMN boot TEXT');
+
+    // The widest gang the fleet holds room for while it holds the vessel (`VesselSpec.reserve`); null for an earlier
+    // Worker's vessel, which takes any.
+    if (!vessels.includes('ranks')) this.sql.exec('ALTER TABLE vessels ADD COLUMN ranks INTEGER');
   }
 
   async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
@@ -433,7 +439,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const wanted = Math.min(this.needed(spec, hedged), await this.capacity(spec)) - alive;
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => vesselName(named + index + 1));
 
-    for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
+    const widest = Number(this.sql.exec(WIDEST).one()['n']);
+
+    for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat, ranks) VALUES (?, ?, ?, ?)', name, 'waiting', Date.now(), widest);
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
   }
 
@@ -461,7 +469,7 @@ export class ArmadaJob extends DurableObject<Env> {
       runtime: spec.run.kind === 'task' ? spec.run.runtime : 'node', output: spec.output, timeout: spec.timeout,
       slots: spec.slots, pack: packs(spec),
       slotMemoryBytes: packs(spec) ? tasksMemoryOf(spec.recipe.size) : Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
-      reserve: Number(this.sql.exec(WIDEST).one()['n']) * SIZES[spec.recipe.size].vcpus,
+      reserve: Number(this.sql.exec('SELECT ranks FROM vessels WHERE name = ?', name).one()['ranks']) * SIZES[spec.recipe.size].vcpus,
       deadlineAt: ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + (spec.deadline ?? JOB_DEADLINE_SECONDS) * 1000,
     };
 
@@ -569,7 +577,7 @@ export class ArmadaJob extends DurableObject<Env> {
       return null;
     }
 
-    const first = this.sql.exec<{ idx: number; item: string; weight: number }>(`SELECT idx, item, weight FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
+    const first = this.sql.exec<{ idx: number; item: string; weight: number }>(`SELECT idx, item, weight FROM tasks WHERE state = 'queued' AND not_before <= ? AND ${this.covered(name)} ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
       // A gang forms from the vessels that ask next, this one rank 0.
@@ -665,6 +673,16 @@ export class ArmadaJob extends DurableObject<Env> {
     ).toArray()[0];
   }
 
+  /** An SQL condition on a task's row: vessel `name` may take part in it. The fleet granted the vessel its vCPUs with room
+   *  for its job's widest gang then, and holds no more for it (`ArmadaFleet.acquire`): a gang an open job took since,
+   *  wider than that, forms on vessels that reserve its width, or two jobs' vessels could each hold part of what both
+   *  gangs need. */
+  private covered(name: string): string {
+    const ranks = this.sql.exec<{ ranks: number | null }>('SELECT ranks FROM vessels WHERE name = ?', name).toArray()[0]?.ranks ?? null;
+
+    return ranks === null ? 'TRUE' : `${RANKS} <= ${String(ranks)}`;
+  }
+
   /** `name`'s rank in a gang: its claim once the gang formed, a wait while it forms, joining the one forming if it is in
    *  none and the job's pool is not `full`; undefined when no gang is forming or holds it. */
   private rank(spec: Kept, env: Record<string, string>, name: string, full: boolean): Promise<Claim> | { readonly waitMs: number } | undefined {
@@ -673,7 +691,7 @@ export class ArmadaJob extends DurableObject<Env> {
     ).toArray()[0];
 
     if (mine === undefined) {
-      const forming = this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'forming' ORDER BY idx LIMIT 1`).toArray()[0];
+      const forming = this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'forming' AND ${this.covered(name)} ORDER BY idx LIMIT 1`).toArray()[0];
 
       if (forming === undefined || full) return undefined;
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, (SELECT COUNT(*) FROM members WHERE idx = ?), ?, 'joined')`, forming.idx, forming.idx, name);

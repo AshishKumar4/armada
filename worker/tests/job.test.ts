@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { environmentKey, JobSpecSchema, RecipeSchema, refusal, type Outcome } from '../../src/protocol';
+import { environmentKey, JobSpecSchema, RecipeSchema, refusal, SIZES, type Outcome } from '../../src/protocol';
 import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
@@ -363,6 +363,28 @@ describe('a job past its replacements', () => {
 
     expect({ spent, after: begun.length, events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind]) })
       .toEqual({ spent: 10, after: 11, events: [[0, 'exited'], [1, 'exited'], [2, 'exited']] });
+  });
+});
+
+describe('an open job given a gang wider than its vessels reserved', () => {
+  test('forms it on vessels that reserve its width, while the vessels before take what they cover, then leave', async () => {
+    const reserves = new Map<string, number | undefined>();
+    const stored = state();
+
+    const open = new ArmadaJob(stored.ctx, world({
+      VESSEL: namespace((name: string) => ({ begin: async (spec: VesselSpec) => { reserves.set(name.slice('j1/'.length), spec.reserve); }, stop: async () => true })),
+      ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation }) })),
+    }));
+
+    await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], open: true, run: { kind: 'command' }, pool: 4, mode: 'fast' }));
+    await open.alarm();
+    await open.add([{ item: { gang: 2 }, argv: ['true'] }, { item: 'b', argv: ['true'] }]);
+    // v1 reserved one container's vCPUs: it takes the task it covers, and leaves once none is left.
+    const taken = [await open.claim('v1'), await open.claim('v1')].map((claim) => claim === null || 'waitMs' in claim ? claim : claim.index);
+    const ranks = await formed(open, ['v2', 'v3']);
+
+    expect({ taken, reserves: Object.fromEntries(reserves), ranks: ['v2', 'v3'].map((name) => ranks[name]?.gang?.rank) })
+      .toEqual({ taken: [0, 2], reserves: { v1: SIZES.medium.vcpus, v2: 2 * SIZES.medium.vcpus, v3: 2 * SIZES.medium.vcpus, v4: 2 * SIZES.medium.vcpus }, ranks: [0, 1] });
   });
 });
 
