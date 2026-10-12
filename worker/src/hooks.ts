@@ -166,12 +166,15 @@ rm -rf /tmp/bun.zip /tmp/bun-linux-x64`,
 } as const;
 
 /** The driver script: posts a pending status, fetches armada at the deployment's commit with its runtime dependencies
- *  alone, clones the commit, runs `armada run <sha> --json` against the deployment, and posts the verdict's count as
- *  the status. The two credentials (the GitHub token, in the secret `ARMADA_GITHUB_SECRET` names, and ARMADA_TOKEN,
- *  added at claim) are read only from the environment, so the job's log keeps them masked. */
+ *  alone, clones the commit, runs `armada run <checkout> --json` against the deployment, and posts the verdict's count
+ *  as the status. The two credentials (the GitHub token, in the secret `ARMADA_GITHUB_SECRET` names, and ARMADA_TOKEN,
+ *  added at claim) are read only from the environment, so the job's log keeps them masked. No code of the commit under
+ *  test runs where they are (#33): bun starts in a directory of the driver's own, since it runs the `bunfig.toml`
+ *  preloads where it starts; the CLI gets no GitHub token, which only the statuses need; and a local plan gets no
+ *  ARMADA_TOKEN (`localPlan`). */
 const DRIVER = String.raw`set -eu
 github=$(printenv "$ARMADA_GITHUB_SECRET")
-mkdir -p "$HOME/repo" "$HOME/armada"
+mkdir -p "$HOME/repo" "$HOME/armada" "$HOME/run"
 # The HTTP code gets a name of its own: a function's variables are the script's, and 'code' holds the run's exit.
 status() {
   answered=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
@@ -189,9 +192,9 @@ git -C "$HOME/repo" init -q
 git -C "$HOME/repo" fetch -q "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
   || git -C "$HOME/repo" fetch -q "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
 git -C "$HOME/repo" checkout -q FETCH_HEAD
-cd "$HOME/repo"
+cd "$HOME/run"
 set +e
-bun "$HOME/armada/src/cli.ts" run "$ARMADA_COMMIT" --json > verdict.json
+env -u "$ARMADA_GITHUB_SECRET" bun "$HOME/armada/src/cli.ts" run "$HOME/repo" --json > verdict.json
 code=$?
 set -e
 count=$(bun -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rows; console.log(r.filter((x) => x.exitCode === 0).length + " of " + r.length + " rows green"); } catch { console.log("the run did not grade"); }' verdict.json)

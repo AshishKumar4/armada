@@ -57,6 +57,12 @@ export function connect(): Armada {
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
 }
 
+/** `env` without what `connect` reaches a deployment by, its bearer or a file holding one: the environment for code
+ *  armada runs that is not its own, such as a commit's local plan (#33). */
+export function unconnected(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).flatMap(([name, value]) => value === undefined || name === 'ARMADA_TOKEN' || name === 'ARMADA_CONNECTION' ? [] : [[name, value]]));
+}
+
 /** A failed response in one line: the Worker's own error, or the status and the title or first line of any other page,
  *  such as the error page a Worker still rolling out answers with. */
 async function failureOf(response: Response): Promise<string> {

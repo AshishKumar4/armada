@@ -1046,10 +1046,11 @@ describe('armada run', () => {
     expect({ exit: ran.exit, secrets }).toEqual({ exit: 0, secrets: [[], ['CACHE_TOKEN']] });
   });
 
-  test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job', async () => {
+  test('a local plan runs in the checkout of the commit, with its target and timings filled, no plan job, and no bearer', async () => {
     const printed = JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] });
-    // The plan checks what it was given: the timings file the runner answered, and the default target.
-    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
+    // The plan checks what it was given: the timings file the runner answered, and the default target; and that the
+    // deployment's bearer the CLI holds is not among it, since a plan is the commit's own code (#33).
+    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && [ -z "\${ARMADA_TOKEN:-}" ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
     const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planConfig: { command, local: true } });
 
     expect({ exit: ran.exit, jobs: ran.commands.length, task: ran.commands[0]?.slice(-2), here: ran.stdout.includes('plan run here') })

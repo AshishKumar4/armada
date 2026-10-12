@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config, type 
 import { listSchedule } from './dispatch';
 import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Manifest, type Size, type Timings } from './protocol';
-import { describeBoots, type Armada, type Summary } from './sdk';
+import { describeBoots, unconnected, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -78,7 +78,8 @@ export function remainingDeadline(deadlineAt: number): number {
 
 /** The plan's stdout, run in `repo` where its checkout is `sha` and clean, with `{target}` and `{timings}` filled here;
  *  undefined where it is not that commit, and the plan runs in a container. A container's start, cold on a new machine,
- *  was 61 of the 70 seconds Dew's plan took. */
+ *  was 61 of the 70 seconds Dew's plan took. The plan is the commit's own code, so it runs without the deployment's
+ *  bearer this process holds (#33). */
 export function localPlan({ repo, sha, command, target, timings, env, deadlineAt }: LocalPlan): string | undefined {
   if (git(repo, ['rev-parse', 'HEAD']).toString().trim() !== sha || git(repo, ['status', '--porcelain']).toString().trim() !== '') return undefined;
   const scratch = mkdtempSync(join(tmpdir(), 'armada-plan-'));
@@ -87,7 +88,7 @@ export function localPlan({ repo, sha, command, target, timings, env, deadlineAt
     writeFileSync(join(scratch, TIMINGS_FILE), JSON.stringify(timings));
     const argv = command.map((word) => word.replaceAll('{target}', String(target)).replaceAll('{timings}', join(scratch, TIMINGS_FILE)));
     const filled = Object.fromEntries(Object.entries(env).map(([name, value]) => [name, value.replaceAll('{workdir}', repo)]));
-    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...process.env, ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt) * 1000, killSignal: 'SIGKILL' });
+    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...unconnected(process.env), ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt) * 1000, killSignal: 'SIGKILL' });
 
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new Error('CiDeadlineExceeded: the local plan passed the CI run\'s deadline');
 
