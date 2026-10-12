@@ -312,7 +312,7 @@ describe('a task whose container stopped under it', () => {
     const { job: lossy } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
     const lost: (number | null)[] = [];
 
-    for (const vessel of ['v1', 'r1', 'r2']) {
+    for (const vessel of ['v1', 'v2', 'v3']) {
       const claim = await lossy.claim(vessel);
 
       lost.push(claim === null || 'waitMs' in claim ? null : claim.index);
@@ -329,11 +329,11 @@ describe('a task whose container stopped under it', () => {
 describe('a vessel lost before it took a task', () => {
   test('is replaced apart from the losses under a task, as many as the job\'s pool', async () => {
     const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });
-    const replacements = Array.from({ length: 12 }, (_, index) => `r${String(index + 1)}`);
 
-    for (const vessel of ['v1', ...replacements]) await booting.vesselFailed(vessel, 'the first exec exited 137: ');
+    // Each start fails, the replacement's too, and the one past the twelfth replacement is not replaced.
+    for (let lost = 0; lost <= 12; lost += 1) await booting.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'the first exec exited 137: ');
 
-    expect(begun).toEqual(['j1/v1', ...replacements.map((vessel) => `j1/${vessel}`)]);
+    expect(begun).toEqual(Array.from({ length: 13 }, (_, index) => `j1/v${String(index + 1)}`));
   });
 });
 
@@ -654,10 +654,10 @@ describe('a gang task', () => {
     expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
     expect(await open.claim('v2')).toEqual({ waitMs: 1000 });
     await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
-    const ranks = ['v1', 'v2', 'v4', 'r1'];
+    const ranks = ['v1', 'v2', 'v4', 'v5'];
     const held = await formed(open, ranks);
 
-    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/r1']);
+    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/v5']);
     expect(ranks.map((name) => [held[name]?.gang?.rank, held[name]?.gang?.vessels])).toEqual(ranks.map((_, rank) => [rank, ranks]));
     expect(new Set(Object.values(held).map((claim) => claim.gang?.token)).size).toBe(1);
 
@@ -676,7 +676,7 @@ describe('a gang task', () => {
       expect(await Promise.all(['v1', 'v2', 'v4'].map(async (name) => await open.claim(name)))).toEqual(Array.from({ length: 3 }, () => ({ waitMs: 1000 })));
       await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
       setSystemTime(began + 1000);
-      const ranks = ['v1', 'v2', 'v4', 'r1'];
+      const ranks = ['v1', 'v2', 'v4', 'v5'];
       const held = await formed(open, ranks);
 
       expect(Object.keys(held).sort()).toEqual([...ranks].sort());
@@ -699,13 +699,13 @@ describe('a gang task', () => {
     await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
     await open.vesselFailed('v3', 'a duplicate failure report', { gone: true });
     const stale = [await open.started('v1', 0, old), await open.still('v1', 0, 0, old)];
-    const ranks = ['v1', 'v2', 'v4', 'r1'];
+    const ranks = ['v1', 'v2', 'v4', 'v5'];
     const again = await formed(open, ranks);
 
     for (const name of ranks) await land(open, name, 0, { exitCode: 0 });
 
-    expect({ stale, begun, attempt: again['r1']?.attempt === old + 1, events: (await open.events(0)).events.map(({ outcome }) => [outcome.kind, outcome.exitCode]) })
-      .toEqual({ stale: [false, false], begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/r1'], attempt: true, events: [['exited', 0]] });
+    expect({ stale, begun, attempt: again['v5']?.attempt === old + 1, events: (await open.events(0)).events.map(({ outcome }) => [outcome.kind, outcome.exitCode]) })
+      .toEqual({ stale: [false, false], begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/v5'], attempt: true, events: [['exited', 0]] });
   });
 
   test('a forming gang that loses a joined member forms anew rather than waiting on it', async () => {
@@ -714,13 +714,13 @@ describe('a gang task', () => {
     await open.claim('v1');
     await open.claim('v2');
     await open.vesselFailed('v2', 'container lost before launch', { gone: true });
-    const ranks = ['v1', 'v3', 'v4', 'r1'];
+    const ranks = ['v1', 'v3', 'v4', 'v5'];
     const held = await formed(open, ranks);
 
     for (const name of ranks) await land(open, name, 0, { exitCode: 0 });
 
     expect({ begun, ranks: ranks.map((name) => held[name]?.gang?.rank), events: (await open.events(0)).events.map(({ outcome }) => outcome.kind) })
-      .toEqual({ begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/r1'], ranks: [0, 1, 2, 3], events: ['exited'] });
+      .toEqual({ begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/v5'], ranks: [0, 1, 2, 3], events: ['exited'] });
   });
 
   test('a gang failed by its launch bound refills the pool for the next task without starting an extra replacement', async () => {
@@ -821,7 +821,7 @@ describe('a gang task', () => {
       await open.alarm();
       expect((await open.events(0)).events).toHaveLength(0);
       await open.vesselFailed('v2', 'container lost while running', { gone: true });
-      await formed(open, ['v1', 'r1'], false);
+      await formed(open, ['v1', 'v3'], false);
 
       expect(await open.started('v1', 0, 1)).toBe(false);
       expect(await open.started('v1', 0, 2)).toBe(true);
@@ -868,7 +868,7 @@ describe('a gang task', () => {
 
   test('is lost when fewer vessels are left than its ranks and no replacement may start, while the rest of the job runs on', async () => {
     const plain = ['a', 'b', 'c', 'd'].map((name) => ({ item: { name, weight: 1 }, argv: ['true'] }));
-    const { job: lossy } = await job({ recipe: {}, items: [...plain, { item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+    const { job: lossy, begun } = await job({ recipe: {}, items: [...plain, { item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
     const alive = ['v1', 'v2'];
 
     // Eight vessels lost under tasks spend the job's replacements.
@@ -877,13 +877,15 @@ describe('a gang task', () => {
 
       await lossy.claim(vessel);
       await lossy.vesselFailed(vessel, 'container lost', { gone: true });
-      alive.push(`r${String(lost)}`);
+      alive.push((begun.at(-1) ?? '').slice('j1/'.length));
     }
 
-    await finish(lossy, 'r7');
-    await finish(lossy, 'r7');
-    await formed(lossy, ['r7', 'r8']);
-    await lossy.vesselFailed('r8', 'container lost', { gone: true });
+    const [first = '', second = ''] = alive;
+
+    await finish(lossy, first);
+    await finish(lossy, first);
+    await formed(lossy, [first, second]);
+    await lossy.vesselFailed(second, 'container lost', { gone: true });
     const { events, done } = await lossy.events(0);
 
     expect({ done, events: events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.reason ?? null]) })
@@ -896,10 +898,10 @@ describe('a gang task', () => {
     await formed(lossy, ['v1', 'v2']);
     await lossy.vesselFailed('v2', 'the wait failed to run: Network connection lost.');
     const stopped = await lossy.still('v1', 0);
-    const again = await formed(lossy, ['v1', 'r1']);
+    const again = await formed(lossy, ['v1', 'v3']);
 
-    expect({ stopped, begun, again: ['v1', 'r1'].map((vessel) => [again[vessel]?.gang?.rank, again[vessel]?.attempt]), events: (await lossy.events(0)).events })
-      .toEqual({ stopped: false, begun: ['j1/v1', 'j1/v2', 'j1/r1'], again: [[0, 2], [1, 2]], events: [] });
+    expect({ stopped, begun, again: ['v1', 'v3'].map((vessel) => [again[vessel]?.gang?.rank, again[vessel]?.attempt]), events: (await lossy.events(0)).events })
+      .toEqual({ stopped: false, begun: ['j1/v1', 'j1/v2', 'j1/v3'], again: [[0, 2], [1, 2]], events: [] });
   });
 });
 

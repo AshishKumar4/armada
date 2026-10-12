@@ -22,10 +22,11 @@ interface Stores {
   readonly store: (name: string) => ArmadaEstimates | undefined;
 }
 
-/** The classes' stores, real objects, kept by class; `answers` decides whether a read is answered. */
-function stores(answers: () => boolean = () => true): Stores {
-  const held = new Map<string, ArmadaEstimates>();
-  const of = (name: string) => held.get(name) ?? held.set(name, new ArmadaEstimates(state().ctx, world({}))).get(name);
+/** The classes' stores, real objects, kept by class; `answers` decides whether a read is answered, and each of `held`
+ *  holds the next answered read in flight until it returns. */
+function stores(answers: () => boolean = () => true, held: (() => Promise<void>)[] = []): Stores {
+  const kept = new Map<string, ArmadaEstimates>();
+  const of = (name: string) => kept.get(name) ?? kept.set(name, new ArmadaEstimates(state().ctx, world({}))).get(name);
 
   const space = namespace((name: string) => {
     const store = of(name);
@@ -33,8 +34,11 @@ function stores(answers: () => boolean = () => true): Stores {
     return {
       read: async (items: readonly string[]) => {
         if (!answers()) throw new Error('the store is not answering');
+        const answer = await store?.read(items);
 
-        return await store?.read(items);
+        await held.shift()?.();
+
+        return answer;
       },
       record: async (...args: Parameters<ArmadaEstimates['record']>) => await store?.record(...args),
     };
@@ -55,8 +59,9 @@ async function learned(sample: Usage, answers?: () => boolean): Promise<Stores> 
 /** A job of `items` on a ready medium environment, its classes' stores `estimates`: the job, and the vessels it began. */
 async function packing(items: readonly Json[], estimates: Stores, more: Partial<v.InferInput<typeof JobSpecSchema>> = {}) {
   const begun: string[] = [];
+  const stored = state();
 
-  const created = new ArmadaJob(state().ctx, world({
+  const created = new ArmadaJob(stored.ctx, world({
     VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name.slice('j1/'.length)); }, stop: async () => true })),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation: READY }) })),
     ESTIMATES: estimates.space,
@@ -65,7 +70,7 @@ async function packing(items: readonly Json[], estimates: Stores, more: Partial<
   await created.create('j1', v.parse(JobSpecSchema, { recipe: { size: 'medium' }, items: items.map((item) => ({ item, argv: argvOf(item) })), run: { kind: 'command' }, pool: 4, ...more }));
   await created.alarm();
 
-  return { job: created, begun };
+  return { job: created, begun, stored };
 }
 
 /** What `vessel`'s next `count` slots are handed: each task's index, or null. */
@@ -128,14 +133,17 @@ describe('an efficient job', () => {
     const items: Json[] = [{ weight: 9, n: 0 }, { weight: 9, n: 1 }, { weight: 9, n: 2 }, { weight: 9, n: 3 }, { gang: 2 }];
     const { job, begun } = await packing(items, await learned(SMALL));
     const packed = await slotsOf(job, 'v1', 4);
-    const waiting = await job.claim('v2');
+    // The four runs fill the pool: the gang waits for them.
+    const full = await job.claim('v2');
 
     for (const index of [0, 1, 2, 3]) await land(job, 'v1', ran(index, 'v1', 0));
 
+    const forming = await job.claim('v2');
     const rank = await claimed(job, 'v1');
     const lead = await claimed(job, 'v2');
 
-    expect({ begun, packed, waiting, ranks: [lead.gang?.rank, rank.gang?.rank] }).toEqual({ begun: ['v1', 'v2'], packed: [0, 1, 2, 3], waiting: { waitMs: 1000 }, ranks: [0, 1] });
+    expect({ begun, packed, full, forming, ranks: [lead.gang?.rank, rank.gang?.rank] })
+      .toEqual({ begun: ['v1', 'v2'], packed: [0, 1, 2, 3], full: { waitMs: 1000 }, forming: { waitMs: 1000 }, ranks: [0, 1] });
   });
 
   test('runs its tasks whole while their class\'s store does not answer, and packs them once it does', async () => {
@@ -160,7 +168,7 @@ describe('an efficient job', () => {
     await land(job, 'v1', ran(0, 'v1', 0, { peakMemory: 4 * GIB }));
     await Promise.all([job.alarm(), job.alarm()]);
 
-    expect((await made.store(CLASS)?.read([]))?.estimate).toBeNull();
+    expect((await made.store(CLASS)?.read([]))?.estimate.usage).toBeNull();
   });
 
   test('runs a task again alone, before its own retries, when it failed beside others, says how, and keeps its item alone', async () => {
@@ -226,10 +234,100 @@ describe('an efficient job', () => {
     await slotsOf(job, 'v1', 2);
     await land(job, 'v1', ran(1, 'v1', 0));
     await job.vesselFailed('v1', 'container lost', { gone: true });
-    const again = await claimed(job, 'r1');
+    const again = await claimed(job, 'v2');
 
-    await land(job, 'r1', ran(0, 'r1', 1, { attempt: again.attempt }));
+    await land(job, 'v2', ran(0, 'v2', 1, { attempt: again.attempt }));
 
     expect((await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter ?? null])).toEqual([[1, 0, null], [0, 1, null]]);
+  });
+  test('holds its pool of runs at once whatever holds them: a hedged copy waits for a run to end, as a packed one does', async () => {
+    const { job, begun } = await packing([{ weight: 9 }, { weight: 1 }, { weight: 1 }], await learned(SMALL), { pool: 2, hedge: 1 });
+    const packed = await slotsOf(job, 'v1', 3);
+    const copy = await job.claim('v2');
+
+    await land(job, 'v1', ran(1, 'v1', 0));
+
+    expect({ begun, packed, copy, after: (await claimed(job, 'v2')).index }).toEqual({ begun: ['v1', 'v2'], packed: [0, 1, null], copy: { waitMs: 1000 }, after: 0 });
+  });
+
+  test('keeps the red of a copied task\'s packed run, though its copy alone was green first', async () => {
+    const { job } = await packing([{ weight: 9 }, { weight: 1 }], await learned(SMALL), { hedge: 1 });
+
+    await slotsOf(job, 'v1', 2);
+    const copy = await claimed(job, 'v2');
+
+    await land(job, 'v2', ran(0, 'v2', 0, { attempt: copy.attempt }));
+    await land(job, 'v1', ran(0, 'v1', 1));
+    await land(job, 'v1', ran(1, 'v1', 0));
+
+    expect((await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter ?? null])).toEqual([[0, 1, null], [1, 0, null]]);
+  });
+
+  test('a run whose process exited before another joined its container ran beside nothing, so its red is its own', async () => {
+    const { job } = await packing(['a', 'b'], await learned(SMALL));
+
+    await claimed(job, 'v1');
+    expect(await job.accept('v1', 0, 1)).toBe(true);
+    // Task a is landing, its process gone, when b joins.
+    const joined = await claimed(job, 'v1', 1);
+
+    await job.complete('v1', ran(0, 'v1', 1), 1000);
+    await land(job, 'v1', ran(1, 'v1', 0));
+
+    expect({ joined: joined.index, landed: (await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter ?? null]) })
+      .toEqual({ joined: 1, landed: [[0, 1, null], [1, 0, null]] });
+  });
+
+  test('learns only from the run whose answer lands, so nothing is left to deliver after the job ended', async () => {
+    const made = await learned(SMALL);
+    const { job, stored } = await packing([{ weight: 9 }], made, { hedge: 1 });
+    const copy = await claimed(job, 'v2');
+
+    await claimed(job, 'v1');
+    // v1's green is uploading when v2's red lands and ends the job.
+    expect(await job.accept('v1', 0, 0)).toBe(true);
+    await land(job, 'v2', ran(0, 'v2', 1, { attempt: copy.attempt }));
+    await job.complete('v1', ran(0, 'v1', 0), 1000);
+
+    expect({ done: (await job.events(0)).done, undelivered: stored.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM outbox').one()['n'], alarm: await stored.ctx.storage.getAlarm() })
+      .toEqual({ done: true, undelivered: 0, alarm: null });
+  });
+
+  test('starts no vessel past its replacements, however often it grows', async () => {
+    const { job, begun } = await packing(['a', 'b'], stores(), { pool: 2 });
+
+    await claimed(job, 'v1');
+
+    // Every other start fails, until the job stops replacing them.
+    for (let lost = 0; lost < 12; lost += 1) await job.vesselFailed(begun.at(-1) ?? '', 'the first exec exited 137: ');
+
+    const spent = [...begun];
+
+    for (let alarm = 0; alarm < 3; alarm += 1) await job.alarm();
+
+    expect({ spent, after: begun }).toEqual({ spent: Array.from({ length: 10 }, (_, index) => `v${String(index + 1)}`), after: spent });
+  });
+  test('keeps the newest estimate of a class, though an older answer arrives after it', async () => {
+    const big: Usage = { cores: 1, memory: 6 * GIB, disk: 1e6 };
+    const answered = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+
+    const made = stores(() => true, [async () => {
+      answered.resolve();
+      await released.promise;
+    }]);
+
+    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...SMALL, run: `earlier/${String(at)}/1/v1`, item: `e${String(at)}` })));
+    const { job } = await packing([], made, { open: true });
+    // Its read answered small, and held in flight while the class is measured bigger and the job reads that.
+    const adding = job.add(['c', 'd'].map((item) => ({ item, argv: argvOf(item) })));
+
+    await answered.promise;
+    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...big, run: `later/${String(at)}/1/v1`, item: `l${String(at)}` })));
+    await job.alarm();
+    released.resolve();
+    await adding;
+
+    expect(await slotsOf(job, 'v1', 2)).toEqual([0, null]);
   });
 });

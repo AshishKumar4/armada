@@ -2,7 +2,7 @@
  * ArmadaEstimates: what one class of task used, so a job packs the next ones into its containers (`placement.ts`). A
  * class is a pushed task's id, or a command's program, under one environment (`classOf`). Its object keeps the class's
  * last samples, one a run, and a record of each item it ran (`itemKey`): the item's own use, and whether it must run
- * alone. It answers with the class's estimate, which it alone computes.
+ * alone. It answers with the class's estimate, which it alone computes, at its revision.
  */
 import { DurableObject } from 'cloudflare:workers';
 import { canonical, sha256, SIZES, type JobSpec, type Size, type Task } from '../../src/protocol';
@@ -21,20 +21,32 @@ export interface ItemUsage extends Usage {
   readonly alone: boolean;
 }
 
-/** One run's use, by the run (`runOf`) and its item: a run delivered twice is one sample. */
+/** One run's use, by the run (its job, task, attempt and vessel) and its item: a run delivered twice is one sample. */
 export interface Sample extends Usage {
   readonly run: string;
   readonly item: string;
 }
 
-/** What a class's object answers: its estimate, null below `MIN_SAMPLES`, and the records of the items asked for. */
+/** A class's estimate, null below `MIN_SAMPLES`, and its revision, the newest sample it is of: of two answers, the one
+ *  of the later revision is the newer, whichever arrives last. */
+export interface Estimate {
+  readonly usage: Usage | null;
+  readonly revision: number;
+}
+
+/** What a class's object answers: its estimate and the records of the items asked for. */
 export interface Reading {
-  readonly estimate: Usage | null;
+  readonly estimate: Estimate;
   readonly items: Readonly<Record<string, ItemUsage>>;
 }
 
-/** The samples a class keeps: enough for its quantiles, few enough to read whole at each answer. */
+/** The samples a class's estimate is of, its newest: enough for its quantiles, few enough to read whole at each
+ *  answer. */
 const SAMPLES = 200;
+
+/** The runs a class keeps: far more than its estimate reads, so a delivery made again after a lost answer, a send
+ *  apart, still finds its runs and counts each once. */
+const RUNS = 20_000;
 
 /** The item records a class keeps, the least recently run dropped first. */
 const ITEMS = 20_000;
@@ -88,7 +100,7 @@ export class ArmadaEstimates extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.sql.exec('CREATE TABLE IF NOT EXISTS samples (seq INTEGER PRIMARY KEY AUTOINCREMENT, run TEXT NOT NULL UNIQUE, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS samples (seq INTEGER PRIMARY KEY, run TEXT NOT NULL UNIQUE, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS items (key TEXT PRIMARY KEY, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL, alone INTEGER NOT NULL, at INTEGER NOT NULL)');
   }
 
@@ -112,7 +124,7 @@ export class ArmadaEstimates extends DurableObject<Env> {
    *  not recorded again, so a delivery made twice (two sends at once, or one whose answer was lost) counts once. An item
    *  keeps its latest cores and the most memory and disk any run of it used, so a run that peaked once is packed for
    *  that peak; once alone, it stays alone. */
-  async record(samples: readonly Sample[], alone: readonly string[] = []): Promise<Usage | null> {
+  async record(samples: readonly Sample[], alone: readonly string[] = []): Promise<Estimate> {
     const now = Date.now();
 
     for (const sample of samples) {
@@ -128,14 +140,16 @@ export class ArmadaEstimates extends DurableObject<Env> {
       this.sql.exec(`INSERT INTO items (key, cores, memory, disk, alone, at) VALUES (?, 0, 0, 0, 1, ?) ON CONFLICT (key) DO UPDATE SET alone = 1, at = excluded.at`, item, now);
     }
 
-    this.sql.exec('DELETE FROM samples WHERE seq <= (SELECT MAX(seq) FROM samples) - ?', SAMPLES);
+    this.sql.exec('DELETE FROM samples WHERE seq IN (SELECT seq FROM samples ORDER BY seq DESC LIMIT -1 OFFSET ?)', RUNS);
     this.sql.exec('DELETE FROM items WHERE key IN (SELECT key FROM items ORDER BY at DESC LIMIT -1 OFFSET ?)', ITEMS);
 
     return this.estimate();
   }
 
-  /** The class's estimate from its newest samples. */
-  private estimate(): Usage | null {
-    return classEstimate(this.sql.exec<{ cores: number; memory: number; disk: number }>('SELECT cores, memory, disk FROM samples ORDER BY seq DESC LIMIT ?', SAMPLES).toArray());
+  /** The class's estimate from its newest samples. A sample's `seq` only grows: the newest is never dropped. */
+  private estimate(): Estimate {
+    const newest = this.sql.exec<{ seq: number; cores: number; memory: number; disk: number }>('SELECT seq, cores, memory, disk FROM samples ORDER BY seq DESC LIMIT ?', SAMPLES).toArray();
+
+    return { usage: classEstimate(newest), revision: newest[0]?.seq ?? 0 };
   }
 }

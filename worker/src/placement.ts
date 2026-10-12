@@ -5,25 +5,33 @@
  * job's `tasks` and `members`; the job hands out each run it chooses, as it does any other.
  *
  * A task's estimate is its own item's record where its item ran before, else its class's, read live from the class's
- * last answer; a task with neither, one not looked up yet, one that runs alone, a gang's rank and a hedged copy each
- * take a container whole.
+ * last answer; a task with neither, one not looked up yet, one that runs alone, a gang's rank and a task with a copy
+ * running each take a container whole.
  */
 import type { Outcome, Size } from '../../src/protocol';
-import { roomOf, type ArmadaEstimates, type Sample, type Usage } from './estimates';
+import { roomOf, type ArmadaEstimates, type Estimate, type Sample, type Usage } from './estimates';
 
 /** How a run beside other tasks ended when the kernel killed it for memory. */
 export const KILLED_FOR_MEMORY = 'killed for memory';
 
+/** The containers a task needs at once, as an SQL expression on its `item` column: one, or a gang's each rank. */
+export const ranksOf = (item: string): string => `CASE WHEN json_type(${item}, '$.item.gang') IS 'integer' THEN json_extract(${item}, '$.item.gang') ELSE 1 END`;
+
+/** The class stores a job asks at once. */
+const STORE_CALLS = 32;
+
 /** Each task with what it is expected to use and the containers it takes whole, as an SQL row source over the job's
  *  tasks. */
 const ESTIMATED = `SELECT t.idx, t.state, t.weight, t.not_before, t.vessel, t.dup,
-    COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk,
-    CASE WHEN json_type(t.item, '$.item.gang') IS 'integer' THEN json_extract(t.item, '$.item.gang') ELSE 1 END AS ranks,
-    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR json_type(t.item, '$.item.gang') IS 'integer') AS whole
+    COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk, ${ranksOf('t.item')} AS ranks,
+    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
   FROM tasks t LEFT JOIN placed p ON p.idx = t.idx LEFT JOIN classes c ON c.class = p.class`;
 
 /** The task states whose runs hold a container. */
 const HELD = `('running', 'landing')`;
+
+/** The member states of a gang's rank that holds its vessel. */
+const RANKED = `('joined', 'ready', 'starting', 'running', 'landing')`;
 
 /** What a vessel runs now: its runs, their estimates summed, whether one takes the container whole, and whether it holds
  *  a gang's rank still to be handed its claim. */
@@ -48,11 +56,36 @@ const within = (usage: Usage, room: Usage): boolean => usage.cores <= room.cores
 
 const NONE: Usage = { cores: 0, memory: 0, disk: 0 };
 
+/** What a job asks of each class's store (`ask`), and does with its answer (`take`); `doing` names it in the log. */
+interface Asking<Rows, Answer> {
+  readonly doing: string;
+  readonly ask: (store: DurableObjectStub<ArmadaEstimates>, rows: Rows) => Promise<Answer>;
+  readonly take: (cls: string, rows: Rows, answer: Answer) => void;
+}
+
+/** Each class of `classes` asked of its store, `STORE_CALLS` classes at a time, each answer taken as it is in; a class
+ *  whose store does not answer is said in the log and left for the next call. */
+async function eachClass<Rows, Answer>(stores: DurableObjectNamespace<ArmadaEstimates>, classes: ReadonlyMap<string, Rows>, { doing, ask, take }: Asking<Rows, Answer>): Promise<void> {
+  const all = [...classes];
+
+  for (let from = 0; from < all.length; from += STORE_CALLS) {
+    const batch = all.slice(from, from + STORE_CALLS);
+    const answers = await Promise.allSettled(batch.map(async ([cls, rows]) => await ask(stores.getByName(cls), rows)));
+
+    for (const [at, [cls, rows]] of batch.entries()) {
+      const answered = answers[at];
+
+      if (answered?.status === 'fulfilled') take(cls, rows, answered.value);
+      else console.error(JSON.stringify({ estimates: cls, [doing]: String(answered?.reason) }));
+    }
+  }
+}
+
 export class Placement {
   constructor(private readonly sql: SqlStorage) {
     sql.exec(`CREATE TABLE IF NOT EXISTS placed (idx INTEGER PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, looked INTEGER NOT NULL DEFAULT 0,
       cores REAL, memory REAL, disk REAL, alone INTEGER NOT NULL DEFAULT 0, failure TEXT)`);
-    sql.exec('CREATE TABLE IF NOT EXISTS classes (class TEXT PRIMARY KEY, cores REAL, memory REAL, disk REAL)');
+    sql.exec('CREATE TABLE IF NOT EXISTS classes (class TEXT PRIMARY KEY, cores REAL, memory REAL, disk REAL, revision INTEGER NOT NULL)');
     sql.exec('CREATE TABLE IF NOT EXISTS outbox (run TEXT PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL)');
     sql.exec('CREATE TABLE IF NOT EXISTS isolate (class TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (class, item))');
     sql.exec('CREATE TABLE IF NOT EXISTS beside (vessel TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, PRIMARY KEY (vessel, idx, attempt))');
@@ -69,47 +102,52 @@ export class Placement {
   async look(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
     const unlooked = this.sql.exec<{ idx: number; class: string; item: string }>('SELECT idx, class, item FROM placed WHERE looked = 0').toArray();
 
-    for (const cls of new Set(unlooked.map((row) => row.class))) {
-      const rows = unlooked.filter((row) => row.class === cls);
-      const [read] = await Promise.allSettled([stores.getByName(cls).read([...new Set(rows.map((row) => row.item))])]);
+    await eachClass(stores, Map.groupBy(unlooked, (row) => row.class), {
+      doing: 'looking',
+      ask: async (store, rows) => await store.read([...new Set(rows.map((row) => row.item))]),
+      take: (cls, rows, { estimate, items }) => {
+        this.estimated(cls, estimate);
 
-      if (read.status === 'rejected') {
-        console.error(JSON.stringify({ estimates: cls, looking: String(read.reason) }));
-        continue;
-      }
+        for (const row of rows) {
+          const own = items[row.item];
 
-      this.estimated(cls, read.value.estimate);
-
-      for (const row of rows) {
-        const own = read.value.items[row.item];
-
-        this.sql.exec('UPDATE placed SET looked = 1, cores = ?, memory = ?, disk = ?, alone = MAX(alone, ?) WHERE idx = ? AND looked = 0',
-          own?.cores ?? null, own?.memory ?? null, own?.disk ?? null, own?.alone === true ? 1 : 0, row.idx);
-      }
-    }
+          this.sql.exec('UPDATE placed SET looked = 1, cores = ?, memory = ?, disk = ?, alone = MAX(alone, ?) WHERE idx = ? AND looked = 0',
+            own?.cores ?? null, own?.memory ?? null, own?.disk ?? null, own?.alone === true ? 1 : 0, row.idx);
+        }
+      },
+    });
   }
 
-  /** What vessel `name` runs now. A hedged copy and a gang's rank take a container whole, as a run its estimate says
-   *  does. */
+  /** What vessel `name` runs now: its tasks and the copies it runs, and the gang ranks it holds, each of which takes it
+   *  whole. */
   loadOf(name: string): Load {
-    const held = this.sql.exec<{ runs: number; cores: number | null; memory: number | null; disk: number | null; whole: number | null; copy: number | null }>(
-      `SELECT COUNT(*) AS runs, SUM(cores) AS cores, SUM(memory) AS memory, SUM(disk) AS disk, MAX(whole) AS whole, MAX(dup = ?) AS copy
-        FROM (${ESTIMATED}) WHERE state IN ${HELD} AND (vessel = ? OR dup = ?)`, name, name, name,
+    const held = this.sql.exec<{ runs: number; cores: number | null; memory: number | null; disk: number | null; whole: number | null }>(
+      `SELECT COUNT(*) AS runs, SUM(cores) AS cores, SUM(memory) AS memory, SUM(disk) AS disk, MAX(whole) AS whole
+        FROM (${ESTIMATED}) WHERE state IN ${HELD} AND (vessel = ? OR dup = ?)`, name, name,
     ).one();
 
-    const ranks = this.sql.exec<{ state: string }>(`SELECT state FROM members WHERE vessel = ? AND state IN ('joined', 'ready', 'starting', 'running', 'landing')`, name).toArray();
+    const ranks = this.sql.exec<{ state: string }>(`SELECT state FROM members WHERE vessel = ? AND state IN ${RANKED}`, name).toArray();
 
     return {
       runs: held.runs + ranks.length, cores: held.cores ?? 0, memory: held.memory ?? 0, disk: held.disk ?? 0,
-      whole: held.whole === 1 || held.copy === 1 || ranks.length > 0, joined: ranks.some((rank) => rank.state === 'joined' || rank.state === 'ready'),
+      whole: held.whole === 1 || ranks.length > 0, joined: ranks.some((rank) => rank.state === 'joined' || rank.state === 'ready'),
     };
   }
 
-  /** The heaviest queued task whose estimate fits beside `load` in a container of `size`, while the job runs fewer than
-   *  `pool` runs; null when none does, or `load` takes its container whole. Choosing changes nothing: the job hands the
-   *  run out, then marks who it runs beside (`beside`). */
-  fit(load: Load, size: Size, { runs, pool, now }: { readonly runs: number; readonly pool: number; readonly now: number }): number | null {
-    if (load.whole || runs >= pool) return null;
+  /** The runs the job holds at once, which its pool bounds: each task running or landing, each copy of one, and each
+   *  rank of a gang from when it joins. */
+  held(): number {
+    return Number(this.sql.exec(`SELECT
+        (SELECT COUNT(*) FROM tasks WHERE state IN ${HELD} AND idx NOT IN (SELECT idx FROM members))
+      + (SELECT COUNT(*) FROM tasks WHERE state IN ${HELD} AND dup IS NOT NULL)
+      + (SELECT COUNT(*) FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running', 'landing') AND m.state IN ${RANKED}) AS n`).one()['n']);
+  }
+
+  /** The heaviest queued task whose estimate fits beside `load` in a container of `size`; null when none does, or `load`
+   *  takes its container whole. Choosing changes nothing: the job hands the run out, then marks who it runs beside
+   *  (`beside`). */
+  fit(load: Load, size: Size, now: number): number | null {
+    if (load.whole) return null;
     const left = roomOf(size);
 
     return this.sql.exec<{ idx: number }>(
@@ -145,20 +183,28 @@ export class Placement {
     return Math.min(pool, Math.max(whole + bins.length + hedged, widest));
   }
 
-  /** Vessel `name` was handed run `attempt` of task `index` beside what it runs: that run and each of the others ran
-   *  beside one another. A run alone has no mark, so a later run of the same task starts with none. */
+  /** Vessel `name` was handed run `attempt` of task `index` beside what it runs: if a run there is still running, that
+   *  run and the new one ran beside each other. A run whose process exited, landing, runs beside nothing; nor does a run
+   *  alone, so a later run of the same task starts with no mark. */
   beside(name: string, index: number, attempt: number): void {
-    for (const run of this.sql.exec<{ idx: number; attempts: number }>(`SELECT idx, attempts FROM tasks WHERE state IN ${HELD} AND vessel = ?`, name).toArray()) {
+    const running = this.sql.exec<{ idx: number; attempts: number }>(`SELECT idx, attempts FROM tasks WHERE state = 'running' AND vessel = ? AND idx != ?`, name, index).toArray();
+
+    if (running.length === 0) return;
+
+    for (const run of [...running, { idx: index, attempts: attempt }]) {
       this.sql.exec('INSERT OR IGNORE INTO beside (vessel, idx, attempt) VALUES (?, ?, ?)', name, run.idx, run.attempts);
     }
+  }
 
-    this.sql.exec('INSERT OR IGNORE INTO beside (vessel, idx, attempt) VALUES (?, ?, ?)', name, index, attempt);
+  /** Run `attempt` of task `index` got a copy: its copies decide it (`ArmadaJob.accept`), so neither runs again alone for
+   *  a red, and nothing runs beside it from now on (`whole`). */
+  copied(index: number, attempt: number): void {
+    this.sql.exec('DELETE FROM beside WHERE idx = ? AND attempt = ?', index, attempt);
   }
 
   /** How `outcome`, `name`'s run of its task, ended, when that run ran beside other tasks and ended red, past its timeout
    *  or killed for memory, and its task has not run alone since: it is then to run again alone (`alone`). Null for any
-   *  other run: a run alone, a hedged copy (which runs alone), or one cancelled or lost, which the platform's retries took
-   *  already. */
+   *  other run: a run alone, a copied one, or one cancelled or lost, which the platform's retries took already. */
   packedFailure(name: string, outcome: Outcome): string | null {
     const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ?', name, outcome.index, outcome.attempt).toArray().length > 0;
     const failure = this.sql.exec<{ failure: string | null }>('SELECT failure FROM placed WHERE idx = ?', outcome.index).toArray()[0]?.failure ?? null;
@@ -205,24 +251,27 @@ export class Placement {
    *  estimate. A delivery is idempotent (`ArmadaEstimates.record`), so what two sends at once both carry counts once; one
    *  a store does not take stays for the next send. */
   async flush(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
-    const classes = this.sql.exec<{ class: string }>('SELECT class FROM outbox UNION SELECT class FROM isolate').toArray().map((row) => row.class);
+    const samples = this.sql.exec<{ run: string; class: string; item: string; cores: number; memory: number; disk: number }>('SELECT run, class, item, cores, memory, disk FROM outbox').toArray();
+    const isolated = this.sql.exec<{ class: string; item: string }>('SELECT class, item FROM isolate').toArray();
+    const samplesOf = Map.groupBy(samples, (row) => row.class);
+    const aloneOf = Map.groupBy(isolated, (row) => row.class);
 
-    for (const cls of classes) {
-      const samples: Sample[] = this.sql.exec<{ run: string; item: string; cores: number; memory: number; disk: number }>('SELECT run, item, cores, memory, disk FROM outbox WHERE class = ?', cls).toArray();
-      const items = this.sql.exec<{ item: string }>('SELECT item FROM isolate WHERE class = ?', cls).toArray().map((row) => row.item);
-      const [recorded] = await Promise.allSettled([stores.getByName(cls).record(samples, items)]);
+    const classes = new Map([...new Set([...samplesOf.keys(), ...aloneOf.keys()])].map((cls) => [cls, {
+      samples: (samplesOf.get(cls) ?? []).map(({ run, item, cores, memory, disk }): Sample => ({ run, item, cores, memory, disk })),
+      alone: (aloneOf.get(cls) ?? []).map((row) => row.item),
+    }]));
 
-      if (recorded.status === 'rejected') {
-        console.error(JSON.stringify({ estimates: cls, delivering: String(recorded.reason) }));
-        continue;
-      }
+    await eachClass(stores, classes, {
+      doing: 'delivering',
+      ask: async (store, { samples: delivered, alone }) => await store.record(delivered, alone),
+      take: (cls, { samples: delivered, alone }, estimate) => {
+        this.estimated(cls, estimate);
 
-      this.estimated(cls, recorded.value);
+        for (const { run } of delivered) this.sql.exec('DELETE FROM outbox WHERE run = ?', run);
 
-      for (const { run } of samples) this.sql.exec('DELETE FROM outbox WHERE run = ?', run);
-
-      for (const item of items) this.sql.exec('DELETE FROM isolate WHERE class = ? AND item = ?', cls, item);
-    }
+        for (const item of alone) this.sql.exec('DELETE FROM isolate WHERE class = ? AND item = ?', cls, item);
+      },
+    });
   }
 
   /** Whether the job has something still to deliver. */
@@ -230,9 +279,10 @@ export class Placement {
     return this.sql.exec('SELECT 1 AS n FROM outbox UNION SELECT 1 AS n FROM isolate LIMIT 1').toArray().length > 0;
   }
 
-  /** `cls`'s estimate, as its store last answered. */
-  private estimated(cls: string, estimate: Usage | null): void {
-    this.sql.exec('INSERT INTO classes (class, cores, memory, disk) VALUES (?, ?, ?, ?) ON CONFLICT (class) DO UPDATE SET cores = excluded.cores, memory = excluded.memory, disk = excluded.disk',
-      cls, estimate?.cores ?? null, estimate?.memory ?? null, estimate?.disk ?? null);
+  /** `cls`'s estimate, as its store answered, unless the job holds a newer one already: answers can arrive out of order. */
+  private estimated(cls: string, { usage, revision }: Estimate): void {
+    this.sql.exec(`INSERT INTO classes (class, cores, memory, disk, revision) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (class) DO UPDATE SET cores = excluded.cores, memory = excluded.memory, disk = excluded.disk, revision = excluded.revision WHERE excluded.revision >= classes.revision`,
+    cls, usage?.cores ?? null, usage?.memory ?? null, usage?.disk ?? null, revision);
   }
 }

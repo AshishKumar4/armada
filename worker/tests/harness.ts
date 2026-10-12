@@ -42,6 +42,9 @@ await mock.module('cloudflare:workers', () => ({
   },
 }));
 
+// Imported once the mock is in place: the store extends its DurableObject.
+const { ArmadaEstimates } = await import('../src/estimates');
+
 /** A key, or the keys, a storage call names. */
 const many = (key: string | readonly string[]): key is readonly string[] => Array.isArray(key);
 
@@ -196,8 +199,8 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
     FLEET_VCPUS: '1500',
     ARTIFACTS: bucket(),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
-    // A store with nothing learned yet: every task runs alone until its class is.
-    ESTIMATES: namespace(() => ({ read: async () => ({ estimate: null, items: {} }), record: async () => null })),
+    // A store with nothing learned yet, each time it is asked: every task runs alone.
+    ESTIMATES: namespace(() => new ArmadaEstimates(state().ctx, world({}))),
     ...bindings,
   });
 

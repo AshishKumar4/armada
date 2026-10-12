@@ -32,7 +32,7 @@ import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { classOf, itemKey, tasksMemoryOf } from './estimates';
-import { Placement, type Load } from './placement';
+import { Placement, ranksOf, type Load } from './placement';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
 import type { VesselSpec } from './vessel';
@@ -70,14 +70,18 @@ export interface Gang {
   readonly token: string;
 }
 
-/** How long a rank waits before it asks again whether its gang has formed. */
-const GANG_WAIT_MS = 1_000;
+/** How long a vessel waits before it asks again: a rank for its gang to form, or one in a packing job for a run of its
+ *  full pool to end. */
+const WAIT_MS = 1_000;
+
+/** The states of a vessel that is alive: waiting for the fleet, starting, or taking tasks. */
+const ALIVE = `('waiting', 'booting', 'working')`;
 
 /** The states a task is open in: not yet run, a gang gathering its ranks, running, or its answer landing. */
 const OPEN = `state IN ('queued', 'forming', 'running', 'landing')`;
 
-/** The containers a task needs at once, as an SQL expression on its row: one, or a gang's each rank. */
-const RANKS = `CASE WHEN json_type(item, '$.item.gang') = 'integer' THEN json_extract(item, '$.item.gang') ELSE 1 END`;
+/** The containers a task needs at once, as an SQL expression on its row. */
+const RANKS = ranksOf('item');
 
 /** The containers the open tasks need at once. */
 const NEEDED = `SELECT COALESCE(SUM(${RANKS}), 0) AS n FROM tasks WHERE ${OPEN}`;
@@ -412,11 +416,12 @@ export class ArmadaJob extends DurableObject<Env> {
     const generation = await this.ctx.storage.get<Generation>('environment');
 
     if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
-    const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
-    const named = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name LIKE 'v%'`).one()['n']);
+    const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ${ALIVE}`).one()['n']);
+    const named = Number(this.sql.exec('SELECT COUNT(*) AS n FROM vessels').one()['n']);
     // A lane for each hedged copy, which runs on another container than its first; a gang is never hedged.
     const hedged = Math.min(spec.hedge, this.count(`${OPEN} AND json_type(item, '$.item.gang') IS NOT 'integer'`));
-    const wanted = this.needed(spec, hedged) - alive;
+    // The places vessels lost past the job's replacements forfeited stay empty (`vesselFailed`).
+    const wanted = this.needed(spec, hedged) - alive - ((await this.ctx.storage.get<number>('forfeited')) ?? 0);
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => `v${String(named + index + 1)}`);
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
@@ -484,7 +489,10 @@ export class ArmadaJob extends DurableObject<Env> {
   async claim(name: string, slot = 0): Promise<Claim | { readonly waitMs: number } | null> {
     const claimed = await this.next(name, slot);
 
-    if (claimed !== null && !('waitMs' in claimed)) this.runs.began({ vessel: name, slot, index: claimed.index, attempt: claimed.attempt }, Date.now());
+    if (claimed === null || 'waitMs' in claimed) return claimed;
+    this.runs.began({ vessel: name, slot, index: claimed.index, attempt: claimed.attempt }, Date.now());
+
+    if (claimed.duplicate) this.placement.copied(claimed.index, claimed.attempt);
 
     return claimed;
   }
@@ -524,13 +532,26 @@ export class ArmadaJob extends DurableObject<Env> {
     // task that takes it whole; this slot then ends, and the vessel runs on. One holding a gang's rank still to start
     // takes that rank's claim (`rank`).
     const load = packs(spec) ? this.placement.loadOf(name) : null;
+    // A packing job's pool bounds its runs at once, however they are held (`Placement.held`): while it is full, no vessel
+    // takes a new one.
+    const full = load !== null && this.placement.held() >= spec.pool;
 
-    if (load !== null && load.runs > 0 && !load.joined) return this.fitting(spec, env, { name, slot, now }, load);
+    if (load !== null && load.runs > 0 && !load.joined) return full ? null : this.fitting(spec, env, { name, slot, now }, load);
     // No await between finding no forming gang and creating one: simultaneous first claims would all miss `rank`,
     // then only the first form it, with the others retiring against the now-empty queue instead of joining.
-    const ganged = this.rank(spec, env, name);
+    const ganged = this.rank(spec, env, name, full);
 
     if (ganged !== undefined) return await ganged;
+
+    if (full) {
+      // An empty vessel stays for the work its job has yet to run, and takes it as a run ends.
+      if (this.count(`state IN ('queued', 'forming')`) > 0) return { waitMs: WAIT_MS };
+
+      if (!this.busy(name)) this.beat(name, 'done');
+
+      return null;
+    }
+
     const first = this.sql.exec<{ idx: number; item: string; weight: number }>(`SELECT idx, item, weight FROM tasks WHERE state = 'queued' AND not_before <= ? ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
@@ -538,7 +559,7 @@ export class ArmadaJob extends DurableObject<Env> {
       this.sql.exec(`UPDATE tasks SET state = 'forming' WHERE idx = ?`, first.idx);
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, 0, ?, 'joined')`, first.idx, name);
 
-      return { waitMs: GANG_WAIT_MS };
+      return { waitMs: WAIT_MS };
     }
 
     const hedged = this.hedged(spec, name, slot, first?.weight ?? 0);
@@ -588,10 +609,10 @@ export class ArmadaJob extends DurableObject<Env> {
     return null;
   }
 
-  /** The queued task that fits beside what vessel `name` runs (`load`), within the job's pool of runs, handed out to
-   *  `slot` beside them (`Placement.fit`); or null when none does. */
+  /** The queued task that fits beside what vessel `name` runs (`load`), handed out to `slot` beside them
+   *  (`Placement.fit`); or null when none does. */
   private fitting(spec: Kept, env: Record<string, string>, { name, slot, now }: { readonly name: string; readonly slot: number; readonly now: number }, load: Load): Claim | null {
-    const index = this.placement.fit(load, spec.recipe.size, { runs: this.runs.count(), pool: spec.pool, now });
+    const index = this.placement.fit(load, spec.recipe.size, now);
 
     if (index === null) return null;
 
@@ -619,8 +640,8 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** `name`'s rank in a gang: its claim once the gang formed, a wait while it forms, joining the one forming if it is in
-   *  none; undefined when no gang is forming or holds it. */
-  private rank(spec: Kept, env: Record<string, string>, name: string): Promise<Claim> | { readonly waitMs: number } | undefined {
+   *  none and the job's pool is not `full`; undefined when no gang is forming or holds it. */
+  private rank(spec: Kept, env: Record<string, string>, name: string, full: boolean): Promise<Claim> | { readonly waitMs: number } | undefined {
     let mine = this.sql.exec<{ idx: number; state: string }>(
       `SELECT m.idx, m.state FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND m.state IN ('joined', 'ready') AND t.state IN ('forming', 'running')`, name,
     ).toArray()[0];
@@ -628,7 +649,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if (mine === undefined) {
       const forming = this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'forming' ORDER BY idx LIMIT 1`).toArray()[0];
 
-      if (forming === undefined) return undefined;
+      if (forming === undefined || full) return undefined;
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, (SELECT COUNT(*) FROM members WHERE idx = ?), ?, 'joined')`, forming.idx, forming.idx, name);
       mine = { idx: forming.idx, state: 'joined' };
     }
@@ -638,7 +659,7 @@ export class ArmadaJob extends DurableObject<Env> {
     let token: string | undefined;
 
     if (mine.state === 'joined') {
-      if (Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE idx = ?', mine.idx).one()['n']) < world) return { waitMs: GANG_WAIT_MS };
+      if (Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE idx = ?', mine.idx).one()['n']) < world) return { waitMs: WAIT_MS };
       // Every rank has joined: hand out claims under one relay token, and the gang's launch starts now (`LAUNCHING`). A
       // claim is not a launched task: each vessel acknowledges its launch (`started`), and the gang's start bound stays
       // armed until all do.
@@ -823,10 +844,12 @@ export class ArmadaJob extends DurableObject<Env> {
     // A gang's outcome is kept once its ranks decide it (`ranked`).
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
     const retries = (await this.spec())?.retries;
-
-    if (member === undefined) this.placement.learn(`${(await this.ctx.storage.get<string>('id')) ?? ''}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, outcome.index, outcome);
+    const id = (await this.ctx.storage.get<string>('id')) ?? '';
     // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
     const task = kept === null ? undefined : this.landing(name, kept.index, member !== undefined);
+
+    // What a run used is learnt from the run that lands: not from a copy the other replaced, nor one after the job ended.
+    if (task !== undefined && member === undefined) this.placement.learn(`${id}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, outcome.index, outcome);
     const packed = kept !== null && task !== undefined && member === undefined ? this.placement.packedFailure(name, kept) : null;
 
     const named = kept !== null && kept.exitCode !== 0
@@ -911,6 +934,9 @@ export class ArmadaJob extends DurableObject<Env> {
       || Number(this.sql.exec(`SELECT COUNT(*) AS n FROM tasks WHERE (vessel = ? OR dup = ?) AND state IN ('running', 'landing')`, name, name).one()['n']) > 0
       || Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE vessel = ?', name).one()['n']) > 0;
 
+    // Only a vessel alive until now leaves a place in the pool: a report of one already failed or retired leaves none.
+    const live = this.sql.exec(`SELECT 1 AS n FROM vessels WHERE name = ? AND state IN ${ALIVE}`, name).toArray().length > 0;
+
     this.sql.exec('UPDATE vessels SET state = ?, error = ?, beat = ? WHERE name = ?', 'failed', error.slice(0, 2000), Date.now(), name);
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
@@ -933,12 +959,7 @@ export class ArmadaJob extends DurableObject<Env> {
       }
     }
 
-    const replaced = (await this.ctx.storage.get<number>('replaced')) ?? 0;
-    const rebooted = (await this.ctx.storage.get<number>('rebooted')) ?? 0;
-    const allowed = took ? replaced < REPLACEMENTS : rebooted < Math.max(REPLACEMENTS, spec.pool);
     const generation = await this.ctx.storage.get<Generation>('environment');
-    const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
-    const wanted = this.needed(spec);
 
     if (missing !== undefined) {
       // No replacement is spent on it. The job's own snapshot is prepared again; a start from one it already moved
@@ -949,15 +970,17 @@ export class ArmadaJob extends DurableObject<Env> {
       }
 
       await this.awaitEnvironment(spec);
-      await this.grow();
-    } else if (alive < wanted && this.count(`state IN ('queued', 'forming')`) > 0 && allowed && generation !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running') {
-      const next = `r${String(replaced + rebooted + 1)}`;
+    } else if (live) {
+      // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
+      // the place, and runs on with one vessel fewer (`grow`).
+      const spent = (await this.ctx.storage.get<number>(took ? 'replaced' : 'rebooted')) ?? 0;
+      const forfeited = (await this.ctx.storage.get<number>('forfeited')) ?? 0;
 
-      await this.ctx.storage.put(took ? 'replaced' : 'rebooted', (took ? replaced : rebooted) + 1);
-      this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', next, 'waiting', Date.now());
-      await this.launch(spec, generation, next);
+      if (spent < (took ? REPLACEMENTS : Math.max(REPLACEMENTS, spec.pool))) await this.ctx.storage.put(took ? 'replaced' : 'rebooted', spent + 1);
+      else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
+    await this.grow();
     await this.settle();
   }
 
@@ -1014,7 +1037,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
 
     const peers = this.sql.exec<{ name: string }>(`SELECT v.name FROM vessels v JOIN members m ON m.vessel = v.name
-      WHERE m.idx = ? AND v.state IN ('waiting', 'booting', 'working')`, index).toArray();
+      WHERE m.idx = ? AND v.state IN ${ALIVE}`, index).toArray();
 
     const stopped = await Promise.allSettled(peers.map(async ({ name }) => await this.env.VESSEL.getByName(`${id}/${name}`).stop()));
 
@@ -1030,15 +1053,15 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.grow();
   }
 
-  /** Done once the job is closed, no task is queued or running, and no vessel can still take one. A closed job adds a
-   *  vessel only to replace one lost, while it may (`vesselFailed`), so an open task that needs more containers at once
-   *  than its vessels left can never run, and is lost: every open task once none is left. A task whose cache read is
-   *  still out is settled by the method that reads it. */
+  /** Done once the job is closed, no task is queued or running, and no vessel can still take one. A job's vessels are
+   *  as many as its open tasks need but for the places it forfeited (`grow`), and a vessel leaves only once nothing is
+   *  queued for it, so an open task that needs more containers at once than its vessels left never runs, and is lost:
+   *  every open task once none is left. A task whose cache read is still out is settled by the method that reads it. */
   private async settle(): Promise<void> {
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'running' || (await this.ctx.storage.get<boolean>('open')) === true) return;
 
     if (this.count(`state = 'checking'`) > 0) return;
-    const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
+    const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ${ALIVE}`).one()['n']);
     // A job without its environment is waiting for it prepared again, and vessels for its open tasks with it.
     const awaiting = (await this.ctx.storage.get<Generation>('environment')) === undefined;
     const stranded = awaiting ? [] : this.sql.exec<{ idx: number; ranks: number }>(`SELECT idx, ${RANKS} AS ranks FROM tasks WHERE ${OPEN} AND ${RANKS} > ?`, alive).toArray();
@@ -1103,7 +1126,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     await this.conclude();
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
-    const live = this.sql.exec<{ name: string }>(`SELECT name FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).toArray();
+    const live = this.sql.exec<{ name: string }>(`SELECT name FROM vessels WHERE state IN ${ALIVE}`).toArray();
 
     // The job is concluded already; a vessel that cannot be told ends at its container's inactivity timeout, and its
     // runs stay until then.
@@ -1120,7 +1143,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const now = Date.now();
 
-    for (const vessel of this.sql.exec<{ name: string; state: 'waiting' | 'booting' | 'working'; beat: number }>(`SELECT name, state, beat FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).toArray()) {
+    for (const vessel of this.sql.exec<{ name: string; state: 'waiting' | 'booting' | 'working'; beat: number }>(`SELECT name, state, beat FROM vessels WHERE state IN ${ALIVE}`).toArray()) {
       if (now - vessel.beat <= SILENT_MS[vessel.state]) continue;
       const [stopped] = await Promise.allSettled([this.env.VESSEL.getByName(`${id}/${vessel.name}`).stop()]);
 
