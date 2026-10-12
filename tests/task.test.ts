@@ -581,4 +581,15 @@ ${hostile}
 EOF`,
     ]) expect(misplaced).toThrow();
   });
+
+  test('takes a word where the shell reads plain words, and refuses one in quotes or a here-document, as the Python sh does', () => {
+    const fixtures = v.parse(v.array(v.object({ script: v.string(), context: v.nullable(v.picklist(['quotes', 'heredoc'])) })), JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'sh-contexts.json'), 'utf8')));
+
+    for (const { script, context } of fixtures) {
+      const interpolate = () => sh(Object.assign([script, ''], { raw: [script, ''] }), 'word');
+
+      if (context === null) expect(interpolate).not.toThrow();
+      else expect(interpolate).toThrow();
+    }
+  });
 });

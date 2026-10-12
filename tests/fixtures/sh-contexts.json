@@ -1,0 +1,78 @@
+[
+  {
+    "script": "echo ",
+    "context": null
+  },
+  {
+    "script": "echo '",
+    "context": "quotes"
+  },
+  {
+    "script": "echo \"",
+    "context": "quotes"
+  },
+  {
+    "script": "echo \\' ",
+    "context": null
+  },
+  {
+    "script": "echo 'a' \"b\" ",
+    "context": null
+  },
+  {
+    "script": "cat <<EOF\n",
+    "context": "heredoc"
+  },
+  {
+    "script": "cat <<'EOF'\n",
+    "context": "heredoc"
+  },
+  {
+    "script": "cat <<\\EOF\n",
+    "context": "heredoc"
+  },
+  {
+    "script": "cat << \"E\"OF\nline\n",
+    "context": "heredoc"
+  },
+  {
+    "script": "cat <<EOF\nx\nEOF\necho ",
+    "context": null
+  },
+  {
+    "script": "cat <<-EOF\n\tx\n\tEOF\necho ",
+    "context": null
+  },
+  {
+    "script": "cat <<EOF\n\tEOF\n",
+    "context": "heredoc"
+  },
+  {
+    "script": "cat <<A <<B\nA\n",
+    "context": "heredoc"
+  },
+  {
+    "script": "cat <<A <<B\nA\nB\necho ",
+    "context": null
+  },
+  {
+    "script": "cat <<EOF; echo ",
+    "context": null
+  },
+  {
+    "script": "echo $((1<<2)) ",
+    "context": null
+  },
+  {
+    "script": "# <<EOF\necho ",
+    "context": null
+  },
+  {
+    "script": "cat <<< ",
+    "context": null
+  },
+  {
+    "script": "echo '<<EOF'\n",
+    "context": null
+  }
+]

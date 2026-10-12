@@ -87,12 +87,29 @@ def _interpolated(value: object) -> str:
     raise TypeError(f"a {{}} takes a word, a list of words, an out file or a shell, not {type(value).__name__}")
 
 
-def _quoted_prefix(script: str) -> bool:
-    """Whether the shell is inside quotes at the end of `script`: an interpolation quoted again there would be
-    read inside them, where ``$(...)`` still runs within double quotes."""
+_HEREDOC = re.compile(r"""<<(-?)[ \t]*((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"\\])+)""")
+_UNQUOTED = re.compile(r"""'([^']*)'|"([^"]*)"|\\(.)""")
+
+
+def _context(script: str) -> str | None:
+    """Where the end of `script` leaves the shell when it is not reading plain words, as sh.ts's `context` says:
+    inside quotes, where ``$(...)`` still runs within double quotes, or inside a here-document's body, where the shell
+    expands ``$(...)`` through any quotes. An interpolation in either is not one literal word."""
     mark = ""
+    arithmetic = 0
+    pending: list[tuple[str, bool]] = []
+    body: tuple[str, bool] | None = None
     at = 0
     while at < len(script):
+        if body is not None:
+            end = script.find("\n", at)
+            if end == -1:
+                return "heredoc"
+            line = script[at:end]
+            if (line.lstrip("\t") if body[1] else line) == body[0]:
+                body = pending.pop(0) if pending else None
+            at = end + 1
+            continue
         char = script[at]
         if mark != "'" and char == "\\":
             at += 1
@@ -100,8 +117,35 @@ def _quoted_prefix(script: str) -> bool:
             mark = char
         elif char == mark:
             mark = ""
+        elif mark == "" and script.startswith("$((", at):
+            arithmetic += 1
+            at += 2
+        elif arithmetic > 0 and script.startswith("))", at):
+            arithmetic -= 1
+            at += 1
+        elif mark == "" and char == "\n" and pending:
+            body = pending.pop(0)
+        elif mark == "" and arithmetic == 0 and char == "#" and (at == 0 or script[at - 1].isspace() or script[at - 1] in ";&|()<>"):
+            # A comment, to its line's end: a `<<` in it opens nothing.
+            end = script.find("\n", at)
+            at = len(script) if end == -1 else end - 1
+        elif mark == "" and arithmetic == 0 and script.startswith("<<", at) and not script.startswith("<<<", at):
+            heredoc = _HEREDOC.match(script, at)
+            if heredoc is not None:
+                # The delimiter is the word with its quoting removed: 'E'OF and \EOF both end at a line EOF.
+                word = _UNQUOTED.sub(lambda found: found.group(1) or found.group(2) or found.group(3) or "", heredoc.group(2))
+                pending.append((word, heredoc.group(1) == "-"))
+                at = heredoc.end() - 1
         at += 1
-    return mark != ""
+    if body is not None:
+        return "heredoc"
+    return None if mark == "" else "quotes"
+
+
+_MISPLACED = {
+    "quotes": "sh quotes each {} itself: write sh('echo {}', word), not sh('echo \"{}\"', word)",
+    "heredoc": "sh cannot make a {} one word inside a here-document: pass it as an argument, as sh(\"printf '%s\\n' {}\", word)",
+}
 
 
 def _template(template: str, words: tuple[object, ...], *, escape: bool) -> Shell:
@@ -112,8 +156,9 @@ def _template(template: str, words: tuple[object, ...], *, escape: bool) -> Shel
     for at, part in enumerate(parts):
         script += part.replace("\x00", "{").replace("\x01", "}")
         if at < len(words):
-            if escape and _quoted_prefix(script):
-                raise ValueError("sh quotes each {} itself: write sh('echo {}', word), not sh('echo \"{}\"', word)")
+            where = _context(script) if escape else None
+            if where is not None:
+                raise ValueError(_MISPLACED[where])
             script += _interpolated(words[at]) if escape else str(words[at])
     return Shell(script)
 

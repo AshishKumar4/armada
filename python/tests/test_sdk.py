@@ -22,6 +22,18 @@ class TestSh(unittest.TestCase):
         with self.assertRaises(ValueError):
             sh('echo "{}"', "word")
 
+    def test_takes_a_word_where_the_shell_reads_plain_words_as_the_typescript_sh_does(self) -> None:
+        fixtures = json.loads((Path(__file__).parents[2] / "tests" / "fixtures" / "sh-contexts.json").read_text())
+
+        def refuses(script: str) -> bool:
+            try:
+                sh(script.replace("{", "{{").replace("}", "}}") + "{}", "word")
+            except ValueError:
+                return True
+            return False
+
+        self.assertEqual([refuses(each["script"]) for each in fixtures], [each["context"] is not None for each in fixtures])
+
     def test_hands_each_word_to_the_program_unchanged(self) -> None:
         words = ["name\n", "a b", "it's", "$(echo pwned)"]
         self.assertEqual(sh("printf '[%s]' {}", words).text(), "".join(f"[{word}]" for word in words))
