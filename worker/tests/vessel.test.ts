@@ -232,13 +232,20 @@ describe('a vessel restarted while it finishes a task', () => {
 });
 
 describe('a vessel restarted while it stops a task its job no longer wants', () => {
-  test('stops it again and tells its job, which hears of it once', async () => {
+  test('tells its job, which hears of it once, and reads nothing of the task it cleared', async () => {
     const stopped: number[] = [];
     const reached = Promise.withResolvers<void>();
-    const claims: Claim[] = [{ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: true }];
+    const gang = { rank: 1, job: 'job', vessels: ['v1', 'v2'], origin: 'https://origin', token: 't'.repeat(48) };
+    const claims: Claim[] = [{ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }];
     let told = false;
+    let cleared = false;
 
+    // Once the task is cleared, its files are gone: a read of them fails, as on a real container.
     const stored = state(container((argv) => {
+      cleared ||= argv[3] === 'clear';
+
+      if (cleared && argv[3] !== 'clear' && (argv[2] ?? '').includes('/armada/task')) return { exitCode: 1, stdout: '' };
+
       if (argv[3] === 'wait') return { exitCode: 0, stdout: '' };
 
       return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
@@ -246,7 +253,8 @@ describe('a vessel restarted while it stops a task its job no longer wants', () 
 
     const job = {
       booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false,
-      retired: async () => undefined, vesselFailed: async () => undefined, accept: async () => true, complete: async () => undefined,
+      retired: async () => undefined, accept: async () => true, complete: async () => undefined,
+      vesselFailed: async (_name: string, error: string) => { throw new Error(error); },
       // The object restarts while its job is told: the first telling never answers.
       stopped: async (_name: string, index: number) => {
         if (!told) {
