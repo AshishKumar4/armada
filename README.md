@@ -278,6 +278,22 @@ written, so the log's secret mask does not apply to them. `armada map --artifact
 
 A matrix entry may name the `rows` its task must report. A task that reports other rows leaves the run ungraded.
 
+A matrix entry may also name an `environment` from `environments`. Each named environment is the project's
+`environment` with the fields it gives replaced, and it gets its own snapshot. Its entries run in a task job of their
+own, so a container restores only what its tasks need. The pool is split between the jobs by their entries' past
+timings, or by their counts. The run grades every row as one, and its report lists each job under `jobs`. For example,
+one project tests two Pythons, each from a snapshot that holds only its own packages:
+
+```json
+{
+  "environment": { "setup": "ci/setup.sh", "install": "ci/install-312.sh" },
+  "environments": { "py314": { "install": "ci/install-314.sh" } }
+}
+```
+
+Its plan prints `{"name": "test-312"}` for the project's environment and `{"name": "test-314", "environment": "py314"}`
+for the other.
+
 | Field | Default | Meaning |
 |---|---|---|
 | `name` | | The project's slug. |
@@ -285,6 +301,7 @@ A matrix entry may name the `rows` its task must report. A task that reports oth
 | `environment.setup` | | A script in the commit, run as root once per environment. |
 | `environment.install` | | A script in the commit, run as `ci` in the checkout once per environment. |
 | `environment.key` | `[]` | Globs over the files whose content keys the environment, such as the lockfile. |
+| `environments` | `{}` | Named environments over `environment`, for the matrix entries that name one. |
 | `checkout` | `/home/ci/work/<name>/<name>` | Where the commit is checked out. |
 | `history` | `full` | `commit` checks out the tree without its history. |
 | `env` | `{}` | Environment variables for the plan and tasks. `{workdir}` is the checkout. |
