@@ -5,7 +5,7 @@
  * reads them once its environment is ready, and adds what its tasks used as they land.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { canonical, type Json, type JobSpec, type Task } from '../../src/protocol';
+import { canonical, SIZES, type Json, type JobSpec, type Size, type Task } from '../../src/protocol';
 import type { Env } from './env';
 
 /** What a task used, or is expected to use: its cores (CPU seconds over wall seconds), its peak memory and its disk, in
@@ -47,6 +47,19 @@ export function classOf(spec: Pick<JobSpec, 'run'>, task: Task, key: string): st
   if (spec.run.kind === 'task') return `task ${spec.run.id} ${key}`;
 
   return `command ${JSON.stringify((task.argv ?? []).slice(0, 2))} ${key}`;
+}
+
+/** The memory a container keeps for itself beside its tasks: its main process, the runner's execs, a gang's relay. */
+const SYSTEM_MEMORY = 512 * 2 ** 20;
+
+/** The memory every task of a container holds together, at most: the cgroup over all of them is capped at it, so a
+ *  container whose tasks outgrew their estimates has one of them killed, never its own processes (`container.ts`). */
+export const tasksMemoryOf = (size: Size): number => SIZES[size].memoryGiB * 2 ** 30 - SYSTEM_MEMORY;
+
+/** What a container's tasks may be estimated to use together: every vCPU, since estimates are of cores at their 90th
+ *  percentile; and of memory and disk, a margin under what it holds, since a task's use varies from its class's. */
+export function roomOf(size: Size): Usage {
+  return { cores: SIZES[size].vcpus, memory: tasksMemoryOf(size) * 0.85, disk: SIZES[size].diskGB * 1e9 * 0.8 };
 }
 
 /** An item's key in its class: its item and argv, whatever their keys' order. */

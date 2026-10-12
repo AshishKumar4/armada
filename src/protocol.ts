@@ -31,11 +31,11 @@ export const SIZE_NAMES = ['micro', 'mini', 'small', 'medium'] as const;
 export type Size = (typeof SIZE_NAMES)[number];
 
 export const SIZES = {
-  micro: { instance: 'standard-1', vcpus: 0.5, memoryGiB: 4 },
-  mini: { instance: 'standard-2', vcpus: 1, memoryGiB: 6 },
-  small: { instance: 'standard-3', vcpus: 2, memoryGiB: 8 },
-  medium: { instance: 'standard-4', vcpus: 4, memoryGiB: 12 },
-} as const satisfies Record<Size, { readonly instance: string; readonly vcpus: number; readonly memoryGiB: number }>;
+  micro: { instance: 'standard-1', vcpus: 0.5, memoryGiB: 4, diskGB: 8 },
+  mini: { instance: 'standard-2', vcpus: 1, memoryGiB: 6, diskGB: 12 },
+  small: { instance: 'standard-3', vcpus: 2, memoryGiB: 8, diskGB: 16 },
+  medium: { instance: 'standard-4', vcpus: 4, memoryGiB: 12, diskGB: 20 },
+} as const satisfies Record<Size, { readonly instance: string; readonly vcpus: number; readonly memoryGiB: number; readonly diskGB: number }>;
 
 export const SizeSchema = v.picklist(SIZE_NAMES, 'a size is micro, mini, small or medium');
 

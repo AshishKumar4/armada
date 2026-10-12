@@ -31,7 +31,7 @@ import {
 import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { classOf, itemKey, Learned } from './estimates';
+import { classOf, itemKey, Learned, roomOf, tasksMemoryOf, type Usage } from './estimates';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
 import type { VesselSpec } from './vessel';
@@ -94,6 +94,13 @@ const WATCHDOG_MS = 15_000;
 
 /** A vessel that has not been heard from in this long, while booting or working, is lost. */
 const SILENT_MS = { waiting: 60 * 60_000, booting: 8 * 60_000, working: 4 * 60_000 } as const;
+
+/** What a packing job's vessel runs now (`loadOf`), and whether it holds a gang's rank still to start. */
+interface Load extends Usage {
+  readonly tasks: number;
+  readonly whole: boolean;
+  readonly joined: boolean;
+}
 
 /** One run of a task: its index, which attempt it is, and whether it is a copy of a run already going. */
 interface Attempt {
@@ -446,14 +453,36 @@ export class ArmadaJob extends DurableObject<Env> {
     if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
     const named = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name LIKE 'v%'`).one()['n']);
-    // The open tasks' lanes, and a lane for each hedged copy, which runs on another container than its first, over the
-    // slots each container carries; a gang's rank is a whole slot already, and a gang is never hedged.
+    // A lane for each hedged copy, which runs on another container than its first; a gang is never hedged.
     const hedged = Math.min(spec.hedge, this.count(`${OPEN} AND json_type(item, '$.item.gang') IS NOT 'integer'`));
-    const wanted = Math.min(spec.pool, Math.ceil((Number(this.sql.exec(NEEDED).one()['n']) + hedged) / spec.slots)) - alive;
+    const wanted = this.needed(spec, hedged) - alive;
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => `v${String(named + index + 1)}`);
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
+  }
+
+  /** The containers the open tasks, and `hedged` copies of them, need at once, up to the pool. One task each (a gang's
+   *  each rank) over the slots a fixed container carries. Packing, over the heaviest tasks the pool runs at once: one
+   *  each for a task that takes a container whole (one not estimated yet, one that runs alone, a gang's rank, a hedged
+   *  copy), and for the rest as many as their estimates fill, by whichever of cores, memory or disk fills first. */
+  private needed(spec: Kept, hedged = 0): number {
+    if (!packs(spec)) return Math.min(spec.pool, Math.ceil((Number(this.sql.exec(NEEDED).one()['n']) + hedged) / spec.slots));
+    const room = roomOf(spec.recipe.size);
+
+    const open = this.sql.exec<{ cores: number | null; memory: number | null; disk: number | null; ranks: number; whole: number }>(
+      `SELECT est_cores AS cores, est_mem AS memory, est_disk AS disk,
+        CASE WHEN json_type(item, '$.item.gang') = 'integer' THEN json_extract(item, '$.item.gang') ELSE 1 END AS ranks,
+        CASE WHEN alone IS NOT 0 OR est_mem IS NULL OR json_type(item, '$.item.gang') = 'integer' THEN 1 ELSE 0 END AS whole
+      FROM tasks WHERE ${OPEN} ORDER BY weight DESC, idx LIMIT ?`, spec.pool,
+    ).toArray();
+
+    const packed = open.filter((task) => task.whole === 0);
+    const sum = (field: 'cores' | 'memory' | 'disk') => packed.reduce((total, task) => total + (task[field] ?? 0), 0);
+    const fill = Math.max(sum('cores') / room.cores, sum('memory') / room.memory, sum('disk') / room.disk);
+    const whole = open.filter((task) => task.whole === 1).reduce((total, task) => total + task.ranks, 0);
+
+    return Math.min(spec.pool, whole + hedged + Math.ceil(fill));
   }
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
@@ -464,7 +493,8 @@ export class ArmadaJob extends DurableObject<Env> {
       workdir: workdirOf(spec.recipe), commit: spec.commit === undefined || spec.recipe.repo === undefined ? null : { ...spec.commit, project: spec.recipe.repo.project, history: spec.recipe.repo.history },
       tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'task' ? spec.run.bundle ?? null : null,
       runtime: spec.run.kind === 'task' ? spec.run.runtime : 'node', output: spec.output, timeout: spec.timeout,
-      slots: spec.slots, slotMemoryBytes: Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
+      slots: spec.slots, pack: packs(spec),
+      slotMemoryBytes: packs(spec) ? tasksMemoryOf(spec.recipe.size) : Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
       reserve: Number(this.sql.exec(WIDEST).one()['n']) * SIZES[spec.recipe.size].vcpus,
       deadlineAt: ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + (spec.deadline ?? JOB_DEADLINE_SECONDS) * 1000,
     };
@@ -544,6 +574,12 @@ export class ArmadaJob extends DurableObject<Env> {
     // A vessel that claimed is no longer standing by for a straggler.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     const now = Date.now();
+    // A packing job's vessel already running a task takes only what fits beside it (`fitting`), and nothing beside a
+    // task that takes it whole; this slot then ends, and the vessel runs on. One holding a gang's rank still to start
+    // takes that rank's claim (`rank`).
+    const load = packs(spec) ? this.loadOf(name) : null;
+
+    if (load !== null && load.tasks > 0 && !load.joined) return this.fitting(spec, env, { name, slot, now }, load);
     // No await between finding no forming gang and creating one: simultaneous first claims would all miss `rank`,
     // then only the first form it, with the others retiring against the now-empty queue instead of joining.
     const ganged = this.rank(spec, env, name);
@@ -605,6 +641,45 @@ export class ArmadaJob extends DurableObject<Env> {
     if (!this.busy(name)) this.beat(name, 'done');
 
     return null;
+  }
+
+  /** What vessel `name` runs now, in a packing job: how many tasks, their estimates summed, and whether one takes the
+   *  container whole: one whose use is not known yet, one that runs alone, or a gang's rank. */
+  private loadOf(name: string): Load {
+    const held = this.sql.exec<{ tasks: number; cores: number | null; memory: number | null; disk: number | null; whole: number | null }>(
+      `SELECT COUNT(*) AS tasks, SUM(est_cores) AS cores, SUM(est_mem) AS memory, SUM(est_disk) AS disk,
+        MAX(CASE WHEN alone IS NOT 0 OR est_mem IS NULL OR json_type(item, '$.item.gang') = 'integer' THEN 1 ELSE 0 END) AS whole
+      FROM tasks WHERE state IN ('running', 'landing') AND (vessel = ? OR dup = ?)`, name, name,
+    ).one();
+
+    const ranks = this.sql.exec<{ state: string }>(`SELECT state FROM members WHERE vessel = ? AND state IN ('joined', 'ready', 'starting', 'running', 'landing')`, name).toArray();
+
+    return {
+      tasks: held.tasks + ranks.length, cores: held.cores ?? 0, memory: held.memory ?? 0, disk: held.disk ?? 0, whole: held.whole === 1 || ranks.length > 0,
+      joined: ranks.some((rank) => rank.state === 'joined' || rank.state === 'ready'),
+    };
+  }
+
+  /** The heaviest queued task whose estimate fits beside `load` on vessel `name`, in what its container gives its
+   *  tasks (`roomOf`), handed out to `slot`; or null when none does, or `load` takes the container whole. The task and
+   *  every task it now runs beside are `shared`, which their ends read (`complete`). A gang, a task that runs alone or
+   *  one not estimated yet only ever goes to an empty vessel. */
+  private fitting(spec: Kept, env: Record<string, string>, { name, slot, now }: { readonly name: string; readonly slot: number; readonly now: number }, load: Load): Claim | null {
+    if (load.whole) return null;
+    const room = roomOf(spec.recipe.size);
+
+    const next = this.sql.exec<{ idx: number; item: string; attempts: number }>(
+      `UPDATE tasks SET state = 'running', vessel = ?, started = ?, slot = ?, attempts = attempts + 1, shared = 1 WHERE idx = (
+        SELECT idx FROM tasks WHERE state = 'queued' AND not_before <= ? AND looked = 1 AND alone = 0 AND est_mem IS NOT NULL
+          AND json_type(item, '$.item.gang') IS NOT 'integer' AND est_cores <= ? AND est_mem <= ? AND est_disk <= ?
+        ORDER BY weight DESC, idx LIMIT 1) RETURNING idx, item, attempts`,
+      name, now, slot, now, room.cores - load.cores, room.memory - load.memory, room.disk - load.disk,
+    ).toArray()[0];
+
+    if (next === undefined) return null;
+    this.sql.exec(`UPDATE tasks SET shared = 1 WHERE state IN ('running', 'landing') AND (vessel = ? OR dup = ?)`, name, name);
+
+    return this.claimOf(spec, env, next.item, { index: next.idx, attempt: next.attempts, duplicate: false });
   }
 
   /** One of the job's `hedge` heaviest tasks, running on one vessel, that `name` runs a second copy of: the heaviest no
@@ -926,7 +1001,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const allowed = took ? replaced < REPLACEMENTS : rebooted < Math.max(REPLACEMENTS, spec.pool);
     const generation = await this.ctx.storage.get<Generation>('environment');
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
-    const wanted = Math.min(spec.pool, Math.ceil(Number(this.sql.exec(NEEDED).one()['n']) / spec.slots));
+    const wanted = this.needed(spec);
 
     if (missing !== undefined) {
       // No replacement is spent on it. The job's own snapshot is prepared again; a start from one it already moved

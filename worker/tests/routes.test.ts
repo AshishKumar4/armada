@@ -108,7 +108,8 @@ describe('a run its vessel lost track of', () => {
 
     const restarted = new ArmadaJob(state().ctx, env);
 
-    await restarted.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 1 }), 'https://armada.test');
+    // One task a container: the vessel asks again because it lost its slot's record, not to pack another task.
+    await restarted.create(id, v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 1, mode: 'fast' }), 'https://armada.test');
     await restarted.alarm();
     const first = await restarted.claim('v1');
 

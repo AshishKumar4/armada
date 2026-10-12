@@ -162,11 +162,12 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
  *  controllers, the task's own group emptied (`endGroup`), a runner sub-group, an even memory cap for a slot, and
  *  the group handed to the user. The groups are set up here, at each launch, so a container an earlier Worker
  *  started has them. */
-function groupSetup(group: string, memoryBytes?: number): string {
+function groupSetup(group: string, memoryBytes?: number, tasksMemoryBytes?: number): string {
   return String.raw`if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
-${endGroup(group)}
+${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PARENT_GROUP}/memory.max
+`}${endGroup(group)}
 mkdir -p ${group}/runner
 echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
 ${memoryBytes === undefined ? '' : `echo ${String(memoryBytes)} > ${group}/memory.max
@@ -187,20 +188,21 @@ cd ${workdir}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
-/** `launchTask` for one slot of a slotted container: the same task, inside a private mount namespace where the
- *  slot's task dir is bound over `TASK`, each tmpfs path is fresh, and the checkout and the user's home are overlays
- *  whose writes land under the slot's root — so no slot reads another's files or writes the real checkout, slot 0
- *  included. The `cd` is inside the namespace or it would pin the checkout below the overlay. Its cgroup caps at
- *  `memoryBytes`, the container's memory split evenly across slots. Network is shared: two tasks binding one fixed
+/** `launchTask` for one slot of a slotted or packing container: the same task, inside a private mount namespace where
+ *  the slot's task dir is bound over `TASK`, each tmpfs path is fresh, and the checkout and the user's home are
+ *  overlays whose writes land under the slot's root — so no slot reads another's files or writes the real checkout,
+ *  slot 0 included. The `cd` is inside the namespace or it would pin the checkout below the overlay. Its cgroup caps at
+ *  `memoryBytes`: the container's memory split evenly across fixed slots, or, packing, what every task holds together,
+ *  which also caps the group over all of them (`tasksMemoryBytes`). Network is shared: two tasks binding one fixed
  *  port collide. */
-export function launchSlot(workdir: string, slot: number, memoryBytes: number, tmpfs: readonly string[]): string {
+export function launchSlot(workdir: string, slot: number, { memoryBytes, tasksMemoryBytes }: { readonly memoryBytes: number; readonly tasksMemoryBytes?: number }, tmpfs: readonly string[]): string {
   const root = slotRoot(slot);
   const dir = slotTask(slot);
   const group = taskGroup(slot);
   const fresh = tmpfs.map((path) => `mount -t tmpfs -o mode=1777,size=6g tmpfs ${path}`).join('\n');
 
   return String.raw`set -eu
-${groupSetup(group, memoryBytes)}
+${groupSetup(group, memoryBytes, tasksMemoryBytes)}
 rm -rf ${root}
 mkdir -p ${dir} ${dir}/artifacts ${root}/upper ${root}/work ${root}/home-upper ${root}/home-work
 chown -R ci:ci ${root}

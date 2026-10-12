@@ -65,7 +65,7 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
 describe.skipIf(!host)('a slotted task', () => {
   test('runs as the user in its own mounts and capped group, sees its own task dir, and leaves the checkout as it was', () => {
     const before = Bun.spawnSync(['ls', workdir]).stdout.toString();
-    const script = launchSlot(workdir, 2, 64 * 1024 * 1024, ['/dev/shm']);
+    const script = launchSlot(workdir, 2, { memoryBytes: 64 * 1024 * 1024 }, ['/dev/shm']);
 
     expect(sh(script, 'sh', '-c', `id -u; cat /proc/self/cgroup; cat ${TASK_GROUP}-2/memory.max; touch here /dev/shm/scratch; ls ${TASK}; ls ${STATE}/slots | wc -l`).exitCode).toBe(0);
     const exit = sh(waitOn(slotTask(2)), '20').stdout.toString().trim();

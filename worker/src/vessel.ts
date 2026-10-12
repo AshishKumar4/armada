@@ -39,8 +39,12 @@ export interface VesselSpec {
   /** The tasks this container runs at once: 1 (absent for an earlier Worker's spec) shares today's layout; more
    *  gives each slot its own namespace, overlay and cgroup. */
   readonly slots?: number;
-  /** One slot's memory cap in bytes: the size's memory split evenly across the slots. */
+  /** One slot's memory cap in bytes: the size's memory split evenly across the slots, or, packing, what its tasks
+   *  hold together. */
   readonly slotMemoryBytes?: number;
+  /** It takes as many tasks as their estimates fit (`ArmadaJob`'s packing), each in a slot of its own, and caps what
+   *  they hold together at `slotMemoryBytes`. Absent for an earlier Worker's spec, which packs none. */
+  readonly pack?: boolean;
   /** The vCPUs its job holds at once to run its widest gang: the fleet grants this container only if all of them fit,
    *  so two jobs' gangs never each hold part of what both need. Absent for an earlier Worker's spec, which reserves
    *  its own. */
@@ -72,7 +76,7 @@ export interface SlotLayout {
 }
 
 export function layoutOf(spec: SlotSpec, slot: number): SlotLayout {
-  if (spec.slots <= 1) return { dir: TASK, group: TASK_GROUP, mask: MASK_VALUES, isolated: false };
+  if (spec.slots <= 1 && spec.pack !== true) return { dir: TASK, group: TASK_GROUP, mask: MASK_VALUES, isolated: false };
 
   return { dir: slotTask(slot), group: taskGroup(slot), mask: maskValuesOf(slot), isolated: true };
 }
@@ -90,6 +94,20 @@ interface Current {
   readonly claim: Omit<Claim, 'env'>;
   readonly startedAt: number;
 }
+
+/** How one slot's loop ended its slice: the slice ran out, the job had no task for it, or how long to wait for one. */
+type SlotEnd = 'reslice' | 'retired' | number;
+
+/** A slice of a vessel's slot loops: when it ends, the flag the first failed loop sets, and what a loop calls when it
+ *  started a task (a packing vessel then opens one more slot to ask). */
+interface Slice {
+  readonly until: number;
+  readonly abort: { failed: boolean };
+  readonly started: () => void;
+}
+
+/** The most tasks a packing container runs at once, as the most slots a fixed one has. */
+const PACKED_SLOTS = 16;
 
 /** Where slot `slot`'s running task is kept. */
 const slotKey = (slot: number): string => `slot:${String(slot)}`;
@@ -283,7 +301,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** One slot's slice: pull a task while free, block on `waitOn` while one runs, finish it, repeat — all slots' loops
    *  run beside each other, so one slot's store never idles another's launch. A null claim ends this loop retired; a
    *  `waitMs` parks only this slot; a fatal error fails the vessel once through `abort`. */
-  private async slotLoop(spec: SlotSpec, slot: number, until: number, abort: { failed: boolean }): Promise<'reslice' | 'retired' | number> {
+  private async slotLoop(spec: SlotSpec, slot: number, { until, abort, started }: Slice): Promise<SlotEnd> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
     const { dir, group } = layoutOf(spec, slot);
@@ -309,6 +327,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         await this.launch(spec, container, claim, slot);
         current = { claim: kept, startedAt: Date.now() };
         await this.ctx.storage.put(slotKey(slot), current);
+        started();
 
         if (claim.gang !== undefined && !(await job.started(spec.name, claim.index, claim.attempt))) {
           await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
@@ -357,26 +376,52 @@ export class ArmadaVessel extends DurableObject<Env> {
     return 'reslice';
   }
 
-  /** Runs every slot's loop for a slice; true while there is more to do, false once the vessel retired or every slot
-   *  waits out a backoff. */
+  /** Runs its slots' loops for a slice; true while there is more to do, false once the vessel retired or every slot
+   *  waits out a backoff. A fixed vessel runs every slot's loop. A packing one runs a loop for each slot that holds a
+   *  task and one more that asks for another, and a loop that starts a task opens one more, up to `PACKED_SLOTS`: a
+   *  loop the job has nothing fitting for ends, and the next task started opens another to ask again. */
   private async work(spec: SlotSpec): Promise<boolean> {
     this.watch(this.container());
     const until = Date.now() + SLICE_MS;
     const abort = { failed: false };
+    // Every loop opened this slice, and the slots whose loops still run: a slot ended this slice is not opened again.
+    const loops: Promise<SlotEnd>[] = [];
+    const used = new Set<number>();
 
-    // The first loop to fail sets the flag, which stops the others at their next step; once every loop has stopped,
-    // that failure fails the vessel once, through the alarm's catch, with no loop still claiming for it.
-    const loops = Array.from({ length: spec.slots }, async (_, slot) => {
-      try {
-        return await this.slotLoop(spec, slot, until, abort);
-      } catch (cause) {
-        abort.failed = true;
+    const open = (slot: number): void => {
+      used.add(slot);
+      // The first loop to fail sets the flag, which stops the others at their next step; once every loop has stopped,
+      // that failure fails the vessel once, through the alarm's catch, with no loop still claiming for it.
+      loops.push((async () => {
+        try {
+          return await this.slotLoop(spec, slot, { until, abort, started: widen });
+        } catch (cause) {
+          abort.failed = true;
 
-        throw cause;
-      }
-    });
+          throw cause;
+        }
+      })());
+    };
 
-    const settled = await Promise.allSettled(loops);
+    const widen = (): void => {
+      const free = Array.from({ length: PACKED_SLOTS }, (_, slot) => slot).find((slot) => !used.has(slot));
+
+      if (spec.pack === true && free !== undefined) open(free);
+    };
+
+    if (spec.pack === true) {
+      const held = [...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()].map((key) => Number(key.slice('slot:'.length)));
+
+      for (const slot of held) open(slot);
+      widen();
+    } else {
+      for (let slot = 0; slot < spec.slots; slot += 1) open(slot);
+    }
+
+    // Loops open more as they go: settled again until no new one was opened meanwhile.
+    let settled: PromiseSettledResult<SlotEnd>[] = [];
+
+    while (settled.length < loops.length) settled = await Promise.allSettled(loops);
     const failed = settled.find((each) => each.status === 'rejected');
 
     if (failed !== undefined) throw failed.reason;
@@ -417,7 +462,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     await pipeIn(container, positional(claim.argv, exported), argv, { secret: true });
 
     if (layout.isolated) {
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, spec.slotMemoryBytes, spec.tmpfs)), 'launch'], { env: rest, ms: EXEC_MS });
+      const limits = { memoryBytes: spec.slotMemoryBytes, tasksMemoryBytes: spec.pack === true ? spec.slotMemoryBytes : undefined };
+
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, limits, spec.tmpfs)), 'launch'], { env: rest, ms: EXEC_MS });
       await keep();
     } else {
       await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir)), 'launch'], { env: rest, ms: EXEC_MS });
