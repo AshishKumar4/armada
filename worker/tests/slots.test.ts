@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Json, Outcome } from '../../src/protocol';
-import { clearSlot, slotTask, taskGroup, waitOn } from '../src/container';
+import { clearTask, slotRoot, slotTask, taskGroup, waitOn } from '../src/container';
 import type { Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { bucket, container, namespace, state, world } from './harness';
@@ -46,7 +46,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
 
     if ((argv[2] ?? '').startsWith('set -eu\npid=')) killed.push(argv[2] ?? '');
 
-    if (argv[3] === 'clear') effects.push(['cleared', Array.from({ length: 16 }, (_, slot) => slot).find((slot) => clearSlot(slot) === argv[2])]);
+    if (argv[3] === 'clear') effects.push(['cleared', Array.from({ length: 16 }, (_, slot) => slot).find((slot) => clearTask(taskGroup(slot), slotRoot(slot)) === argv[2])]);
 
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     const endsOf = ends[slotOf(argv[2] ?? '')] ?? [];

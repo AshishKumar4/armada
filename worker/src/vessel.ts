@@ -12,7 +12,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { boundaryOf, BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Outcome } from '../../src/protocol';
 import {
-  clearSlot, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  clearTask, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import { CAPACITY_RETRY_MS } from './fleet';
@@ -603,10 +603,11 @@ export class ArmadaVessel extends DurableObject<Env> {
     };
   }
 
-  /** An isolated slot cleared (`clearSlot`) once its task's answer is read, before its job counts the slot free. A
-   *  shared container's one task is cleared as the next launches. */
+  /** A slot's task cleared (`clearTask`) once its answer is read, before its job counts the slot free. */
   private async clear(spec: SlotSpec, slot: number): Promise<void> {
-    if (layoutOf(spec, slot).isolated) await must(this.container(), 'clearing the slot', ['/bin/sh', '-c', clearSlot(slot), 'clear'], { ms: EXEC_MS });
+    const { group, isolated } = layoutOf(spec, slot);
+
+    await must(this.container(), 'clearing the task', ['/bin/sh', '-c', clearTask(group, isolated ? slotRoot(slot) : TASK), 'clear'], { ms: EXEC_MS });
   }
 
   /** What a command printed, or null, said in the log, when it could not run: for what a task's outcome reads but

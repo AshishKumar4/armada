@@ -233,11 +233,12 @@ cd ${workdir}
 exec "$@"' ns ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
 
-/** As root: slot `slot`'s task ended, and its answer was read: all it left running ends, and all it wrote, its overlays
- *  and its task dir, is gone, so what the slot held is free before its job counts it free. */
-export const clearSlot = (slot: number): string => String.raw`set -eu
-${endGroup(taskGroup(slot))}
-rm -rf ${slotRoot(slot)}`;
+/** As root: a task ended in `group`, and its answer was read: all it left running ends, and all it wrote under `root`,
+ *  its task dir and a slot's overlays, is gone. What it held is free before its job counts it free, and the container's
+ *  main process holds for it no longer (`hold`). */
+export const clearTask = (group: string, root: string): string => String.raw`set -eu
+${endGroup(group)}
+rm -rf ${root}`;
 
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
  *  nothing while it runs. */
@@ -358,13 +359,14 @@ fs.closeSync(output);
 fs.renameSync(file + '.masked', file);
 fs.rmSync(kept, { force: true });`;
 
-/** Ends the task in `dir` and everything it started: its session a TERM, then 2 s later a KILL, then its whole
- *  `group`. */
+/** Ends the task in `dir` and everything it started: its session a TERM, a KILL once it has had 2 s to end, then its
+ *  whole `group`. */
 export const killOf = (dir: string, group: string): string => String.raw`set -eu
 pid="$(cat ${dir}/pid 2>/dev/null || true)"
 if [ -n "$pid" ]; then
   kill -TERM -- "-$pid" 2>/dev/null || true
-  sleep 2
+  n=0
+  while kill -0 -- "-$pid" 2>/dev/null && [ "$n" -lt 40 ]; do n=$((n + 1)); sleep 0.05; done
   kill -KILL -- "-$pid" 2>/dev/null || true
 fi
 ${endGroup(group)}`;
@@ -375,28 +377,27 @@ export const instanceOf = (size: Size): ContainerStartupOptions['instance'] => S
 /** What a container's main process runs under tini, which reaps orphans as PID 1. The platform stops an instance (a
  *  rollout, a host's maintenance) by sending its main process SIGTERM, then SIGKILL 15 minutes later, and a bare
  *  `sleep` would end at the SIGTERM and take the running task with it. This marks the container stopping
- *  (`STOPPING`), so its vessel claims nothing more, holds while the task under `state` runs, up to `graceSeconds`,
- *  then `lingerSeconds` for the vessel to read the answer, and exits. The containers Dew's CI lost mid-task were not
- *  stopped this way: none was marked stopping first. */
-export function hold(state: string, graceSeconds: number, lingerSeconds: number): string {
+ *  (`STOPPING`), so its vessel claims nothing more, holds while a task under `state` runs or its answer is unread (its
+ *  vessel clears it once read, `clearTask`), up to `graceSeconds`, and exits. The containers Dew's CI lost mid-task
+ *  were not stopped this way: none was marked stopping first. */
+export function hold(state: string, graceSeconds: number): string {
   return String.raw`trap 'stop=1' TERM
 stop=
 while [ -z "$stop" ]; do sleep 5 & wait $!; done
 date -u +%Y-%m-%dT%H:%M:%SZ > ${state}/stopping
 end=$(( $(date +%s) + ${String(graceSeconds)} ))
 while :; do
-  running=
+  held=
   for dir in ${state}/task ${state}/slots/*/task; do
-    [ -f "$dir/pid" ] && [ ! -f "$dir/exit" ] && running=1
+    [ -f "$dir/pid" ] && held=1
   done
-  [ -z "$running" ] || [ "$(date +%s)" -ge "$end" ] && break
+  [ -z "$held" ] || [ "$(date +%s)" -ge "$end" ] && break
   sleep 1
-done
-sleep ${String(lingerSeconds)}`;
+done`;
 }
 
 /** A container's main process: `hold` under tini, a minute short of the platform's SIGKILL. */
-export const ENTRYPOINT = ['tini', '--', '/bin/sh', '-c', hold(STATE, 14 * 60, 30)];
+export const ENTRYPOINT = ['tini', '--', '/bin/sh', '-c', hold(STATE, 14 * 60)];
 
 export interface Exec extends Omit<ContainerExecOptions, 'user' | 'signal'> {
   /** An exec can wait on a container that never answers. */

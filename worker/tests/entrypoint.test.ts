@@ -20,7 +20,7 @@ async function started(running: boolean) {
   mkdirSync(join(state, 'task'));
 
   if (running) writeFileSync(join(state, 'task', 'pid'), '1\n');
-  const main = Bun.spawn(['/bin/sh', '-c', hold(state, 30, 1)]);
+  const main = Bun.spawn(['/bin/sh', '-c', hold(state, 30)]);
 
   await Bun.sleep(300);
 
@@ -28,22 +28,27 @@ async function started(running: boolean) {
 }
 
 describe('the container\'s main process', () => {
-  test('holds through SIGTERM while a task runs, marks the container stopping, and ends a linger after the task', async () => {
+  test('holds through SIGTERM while a task runs and while its answer is unread, marks the container stopping, and ends once its vessel cleared it', async () => {
     const { state, main, ended } = await started(true);
 
     main.kill('SIGTERM');
     await Bun.sleep(2_000);
-    expect({ ended: ended(), stopping: existsSync(join(state, 'stopping')) }).toEqual({ ended: false, stopping: true });
-    writeFileSync(join(state, 'task', 'exit'), '0\n');
-    expect(await Promise.race([main.exited, Bun.sleep(5_000).then(() => 'still running')])).toBe(0);
-  }, 15_000);
+    const running = { ended: ended(), stopping: existsSync(join(state, 'stopping')) };
 
-  test('ends a linger after SIGTERM when no task runs', async () => {
+    writeFileSync(join(state, 'task', 'exit'), '0\n');
+    await Bun.sleep(2_000);
+    const unread = ended();
+
+    rmSync(join(state, 'task'), { recursive: true });
+
+    expect({ running, unread, cleared: await Promise.race([main.exited, Bun.sleep(5_000).then(() => 'still running')]) })
+      .toEqual({ running: { ended: false, stopping: true }, unread: false, cleared: 0 });
+  }, 20_000);
+
+  test('ends at SIGTERM when no task runs', async () => {
     const { main } = await started(false);
-    const sent = Date.now();
 
     main.kill('SIGTERM');
-    expect(await Promise.race([main.exited, Bun.sleep(5_000).then(() => 'still running')])).toBe(0);
-    expect(Date.now() - sent).toBeGreaterThanOrEqual(900);
+    expect(await Promise.race([main.exited, Bun.sleep(7_000).then(() => 'still running')])).toBe(0);
   }, 15_000);
 });

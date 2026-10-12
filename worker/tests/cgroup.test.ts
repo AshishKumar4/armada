@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { clearSlot, killOf, launchSlot, launchTask, slotRoot, slotTask, STATE, TASK, TASK_GROUP, taskGroup, usageFrom, usageOf, WAIT, waitOn } from '../src/container';
+import { clearTask, killOf, launchSlot, launchTask, slotRoot, slotTask, STATE, TASK, TASK_GROUP, taskGroup, usageFrom, usageOf, WAIT, waitOn } from '../src/container';
 
 const host = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode === 0 && readFileSync('/proc/self/mounts', 'utf8').includes(' /sys/fs/cgroup cgroup2 ');
 
@@ -54,11 +54,13 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     expect({ exit: interrupted.exit, log: interrupted.log.trim() }).toEqual({ exit: '130', log: 'SigIgn:\t0000000000000000' });
   });
 
-  test('a killed task ends with all it started', () => {
+  test('a killed task ends with all it started, as soon as its session goes at the TERM', () => {
     expect(sh(launchTask(workdir), 'sh', '-c', 'setsid sleep 603 >/dev/null 2>&1 < /dev/null & sleep 604').exitCode).toBe(0);
     expect(sh(WAIT, '1').stdout.toString().trim()).toBe('');
+    const began = Date.now();
+
     expect(sh(killOf(TASK, TASK_GROUP)).exitCode).toBe(0);
-    expect({ left: [alive('sleep 603'), alive('sleep 604')], group: existsSync(TASK_GROUP) }).toEqual({ left: [false, false], group: false });
+    expect({ left: [alive('sleep 603'), alive('sleep 604')], group: existsSync(TASK_GROUP), soon: Date.now() - began < 1_000 }).toEqual({ left: [false, false], group: false, soon: true });
   });
 });
 
@@ -111,7 +113,7 @@ describe.skipIf(!host)('packed tasks', () => {
     expect(sh(waitOn(slotTask(slot)), '20').stdout.toString().trim()).toBe('0');
     const before = [alive('sleep 300'), existsSync(`${slotRoot(slot)}/upper/left`)];
 
-    expect(sh(clearSlot(slot)).exitCode).toBe(0);
+    expect(sh(clearTask(taskGroup(slot), slotRoot(slot))).exitCode).toBe(0);
     expect({ before, after: [alive('sleep 300'), existsSync(slotRoot(slot)), existsSync(taskGroup(slot))] }).toEqual({ before: [true, true], after: [false, false, false] });
   }, 30_000);
 });
