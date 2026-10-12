@@ -932,15 +932,22 @@ describe('armada run', () => {
     const ran = await run([], plan, {}, { ...environments, config: { ...environments.config, pool: 6 }, taskConfig: { command: ['task', '{name}', '{index}'], verdict: false }, exitOf });
     const report = reportOf(ran.report);
 
-    expect({ exit: ran.exit, jobs: taskJobs(ran.bodies), rows: report.verdicts.rows.map(({ name, exitCode }) => [name, exitCode]), each: report.jobs?.map(({ environment, job }) => [environment, job]) }).toEqual({
+    // The jobs are made at once, so the runner may get them in any order: each is told by its environment's install.
+    const byInstall = Object.fromEntries(taskJobs(ran.bodies).map(({ install, argv, pool }) => [install, { argv, pool }]));
+
+    expect({
+      exit: ran.exit, jobs: byInstall, rows: report.verdicts.rows.map(({ name, exitCode }) => [name, exitCode]),
+      each: report.jobs?.map(({ environment }) => environment), ids: report.jobs?.map(({ job }) => job).toSorted((left, right) => left.localeCompare(right)),
+    }).toEqual({
       exit: 1,
-      jobs: [
-        { install: 'echo project', argv: [['task', 'a', '0']], pool: 1 },
-        { install: 'echo 3.14', argv: [['task', 'b', '1'], ['task', 'red', '2']], pool: 2 },
-        { install: 'echo 3.12', argv: [['task', 'd', '3']], pool: 1 },
-      ],
+      jobs: {
+        'echo project': { argv: [['task', 'a', '0']], pool: 1 },
+        'echo 3.14': { argv: [['task', 'b', '1'], ['task', 'red', '2']], pool: 2 },
+        'echo 3.12': { argv: [['task', 'd', '3']], pool: 1 },
+      },
       rows: [['a', 0], ['b', 0], ['red', 1], ['d', 0]],
-      each: [['', 'tasks'], ['py314', 'tasks-2'], ['py312', 'tasks-3']],
+      each: ['', 'py314', 'py312'],
+      ids: ['tasks', 'tasks-2', 'tasks-3'],
     });
   });
 
@@ -952,7 +959,7 @@ describe('armada run', () => {
     const wide = await run([], { include: [{ name: 'a' }, { name: 'g', environment: 'py314', gang: 6 }] }, {}, { ...environments, config: { ...environments.config, pool: 4 }, taskConfig: { verdict: false }, exitOf });
     const said = [crowded, wide].map((ran) => reportOf(ran.report).problems.find((problem) => problem.includes('containers')) ?? '');
 
-    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool)], refused: [crowded, wide].map((ran) => [ran.exit, taskJobs(ran.bodies).length, reportOf(ran.report).graded]), need: said.map((problem) => /need (\d+) containers/u.exec(problem)?.[1]) })
+    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool).toSorted((left, right) => left - right)], refused: [crowded, wide].map((ran) => [ran.exit, taskJobs(ran.bodies).length, reportOf(ran.report).graded]), need: said.map((problem) => /need (\d+) containers/u.exec(problem)?.[1]) })
       .toEqual({ gang: [0, [1, 6]], refused: [[2, 0, 'not graded'], [2, 0, 'not graded']], need: ['3', '7'] });
   });
 
