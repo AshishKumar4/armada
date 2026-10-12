@@ -172,6 +172,55 @@ describe('a finished task', () => {
   });
 });
 
+describe('a vessel restarted while it finishes a task', () => {
+  test('takes the finish up where it was, and its job is told the task\'s outcome once', async () => {
+    const completed: Outcome[] = [];
+    const accepted: number[] = [];
+    const reached = Promise.withResolvers<void>();
+    const claims: Claim[] = [{ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }];
+    let first = true;
+
+    const stored = state(container((argv) => {
+      if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
+
+      return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+    }));
+
+    const job = {
+      booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+      stopped: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
+      accept: async (_name: string, index: number) => {
+        accepted.push(index);
+
+        return true;
+      },
+      // The object restarts while its job is told: the call never answers.
+      complete: async (_name: string, outcome: Outcome) => {
+        if (first) {
+          first = false;
+          reached.resolve();
+
+          return await new Promise<never>(() => undefined);
+        }
+
+        completed.push(outcome);
+      },
+    };
+
+    const env = world({ JOB: namespace(() => job), ARTIFACTS: bucket() });
+    const before = new ArmadaVessel(stored.ctx, env);
+
+    await before.begin(spec);
+    // It stops answering at its job's complete, never to go on.
+    await Promise.race([before.alarm(), reached.promise]);
+    const after = new ArmadaVessel(stored.ctx, env);
+
+    for (let alarm = 0; alarm < 3; alarm += 1) await after.alarm();
+
+    expect({ accepted, completed: completed.map((outcome) => [outcome.index, outcome.exitCode]) }).toEqual({ accepted: [0], completed: [[0, 0]] });
+  });
+});
+
 describe('a pushed task\'s answer', () => {
   test('is the body\'s value or its command\'s, as its runner wrote; none where it wrote none; and a marker the platform lost loses the run', async () => {
     const said = await Promise.all([{ exitCode: 0, stdout: 'value\n' }, { exitCode: 0, stdout: 'command\n' }, { exitCode: 1, stdout: '' }, new Error('Network connection lost.')]

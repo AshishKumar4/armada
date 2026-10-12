@@ -780,13 +780,17 @@ export class ArmadaJob extends DurableObject<Env> {
     if (run !== undefined && task !== undefined && run.attempt !== task.attempts) return false;
 
     if (member !== undefined) {
-      if (task?.state !== 'running' || member.state !== 'running') return false;
+      // A rank landing already asks again when its vessel restarted mid-finish: it is still the one landing.
+      if (task?.state !== 'running' || (member.state !== 'running' && member.state !== 'landing')) return false;
       this.sql.exec(`UPDATE members SET state = 'landing' WHERE idx = ? AND vessel = ?`, index, name);
 
       return true;
     }
 
     if (task === undefined || (task.vessel !== name && task.dup !== name)) return false;
+
+    // So does the run landing as the task's.
+    if (task.state === 'landing' && task.vessel === name) return true;
 
     if (task.state === 'running') {
       // The copy answering lands as the task's; the other stays named, with its slot, so a red it reaches its end with

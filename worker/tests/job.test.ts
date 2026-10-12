@@ -396,6 +396,20 @@ describe('a job that ended', () => {
   });
 });
 
+describe('a run landing whose vessel restarted', () => {
+  test('is still the one landing when it asks again, and its task lands once', async () => {
+    const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
+    const claim = await open.claim('v1');
+    const attempt = claim === null || 'waitMs' in claim ? 0 : claim.attempt;
+    const asked = [await open.accept('v1', 0, 0, { slot: 0, attempt }), await open.accept('v1', 0, 0, { slot: 0, attempt })];
+
+    await open.complete('v1', { ...exited(0, 'v1'), attempt }, 1000);
+    await open.complete('v1', { ...exited(0, 'v1'), attempt }, 1000);
+
+    expect({ asked, events: (await open.events(0)).events.length }).toEqual({ asked: [true, true], events: 1 });
+  });
+});
+
 describe('an answer of an earlier attempt', () => {
   test('lands nothing for the attempt after it, though the same vessel runs that one', async () => {
     const { job: open } = await job({

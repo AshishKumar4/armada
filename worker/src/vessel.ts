@@ -93,6 +93,10 @@ interface Ending {
 interface Current {
   readonly claim: Omit<Claim, 'env'>;
   readonly startedAt: number;
+  /** How it ended, once it did, and the outcome its job is told, once its answer is read and stored: an object
+   *  restarted on the way takes its finish up from there (`finish`). */
+  readonly ending?: Ending;
+  readonly outcome?: Outcome;
 }
 
 /** How one slot's loop ended its slice: the slice ran out, the job had no task for it, or how long to wait for one. */
@@ -312,6 +316,11 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     while (Date.now() < until && !abort.failed) {
       let current = await this.ctx.storage.get<Current>(slotKey(slot));
+
+      if (current?.ending !== undefined) {
+        await this.finish(spec, slot, current, current.ending);
+        continue;
+      }
 
       if (current === undefined) {
         // A container the platform is stopping takes no new task: the vessel fails, and the job replaces it.
@@ -540,20 +549,35 @@ export class ArmadaVessel extends DurableObject<Env> {
     this.pipes.delete(socket);
   }
 
-  /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. */
-  private async finish(spec: SlotSpec, slot: number, current: Current, { exitCode, reason }: Ending): Promise<void> {
+  /** The task's answer, if it is the one kept: its log and output into R2, then its outcome to the job. Each step is
+   *  kept before the next, and the slot only once the job has the outcome: an object restarted on the way finishes
+   *  again from its last step, and the job takes the same answer once. */
+  private async finish(spec: SlotSpec, slot: number, current: Current, ending: Ending): Promise<void> {
+    const ended: Current = { ...current, ending };
+
+    await this.ctx.storage.put(slotKey(slot), ended);
+    const outcome = current.outcome ?? await this.answer(spec, slot, ended, ending);
+
+    if (outcome !== null && current.outcome === undefined) await this.ctx.storage.put(slotKey(slot), { ...ended, outcome });
+    await this.clear(spec, slot);
+
+    if (outcome !== null) await this.env.JOB.getByName(spec.jobId).complete(spec.name, outcome, outcome.seconds * 1000);
+    await this.ctx.storage.delete(slotKey(slot));
+  }
+
+  /** The outcome of `current`'s task, which ended `ending`, its log, output and artifacts stored; or null where the job
+   *  keeps another answer. */
+  private async answer(spec: SlotSpec, slot: number, current: Current, { exitCode, reason }: Ending): Promise<Outcome | null> {
     const container = this.container();
     const { dir, group, isolated } = layoutOf(spec, slot);
     const { index, attempt } = current.claim;
     const rank = current.claim.gang?.rank ?? 0;
     const job = this.env.JOB.getByName(spec.jobId);
 
-    await this.ctx.storage.delete(slotKey(slot));
-
     // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
     if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
 
-    if (!(await job.accept(spec.name, index, exitCode, { slot, attempt }))) return await this.clear(spec, slot);
+    if (!(await job.accept(spec.name, index, exitCode, { slot, attempt }))) return null;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
@@ -574,12 +598,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     const [kind = '', error] = marker.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
 
-    const outcome: Outcome = {
+    return {
       index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, error, ...usage,
     };
-
-    await this.clear(spec, slot);
-    await job.complete(spec.name, outcome, seconds * 1000);
   }
 
   /** An isolated slot cleared (`clearSlot`) once its task's answer is read, before its job counts the slot free. A
