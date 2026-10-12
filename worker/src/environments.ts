@@ -12,9 +12,9 @@ import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
 import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
-import { AS_USER, EXEC_MS, INACTIVITY_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
+import { AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
-import { CAPACITY_RETRY_MS } from './fleet';
+import { CAPACITY_RETRY_MS, letGo } from './fleet';
 
 export type Generation = v.InferOutput<typeof GenerationSchema>;
 
@@ -449,7 +449,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(Date.now());
     } catch (cause) {
       await this.ctx.storage.delete('preparation');
-      await this.end(preparation);
+      // The preparation failed already, whatever its container does.
+      await letGo(this.ctx, this.env, holderOf(preparation));
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
 
       if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
@@ -608,19 +609,11 @@ export class ArmadaPreparer extends DurableObject<Env> {
     return { retryInMs: 0 };
   }
 
-  /** The container goes, and its vCPUs return to the fleet once it is gone, as a vessel's do: one that will not stop
-   *  ends at its inactivity timeout and holds them until then. A preparation fails or is made whatever its container
-   *  does: a made snapshot is the environment. */
-  private async end(preparation: Preparation): Promise<void> {
-    const [destroyed] = await Promise.allSettled([this.ctx.container?.destroy()]);
-
-    await this.env.FLEET.getByName(SINGLE).release(holderOf(preparation), destroyed.status === 'fulfilled' ? 0 : INACTIVITY_MS);
-  }
-
   private async done(preparation: Preparation): Promise<void> {
     if (preparation.snapshot === null) throw new Error('a finished preparation has no snapshot');
     await this.ctx.storage.delete('preparation');
-    await this.end(preparation);
+    // Made, the snapshot is the environment, whatever its container does.
+    await letGo(this.ctx, this.env, holderOf(preparation));
     const { recipe: { repo }, sha } = preparation;
     const shallow = repo !== undefined && sha !== null && boundaryOf({ sha, shallow: preparation.shallow }, repo.history).length > 0;
 

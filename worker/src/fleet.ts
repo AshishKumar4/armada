@@ -12,7 +12,7 @@ import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import type { Fleet } from '../../src/protocol';
 import { INACTIVITY_MS } from './container';
-import type { Env } from './env';
+import { SINGLE, type Env } from './env';
 
 /** The jobs made last that the fleet keeps the ids of. */
 export const RECENT = 500;
@@ -22,6 +22,17 @@ const LEASE_MS = INACTIVITY_MS;
 
 /** How soon a container the fleet had no room for asks again. */
 export const CAPACITY_RETRY_MS = 5_000;
+
+/** An object's container goes, and `holder`'s vCPUs, where it holds any, return to the fleet once it is gone: one that
+ *  will not stop ends at its inactivity timeout, and holds them until then. Whether it is gone. */
+export async function letGo(ctx: DurableObjectState, env: Env, holder: string | undefined): Promise<boolean> {
+  const [destroyed] = await Promise.allSettled([ctx.container?.destroy()]);
+  const gone = destroyed.status === 'fulfilled';
+
+  if (holder !== undefined) await env.FLEET.getByName(SINGLE).release(holder, gone ? 0 : INACTIVITY_MS);
+
+  return gone;
+}
 
 interface Hold {
   readonly vcpus: number;

@@ -15,7 +15,7 @@ import {
   clearTask, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
-import { CAPACITY_RETRY_MS } from './fleet';
+import { CAPACITY_RETRY_MS, letGo } from './fleet';
 import type { Claim, Gang } from './job';
 import { GANG_DOWN, GANG_UP, LINK_ID, Piped, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY } from './relay';
 
@@ -210,12 +210,8 @@ export class ArmadaVessel extends DurableObject<Env> {
   private async end(state: 'stopped' | 'failed' | 'done', spec: VesselSpec | undefined): Promise<boolean> {
     await this.ctx.storage.put('state', state);
     await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
-    const [destroyed] = await Promise.allSettled([this.ctx.container?.destroy()]);
-    const gone = destroyed.status === 'fulfilled';
 
-    if (spec !== undefined) await this.env.FLEET.getByName(SINGLE).release(this.holder(spec), gone ? 0 : INACTIVITY_MS);
-
-    return gone;
+    return await letGo(this.ctx, this.env, spec === undefined ? undefined : this.holder(spec));
   }
 
   private holder(spec: VesselSpec): string {
