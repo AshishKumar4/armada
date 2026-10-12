@@ -1,3 +1,4 @@
+import { DurableObject } from 'cloudflare:workers';
 import { errorOf, hex, sha256 } from '../../src/protocol';
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
 import type { ArmadaEstimates } from './estimates';
@@ -81,6 +82,15 @@ export function textOf(bytes: ArrayBuffer): string | undefined {
 
 /** The one instance of a deployment-wide object. */
 export const SINGLE = 'all';
+
+/** A deployment-wide object. It says which interface its code runs (`ARMADA_CONTRACT`): an object keeps running its
+ *  earlier code for minutes after a deploy, and the fleet admits a version's first job once each runs that version's
+ *  (`ArmadaFleet.admitJob`). */
+export class ArmadaSingle extends DurableObject<Env> {
+  contract(): string | undefined {
+    return this.env.ARMADA_CONTRACT;
+  }
+}
 
 /** An error and every cause under it, on one line. */
 function chain(error: Error): string {

@@ -5,14 +5,13 @@
  *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
- * the version deployed after it admits jobs from its first request. And it keeps the ids of the last RECENT jobs made,
- * which the dashboard lists.
+ * the version deployed after it admits jobs from its first request, once the deployment-wide objects run its
+ * interface. And it keeps the ids of the last RECENT jobs made, which the dashboard lists.
  */
-import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import type { Fleet } from '../../src/protocol';
 import { INACTIVITY_MS } from './container';
-import { SINGLE, type Env } from './env';
+import { ArmadaSingle, SINGLE, type Env } from './env';
 
 /** The jobs made last that the fleet keeps the ids of. */
 export const RECENT = 500;
@@ -35,7 +34,7 @@ export async function letGo(ctx: DurableObjectState, env: Env, { holder, inactiv
   return gone;
 }
 
-interface Hold {
+export interface Hold {
   readonly vcpus: number;
   readonly until: number;
   /** The vCPUs its job must hold at once (`VesselSpec.reserve`), which no other job is granted while the job holds any. */
@@ -60,12 +59,12 @@ function needs(holds: Record<string, Hold>): Map<string, number> {
  *  secrets, takes between two asks. */
 export const DRAIN_MS = 10 * 60_000;
 
-interface Drained {
+export interface Drained {
   readonly version: string;
   readonly until: number;
 }
 
-export class ArmadaFleet extends DurableObject<Env> {
+export class ArmadaFleet extends ArmadaSingle {
   /** Whether `holder` holds `vcpus` now; it keeps them until `release`, or its lease ends past its job's `deadlineAt`.
    *  Its job keeps `reserve` from the other jobs while it holds any: a holder is granted only once its job's whole
    *  reserve fits beside theirs, so the ranks of two jobs' gangs never split the fleet between them and wait on each
@@ -115,13 +114,25 @@ export class ArmadaFleet extends DurableObject<Env> {
     return Object.fromEntries(Object.entries(holds ?? {}).filter(([, hold]) => hold.until > now));
   }
 
-  /** Admits `job` unless `version` is drained, and counts it open in the same step: a drain then sees every job it
-   *  did not refuse. */
-  async reserve(version: string, job: string): Promise<boolean> {
-    if (!(await this.admits(version))) return false;
+  /** Admits `job` unless `version` is drained, or this fleet or another deployment-wide object runs an interface other
+   *  than `contract`, the asking Worker's; and counts it open in the same step, so a drain sees every job it did not
+   *  refuse. After a deploy that changed the interface, the first job waits for the objects that kept the earlier code
+   *  (`ArmadaSingle`). */
+  async admitJob(version: string, contract: string | undefined, job: string): Promise<boolean> {
+    if (!(await this.admits(version)) || !(await this.runs(contract))) return false;
     await this.ctx.storage.put(`job:${job}`, Date.now());
 
     return true;
+  }
+
+  /** Whether this fleet and each other deployment-wide object run `contract`. One whose code is too old to say runs an
+   *  earlier one. */
+  private async runs(contract: string | undefined): Promise<boolean> {
+    if (contract !== this.contract()) return false;
+    const singles = [this.env.ENVIRONMENTS, this.env.SECRETS, this.env.TASKS, this.env.WEBHOOKS];
+    const answers = await Promise.allSettled(singles.map(async (single) => await single.getByName(SINGLE).contract()));
+
+    return answers.every((answer) => answer.status === 'fulfilled' && answer.value === contract);
   }
 
   /** A job made: open until `closed`, and among the recent ones until RECENT newer ones push it out. */

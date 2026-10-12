@@ -73,7 +73,7 @@ deploy options:
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
                        client the deployed one serves, its driver differs, or its Durable
-                       Objects call each other differently
+                       Objects call each other or store their records differently
   --keep=N             the environments whose snapshots stay beyond those open jobs use: the N most recently
                        used (default 3), and any used in the last hour; the rest are deleted
 
@@ -391,12 +391,12 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     // A version whose Worker would still serve every client the deployed one does, and whose objects call each other
     // as the deployed one's do, takes over the running jobs: their containers outlive the Worker's update, and each
     // object resumes from storage (measured: six deploys in two minutes over 200 one-minute tasks cut none and refused
-    // no job). Objects keep running the deployed code for minutes after, so a version whose interface differs drains.
+    // no job). Objects keep running the deployed code for minutes after, so a version whose interface differs drains,
+    // and takes its first job once they run its own (`ArmadaFleet.admitJob`).
     const health = deployed === null ? null : await healthOf(name, deployed);
-    const contract = contractOf(ROOT);
 
-    if (deployed !== null && mustDrain(health, forceDrain, contract)) await drain(deployed, () => { drained = true; });
-    await install(account, name, file, { vcpus, token: known?.token, contract, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    if (deployed !== null && mustDrain(health, forceDrain, contractOf(ROOT))) await drain(deployed, () => { drained = true; });
+    await install(account, name, file, { vcpus, token: known?.token, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
@@ -498,11 +498,9 @@ interface Given {
   readonly vcpus: number | undefined;
   readonly token: string | undefined;
   readonly secrets: Readonly<Record<string, string>>;
-  /** The interface its Durable Objects call each other by (`contractOf`). */
-  readonly contract: string;
 }
 
-async function install(account: string, name: string, file: string, { vcpus, token: kept, secrets, contract }: Given): Promise<void> {
+async function install(account: string, name: string, file: string, { vcpus, token: kept, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -521,8 +519,9 @@ async function install(account: string, name: string, file: string, { vcpus, tok
   const config = join(tmpdir(), `armada-wrangler-${String(process.pid)}.jsonc`);
 
   await buildDashboard(DASHBOARD);
+  // Read from the checkout as it is deployed, as its commit is, not as it was before a drain that may have taken hours.
   writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
-    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, sha: sourceSha(), contract,
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, sha: sourceSha(), contract: contractOf(ROOT),
   }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));

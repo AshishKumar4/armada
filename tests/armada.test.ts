@@ -6,7 +6,6 @@ import * as v from 'valibot';
 import { extractTar, lanesFor, poolFor, remainingDeadline } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
-import { contractOf } from '../src/contract';
 import { deploymentConfig } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
@@ -281,23 +280,36 @@ describe('a deploy', () => {
     ]).toEqual([true, true, true, true, false, false, false, true, true, true]);
   });
 
-  test('fingerprints the interface its Durable Objects call each other by: the same for a comment or a method\'s body, another for a public method\'s arguments', () => {
+  test('fingerprints the interface its Durable Objects call each other by and the shapes they store, with only Bun installed: the same for a comment or a method\'s body, another for a public method\'s arguments or a stored field', () => {
     const copy = mkdtempSync(join(tmpdir(), 'armada-contract-'));
     const root = join(import.meta.dir, '..');
+
+    // Asked of a Bun with nothing on its PATH: an install from install.sh has Bun and Git, and no Node.js.
+    const contract = (): string => {
+      const ran = Bun.spawnSync([process.execPath, '-e', `import { contractOf } from ${JSON.stringify(join(root, 'src', 'contract.ts'))}; console.log(contractOf(${JSON.stringify(copy)}));`], { env: { PATH: copy } });
+
+      if (ran.exitCode !== 0) throw new Error(ran.stderr.toString());
+
+      return ran.stdout.toString().trim();
+    };
 
     try {
       for (const part of ['worker', 'src', 'package.json']) cpSync(join(root, part), join(copy, part), { recursive: true, filter: (from) => !from.includes('node_modules') && !from.includes('dashboard') && !from.includes('tests') });
       symlinkSync(join(root, 'node_modules'), join(copy, 'node_modules'));
       const fleet = join(copy, 'worker', 'src', 'fleet.ts');
       const original = readFileSync(fleet, 'utf8');
-      const before = contractOf(copy);
+      const before = contract();
 
       writeFileSync(fleet, original.replace('  async used(): Promise<number> {', '  /** Edited. */\n  async used(): Promise<number> {\n    await this.ctx.storage.sync();'));
-      const inner = contractOf(copy);
+      const inner = contract();
 
       writeFileSync(fleet, original.replace('async release(holder: string, afterMs = 0): Promise<void> {', 'async release(holder: string, afterMs = 0, why = \'\'): Promise<void> {\n    void why;'));
+      const outer = contract();
 
-      expect({ inner: inner === before, outer: contractOf(copy) === before }).toEqual({ inner: true, outer: false });
+      // The fleet's holds and its drain, each kept until a time, kept under another name.
+      writeFileSync(fleet, original.replaceAll('until: ', 'till: ').replaceAll('.until', '.till'));
+
+      expect({ inner: inner === before, outer: outer === before, stored: contract() === before }).toEqual({ inner: true, outer: false, stored: false });
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }

@@ -454,7 +454,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
     // Admitted and counted open in one step of the fleet's, so a drain that counts no open job has admitted none that
     // is still being made; a job refused or failed on the way gives its place back.
-    if (!(await fleet.reserve(env.VERSION.id, created))) {
+    if (!(await fleet.admitJob(env.VERSION.id, env.ARMADA_CONTRACT, created))) {
       return Response.json({ error: 'armada is being redeployed and takes no new job until that is done; run again in a few minutes' }, { status: 503 });
     }
 
@@ -573,7 +573,7 @@ async function drive(request: Request, env: Env, { project, config, payload }: {
     const fleet = env.FLEET.getByName(SINGLE);
 
     // Counted open only once nothing above can refuse it, so a drain never waits on a job that was never made.
-    if (!(await fleet.reserve(env.VERSION.id, created))) throw new Refused(503, 'armada is being redeployed and takes no new job until that is done');
+    if (!(await fleet.admitJob(env.VERSION.id, env.ARMADA_CONTRACT, created))) throw new Refused(503, 'armada is being redeployed and takes no new job until that is done');
     await closedOnFailure(fleet, created, async () => { await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin); });
   } catch (cause) {
     await hooks.unclaim(project, sha, created);

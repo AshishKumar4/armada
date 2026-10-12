@@ -5,10 +5,9 @@
  * The endpoint itself is `webhooked` in worker.ts;
  * `eventOf` and `driverSpec` are pure, so the tests exercise them without a request.
  */
-import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import { Sha, type HookConfig, type JobSpecSchema, type Json, type Webhook } from '../../src/protocol';
-import type { Env } from './env';
+import { ArmadaSingle } from './env';
 
 /** What a delivery asks for, once the event and the config decide it. */
 export type Ask =
@@ -72,7 +71,7 @@ export interface KeptHook extends HookConfig {
   readonly earlier?: readonly string[];
 }
 
-export class ArmadaWebhooks extends DurableObject<Env> {
+export class ArmadaWebhooks extends ArmadaSingle {
   /** Stores or replaces a project's config. A new signing secret is taken beside the ones before it, since GitHub signs
    *  with one of them until its hook is updated; storing the config again with the same secret says it is, and drops
    *  them. A secret's change that stopped between its steps (`webhook add`) refuses no delivery. */

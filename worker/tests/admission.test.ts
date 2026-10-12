@@ -15,13 +15,15 @@ const original = globalThis.fetch;
 
 afterEach(() => { globalThis.fetch = original; });
 
-/** A deployment of `version` whose fleet and jobs live in memory, and a client whose requests reach it. */
-function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' })), version = 'a') {
+/** A deployment of `version` whose fleet and jobs live in memory, with `bindings`, and a client whose requests reach
+ *  it. */
+function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' })), version = 'a', bindings: Parameters<typeof world>[0] = {}) {
   const jobs = new Map<string, ArmadaJob>();
 
   const env: Env = world({
     ARMADA_TOKEN: TOKEN, VERSION: { id: version, tag: '', timestamp: '' }, FLEET: namespace(() => fleet),
     JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name)),
+    ...bindings,
   });
 
   globalThis.fetch = fakeFetch(async (request) => await worker.fetch(request, env));
@@ -85,6 +87,27 @@ describe('a drained version', () => {
     });
   });
 
+  test('admits the next version\'s first job once the fleet and each other deployment-wide object run its interface', async () => {
+    const storage = state();
+    // The interface each object runs: the earlier one until the platform replaces it, and none said by one too old to.
+    const running = { fleet: 'earlier', environments: 'earlier', webhooks: 'none' };
+    const single = (object: 'environments' | 'webhooks') => namespace(() => running[object] === 'none' ? {} : { contract: () => running[object] });
+    const singles = { ENVIRONMENTS: single('environments'), SECRETS: single('environments'), TASKS: single('environments'), WEBHOOKS: single('webhooks') };
+    const fleet = namespace(() => new ArmadaFleet(storage.ctx, world({ FLEET_VCPUS: '100', ARMADA_CONTRACT: running.fleet, ...singles })));
+    const { armada } = deployment(undefined, 'b', { ARMADA_CONTRACT: 'later', FLEET: fleet });
+    const answers: string[] = [];
+
+    for (const replaced of ['fleet', 'environments', 'webhooks'] as const) {
+      answers.push(await settled(armada.create(spec), 'admitted'));
+      running[replaced] = 'later';
+    }
+
+    answers.push(await settled(armada.create(spec), 'admitted'));
+    const refused = 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes';
+
+    expect(answers).toEqual([refused, refused, refused, 'admitted']);
+  });
+
   test('counts a job admitted before it but still being made, so a deploy waits for it', async () => {
     const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' }));
     const jobs = new Map<string, ArmadaJob>();
@@ -131,7 +154,7 @@ describe('a drained version', () => {
     await armada.cancel(done);
     // Each leaked: counted open with no job behind it to close it, as a race or an older version left them.
     await fleet.opened(done);
-    await fleet.reserve('a', 'never-made');
+    await fleet.admitJob('a', undefined, 'never-made');
     const making = await armada.create({ ...spec, open: true });
     const before = await armada.drain();
 

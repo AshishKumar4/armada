@@ -2,10 +2,9 @@
  * ArmadaSecrets: the deployment's secrets, by name. One object per deployment. A value is set and read only here: a
  * job keeps the names its tasks get, each task's claim reads the values, and nothing answers a value to a client.
  */
-import { DurableObject } from 'cloudflare:workers';
-import type { Env } from './env';
+import { ArmadaSingle } from './env';
 
-export class ArmadaSecrets extends DurableObject<Env> {
+export class ArmadaSecrets extends ArmadaSingle {
   async set(name: string, value: string): Promise<void> {
     await this.ctx.storage.put(`secret:${name}`, value);
   }

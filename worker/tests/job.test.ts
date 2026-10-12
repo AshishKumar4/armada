@@ -427,7 +427,7 @@ describe('a job that ended', () => {
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
       ENVIRONMENTS: readyRegistry(),
       FLEET: namespace(() => ({
-        acquire: async () => true, release: async () => undefined, opened: async () => undefined, admits: async () => true, reserve: async () => true, open: async () => [],
+        acquire: async () => true, release: async () => undefined, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
         closed: async (id: string) => {
           if (refuse) throw new Error('the fleet is not answering');
           closed.push(id);

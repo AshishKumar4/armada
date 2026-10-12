@@ -37,14 +37,14 @@ import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
 import type { VesselSpec } from './vessel';
 
-type Phase = JobStatus['phase'];
+export type Phase = JobStatus['phase'];
 
 /** What the job keeps of its spec: everything but its items (in the `tasks` table), its env (under `env`) and whether
  *  it is open (under `open`). */
 /** The job's spec as it keeps it: its items are its tasks, its env its own key, its openness its own. */
 const KeptSchema = v.omit(JobSpecSchema, ['items', 'env', 'open']);
 
-type Kept = v.InferOutput<typeof KeptSchema>;
+export type Kept = v.InferOutput<typeof KeptSchema>;
 
 /** A task the vessel should run: its index, attempt, argv and environment. */
 export interface Claim {
@@ -82,7 +82,7 @@ export const VESSEL_NAME = /^[vr][1-9]\d*$/u;
 
 /** What a job owes once it is done (`settleUp`): its close to the fleet, its environment's use to the registry, and
  *  its hold on its bundle to the task registry. */
-type Owed = 'closed' | 'used' | 'unpinned';
+export type Owed = 'closed' | 'used' | 'unpinned';
 
 /** The states of a vessel that is alive: waiting for the fleet, starting, or taking tasks. */
 const ALIVE = `('waiting', 'booting', 'working')`;

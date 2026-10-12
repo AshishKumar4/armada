@@ -207,13 +207,15 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   let whole: Env;
 
   Object.assign(env, {
-    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, reserve: async () => true, open: async () => [] })),
+    FLEET: namespace(() => ({ acquire: async () => true, release: async () => undefined, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARMADA_TOKEN: 't'.repeat(32),
     FLEET_VCPUS: '1500',
     ARTIFACTS: bucket(),
     TASKS: namespace(() => tasks ??= new ArmadaTasks(state().ctx, whole)),
-    ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
+    ENVIRONMENTS: namespace(() => ({ used: async () => undefined, contract: () => undefined })),
+    SECRETS: namespace(() => ({ contract: () => undefined })),
+    WEBHOOKS: namespace(() => ({ contract: () => undefined })),
     // A store with nothing learned yet, each time it is asked: every task runs alone.
     ESTIMATES: namespace(() => new ArmadaEstimates(state().ctx, world({}))),
     ...bindings,

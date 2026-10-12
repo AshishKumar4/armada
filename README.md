@@ -373,7 +373,9 @@ output, log and artifacts. It also lists the environments and each project's CI 
 
 A deploy over a running armada keeps its jobs running. It waits for them first with `--drain`, or when the new
 version cannot take them over: when it would refuse a client the deployed one serves, or when its Durable Objects call
-each other differently, since the deployed objects keep running their code for minutes after the deploy.
+each other differently or store other shapes, since the deployed objects keep running their code for minutes after the
+deploy. Such a version takes its first job once its deployment-wide objects run its code; until then a new job is
+refused as during the drain.
 
 The Worker deletes the environment snapshots it no longer needs, because an account's snapshots are limited. It keeps
 the ones open jobs use, the 3 most recently used others (`--keep=N` changes the count), and any used in the last hour.

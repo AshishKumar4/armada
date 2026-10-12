@@ -7,7 +7,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { medians, recordSamples, type Timings } from '../../src/protocol';
 import type { Env } from './env';
 
-interface History {
+export interface History {
   readonly rows: Record<string, number[]>;
   readonly files: Record<string, number[]>;
   /** `memory` and `cores`, one sample per run. */

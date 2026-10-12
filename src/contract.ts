@@ -1,9 +1,13 @@
 /**
- * The interface a deployment's Durable Objects call each other by, as a fingerprint: the Worker's declarations, every
- * exported type and every class's public methods with their arguments and results, as the compiler emits them without
- * comments. Objects running the earlier Worker's code keep answering for minutes after a deploy, so a deploy whose
- * fingerprint differs from the deployed one's drains it first (`mustDrain`), and no object reads a call of the other
- * version. A change only to how the code works, behind the same declarations, takes over the running jobs.
+ * The interface a deployment's Durable Objects call each other by, and the shapes they store, as a fingerprint: the
+ * Worker's declarations, every exported type and every class's public methods with their arguments and results, as the
+ * compiler emits them without comments. Each type an object keeps in its storage is exported for this. Objects running
+ * the earlier Worker's code keep answering for minutes after a deploy, so a deploy whose fingerprint differs from the
+ * deployed one's drains it first (`mustDrain`), and no object reads a call or a record of the other version. A change
+ * only to how the code works, behind the same declarations, takes over the running jobs.
+ *
+ * Outside it: SQL tables, which each object migrates as it opens them; what runs in a container and how it answers,
+ * which `DRIVER` versions; and what a type cannot say, such as a regex's pattern or a storage key's name.
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
@@ -15,8 +19,9 @@ export function contractOf(root: string): string {
   const out = mkdtempSync(join(tmpdir(), 'armada-contract-'));
 
   try {
-    const emitted = Bun.spawnSync([join(root, 'node_modules', '.bin', 'tsc'), '-p', join(root, 'worker'), '--noEmit', 'false', '--declaration', '--emitDeclarationOnly',
-      '--removeComments', '--rootDir', root, '--outDir', out]);
+    // Run by the Bun that runs armada, as wrangler is: the compiler's own launcher needs Node.js.
+    const emitted = Bun.spawnSync([process.execPath, join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', join(root, 'worker'), '--noEmit', 'false', '--declaration',
+      '--emitDeclarationOnly', '--removeComments', '--rootDir', root, '--outDir', out]);
 
     if (emitted.exitCode !== 0) throw new Error(`the Worker's declarations did not compile:\n${emitted.stdout.toString()}${emitted.stderr.toString()}`);
     const files = readdirSync(out, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.d.ts')).toSorted();

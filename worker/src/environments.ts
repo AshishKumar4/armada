@@ -13,12 +13,12 @@ import type * as v from 'valibot';
 import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AccountFull, AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
-import { packKey, said, SINGLE, type Env } from './env';
+import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
 import { CAPACITY_RETRY_MS, letGo } from './fleet';
 
 export type Generation = v.InferOutput<typeof GenerationSchema>;
 
-type Entry = v.InferOutput<typeof EnvironmentEntrySchema>;
+export type Entry = v.InferOutput<typeof EnvironmentEntrySchema>;
 
 export type Readiness =
   | { readonly kind: 'ready'; readonly generation: Generation }
@@ -39,7 +39,7 @@ const FAILURE_HOLD_MS = 5 * 60_000;
 /** A snapshot no environment records any more and whose delete is still owed, under `debt:<ref>`: one a later
  *  generation of its key displaced, one a preparation made and could not publish, or one whose delete failed. `ref` is
  *  its id, or the digest a delete left once the tags were gone. */
-interface Debt {
+export interface Debt {
   readonly key: string;
 }
 
@@ -51,7 +51,7 @@ export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>
   return { HOME: USER_HOME, LANG: 'C.UTF-8', CI: 'true', ARMADA: '1', ARMADA_WORKDIR: workdir, PATH: '/usr/local/bin:/usr/bin:/bin', TMPDIR: '/tmp', ...own };
 }
 
-export class ArmadaEnvironments extends DurableObject<Env> {
+export class ArmadaEnvironments extends ArmadaSingle {
   /** What a client packs a commit of `history` against: the environment's commit once there is one, else the root. A
    *  shallow environment holds nothing before its commit's boundary, so a pack of `full` history, which leaves out all
    *  its base's history holds, goes from the root (#34). */
@@ -337,11 +337,11 @@ export function expired(entries: readonly { readonly key: string; readonly entry
     .toSorted((left, right) => right.lastUsed - left.lastUsed).slice(keep).filter(({ lastUsed }) => now - lastUsed >= recentMs);
 }
 
-type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot';
+export type Phase = 'base' | 'setup' | 'receive' | 'install' | 'snapshot';
 
 const NEXT: Readonly<Record<Phase, Phase | null>> = { base: 'setup', setup: 'receive', receive: 'install', install: 'snapshot', snapshot: null };
 
-interface Preparation {
+export interface Preparation {
   readonly key: string;
   /** When the registry began this attempt. */
   readonly since: number;

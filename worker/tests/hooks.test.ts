@@ -55,7 +55,7 @@ interface Delivery {
 }
 
 async function deliver(hooksStub: ArmadaWebhooks, payload: Json, {
-  headers = {}, objects = new Map(), jobs = {}, deployed = 'b'.repeat(40), secrets = { GITHUB_TOKEN: 'gh' }, fleet = namespace(() => ({ reserve: async () => true, closed: async () => undefined })),
+  headers = {}, objects = new Map(), jobs = {}, deployed = 'b'.repeat(40), secrets = { GITHUB_TOKEN: 'gh' }, fleet = namespace(() => ({ admitJob: async () => true, closed: async () => undefined })),
 }: Delivery = {}): Promise<Response> {
   const body = JSON.stringify(payload);
 
@@ -206,7 +206,7 @@ describe('the github webhook', () => {
     const open = new Set<string>();
 
     const fleet = namespace(() => ({
-      reserve: async (_version: string, id: string) => {
+      admitJob: async (_version: string, _contract: string | undefined, id: string) => {
         open.add(id);
 
         return true;

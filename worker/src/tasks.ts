@@ -4,11 +4,10 @@
  * project owns, points them all at its bundle, and drops the ids its project no longer exports. A bundle nothing holds
  * any more is deleted (`sweep`).
  */
-import { DurableObject } from 'cloudflare:workers';
 import type { Push } from '../../src/protocol';
-import { bundleKey, SINGLE, type Env } from './env';
+import { ArmadaSingle, bundleKey, SINGLE } from './env';
 
-interface Entry {
+export interface Entry {
   readonly project: string;
   readonly bundle: string;
   /** What runs the bundle; absent on an entry an earlier Worker wrote, which is always node. */
@@ -17,7 +16,7 @@ interface Entry {
 
 /** A bundle the sweep took: `deleting` until the alarm has deleted it, `deleted` once it is gone, until it is uploaded
  *  again. No push or job takes it meanwhile, and its HEAD says it is not there, so a client uploads it again. */
-type Swept = 'deleting' | 'deleted';
+export type Swept = 'deleting' | 'deleted';
 
 /** The R2 keys one delete takes at most. */
 const DELETE_KEYS = 1000;
@@ -25,7 +24,7 @@ const DELETE_KEYS = 1000;
 /** How soon deletes R2 did not take are made again. */
 const DELETE_RETRY_MS = 60_000;
 
-export class ArmadaTasks extends DurableObject<Env> {
+export class ArmadaTasks extends ArmadaSingle {
   /** Records a push, or says why it is refused. The bundles its project's ids ran from before are retired, and deleted
    *  once nothing holds them. */
   async publish(push: Push): Promise<string | null> {

@@ -82,16 +82,16 @@ export function layoutOf(spec: SlotSpec, slot: number): SlotLayout {
   return { dir: slotTask(slot), group: taskGroup(slot), mask: maskValuesOf(slot), isolated: true };
 }
 
-type State = 'waiting' | 'booting' | 'working' | 'done' | 'failed' | 'stopped';
+export type State = 'waiting' | 'booting' | 'working' | 'done' | 'failed' | 'stopped';
 
 /** How a task ended: its exit code, and `timeout` when the vessel killed it at its limit. */
-interface Ending {
+export interface Ending {
   readonly exitCode: number;
   readonly reason?: 'timeout';
 }
 
 /** The task running, kept without its environment, which only its launch needed: a job's env may carry a credential. */
-interface Current {
+export interface Current {
   readonly claim: Omit<Claim, 'env'>;
   readonly startedAt: number;
   /** How it ended, once it did; the outcome its job is told, once its answer is read and stored, or null where its job
