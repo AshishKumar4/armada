@@ -594,12 +594,12 @@ class Task(Generic[In, Out]):
             returned = self.body(checked, context)
             if isinstance(returned, Shell):
                 return returned
-            if isinstance(returned, (bytes, bytearray)):
-                return Envelope({"ok": True, "bytes": base64.b64encode(returned).decode()}, None)
-            # Checked here, as runner.ts does, so a refused value is red and retried by name; the body's own value is
-            # sent, which the reader checks again. Strict JSON: NaN and Infinity are not values.
+            # Checked here, as runner.ts does, bytes too, so a refused value is red and retried by name; the body's own
+            # value is sent, which the reader checks again. Strict JSON: NaN and Infinity are not values.
             if self.output is not None and not isinstance(self.output, str):
                 _check(self.output, returned, "the value")
+            if isinstance(returned, (bytes, bytearray)):
+                return Envelope({"ok": True, "bytes": base64.b64encode(returned).decode()}, None)
             json.dumps(returned, allow_nan=False)
             return Envelope({"ok": True, "value": returned}, None)
         except Exception as cause:

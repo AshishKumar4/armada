@@ -65,6 +65,20 @@ class TestEnvelope(unittest.TestCase):
         binary = raw_bytes.run_envelope(0, _ctx())
         self.assertEqual(binary, Envelope({"ok": True, "bytes": base64.b64encode(b"\x00\x01").decode()}, None))
 
+        def png(value: object) -> bytes:
+            if not isinstance(value, bytes) or not value.startswith(b"\x89PNG"):
+                raise ValueError("not a PNG")
+            return value
+
+        @task(id="refused-bytes", output=png)
+        def refused_bytes(n: int, ctx: Context) -> bytes:
+            return b"\x00\x01"
+
+        # Bytes go through the output's validator as a value does: refused, the task is red with SchemaError.
+        refused = refused_bytes.run_envelope(0, _ctx())
+        assert isinstance(refused, Envelope)
+        self.assertEqual((refused.body["ok"], refused.error), (False, "SchemaError"))
+
     def test_answer_reads_the_envelope_like_task_ts(self) -> None:
         from armada.task import RemoteError, _Value
 
