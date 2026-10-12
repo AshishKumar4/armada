@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -360,7 +360,7 @@ abstract class Base<I extends Json, O> {
   }
 
   /** The job's `run` and whether it keeps each task's output. */
-  protected abstract runOf(armada: Armada): Promise<{ readonly run: { readonly kind: 'command' } | { readonly kind: 'task'; readonly id: string; readonly bundle?: string | undefined }; readonly output: boolean }>;
+  protected abstract runOf(armada: Armada): Promise<{ readonly run: v.InferInput<typeof JobSpecSchema>['run']; readonly output: boolean }>;
 
   /** An item as a task, checked first. */
   protected abstract wire(item: I, index: number): Promise<WireTask>;

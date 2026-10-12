@@ -47,13 +47,12 @@ const ConfigSchema = v.object({
   /** Where the commit is checked out; by default three levels under the user's home, as a GitHub runner's is. */
   checkout: v.optional(v.pipe(v.string(), v.startsWith('/'))),
   history: v.optional(v.picklist(['full', 'commit']), 'full'),
-  env: v.optional(v.record(v.string(), v.string()), {}),
-  tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
+  ...v.pick(JobSpecSchema, ['env', 'tmpfs']).entries,
   /** A size, or `auto`: the smallest the last runs' tasks fit, `medium` until there are any. */
   size: v.optional(v.union([SizeSchema, v.literal('auto')]), 'medium'),
   target: v.optional(v.pipe(v.number(), v.integer(), v.minValue(10)), 300),
-  /** The most containers a run's task job runs at once. */
-  pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 40),
+  /** The most containers a run's task job runs at once, as a job's pool is, 40 by default. */
+  pool: v.optional(v.unwrap(JobSpecSchema.entries.pool), 40),
   /** `local` runs the plan in this checkout where it is the commit itself and clean, as a CI runner's is, rather than
    *  in a container whose start can take a minute; elsewhere the plan runs in a container as ever. */
   plan: v.object({ command: v.pipe(v.array(v.string()), v.minLength(1)), local: v.optional(v.boolean(), false) }),
