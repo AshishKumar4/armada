@@ -41,4 +41,12 @@ describe('a class\'s estimates', () => {
 
     expect((await store.read(['a', 'b', 'unknown'])).items).toEqual({ a: { cores: 2, memory: 2 * GIB, disk: 300, alone: false }, b: { cores: 0.5, memory: GIB, disk: 50, alone: true } });
   });
+  test('reads every item it is asked for, however many, as the platform binds a statement\'s parameters', async () => {
+    const store = new ArmadaEstimates(state().ctx, world({}));
+    const runs = Array.from({ length: 250 }, (_, at) => ({ run: `j/${String(at)}/1/v1`, item: `i${String(at)}`, cores: 1, memory: GIB, disk: 1 }));
+
+    await store.record(runs);
+
+    expect(Object.keys((await store.read(runs.map((run) => run.item))).items).length).toBe(250);
+  });
 });
