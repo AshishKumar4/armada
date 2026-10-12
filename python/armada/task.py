@@ -16,7 +16,7 @@ from typing import BinaryIO, Generic, Literal, Protocol, TypedDict, TypeVar, Uni
 from .client import Armada, JobStatus, Summary, connect, summary_of
 from .recipe import Recipe, RecipeBuilder, recipe as default_recipe
 from .sh import OutFile, Shell, ShellError, execute, out_file
-from .wire import Answerable, Json, maybe_number_of, number_of, object_of, remote_error, text_of
+from .wire import Answerable, Json, maybe_number_of, maybe_text_of, number_of, object_of, remote_error, text_of
 
 # A job's items travel as JSON, so an item type is one JSON can carry.
 In = TypeVar("In", bound=Json)
@@ -94,6 +94,7 @@ class Meta:
     cached: bool = False
     oom_killed: bool = False
     disk_bytes: int | None = None
+    alone_after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +340,7 @@ class Job(Generic[In, Out]):
             peak_memory=None if peak is None else int(peak), cpu_seconds=maybe_number_of(outcome, "cpuSeconds"),
             artifacts=outcome.get("artifacts") is True, cached=outcome.get("cached") is True,
             oom_killed=outcome.get("oomKilled") is True, disk_bytes=None if disk is None else int(disk),
+            alone_after=maybe_text_of(outcome, "aloneAfter"),
         )
         if outcome.get("kind") == "failed":
             if outcome.get("reason") == "cancelled":

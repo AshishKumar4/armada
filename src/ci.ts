@@ -238,7 +238,9 @@ async function follow<O extends string | null>(job: Job<Json, O>, began: number,
   try {
     for await (const result of job) {
       results.push(result);
-      note(`${clock(Date.now() - began).padStart(6)}  ${name(result.index).padEnd(14)} ${await say(result)} in ${clock(result.meta.seconds * 1000)} on ${result.meta.container}`);
+      const alone = result.meta.aloneAfter === undefined ? '' : ` alone, after it failed beside other tasks (${result.meta.aloneAfter}),`;
+
+      note(`${clock(Date.now() - began).padStart(6)}  ${name(result.index).padEnd(14)} ${await say(result)}${alone} in ${clock(result.meta.seconds * 1000)} on ${result.meta.container}`);
     }
 
     return results;

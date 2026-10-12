@@ -145,6 +145,8 @@ export interface Meta {
   readonly oomKilled?: boolean;
   /** The bytes its writes left on its container's disk, for a task in a slot of its own. */
   readonly diskBytes?: number;
+  /** How its run beside other tasks ended, when it failed there and this is its run alone. */
+  readonly aloneAfter?: string;
   /** Whether the task's artifacts directory was kept; `job.artifacts(index)` reads it. */
   readonly artifacts: boolean;
   /** Answered from the task's cache, with nothing run. */
@@ -816,7 +818,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
 
     const meta: Meta = {
       seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true,
-      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes,
+      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes, aloneAfter: outcome.aloneAfter,
     };
 
     const base = { index: outcome.index, item, meta };

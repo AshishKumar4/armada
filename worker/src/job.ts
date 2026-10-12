@@ -129,6 +129,9 @@ const STRAGGLER_WEIGHTS = 1.5;
 const STANDBY_MS = 60_000;
 
 
+/** How a run beside other tasks ended when the kernel killed it for memory (`packedFailure`). */
+const KILLED_FOR_MEMORY = 'killed for memory';
+
 /** Whether a job packs its tasks into its containers by their measured use: in `efficient` mode, unless it fixed its
  *  slots. */
 const packs = (spec: Pick<Kept, 'mode' | 'slots'>): boolean => spec.mode === 'efficient' && spec.slots === 1;
@@ -175,7 +178,8 @@ export class ArmadaJob extends DurableObject<Env> {
 
     // A task's class and item key (`estimates.ts`), what it is expected to use once looked up, whether it runs alone, and
     // whether it ran beside another task.
-    for (const [column, type] of [['class', 'TEXT'], ['ikey', 'TEXT'], ['looked', 'INTEGER'], ['est_cores', 'REAL'], ['est_mem', 'REAL'], ['est_disk', 'REAL'], ['alone', 'INTEGER'], ['shared', 'INTEGER']]) {
+    // And how its run beside other tasks failed, once it is to run alone for it (`packedFailure`).
+    for (const [column, type] of [['class', 'TEXT'], ['ikey', 'TEXT'], ['looked', 'INTEGER'], ['est_cores', 'REAL'], ['est_mem', 'REAL'], ['est_disk', 'REAL'], ['alone', 'INTEGER'], ['shared', 'INTEGER'], ['packed_failure', 'TEXT']]) {
       if (!tasks.includes(column ?? '')) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column ?? ''} ${type ?? ''}`);
     }
 
@@ -861,10 +865,20 @@ export class ArmadaJob extends DurableObject<Env> {
   /** `outcome` as its task's final one, if the task is still `from`: appended, and a green answer of a cached task kept
    *  in the cache, now that no other copy can end it red. A gang's is not: its answer is rank 0's alone. */
   private async land(outcome: Outcome, from: 'running' | 'landing'): Promise<void> {
-    const task = this.sql.exec<{ item: string }>(`UPDATE tasks SET state = ? WHERE idx = ? AND state = ? RETURNING item`, outcome.kind, outcome.index, from).toArray()[0];
+    const task = this.sql.exec<{ item: string; packed_failure: string | null; class: string | null; ikey: string | null }>(
+      `UPDATE tasks SET state = ? WHERE idx = ? AND state = ? RETURNING item, packed_failure, class, ikey`, outcome.kind, outcome.index, from,
+    ).toArray()[0];
 
     if (task === undefined) return;
-    this.append(outcome);
+    const after = task.packed_failure;
+
+    // Green alone after it failed beside others, its item runs alone from now on; but one killed for memory, whose own
+    // record now holds the memory it reached, which packs it apart from what it would not fit beside.
+    if (after !== null && after !== KILLED_FOR_MEMORY && outcome.kind === 'exited' && outcome.exitCode === 0 && task.class !== null && task.ikey !== null) {
+      this.learned.alone(task.class, task.ikey);
+    }
+
+    this.append(after === null ? outcome : { ...outcome, aloneAfter: after });
     const spec = await this.spec();
 
     if (spec?.cache === undefined || spec.run.kind !== 'task' || spec.run.bundle === undefined || outcome.kind !== 'exited' || outcome.exitCode !== 0 || !outcome.output) return;
@@ -875,6 +889,21 @@ export class ArmadaJob extends DurableObject<Env> {
     const scope = { bundle: spec.run.bundle, task: spec.run.id, environment: (await this.ctx.storage.get<string>('key')) ?? '' };
 
     await keep(this.env.ARTIFACTS, scope, { item, days: spec.cache.days, output: runKey(id, outcome.index, outcome, 'output'), marker: outcome.answer });
+  }
+
+  /** How `outcome` ended, when it is a run beside other tasks in its container (`shared`), not a copy's, that ended red,
+   *  past its timeout or killed for memory, and its task has not run alone since: it then runs again alone (`complete`).
+   *  Null for any other: one cancelled, or lost, which the platform's retries took already. */
+  private packedFailure(outcome: Outcome): string | null {
+    const task = this.sql.exec<{ shared: number | null; dup: string | null; packed_failure: string | null }>('SELECT shared, dup, packed_failure FROM tasks WHERE idx = ?', outcome.index).toArray()[0];
+
+    if (task?.shared !== 1 || task.dup !== null || task.packed_failure !== null || outcome.reason === 'cancelled' || outcome.reason === 'lost') return null;
+
+    if (outcome.reason === 'timeout') return 'past its timeout';
+
+    if (outcome.kind !== 'exited' || outcome.exitCode === 0) return null;
+
+    return outcome.oomKilled === true ? KILLED_FOR_MEMORY : `exit ${String(outcome.exitCode)}`;
   }
 
   /** The task an answer lands for, with its retries: a plain task landing on `name`, or a gang's, running. */
@@ -895,11 +924,15 @@ export class ArmadaJob extends DurableObject<Env> {
     if (member === undefined) this.learn(outcome);
     // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
     const task = kept === null ? undefined : this.landing(name, kept.index, member !== undefined);
+    const packed = kept !== null && task !== undefined && member === undefined ? this.packedFailure(kept) : null;
 
     const named = kept !== null && kept.exitCode !== 0
       && (retries?.exitCodes.includes(kept.exitCode) === true || (kept.error !== undefined && retries?.errors.includes(kept.error) === true));
 
-    if (kept !== null && task !== undefined && retries !== undefined && named && task.retries + 1 < retries.attempts) {
+    if (kept !== null && packed !== null) {
+      // It failed beside other tasks in its container: it runs again alone, before any retry of its own.
+      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, alone = 1, shared = 0, packed_failure = ?, not_before = 0 WHERE idx = ?`, packed, kept.index);
+    } else if (kept !== null && task !== undefined && retries !== undefined && named && task.retries + 1 < retries.attempts) {
       const backoff = retries.backoffSeconds * 1000 * 2 ** task.retries;
 
       // A gang forms again: its other ranks stop (`still`).

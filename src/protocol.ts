@@ -349,6 +349,9 @@ export const OutcomeSchema = v.object({
   cpuSeconds: v.optional(v.number()),
   /** The kernel killed a process of the task's for want of memory. */
   oomKilled: v.optional(v.boolean()),
+  /** It ran beside other tasks in its container and ended other than green, so it ran again alone, and this is that run:
+   *  how the run beside them ended. */
+  aloneAfter: v.optional(v.string()),
   /** The bytes its writes left on the container's disk, for a task in a slot of its own: its overlays and task dir. */
   diskBytes: v.optional(v.number()),
   /** Answered from the job's cache: nothing ran. */
