@@ -2,7 +2,7 @@
 `connect` the deployment. `python -m armada push` sends a project's task folder; `.map`, `.stream`, `.run` and
 `.local` run a task by its id."""
 
-from .client import Armada, Connection, JobStatus, RequestError, Summary, TaskCounts, Vessel, connect, summary_of
+from .client import Armada, Boot, Connection, JobStatus, RequestError, Summary, TaskCounts, Vessel, connect, summary_of
 from .recipe import RecipeBuilder, debian, from_, recipe
 from .sh import Completed, OutFile, Shell, ShellError, out_file, quote, raw, sh
 from .task import (
@@ -25,6 +25,7 @@ from .task import (
 
 __all__ = [
                    "Armada",
+                   "Boot",
                    "Cancelled",
                    "Completed",
                    "Connection",

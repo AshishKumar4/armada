@@ -25,8 +25,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
-  type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  type Boot, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
@@ -161,6 +161,8 @@ export class ArmadaJob extends DurableObject<Env> {
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(members)').toArray().some((column) => column.name === 'started')) this.sql.exec('ALTER TABLE members ADD COLUMN started INTEGER');
 
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
+
+    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(vessels)').toArray().some((column) => column.name === 'boot')) this.sql.exec('ALTER TABLE vessels ADD COLUMN boot TEXT');
   }
 
   async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
@@ -413,9 +415,10 @@ export class ArmadaJob extends DurableObject<Env> {
     else this.sql.exec('UPDATE vessels SET beat = ?, state = ? WHERE name = ?', Date.now(), state, name);
   }
 
-  /** A vessel is up: how long its container took to answer. */
-  async booted(name: string, bootMs: number): Promise<void> {
-    this.sql.exec('UPDATE vessels SET boot_ms = ?, state = ?, beat = ? WHERE name = ?', bootMs, 'working', Date.now(), name);
+  /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
+   *  vessel). */
+  async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
+    this.sql.exec('UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ?', bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
   async waiting(name: string): Promise<void> {
@@ -1100,8 +1103,8 @@ export class ArmadaJob extends DurableObject<Env> {
     if (id === undefined) return null;
     const generation = await this.ctx.storage.get<Generation>('environment');
 
-    const vessels = this.sql.exec<{ name: string; state: VesselRow['state']; tasks: number; boot_ms: number | null; busy_ms: number; error: string | null }>(
-      'SELECT name, state, tasks, boot_ms, busy_ms, error FROM vessels ORDER BY rowid',
+    const vessels = this.sql.exec<{ name: string; state: VesselRow['state']; tasks: number; boot_ms: number | null; boot: string | null; busy_ms: number; error: string | null }>(
+      'SELECT name, state, tasks, boot_ms, boot, busy_ms, error FROM vessels ORDER BY rowid',
     ).toArray();
 
     const red = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM events WHERE json_extract(outcome, '$.kind') = 'exited' AND json_extract(outcome, '$.exitCode') != 0`).one()['n']);
@@ -1117,7 +1120,9 @@ export class ArmadaJob extends DurableObject<Env> {
         total: this.count('1 = 1'), queued: this.count(`state IN ('queued', 'checking')`), running: this.count(`state IN ('running', 'landing')`),
         exited: this.count(`state = 'exited'`), red, failed: this.count(`state = 'failed'`),
       },
-      vessels: vessels.map((row) => ({ name: row.name, state: row.state, tasks: row.tasks, bootMs: row.boot_ms, busyMs: row.busy_ms, error: row.error })),
+      vessels: vessels.map((row) => ({
+        name: row.name, state: row.state, tasks: row.tasks, bootMs: row.boot_ms, boot: row.boot === null ? undefined : v.parse(BootSchema, JSON.parse(row.boot)), busyMs: row.busy_ms, error: row.error,
+      })),
       problems: (await this.ctx.storage.get<string[]>('problems')) ?? [],
       environment: generation === undefined ? null : { key: generation.key, sha: generation.sha, created: generation.created, seconds: generation.seconds },
       running: this.running(),

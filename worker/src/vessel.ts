@@ -161,7 +161,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // The fleet's answer let other calls in: a vessel stopped meanwhile gives back what it was just granted.
         if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return await fleet.release(this.holder(spec));
-        await this.ctx.storage.put({ state: 'booting' satisfies State, requested: Date.now() });
+        await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now() });
       }
 
       if (state !== 'working') await this.boot(spec);
@@ -200,12 +200,14 @@ export class ArmadaVessel extends DurableObject<Env> {
     return this.ctx.container;
   }
 
+  /** The container started from the job's snapshot and given what its tasks need, each phase timed (`Boot`, #32). One
+   *  granted under an earlier Worker, which kept no grant of its own, waited 0. */
   private async boot(spec: VesselSpec): Promise<void> {
     const container = this.container();
     const requested = (await this.ctx.storage.get<number>('requested')) ?? Date.now();
-
-    await startAndAnswer(container, { containerSnapshot: { id: spec.snapshot }, instance: spec.instance, enableInternet: true, entrypoint: ENTRYPOINT }, START_MS, INACTIVITY_MS);
-    const bootMs = Date.now() - requested;
+    const granted = (await this.ctx.storage.get<number>('granted')) ?? requested;
+    const restarts = await startAndAnswer(container, { containerSnapshot: { id: spec.snapshot }, instance: spec.instance, enableInternet: true, entrypoint: ENTRYPOINT }, START_MS, INACTIVITY_MS);
+    const answered = Date.now();
 
     await must(container, 'the tmpfs mounts', ['/bin/sh', '-c', mounts(spec.tmpfs)], { ms: EXEC_MS });
 
@@ -230,7 +232,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     }
 
     await this.ctx.storage.put('state', 'working' satisfies State);
-    await this.env.JOB.getByName(spec.jobId).booted(spec.name, bootMs);
+    await this.env.JOB.getByName(spec.jobId).booted(spec.name, answered - granted, { waitMs: granted - requested, startMs: answered - granted, restarts, setupMs: Date.now() - answered });
   }
 
   /** Keeps why the container ended, if it ends while this object runs: the runtime says so only through `monitor()`. */

@@ -215,6 +215,17 @@ class TaskCounts:
 
 
 @dataclass(frozen=True)
+class Boot:
+    """Where a container's boot went: waiting for capacity, its start (the snapshot's restore and any start made again,
+    each said in `restarts`), and the setup before its first task."""
+
+    wait_ms: float
+    start_ms: float
+    restarts: list[str]
+    setup_ms: float
+
+
+@dataclass(frozen=True)
 class Vessel:
     """One container's row in a job's status."""
 
@@ -224,6 +235,7 @@ class Vessel:
     boot_ms: int | None
     busy_ms: float
     error: str | None
+    boot: Boot | None = None
 
 
 @dataclass(frozen=True)
@@ -277,10 +289,16 @@ class JobStatus:
 
 
 def _vessel(fields: JsonObject) -> Vessel:
+    boot = fields.get("boot")
     return Vessel(
         text_of(fields, "name"), text_of(fields, "state"), int(number_of(fields, "tasks", 0)), maybe_whole_of(fields, "bootMs"),
-        number_of(fields, "busyMs", 0), maybe_text_of(fields, "error"),
+        number_of(fields, "busyMs", 0), maybe_text_of(fields, "error"), None if not isinstance(boot, dict) else _boot(boot),
     )
+
+
+def _boot(fields: JsonObject) -> Boot:
+    restarts = [each for each in list_of(fields.get("restarts")) if isinstance(each, str)]
+    return Boot(number_of(fields, "waitMs", 0), number_of(fields, "startMs", 0), restarts, number_of(fields, "setupMs", 0))
 
 
 def _environment(fields: JsonObject) -> Environment:
@@ -309,6 +327,7 @@ class Summary:
     vessels: int
     boot_ms: list[int]
     tasks_per_second: float
+    boots: list[Boot]
 
 
 def summary_of(status: JobStatus) -> Summary:
@@ -322,4 +341,5 @@ def summary_of(status: JobStatus) -> Summary:
         wall_ms=finished - status.created_at, map_ms=map_ms, vessels=len(status.vessels),
         boot_ms=sorted(vessel.boot_ms for vessel in status.vessels if vessel.boot_ms is not None),
         tasks_per_second=(status.tasks.exited + status.tasks.failed) / (map_ms / 1000) if map_ms > 0 else 0,
+        boots=[vessel.boot for vessel in status.vessels if vessel.boot is not None],
     )

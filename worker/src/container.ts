@@ -467,8 +467,8 @@ export class MissingSnapshot extends Error {
 /** The container's first answer, started with `options`. An exec, or `setInactivityTimeout`, right after a start can be
  *  refused as not started or not running yet, and a start can end before it answers: each is waited out, starting
  *  again where the container is gone, up to `ms`. A start the platform ends because its snapshot is gone throws
- *  `MissingSnapshot`. */
-export async function startAndAnswer(container: Container, options: ContainerStartupOptions, ms: number, inactivityMs: number): Promise<void> {
+ *  `MissingSnapshot`. Why each start before the one that answered ended. */
+export async function startAndAnswer(container: Container, options: ContainerStartupOptions, ms: number, inactivityMs: number): Promise<string[]> {
   const deadline = Date.now() + ms;
   const snapshot = options.containerSnapshot?.id ?? '';
   // Why a start ended, when it did: the runtime says so only through `monitor()`.
@@ -476,6 +476,8 @@ export async function startAndAnswer(container: Container, options: ContainerSta
 
   // The platform's only word of a deleted snapshot: its monitor ends the start so (armada-v2, 2026-10-09).
   const gone = (): boolean => snapshot !== '' && ended.includes(`Snapshot "${snapshot}" was not found`);
+
+  const restarts: string[] = [];
 
   const watch = (): void => {
     detach(container.monitor().then(() => { ended = 'the container exited'; }), (error) => { ended = said({ cause: error }); });
@@ -491,7 +493,7 @@ export async function startAndAnswer(container: Container, options: ContainerSta
       await container.setInactivityTimeout(inactivityMs);
     })()]);
 
-    if (first.status === 'fulfilled') return;
+    if (first.status === 'fulfilled') return restarts;
 
     if (gone()) throw new MissingSnapshot(snapshot, ended, { cause: first.reason });
     const refused = first.reason instanceof Error ? `${first.reason.message} ${String(first.reason.cause)}` : String(first.reason);
@@ -508,6 +510,7 @@ export async function startAndAnswer(container: Container, options: ContainerSta
     // A container still starting is not running either; only one whose start ended, or was killed, is started again,
     // and one whose snapshot is gone never is.
     if (!gone() && (ended !== '' || killed)) {
+      restarts.push(killed ? 'killed as it came up (137)' : ended);
       ended = '';
       await startFresh(container, options);
       watch();

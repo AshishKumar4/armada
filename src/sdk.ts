@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Boot, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -30,8 +30,10 @@ export interface Summary {
   /** From the environment's readiness to the last outcome: the map itself. */
   readonly mapMs: number;
   readonly vessels: number;
-  /** Each vessel's time from asking for a container to its first answer, sorted. */
+  /** Each vessel's time from the fleet's capacity granted to its first answer, sorted. */
   readonly bootMs: readonly number[];
+  /** Each booted vessel's boot by phase, from a Worker that times them (#32). */
+  readonly boots: readonly Boot[];
   readonly tasksPerSecond: number;
 }
 
@@ -302,10 +304,24 @@ export function summaryOf(status: JobStatus): Summary {
   const finished = status.finishedAt ?? Date.now();
   const mapMs = finished - (status.startedAt ?? finished);
   const bootMs = status.vessels.flatMap((vessel) => vessel.bootMs === null ? [] : [vessel.bootMs]).sort((left, right) => left - right);
+  const boots = status.vessels.flatMap((vessel) => vessel.boot === undefined ? [] : [vessel.boot]);
   const done = status.tasks.exited + status.tasks.failed;
 
   return {
     tasks: status.tasks.total, green: status.tasks.exited - status.tasks.red, red: status.tasks.red, failed: status.tasks.failed,
-    wallMs: finished - status.createdAt, mapMs, vessels: status.vessels.length, bootMs, tasksPerSecond: mapMs > 0 ? done / (mapMs / 1000) : 0,
+    wallMs: finished - status.createdAt, mapMs, vessels: status.vessels.length, bootMs, boots, tasksPerSecond: mapMs > 0 ? done / (mapMs / 1000) : 0,
   };
+}
+
+/** A job's containers and their boots in one line: their first answers, then the median of each boot phase (#32). */
+export function describeBoots({ vessels, bootMs, boots }: Summary): string {
+  const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
+  const median = (values: readonly number[]): number => values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)] ?? 0;
+  const answers = `${String(vessels)} containers; first answers ${seconds(bootMs[0] ?? 0)} to ${seconds(bootMs.at(-1) ?? 0)} (median ${seconds(median(bootMs))})`;
+
+  if (boots.length === 0) return answers;
+  const restarts = boots.reduce((sum, boot) => sum + boot.restarts.length, 0);
+
+  return `${answers}; median boot: ${seconds(median(boots.map((boot) => boot.waitMs)))} waiting for capacity, ${seconds(median(boots.map((boot) => boot.startMs)))} starting, `
+    + `${seconds(median(boots.map((boot) => boot.setupMs)))} setting up${restarts > 0 ? `; ${String(restarts)} start${restarts === 1 ? '' : 's'} made again` : ''}`;
 }

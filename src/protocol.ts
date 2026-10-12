@@ -351,12 +351,27 @@ export type Outcome = v.InferOutput<typeof OutcomeSchema>;
 /** A job's outcomes in the order they landed, `at` when each did, in ms: absent for one an earlier Worker recorded. */
 export const EventsSchema = v.object({ events: v.array(v.object({ seq: v.number(), outcome: OutcomeSchema, at: v.optional(v.number()) })), done: v.boolean() });
 
+/** Where a vessel's boot went (#32): waiting for the fleet's capacity, from the job asking for the vessel; the start,
+ *  from the capacity granted to the container's first answer, which takes in the snapshot's restore and any start made
+ *  again, each said in `restarts`; and the setup that follows, from the first answer to its first claim (the tmpfs
+ *  mounts, the commit's pack and checkout, the job's files and its bundle). */
+export const BootSchema = v.object({
+  waitMs: v.number(),
+  startMs: v.number(),
+  restarts: v.array(v.string()),
+  setupMs: v.number(),
+});
+
+export type Boot = v.InferOutput<typeof BootSchema>;
+
 const VesselSchema = v.object({
   name: v.string(),
   state: v.picklist(['waiting', 'booting', 'working', 'done', 'failed']),
   tasks: v.number(),
-  /** From asking for a container to its first answer. */
+  /** From the fleet's capacity granted to the container's first answer: `boot`'s `startMs`. */
   bootMs: v.nullable(v.number()),
+  /** Its boot by phase, once it booted; absent before, and from an earlier Worker. */
+  boot: v.optional(BootSchema),
   busyMs: v.number(),
   error: v.nullable(v.string()),
 });

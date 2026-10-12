@@ -9,7 +9,7 @@ import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './d
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
-import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema } from './sdk';
+import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
 import { BaseSchema, deadlineRefusal, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
@@ -228,8 +228,8 @@ async function map(): Promise<number> {
 
   if (usage !== null) console.error(`one task used at most ${describeUsage(usage)}`);
   console.error(`${String(summary.tasks)} tasks: ${String(summary.green)} green, ${String(summary.red)} red, ${String(summary.failed)} failed; wall ${((Date.now() - began) / 1000).toFixed(1)} s, `
-    + `map ${(summary.mapMs / 1000).toFixed(1)} s on ${String(summary.vessels)} containers (${summary.tasksPerSecond.toFixed(1)} tasks/s); `
-    + `first answers ${((summary.bootMs[0] ?? 0) / 1000).toFixed(1)} to ${((summary.bootMs.at(-1) ?? 0) / 1000).toFixed(1)} s`);
+    + `map ${(summary.mapMs / 1000).toFixed(1)} s on ${String(summary.vessels)} containers (${summary.tasksPerSecond.toFixed(1)} tasks/s)`);
+  console.error(describeBoots(summary));
 
   return worst;
 }

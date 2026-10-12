@@ -5,6 +5,7 @@ import type { Env } from '../src/env';
 import { ArmadaFleet, RECENT } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
+import { summaryOf } from '../../src/sdk';
 import { bucket, idleVessels, namespace, readyRegistry, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
@@ -199,5 +200,23 @@ describe('a browser at the deployment\'s root', () => {
     const answer = await worker.fetch(new Request('https://armada.test/'), world({ ARMADA_TOKEN: TOKEN }));
 
     expect([answer.status, answer.headers.get('location')]).toEqual([302, 'https://armada.test/ui/']);
+  });
+});
+
+describe('a job\'s containers', () => {
+  test('say where each boot went, which the run\'s summary carries, beside a vessel of an earlier Worker that timed none', async () => {
+    const { ask, json, jobs } = deployment();
+    const created = await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' } }) });
+    const { id } = v.parse(v.object({ id: v.string() }), await created.json());
+    const job = jobs.get(id);
+
+    await job?.alarm();
+    await job?.booted('v1', 6000, { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 });
+    await job?.booted('v2', 4000);
+    const status = await json(`/jobs/${id}`, JobStatusSchema);
+
+    const boot = { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 };
+
+    expect({ boots: status.vessels.map((vessel) => vessel.boot ?? null), summary: summaryOf(status).boots }).toEqual({ boots: [boot, null], summary: [boot] });
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Outcome } from '../../src/protocol';
+import type { Boot, Outcome } from '../../src/protocol';
 import { argvOf, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
@@ -356,5 +356,54 @@ describe('a task\'s log tail', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a vessel\'s boot', () => {
+  test('is told by phase: the wait for capacity, the start with each start made again and why, and the setup', async () => {
+    Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
+    const booted: { bootMs: number; boot: Boot }[] = [];
+    let asked = 0;
+    let firsts = 0;
+    let now = Date.UTC(2026, 9, 12, 12, 0, 0);
+    const clock = Date.now;
+
+    Date.now = () => now;
+
+    try {
+      const stored = state(container((argv) => {
+        if ((argv[2] ?? '').includes('echo ready')) {
+          firsts += 1;
+          // The runtime kills the first start as it comes up; the second answers 3 s later.
+          now += 3000;
+
+          return firsts === 1 ? { exitCode: 137, stdout: '' } : { exitCode: 0, stdout: 'ready\n' };
+        }
+
+        // The setup's execs (mounts, owning the state) take 2 s in all.
+        now += 1000;
+
+        return { exitCode: 0, stdout: '' };
+      }));
+
+      const vessel = new ArmadaVessel(stored.ctx, world({
+        // The fleet has no room at the first ask, and has 10 s later.
+        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1, release: async () => undefined })),
+        JOB: namespace(() => ({
+          waiting: async () => undefined,
+          booted: async (_name: string, bootMs: number, boot: Boot) => { booted.push({ bootMs, boot }); },
+          claim: async () => null, retired: async () => undefined,
+        })),
+      }));
+
+      await vessel.begin(spec);
+      await vessel.alarm();
+      now += 10_000;
+      await vessel.alarm();
+    } finally {
+      Date.now = clock;
+    }
+
+    expect(booted).toEqual([{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }]);
   });
 });

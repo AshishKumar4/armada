@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, parseConfig, type Config } from './config';
 import { listSchedule } from './dispatch';
 import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Manifest, type Size, type Timings } from './protocol';
-import type { Armada, Summary } from './sdk';
+import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -648,10 +648,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   }
 
   printReds(graded.reds, evidence, note);
-  const boots = summary.bootMs;
-
   note(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(graded.rows.length - graded.reds.length)} of ${String(graded.rows.length)} rows green, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
-  note(`${String(summary.vessels)} containers; first answers ${seconds(boots[0] ?? 0)} to ${seconds(boots.at(-1) ?? 0)} (median ${seconds(boots[Math.floor(boots.length / 2)] ?? 0)})`);
+  note(describeBoots(summary));
 
   if (usage !== null) note(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
   note(`report: ${report}`);
