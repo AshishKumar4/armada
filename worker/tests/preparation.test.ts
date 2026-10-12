@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { workdirOf, type Recipe, type Size } from '../../src/protocol';
 import { ArmadaPreparer, type Generation } from '../src/environments';
+import { ArmadaFleet } from '../src/fleet';
 import { STATE } from '../src/container';
 import { container, namespace, state, world, type Answer } from './harness';
 
@@ -81,6 +82,39 @@ function answering(phase: string, lost: number): Answer & { readonly launched: s
     return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
   }, { launched, envs });
 }
+
+describe('a preparation\'s container', () => {
+  test('starts once the fleet has room for it, as a job\'s does, and gives it back at its end', async () => {
+    const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }));
+    const machine = answering('setup', 0);
+    const started: string[] = [];
+
+    const stored = state(Object.assign(container((argv, options) => {
+      started.push(argv[0] ?? '');
+
+      return machine(argv, options);
+    }), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+
+    const generations: Generation[] = [];
+
+    const preparer = new ArmadaPreparer(stored.ctx, world({
+      FLEET: namespace(() => fleet),
+      ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, prepared: async (generation: Generation) => { generations.push(generation); } })),
+    }));
+
+    // A job's container holds the whole fleet.
+    await fleet.acquire('job/v1', 4, { deadlineAt: Date.now() + 60_000 });
+    await preparer.begin('k'.repeat(64), Date.now(), { recipe, sha: null });
+    await preparer.alarm();
+    const waiting = { started: started.length, retry: (await stored.ctx.storage.getAlarm() ?? 0) > Date.now() };
+
+    await fleet.release('job/v1');
+
+    for (let alarm = 0; alarm < 40 && generations.length === 0; alarm += 1) await preparer.alarm();
+
+    expect({ waiting, prepared: generations.length, held: await fleet.used() }).toEqual({ waiting: { started: 0, retry: true }, prepared: 1, held: 0 });
+  });
+});
 
 describe('preparing an environment', () => {
   test('runs the recipe\'s setup as root with root\'s PATH, where locale-gen and its kin are, and root\'s HOME (#28)', async () => {

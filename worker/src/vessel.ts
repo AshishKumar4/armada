@@ -15,6 +15,7 @@ import {
   clearSlot, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
+import { CAPACITY_RETRY_MS } from './fleet';
 import type { Claim, Gang } from './job';
 import { GANG_DOWN, GANG_UP, LINK_ID, Piped, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY } from './relay';
 
@@ -116,7 +117,6 @@ const PACKED_SLOTS = 16;
 /** Where slot `slot`'s running task is kept. */
 const slotKey = (slot: number): string => `slot:${String(slot)}`;
 
-const SLOT_RETRY_MS = 5_000;
 
 /** A start that has not answered in this long is a lost vessel; a snapshot new to a machine has taken 92 s. */
 const START_MS = 240_000;
@@ -176,7 +176,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         if (!(await fleet.acquire(this.holder(spec), spec.vcpus, { reserve: spec.reserve, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000 }))) {
           await job.moved(spec.name, 'waiting');
-          await this.ctx.storage.setAlarm(Date.now() + SLOT_RETRY_MS);
+          await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
 
           return;
         }

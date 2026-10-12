@@ -14,6 +14,7 @@ import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Comm
 import { deleteSnapshotWith } from '../../src/registry';
 import { AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
+import { CAPACITY_RETRY_MS } from './fleet';
 
 export type Generation = v.InferOutput<typeof GenerationSchema>;
 
@@ -403,6 +404,13 @@ interface Command {
   readonly cwd?: string;
 }
 
+/** The fleet's holder of preparation `key`'s container: its own, apart from every job's. */
+const holderOf = (key: string): string => `preparing/${key}`;
+
+/** The most a preparation can run: each phase within its bound, and the snapshot refused for want of room as long as it
+ *  may be. Its container's hold in the fleet lasts this long, past which the container is gone. */
+const preparationMs = (size: Size): number => Object.keys(NEXT).length * stepMs(size) + ROOM_WAIT_MS;
+
 export class ArmadaPreparer extends DurableObject<Env> {
   async begin(key: string, since: number, { recipe, sha, packer, shallow }: Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow'>): Promise<void> {
     await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, shallow, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
@@ -419,6 +427,13 @@ export class ArmadaPreparer extends DurableObject<Env> {
     let made = preparation.snapshot;
 
     try {
+      // Its container starts once the fleet has room for it, as every job's does, and holds it to the end.
+      if (preparation.phase === 'base' && preparation.started === undefined) {
+        const granted = await this.env.FLEET.getByName(SINGLE).acquire(holderOf(preparation.key), SIZES[preparation.recipe.size].vcpus, { deadlineAt: preparation.since + preparationMs(preparation.recipe.size) });
+
+        if (!granted) return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
+      }
+
       const step = await this.step(preparation);
 
       if ('retryInMs' in step) return await this.ctx.storage.setAlarm(Date.now() + step.retryInMs);
@@ -434,6 +449,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.delete('preparation');
       // The preparation failed already; a container that will not stop ends at its inactivity timeout.
       await Promise.allSettled([this.ctx.container?.destroy()]);
+      await this.env.FLEET.getByName(SINGLE).release(holderOf(preparation.key));
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
 
       if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
@@ -598,6 +614,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
   private async done(preparation: Preparation): Promise<void> {
     if (preparation.snapshot === null) throw new Error('a finished preparation has no snapshot');
     await this.ctx.storage.delete('preparation');
+    await this.env.FLEET.getByName(SINGLE).release(holderOf(preparation.key));
     const { recipe: { repo }, sha } = preparation;
     const shallow = repo !== undefined && sha !== null && boundaryOf({ sha, shallow: preparation.shallow }, repo.history).length > 0;
 

@@ -20,6 +20,9 @@ export const RECENT = 500;
 /** How long a hold lasts past its job's deadline: a container that would not stop runs this long more. */
 const LEASE_MS = INACTIVITY_MS;
 
+/** How soon a container the fleet had no room for asks again. */
+export const CAPACITY_RETRY_MS = 5_000;
+
 interface Hold {
   readonly vcpus: number;
   readonly until: number;
