@@ -962,9 +962,10 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** Done once the job is closed, no task is queued or running, and no vessel can still take one. A closed job adds a
-   *  vessel only to replace one lost, while it may (`vesselFailed`), so an open task that needs more containers at once
-   *  than its vessels left can never run, and is lost: every open task once none is left. A task whose cache read is
-   *  still out is settled by the method that reads it. */
+   *  vessel only to replace one lost, while it may (`vesselFailed`), so a task still to start that needs more containers
+   *  at once than its vessels left never runs, and is lost: every one once none is left. A running task holds its own,
+   *  and a gang's rank that ended may leave. A task whose cache read is still out is settled by the method that reads
+   *  it. */
   private async settle(): Promise<void> {
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'running' || (await this.ctx.storage.get<boolean>('open')) === true) return;
 
@@ -972,7 +973,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('waiting', 'booting', 'working')`).one()['n']);
     // A job without its environment is waiting for it prepared again, and vessels for its open tasks with it.
     const awaiting = (await this.ctx.storage.get<Generation>('environment')) === undefined;
-    const stranded = awaiting ? [] : this.sql.exec<{ idx: number; ranks: number }>(`SELECT idx, ${RANKS} AS ranks FROM tasks WHERE ${OPEN} AND ${RANKS} > ?`, alive).toArray();
+    const stranded = awaiting ? [] : this.sql.exec<{ idx: number; ranks: number }>(`SELECT idx, ${RANKS} AS ranks FROM tasks WHERE state IN ('queued', 'forming') AND ${RANKS} > ?`, alive).toArray();
 
     if (stranded.length > 0) {
       // Why the vessels are not there, in their own last distinct failures, most recent first.
