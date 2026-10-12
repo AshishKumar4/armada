@@ -778,6 +778,8 @@ interface Runner {
   readonly refuse?: number;
   /** The task job, counted from 1, whose results the runner no longer has. */
   readonly lose?: number;
+  /** Run from a bare clone, with no checkout, as the webhook driver fetches a commit. */
+  readonly bare?: boolean;
 }
 
 describe('armada run', () => {
@@ -888,8 +890,10 @@ describe('armada run', () => {
       git(repo, 'add', '.');
       git(repo, 'commit', '-qm', 'one');
 
+      if (runner.bare === true) git(scratch, 'clone', '-q', '--bare', repo, 'repo.git');
+
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
-        cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: runner.bare === true ? join(scratch, 'repo.git') : repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       const exit = await cli.exited;
@@ -1064,15 +1068,17 @@ describe('armada run', () => {
     expect({ exit: ran.exit, secrets }).toEqual({ exit: 0, secrets: [[], ['CACHE_TOKEN']] });
   });
 
-  test('a local plan runs in the checkout of the commit, with its target and timings filled, no plan job, and no bearer', async () => {
-    const printed = JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] });
-    // The plan checks what it was given: the timings file the runner answered, and the default target; and that the
-    // deployment's bearer the CLI holds is not among it, since a plan is the commit's own code (#33).
-    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && [ -z "\${ARMADA_TOKEN:-}" ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
-    const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planConfig: { command, local: true } });
+  test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job; a bare repository plans in a container (#33)', async () => {
+    const plan = { include: [{ name: 'a', rows: ['x'] }] };
+    // The plan checks what it was given: the timings file the runner answered, and the default target.
+    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${JSON.stringify(plan)}'`, 'plan', '{timings}', '{target}'];
+    const verdict = { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] };
+    const ran = await Promise.all([false, true].map(async (bare) => await run([], plan, verdict, { planConfig: { command, local: true }, bare })));
 
-    expect({ exit: ran.exit, jobs: ran.commands.length, task: ran.commands[0]?.slice(-2), here: ran.stdout.includes('plan run here') })
-      .toEqual({ exit: 0, jobs: 1, task: ['task', '/armada/task/out'], here: true });
+    expect(ran.map(({ exit, commands }) => ({ exit, jobs: commands.length, task: commands.at(-1)?.slice(-2) }))).toEqual([
+      { exit: 0, jobs: 1, task: ['task', '/armada/task/out'] },
+      { exit: 0, jobs: 2, task: ['task', '/armada/task/out'] },
+    ]);
   });
 
   test('a task that exits 0 with a red row among its rows is named RED as it lands, with the row', async () => {

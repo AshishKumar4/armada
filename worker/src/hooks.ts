@@ -166,15 +166,15 @@ rm -rf /tmp/bun.zip /tmp/bun-linux-x64`,
 } as const;
 
 /** The driver script: posts a pending status, fetches armada at the deployment's commit with its runtime dependencies
- *  alone, clones the commit, runs `armada run <checkout> --json` against the deployment, and posts the verdict's count
+ *  alone, fetches the commit, runs `armada run <commit> --json` against the deployment, and posts the verdict's count
  *  as the status. The two credentials (the GitHub token, in the secret `ARMADA_GITHUB_SECRET` names, and ARMADA_TOKEN,
  *  added at claim) are read only from the environment, so the job's log keeps them masked. No code of the commit under
- *  test runs where they are (#33): bun starts in a directory of the driver's own, since it runs the `bunfig.toml`
- *  preloads where it starts; the CLI gets no GitHub token, which only the statuses need; and a local plan gets no
- *  ARMADA_TOKEN (`localPlan`). */
+ *  test runs where they are (#33): it is fetched into a bare repository, so none of its files is on disk, neither a
+ *  `bunfig.toml` whose preloads bun runs where it starts nor a plan to run here (`localPlan`); and the CLI gets no GitHub
+ *  token, which only the statuses need. */
 const DRIVER = String.raw`set -eu
 github=$(printenv "$ARMADA_GITHUB_SECRET")
-mkdir -p "$HOME/repo" "$HOME/armada" "$HOME/run"
+mkdir -p "$HOME/armada"
 # The HTTP code gets a name of its own: a function's variables are the script's, and 'code' holds the run's exit.
 status() {
   answered=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "authorization: Bearer $github" -H 'accept: application/vnd.github+json' \
@@ -188,16 +188,15 @@ git -C "$HOME/armada" fetch -q --depth 1 ${ARMADA_REPO} "$ARMADA_DEPLOYED" \
   || { echo "armada: the deployment's commit $ARMADA_DEPLOYED is not on GitHub: deploy from a pushed commit for webhook CI" >&2; status error "armada's deployed commit is not on GitHub"; exit 2; }
 git -C "$HOME/armada" checkout -q FETCH_HEAD
 (cd "$HOME/armada" && bun install --frozen-lockfile --production --silent)
-git -C "$HOME/repo" init -q
+git init -q --bare "$HOME/repo"
 git -C "$HOME/repo" fetch -q "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT" \
   || git -C "$HOME/repo" fetch -q "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
-git -C "$HOME/repo" checkout -q FETCH_HEAD
-cd "$HOME/run"
+cd "$HOME/repo"
 set +e
-env -u "$ARMADA_GITHUB_SECRET" bun "$HOME/armada/src/cli.ts" run "$HOME/repo" --json > verdict.json
+env -u "$ARMADA_GITHUB_SECRET" bun "$HOME/armada/src/cli.ts" run "$ARMADA_COMMIT" --json > "$HOME/verdict.json"
 code=$?
 set -e
-count=$(bun -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rows; console.log(r.filter((x) => x.exitCode === 0).length + " of " + r.length + " rows green"); } catch { console.log("the run did not grade"); }' verdict.json)
+count=$(bun -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rows; console.log(r.filter((x) => x.exitCode === 0).length + " of " + r.length + " rows green"); } catch { console.log("the run did not grade"); }' "$HOME/verdict.json")
 case "$code" in 0) status success "$count" ;; 1) status failure "$count" ;; *) status error "armada's run failed" ;; esac
 exit "$code"
 `;
