@@ -15,7 +15,8 @@ interface Running {
   readonly stored: Stored;
 }
 
-/** A job with two tasks and a credential in its env, its environment ready (or `readiness`), its vessels launched. */
+/** A job with two tasks, a pool of two and a credential in its env, its environment ready (or `readiness`), its vessels
+ *  launched. */
 async function running(readiness: Readiness = { kind: 'ready', generation }): Promise<Running> {
   const stored = state();
 
@@ -24,7 +25,7 @@ async function running(readiness: Readiness = { kind: 'ready', generation }): Pr
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => readiness })),
   }));
 
-  await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, env: { TOKEN: SECRET } }));
+  await job.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, env: { TOKEN: SECRET } }));
   await job.alarm();
 
   return { job, stored };
@@ -60,7 +61,7 @@ describe('a job\'s env', () => {
     },
     'its vessels lost, past their replacements': async ({ job, stored }) => {
       await job.claim('v1');
-      // Both budgets spent: v1's loss under a task, and v2's before it took one.
+      // Both budgets spent: v1's loss under a task, and v2's before it took one, each the last of its place.
       await stored.ctx.storage.put({ replaced: 8, rebooted: 1000 });
       await job.vesselFailed('v1', 'the wait failed to run');
       await job.vesselFailed('v2', 'could not start');

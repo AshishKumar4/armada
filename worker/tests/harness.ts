@@ -10,6 +10,8 @@ import { timingSafeEqual } from 'node:crypto';
 import * as v from 'valibot';
 import { JsonSchema, type Json } from '../../src/protocol';
 import type { Env } from '../src/env';
+import type { ArmadaJob } from '../src/job';
+import type { RunEnd } from '../src/runs';
 import type { Generation } from '../src/environments';
 
 // workerd's constant-time comparison, which the Worker checks its bearer with.
@@ -257,4 +259,12 @@ export function container(answer: Answer, received?: (argv: readonly string[], b
 
   // SAFETY: a vessel calls only these members of its container, each constructed above in memory.
   return machine as Container;
+}
+
+/** How `vessel` would say its run of task `index` ended (`RunEnd`): its newest run of the task, as its job holds it. */
+export async function runOf(job: Pick<ArmadaJob, 'taskStatus'>, vessel: string, index: number): Promise<RunEnd | undefined> {
+  const said = await job.taskStatus(index);
+  const run = 'status' in said ? said.status.running.findLast((each) => each.vessel === vessel) : undefined;
+
+  return run === undefined ? undefined : { slot: run.slot, attempt: run.attempt };
 }

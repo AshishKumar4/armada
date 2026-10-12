@@ -44,8 +44,9 @@ export interface Reading {
  *  answer. */
 const SAMPLES = 200;
 
-/** The runs a class keeps: far more than its estimate reads, so a delivery made again after a lost answer, a send
- *  apart, still finds its runs and counts each once. */
+/** The runs a class keeps, far more than its estimate reads: a job sends again what a lost answer left, an alarm (15 s)
+ *  later, and a class records nowhere near this many runs in that time, so the runs sent again are still here, and
+ *  each counts once. */
 const RUNS = 20_000;
 
 /** The item records a class keeps, the least recently run dropped first. */

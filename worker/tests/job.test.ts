@@ -5,7 +5,7 @@ import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { listSchedule } from '../../src/dispatch';
-import { container, idleVessels, namespace, READY, state, world, type Stored } from './harness';
+import { container, idleVessels, namespace, READY, runOf, state, world, type Stored } from './harness';
 
 const generation = READY;
 
@@ -40,7 +40,7 @@ const exited = (index: number, vessel: string, exitCode = 0, error?: string): Ou
 async function finish(open: ArmadaJob, vessel: string, exitCode = 0, error?: string): Promise<void> {
   const claim = await open.claim(vessel);
 
-  if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index, exitCode))) throw new Error(`${vessel} got no task`);
+  if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index, exitCode, { slot: 0, attempt: claim.attempt }))) throw new Error(`${vessel} got no task`);
   await open.complete(vessel, exited(claim.index, vessel, exitCode, error), 1000);
 }
 
@@ -113,7 +113,7 @@ describe('the claim order', () => {
       expect(claim === null || 'waitMs' in claim ? -1 : claim.index).toBe(expected);
 
       if (claim === null || 'waitMs' in claim) throw new Error('unreachable');
-      await open.accept(vessel, claim.index, 0);
+      await open.accept(vessel, claim.index, 0, { slot: 0, attempt: claim.attempt });
       await open.complete(vessel, exited(claim.index, vessel), durations[claim.index] ?? 0);
       lanes[least]?.push(claim.index);
       loads[least] = (loads[least] ?? 0) + (durations[claim.index] ?? 0);
@@ -327,13 +327,42 @@ describe('a task whose container stopped under it', () => {
 });
 
 describe('a vessel lost before it took a task', () => {
-  test('is replaced apart from the losses under a task, as many as the job\'s pool', async () => {
+  test('is replaced apart from the losses under a task, as many as the job\'s pool, and past them each costs a place in it', async () => {
     const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });
+    let lost = 0;
 
-    // Each start fails, the replacement's too, and the one past the twelfth replacement is not replaced.
-    for (let lost = 0; lost <= 12; lost += 1) await booting.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'the first exec exited 137: ');
+    // Each start fails, every replacement's too, until no place is left to start one in.
+    for (; lost < 100 && (await booting.events(0)).done !== true; lost += 1) await booting.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'the first exec exited 137: ');
 
-    expect(begun).toEqual(Array.from({ length: 13 }, (_, index) => `j1/v${String(index + 1)}`));
+    // v1, its twelve replacements, then one more for each of the twelve places but the last one lost.
+    expect({ lost, begun }).toEqual({ lost: 24, begun: Array.from({ length: 24 }, (_, index) => `j1/v${String(index + 1)}`) });
+  });
+});
+
+describe('a job past its replacements', () => {
+  test('runs on in what is left of its pool: a vessel lost past them costs one place, never the places still free', async () => {
+    const task = (item: string) => ({ item, argv: ['true'] });
+    const { job: open, begun } = await job({ recipe: {}, items: [task('a'), task('b')], open: true, run: { kind: 'command' }, pool: 2 });
+
+    await open.claim('v1');
+
+    // Every start of the other vessel fails, until one costs the job its place.
+    for (let lost = 0; lost < 12 && begun.length < 11; lost += 1) await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'the first exec exited 137: ');
+    await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'the first exec exited 137: ');
+    const spent = begun.length;
+
+    await open.accept('v1', 0, 0, { slot: 0, attempt: 1 });
+    await open.complete('v1', exited(0, 'v1'), 1000);
+    await finish(open, 'v1');
+    expect(await open.claim('v1')).toBeNull();
+    await open.add([task('c')]);
+    await open.close();
+    const late = begun.at(-1) ?? '';
+
+    await finish(open, late.slice('j1/'.length));
+
+    expect({ spent, after: begun.length, events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind]) })
+      .toEqual({ spent: 10, after: 11, events: [[0, 'exited'], [1, 'exited'], [2, 'exited']] });
   });
 });
 
@@ -643,7 +672,7 @@ async function formed(open: ArmadaJob, vessels: readonly string[], start = true)
 
 /** `vessel` lands its rank's answer, with `landed`'s exit code and the rest on its outcome. */
 async function land(open: ArmadaJob, vessel: string, index: number, landed: Partial<Outcome> & { readonly exitCode: number }): Promise<void> {
-  if (!(await open.accept(vessel, index, landed.exitCode))) throw new Error(`${vessel}'s answer was refused`);
+  if (!(await open.accept(vessel, index, landed.exitCode, await runOf(open, vessel, index)))) throw new Error(`${vessel}'s answer was refused`);
   await open.complete(vessel, { ...exited(index, vessel), tail: `${vessel} said this`, ...landed }, 1000);
 }
 
@@ -699,6 +728,9 @@ describe('a gang task', () => {
     await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
     await open.vesselFailed('v3', 'a duplicate failure report', { gone: true });
     const stale = [await open.started('v1', 0, old), await open.still('v1', 0, 0, old)];
+
+    // Each old rank's vessel kills its stale run and says so, as a vessel told no does.
+    for (const name of ['v1', 'v2', 'v4']) await open.stopped(name, 0, { slot: 0, attempt: old });
     const ranks = ['v1', 'v2', 'v4', 'v5'];
     const again = await formed(open, ranks);
 

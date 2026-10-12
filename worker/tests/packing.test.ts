@@ -3,7 +3,7 @@ import * as v from 'valibot';
 import { environmentKey, JobSpecSchema, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEstimates, itemKey, MIN_SAMPLES, type Usage } from '../src/estimates';
 import { ArmadaJob, type Claim } from '../src/job';
-import { namespace, READY, state, world } from './harness';
+import { namespace, READY, runOf, state, world } from './harness';
 
 const GIB = 2 ** 30;
 
@@ -92,7 +92,7 @@ const ran = (index: number, vessel: string, exitCode: number, more: Partial<Outc
 
 /** `vessel` lands its run of a task with `outcome`. */
 async function land(open: ArmadaJob, vessel: string, outcome: Outcome): Promise<void> {
-  if (!(await open.accept(vessel, outcome.index, outcome.exitCode))) throw new Error(`${vessel} could not land task ${String(outcome.index)}`);
+  if (!(await open.accept(vessel, outcome.index, outcome.exitCode, await runOf(open, vessel, outcome.index)))) throw new Error(`${vessel} could not land task ${String(outcome.index)}`);
   await open.complete(vessel, outcome, 1000);
 }
 
@@ -329,5 +329,38 @@ describe('an efficient job', () => {
     await adding;
 
     expect(await slotsOf(job, 'v1', 2)).toEqual([0, null]);
+  });
+  test('holds a losing copy in its pool until its vessel says it stopped', async () => {
+    const { job } = await packing([{ weight: 9 }, { weight: 1 }, { weight: 1 }], await learned(SMALL), { pool: 2, hedge: 1 });
+    const first = await claimed(job, 'v1');
+    const copy = await claimed(job, 'v2');
+
+    // The first copy's red is the task's; the copy on v2 runs on until its next check tells it to stop.
+    await land(job, 'v1', ran(0, 'v1', 1, { attempt: first.attempt }));
+    const meanwhile = await slotsOf(job, 'v1', 2, 1);
+
+    await job.stopped('v2', 0, { slot: 0, attempt: copy.attempt });
+
+    expect({ meanwhile, after: await slotsOf(job, 'v1', 2, 3) }).toEqual({ meanwhile: [1, null], after: [2, null] });
+  });
+
+  test('closes an open job only once what it took has had its vessels asked for', async () => {
+    const answered = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+
+    const made = stores(() => true, [async () => {
+      answered.resolve();
+      await released.promise;
+    }]);
+
+    const { job, begun } = await packing([], made, { open: true });
+    const adding = job.add([{ item: { gang: 2 }, argv: argvOf({ gang: 2 }) }]);
+
+    await answered.promise;
+    await job.close();
+    released.resolve();
+    await adding;
+
+    expect({ begun, done: (await job.events(0)).done }).toEqual({ begun: ['v1', 'v2'], done: false });
   });
 });

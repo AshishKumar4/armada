@@ -134,15 +134,6 @@ export class Placement {
     };
   }
 
-  /** The runs the job holds at once, which its pool bounds: each task running or landing, each copy of one, and each
-   *  rank of a gang from when it joins. */
-  held(): number {
-    return Number(this.sql.exec(`SELECT
-        (SELECT COUNT(*) FROM tasks WHERE state IN ${HELD} AND idx NOT IN (SELECT idx FROM members))
-      + (SELECT COUNT(*) FROM tasks WHERE state IN ${HELD} AND dup IS NOT NULL)
-      + (SELECT COUNT(*) FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running', 'landing') AND m.state IN ${RANKED}) AS n`).one()['n']);
-  }
-
   /** The heaviest queued task whose estimate fits beside `load` in a container of `size`; null when none does, or `load`
    *  takes its container whole. Choosing changes nothing: the job hands the run out, then marks who it runs beside
    *  (`beside`). */
