@@ -768,17 +768,28 @@ interface Runner {
   readonly timings?: Json;
   /** Each task's artifacts archive, one task each: the task job then lands these, every one with its archive. */
   readonly artifacts?: readonly Uint8Array[];
+  /** More of `.armada.json`, and files beside it in the commit. */
+  readonly config?: Readonly<Record<string, Json>>;
+  readonly files?: Readonly<Record<string, string>>;
+  /** Each task job then lands every one of its tasks, exiting with this for its item. */
+  readonly exitOf?: (item: Json) => number;
+  /** The task job, counted from 1, whose creation the runner refuses. */
+  readonly refuse?: number;
 }
 
 describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
-  async function run(args: readonly string[], plan: Json, verdict: Json, { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts }: Runner = {}) {
+  async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, refuse } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
     const bodies: unknown[] = [];
     const seen: string[] = [];
+    const cancelled: string[] = [];
+    // Each task job's items, by its id: the first is `tasks`, the next `tasks-2` and on.
+    const tasked = new Map<string, Json[]>();
     const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
 
     const status = (id: string) => ({
@@ -793,17 +804,33 @@ describe('armada run', () => {
 
         seen.push(`${request.method} ${pathname.split('/').slice(0, 3).join('/')}`);
 
+        if (pathname.endsWith('/cancel')) cancelled.push(pathname.split('/')[2] ?? '');
+
         if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
 
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json(timings);
 
         if (pathname === '/jobs') {
           const body: unknown = await request.json();
+          const { items } = v.parse(v.object({ items: v.array(v.object({ item: JsonSchema, argv: v.array(v.string()) })) }), body);
 
           bodies.push(body);
-          commands.push(v.parse(v.object({ items: v.array(v.object({ argv: v.array(v.string()) })) }), body).items[0]?.argv ?? []);
+          commands.push(items[0]?.argv ?? []);
 
-          return Response.json({ id: commands.at(-1)?.includes('task') === true ? 'tasks' : 'plan' });
+          if (commands.at(-1)?.includes('task') !== true) return Response.json({ id: 'plan' });
+
+          if (tasked.size + 1 === refuse) return Response.json({ error: 'refused' }, { status: 400 });
+          const id = tasked.size === 0 ? 'tasks' : `tasks-${String(tasked.size + 1)}`;
+
+          tasked.set(id, items.map(({ item }) => item));
+
+          return Response.json({ id });
+        }
+
+        const job = pathname.split('/')[2] ?? '';
+
+        if (exitOf !== undefined && tasked.has(job) && pathname.endsWith('/events')) {
+          return Response.json({ events: (tasked.get(job) ?? []).map((item, index) => ({ seq: index + 1, outcome: { ...outcome, index, exitCode: exitOf(item) } })), done: true });
         }
 
         if (pathname.startsWith('/jobs/tasks/') && pathname.endsWith('/events') && artifacts !== undefined) {
@@ -833,7 +860,13 @@ describe('armada run', () => {
     try {
       mkdirSync(repo);
       git(repo, 'init', '-q');
-      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', deadline, environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig } }));
+
+      for (const [file, text] of Object.entries(runner.files ?? {})) {
+        mkdirSync(join(repo, file, '..'), { recursive: true });
+        writeFileSync(join(repo, file), text);
+      }
+
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', deadline, environment: {}, plan: planConfig, task: { command: ['task', '{out}'], ...taskConfig }, ...runner.config }));
       git(repo, 'add', '.');
       git(repo, 'commit', '-qm', 'one');
 
@@ -850,12 +883,76 @@ describe('armada run', () => {
       const directories = report === '' ? {} : v.parse(v.looseObject({ artifacts: v.optional(v.record(v.string(), v.string()), {}) }), JSON.parse(report)).artifacts;
       const evidence = Object.fromEntries(Object.entries(directories).map(([index, dir]) => [index, { dir, files: Object.fromEntries(readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), 'utf8')])) }]));
 
-      return { exit, stdout, stderr, commands, bodies, seen, report, evidence };
+      return { exit, stdout, stderr, commands, bodies, seen, cancelled, report, evidence };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
     }
   }
+
+  /** A commit with three environments: the project's, and py312 and py314 over it, each installing its own Python. */
+  const environments = {
+    config: { environment: { install: 'ci/install.sh' }, environments: { py312: { install: 'ci/py312.sh' }, py314: { install: 'ci/py314.sh' } } },
+    files: { 'ci/install.sh': 'echo project', 'ci/py312.sh': 'echo 3.12', 'ci/py314.sh': 'echo 3.14' },
+  };
+
+  /** Each task job a run started: its environment's install, each task's argv, and its pool. */
+  const taskJobs = (bodies: readonly unknown[]) => bodies.slice(1).map((body) => {
+    const { recipe, items, pool } = v.parse(v.object({ recipe: v.object({ install: v.string() }), items: v.array(v.object({ argv: v.array(v.string()) })), pool: v.number() }), body);
+
+    return { install: recipe.install, argv: items.map(({ argv }) => argv), pool };
+  });
+
+  const reportOf = (report: string) => v.parse(v.looseObject({
+    graded: v.string(), problems: v.array(v.string()), verdicts: v.object({ rows: v.array(v.looseObject({ name: v.string(), exitCode: v.number() })) }),
+    jobs: v.optional(v.array(v.looseObject({ environment: v.string(), job: v.string() }))),
+  }), JSON.parse(report));
+
+  const exitOf = (item: Json) => v.is(v.object({ name: v.literal('red') }), item) ? 1 : 0;
+
+  test('runs each environment\'s entries in a task job of its own, {index} the plan\'s, and grades every row as one run (#31)', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }, { name: 'red', environment: 'py314' }, { name: 'd', environment: 'py312' }] };
+    const ran = await run([], plan, {}, { ...environments, config: { ...environments.config, pool: 6 }, taskConfig: { command: ['task', '{name}', '{index}'], verdict: false }, exitOf });
+    const report = reportOf(ran.report);
+
+    expect({ exit: ran.exit, jobs: taskJobs(ran.bodies), rows: report.verdicts.rows.map(({ name, exitCode }) => [name, exitCode]), each: report.jobs?.map(({ environment, job }) => [environment, job]) }).toEqual({
+      exit: 1,
+      jobs: [
+        { install: 'echo project', argv: [['task', 'a', '0']], pool: 1 },
+        { install: 'echo 3.14', argv: [['task', 'b', '1'], ['task', 'red', '2']], pool: 2 },
+        { install: 'echo 3.12', argv: [['task', 'd', '3']], pool: 1 },
+      ],
+      rows: [['a', 0], ['b', 0], ['red', 1], ['d', 0]],
+      each: [['', 'tasks'], ['py314', 'tasks-2'], ['py312', 'tasks-3']],
+    });
+  });
+
+  test('runs environments in waves within the pool, each job on at least its widest gang (#31)', async () => {
+    const three: Json = { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }, { name: 'c', environment: 'py312' }] };
+    const waves = await run([], three, {}, { ...environments, config: { ...environments.config, pool: 2 }, taskConfig: { verdict: false }, exitOf });
+    const gang = await run([], { include: [{ name: 'a' }, { name: 'g', environment: 'py314', gang: 6 }] }, {}, { ...environments, config: { ...environments.config, pool: 8 }, taskConfig: { verdict: false }, exitOf });
+    // The third job is asked for only once the first two were followed to their end.
+    const third = waves.seen.lastIndexOf('POST /jobs');
+
+    expect({ pools: taskJobs(waves.bodies).map(({ pool }) => pool), later: waves.seen.indexOf('GET /jobs/tasks-2') < third, gang: taskJobs(gang.bodies).map(({ pool }) => pool), exits: [waves.exit, gang.exit] })
+      .toEqual({ pools: [1, 1, 1], later: true, gang: [1, 6], exits: [0, 0] });
+  });
+
+  test('is not graded, and leaves no task job running, when the plan names an unknown environment or a task job does not start (#31)', async () => {
+    const unknown = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py399' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf });
+    const refused = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf, refuse: 2 });
+
+    expect([unknown, refused].map((ran) => ({ exit: ran.exit, started: taskJobs(ran.bodies).length, cancelled: ran.cancelled, graded: reportOf(ran.report).graded })))
+      .toEqual([{ exit: 2, started: 0, cancelled: [], graded: 'not graded' }, { exit: 2, started: 2, cancelled: ['tasks'], graded: 'not graded' }]);
+    expect(reportOf(unknown.report).problems.some((problem) => problem.includes('py399'))).toBe(true);
+  });
+
+  test('names a task by its configured key, even its environment (#31)', async () => {
+    const plan = { include: [{ name: 'smoke', environment: 'py312' }, { name: 'smoke', environment: 'py314' }] };
+    const ran = await run([], plan, {}, { ...environments, taskConfig: { name: 'environment', verdict: false }, exitOf });
+
+    expect({ exit: ran.exit, rows: reportOf(ran.report).verdicts.rows.map(({ name }) => name) }).toEqual({ exit: 0, rows: ['py312', 'py314'] });
+  });
 
   test('defaults below GitHub\'s 40-minute timeout, and a CLI deadline overrides the commit\'s config', async () => {
     const plan = { include: [{ name: 'a', rows: ['x'] }] };
@@ -1263,115 +1360,5 @@ describe('the webhook command', () => {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
     }
-  });
-});
-
-describe('armada run with environments of their own (#31)', () => {
-  /** `armada run HEAD` of a commit whose `.armada.json` names environments, and a plan whose entries name them, against
-   *  a runner whose task jobs answer each entry with exit 0, but for the entry named `red`. What each job was asked,
-   *  the run's exit and its report. */
-  async function run(plan: Json) {
-    const scratch = mkdtempSync(join(tmpdir(), 'armada-envs-'));
-    const repo = join(scratch, 'repo');
-    const jobs: { readonly id: string; readonly install: string; readonly names: string[]; readonly pool: number }[] = [];
-    const items = new Map<string, Json[]>();
-
-    const server = Bun.serve({
-      port: 0,
-      async fetch(request) {
-        const { pathname } = new URL(request.url);
-
-        if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
-
-        if (pathname === '/timings/proj' && request.method === 'GET') return Response.json({ rows: {}, files: {} });
-
-        if (pathname === '/jobs') {
-          const body = v.parse(v.object({ recipe: v.object({ install: v.string() }), items: v.array(v.object({ item: JsonSchema })), pool: v.number() }), await request.json());
-          const id = jobs.length === 0 ? 'plan' : `tasks-${String(jobs.length)}`;
-
-          jobs.push({ id, install: body.recipe.install, names: body.items.map(({ item }) => v.parse(v.object({ name: v.optional(v.string(), '') }), item).name), pool: body.pool });
-          items.set(id, body.items.map(({ item }) => item));
-
-          return Response.json({ id });
-        }
-
-        const [, , id = '', leaf, index] = pathname.split('/');
-
-        if (leaf === 'events') {
-          const held = items.get(id) ?? [];
-
-          return Response.json({
-            done: true,
-            events: held.map((item, at) => ({ seq: at + 1, outcome: { index: at, kind: 'exited', exitCode: v.is(v.object({ name: v.literal('red') }), item) ? 1 : 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true } })),
-          });
-        }
-
-        if (id === 'plan' && leaf === 'tasks' && index === '0') return new Response(JSON.stringify(plan));
-
-        if (id !== '' && leaf === undefined) {
-          const total = items.get(id)?.length ?? 0;
-
-          return Response.json({
-            id, label: '', phase: 'done', key: 'k'.repeat(64), createdAt: 0, startedAt: 0, finishedAt: 1,
-            tasks: { total, queued: 0, running: 0, exited: total, red: 0, failed: 0 }, vessels: [], problems: [], environment: null,
-          });
-        }
-
-        return request.method === 'HEAD' ? new Response(null) : Response.json({ ok: true });
-      },
-    });
-
-    try {
-      mkdirSync(join(repo, 'ci'), { recursive: true });
-      git(repo, 'init', '-q');
-
-      for (const [file, text] of [['ci/install.sh', 'echo project'], ['ci/py312.sh', 'echo 3.12'], ['ci/py314.sh', 'echo 3.14']] as const) writeFileSync(join(repo, file), text);
-      writeFileSync(join(repo, '.armada.json'), JSON.stringify({
-        name: 'proj', pool: 6, environment: { install: 'ci/install.sh' }, environments: { py312: { install: 'ci/py312.sh' }, py314: { install: 'ci/py314.sh' } },
-        plan: { command: ['plan'] }, task: { command: ['task', '{name}'], verdict: false },
-      }));
-      git(repo, 'add', '.');
-      git(repo, 'commit', '-qm', 'one');
-
-      const cli = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD'], {
-        cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
-      });
-
-      const exit = await cli.exited;
-      const said = await new Response(cli.stdout).text();
-      const path = /^report: (.+)$/mu.exec(said)?.[1];
-
-      const report = path === undefined ? null : v.parse(v.looseObject({
-        graded: v.string(), problems: v.array(v.string()),
-        verdicts: v.object({ rows: v.array(v.looseObject({ name: v.string(), exitCode: v.number() })) }),
-        jobs: v.optional(v.array(v.looseObject({ environment: v.string(), job: v.string() }))),
-      }), JSON.parse(readFileSync(path, 'utf8')));
-
-      return { exit, jobs: jobs.slice(1), report };
-    } finally {
-      await server.stop(true);
-      rmSync(scratch, { recursive: true, force: true });
-    }
-  }
-
-  test('runs each environment\'s entries in a task job of its own, the pool split between them, and grades every row as one run', async () => {
-    const ran = await run({ include: [{ name: 'a' }, { name: 'b', environment: 'py314' }, { name: 'red', environment: 'py314' }, { name: 'd', environment: 'py312' }] });
-
-    expect({
-      exit: ran.exit, jobs: ran.jobs.map(({ install, names, pool }) => ({ install, names, pool })),
-      rows: ran.report?.verdicts.rows.map(({ name, exitCode }) => [name, exitCode]), each: ran.report?.jobs?.map(({ environment, job }) => [environment, job]),
-    }).toEqual({
-      exit: 1,
-      jobs: [{ install: 'echo project', names: ['a'], pool: 1 }, { install: 'echo 3.14', names: ['b', 'red'], pool: 2 }, { install: 'echo 3.12', names: ['d'], pool: 1 }],
-      rows: [['a', 0], ['b', 0], ['red', 1], ['d', 0]],
-      each: [['', 'tasks-1'], ['py314', 'tasks-2'], ['py312', 'tasks-3']],
-    });
-  });
-
-  test('is not graded when the plan names an environment the config does not, and starts no task job', async () => {
-    const ran = await run({ include: [{ name: 'a' }, { name: 'b', environment: 'py399' }] });
-
-    expect({ exit: ran.exit, jobs: ran.jobs.length, graded: ran.report?.graded, named: ran.report?.problems.some((problem) => problem.includes('py399')) })
-      .toEqual({ exit: 2, jobs: 0, graded: 'not graded', named: true });
   });
 });
