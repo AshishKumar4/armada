@@ -259,7 +259,8 @@ export const JOB_DEADLINE_SECONDS = 6 * 60 * 60;
 /** CI reports its own deadline below a typical runner's 40-minute timeout, leaving time to report and clean up. */
 export const CI_DEADLINE_SECONDS = 30 * 60;
 
-/** The time a gang gets to gather and launch all its ranks, even while those ranks keep heartbeating. */
+/** The time a formed gang gets to launch all its ranks, from when the last one joined, even while they keep
+ *  heartbeating. A gang still forming waits for its ranks' containers, however long they are busy. */
 export const GANG_START_SECONDS = 5 * 60;
 
 /** A task timeout explicitly requested must fit the whole job's limit. An implicit task timeout does not prevent a
@@ -297,7 +298,7 @@ export const JobSpecSchema = v.object({
   timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
   /** The whole job's bound, including environment preparation and container starts, in seconds. */
   deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), JOB_DEADLINE_SECONDS),
-  /** A gang's bound to gather and launch every rank, in seconds, independent of its task timeout. */
+  /** A formed gang's bound to launch every rank, in seconds, independent of its task timeout. */
   gangStartTimeout: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), GANG_START_SECONDS),
   retries: v.optional(RetriesSchema),
   /** The deployment's secrets each task gets in its environment, by name. Only names travel and are kept. */

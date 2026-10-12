@@ -121,6 +121,14 @@ const STRAGGLER_WEIGHTS = 1.5;
 const STANDBY_MS = 60_000;
 
 
+/** A gang rank's states before its vessel acknowledged its launch (`started`): its state says so, whichever Worker
+ *  stored it. */
+const UNLAUNCHED = `('ready', 'starting')`;
+
+/** A formed gang still launching, as an SQL condition on its task `t`: every rank joined and was handed its claim at
+ *  the task's `started`, and one has not launched yet. */
+const LAUNCHING = `t.state = 'running' AND EXISTS (SELECT 1 FROM members m WHERE m.idx = t.idx AND m.state IN ${UNLAUNCHED})`;
+
 /** Where a task's green answer waits while its other copy may still end red (`complete`, `release`). */
 const heldKey = (index: number) => `held/${String(index)}`;
 
@@ -154,11 +162,10 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('CREATE TABLE IF NOT EXISTS standby (vessel TEXT PRIMARY KEY, until INTEGER NOT NULL)');
     const tasks = this.sql.exec<{ name: string }>('PRAGMA table_info(tasks)').toArray().map((column) => column.name);
 
-    for (const column of ['dup', 'slot', 'dup_slot', 'forming_at']) {
+    for (const column of ['dup', 'slot', 'dup_slot']) {
       if (!tasks.includes(column)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column} INTEGER`);
     }
 
-    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(members)').toArray().some((column) => column.name === 'started')) this.sql.exec('ALTER TABLE members ADD COLUMN started INTEGER');
 
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
 
@@ -268,11 +275,10 @@ export class ArmadaJob extends DurableObject<Env> {
     const created = (await this.ctx.storage.get<number>('createdAt')) ?? now;
     const began = (await this.ctx.storage.get<number>('startedAt')) ?? now;
 
-    const pending = this.sql.exec<{ since: number | null }>(`SELECT MIN(COALESCE(t.forming_at, t.started, ?)) AS since FROM tasks t
-      WHERE t.state IN ('forming', 'running') AND EXISTS (SELECT 1 FROM members m WHERE m.idx = t.idx AND m.started IS NULL)`, began).one();
+    const formed = this.sql.exec<{ since: number | null }>(`SELECT MIN(COALESCE(t.started, ?)) AS since FROM tasks t WHERE ${LAUNCHING}`, began).one().since;
 
     const next = Math.min(now + WATCHDOG_MS, created + (spec.deadline ?? JOB_DEADLINE_SECONDS) * 1000,
-      pending.since === null ? Infinity : pending.since + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000,
+      formed === null ? Infinity : formed + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000,
       sooner ? (await this.ctx.storage.getAlarm()) ?? Infinity : Infinity);
 
     await this.ctx.storage.setAlarm(Math.max(now, next));
@@ -483,7 +489,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
       // A gang forms from the vessels that ask next, this one rank 0.
-      this.sql.exec(`UPDATE tasks SET state = 'forming', forming_at = ? WHERE idx = ?`, now, first.idx);
+      this.sql.exec(`UPDATE tasks SET state = 'forming' WHERE idx = ?`, first.idx);
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, 0, ?, 'joined')`, first.idx, name);
       await this.schedule(spec, true);
 
@@ -571,8 +577,9 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (mine.state === 'joined') {
       if (Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE idx = ?', mine.idx).one()['n']) < world) return { waitMs: GANG_WAIT_MS };
-      // Every rank has joined: hand out claims under one relay token. A claim is not a launched task: each vessel
-      // acknowledges its launch (`started`), and the gang's start deadline stays armed until all do.
+      // Every rank has joined: hand out claims under one relay token, and the gang's launch starts now (`LAUNCHING`). A
+      // claim is not a launched task: each vessel acknowledges its launch (`started`), and the gang's start bound stays
+      // armed until all do.
       this.sql.exec(`UPDATE tasks SET state = 'running', started = ?, attempts = attempts + 1, vessel = (SELECT vessel FROM members WHERE idx = ? AND rank = 0)
         WHERE idx = ?`, Date.now(), mine.idx, mine.idx);
       this.sql.exec(`UPDATE members SET state = 'ready' WHERE idx = ?`, mine.idx);
@@ -618,7 +625,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (task?.state !== 'running' || task.attempts !== attempt) return false;
 
-    return this.sql.exec(`UPDATE members SET state = 'running', started = COALESCE(started, ?) WHERE idx = ? AND vessel = ? AND state IN ('starting', 'running') RETURNING rank`, Date.now(), index, name).toArray().length > 0;
+    return this.sql.exec(`UPDATE members SET state = 'running' WHERE idx = ? AND vessel = ? AND state IN ('starting', 'running') RETURNING rank`, index, name).toArray().length > 0;
   }
 
   private claimOf(spec: Kept, own: Record<string, string>, stored: string, { index, attempt, duplicate }: Attempt): Claim {
@@ -834,7 +841,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
-    await this.lostRank(name, error);
+    this.lostRank(name, error);
 
     for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null; state: string }>(`SELECT idx, infra, dup, state FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
       if (task.state === 'landing' && (await this.ctx.storage.get(heldKey(task.idx))) !== undefined) {
@@ -878,18 +885,13 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.settle();
   }
 
-  /** A lost vessel's gangs: before all ranks launched, fail fast rather than leave peers with a stale rendezvous.
-   *  A gang that did launch is lost whole, queued again as one task, or failed after INFRA_ATTEMPTS losses. */
-  private async lostRank(name: string, error: string): Promise<void> {
-    for (const { idx, rank, infra, starting } of this.sql.exec<{ idx: number; rank: number; infra: number; starting: number }>(
-      `SELECT t.idx, m.rank, t.infra, EXISTS (SELECT 1 FROM members pending WHERE pending.idx = t.idx AND pending.started IS NULL) AS starting
-        FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name,
+  /** A lost vessel's gangs, each lost whole as the platform's loss of one of its ranks, forming, launching or
+   *  launched: queued again as one task to form anew, or failed after INFRA_ATTEMPTS losses. Its other ranks' runs end
+   *  at their next `still`, and a late launch or answer of theirs is of an attempt no longer the task's. */
+  private lostRank(name: string, error: string): void {
+    for (const { idx, infra } of this.sql.exec<{ idx: number; infra: number }>(
+      `SELECT t.idx, t.infra FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name,
     ).toArray()) {
-      if (starting !== 0) {
-        await this.failGang(idx, 'GangMemberLostBeforeStart', `gang member rank ${String(rank)} lost before start: ${error}`, name);
-        continue;
-      }
-
       this.sql.exec('DELETE FROM members WHERE idx = ?', idx);
       this.lost(idx, infra, name, error);
     }
@@ -908,24 +910,18 @@ export class ArmadaJob extends DurableObject<Env> {
     this.append({ index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: name, attempt: INFRA_ATTEMPTS, tail: error.slice(-4000), output: false });
   }
 
-  /** An incomplete gang is bounded by wall time, not its ranks' heartbeats or task timers (which arm only after
-   *  launch). `started` is a fallback for a gang formed before `forming_at` was stored. */
+  /** A formed gang whose ranks did not all launch within its start bound fails: its launch is bounded by wall time, not
+   *  by its ranks' heartbeats or task timers, which arm only once it launched. A forming gang is not bounded: its ranks
+   *  join as vessels come free, however long their tasks before take (#35). */
   private async watchGangs(spec: Kept): Promise<void> {
     const timeout = spec.gangStartTimeout ?? GANG_START_SECONDS;
-    const began = (await this.ctx.storage.get<number>('startedAt')) ?? Date.now();
+    const launching = this.sql.exec<{ idx: number; started: number }>(`SELECT t.idx, t.started FROM tasks t WHERE ${LAUNCHING}`).toArray();
 
-    const pending = this.sql.exec<{ idx: number; item: string; since: number | null }>(
-      `SELECT t.idx, t.item, COALESCE(t.forming_at, t.started) AS since FROM tasks t
-        WHERE t.state IN ('forming', 'running') AND EXISTS (SELECT 1 FROM members m WHERE m.idx = t.idx AND m.started IS NULL)`,
-    ).toArray();
+    for (const { idx, started } of launching) {
+      if (Date.now() - started < timeout * 1000) continue;
+      const pending = this.sql.exec<{ rank: number }>(`SELECT rank FROM members WHERE idx = ? AND state IN ${UNLAUNCHED} ORDER BY rank`, idx).toArray().map(({ rank }) => rank);
 
-    for (const { idx, item, since } of pending) {
-      if (Date.now() - (since ?? began) < timeout * 1000) continue;
-      const started = new Set(this.sql.exec<{ rank: number }>('SELECT rank FROM members WHERE idx = ? AND started IS NOT NULL', idx).toArray().map(({ rank }) => rank));
-      const world = gangOf(v.parse(TaskSchema, JSON.parse(item)).item);
-      const missing = Array.from({ length: world }, (_, rank) => rank).filter((rank) => !started.has(rank));
-
-      await this.failGang(idx, 'GangStartDeadlineExceeded', `gang start deadline exceeded after ${String(timeout)} s: not every rank launched (pending ranks ${missing.join(', ')})`);
+      await this.failGang(idx, 'GangStartDeadlineExceeded', `gang start deadline exceeded after ${String(timeout)} s: not every rank launched (pending ranks ${pending.join(', ')})`);
     }
   }
 

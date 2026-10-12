@@ -53,7 +53,7 @@ map options:
   --slots=N            the tasks one container runs at once, each in its own slot (default 1)
   --timeout=S          a task's limit, in seconds (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
-  --gang-start-timeout=S  all gang ranks must launch within this many seconds (default 300)
+  --gang-start-timeout=S  once every rank has a container, all must launch within this many seconds (default 300)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
   --speculative        let an idle container run a straggler again

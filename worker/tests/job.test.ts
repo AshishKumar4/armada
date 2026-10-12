@@ -691,77 +691,93 @@ describe('a gang task', () => {
     }
   });
 
-  test('a joined member lost before start fails immediately by rank, not a partial rebuild with stale claims', async () => {
-    const { job: open, begun, stopped } = await job(gang(4));
+  test('a member lost before launch loses the gang whole: it forms anew with the replacement, and the old claims launch and answer nothing', async () => {
+    const { job: open, begun } = await job(gang(4));
     const held = await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
-    const began = Date.now();
+    const old = held['v1']?.attempt ?? 0;
 
     await open.vesselFailed('v3', 'internal error; reference = boot-loss', { gone: true });
     await open.vesselFailed('v3', 'a duplicate failure report', { gone: true });
-    const events = await open.events(0);
+    const stale = [await open.started('v1', 0, old), await open.still('v1', 0, 0, old)];
+    const ranks = ['v1', 'v2', 'v4', 'r1'];
+    const again = await formed(open, ranks);
 
-    expect(Date.now() - began).toBeLessThan(1000);
-    expect(events).toMatchObject({ done: true, events: [{ outcome: { kind: 'failed', error: 'GangMemberLostBeforeStart', tail: 'gang member rank 2 lost before start: internal error; reference = boot-loss' } }] });
-    expect(events.events).toHaveLength(1);
-    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4']);
-    expect(stopped).toEqual(['j1/v1', 'j1/v2', 'j1/v4']);
-    expect(await open.started('v1', 0, held['v1']?.attempt ?? 0)).toBe(false);
-    expect(await open.still('v1', 0)).toBe(false);
-    expect(await open.claim('v1')).toBeNull();
+    for (const name of ranks) await land(open, name, 0, { exitCode: 0 });
+
+    expect({ stale, begun, attempt: again['r1']?.attempt === old + 1, events: (await open.events(0)).events.map(({ outcome }) => [outcome.kind, outcome.exitCode]) })
+      .toEqual({ stale: [false, false], begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/r1'], attempt: true, events: [['exited', 0]] });
   });
 
-  test('a forming gang loses a joined member before start by name rather than polling forever', async () => {
-    const { job: open } = await job(gang(4));
+  test('a forming gang that loses a joined member forms anew rather than waiting on it', async () => {
+    const { job: open, begun } = await job(gang(4));
 
     await open.claim('v1');
     await open.claim('v2');
     await open.vesselFailed('v2', 'container lost before launch', { gone: true });
+    const ranks = ['v1', 'v3', 'v4', 'r1'];
+    const held = await formed(open, ranks);
 
-    expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { error: 'GangMemberLostBeforeStart', tail: 'gang member rank 1 lost before start: container lost before launch' } }] });
+    for (const name of ranks) await land(open, name, 0, { exitCode: 0 });
+
+    expect({ begun, ranks: ranks.map((name) => held[name]?.gang?.rank), events: (await open.events(0)).events.map(({ outcome }) => outcome.kind) })
+      .toEqual({ begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4', 'j1/r1'], ranks: [0, 1, 2, 3], events: ['exited'] });
   });
 
-  test('failing a partial gang refills the pool for the next task without starting an extra replacement', async () => {
-    const spec = gang(4);
-    const { job: open, begun } = await job({ ...spec, items: [...spec.items, ...spec.items] });
+  test('a gang failed by its launch bound refills the pool for the next task without starting an extra replacement', async () => {
+    const began = Date.now();
 
-    await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
-    await open.vesselFailed('v3', 'lost before launch', { gone: true });
-    expect(begun).toEqual(Array.from({ length: 8 }, (_, index) => `j1/v${String(index + 1)}`));
-    expect((await open.status())?.vessels.filter((vessel) => vessel.state === 'working' || vessel.state === 'waiting')).toHaveLength(4);
+    try {
+      const spec = gang(4);
+      setSystemTime(began);
+      const { job: open, begun } = await job({ ...spec, items: [...spec.items, ...spec.items], gangStartTimeout: 10 });
 
-    const names = ['v5', 'v6', 'v7', 'v8'];
+      await formed(open, ['v1', 'v2', 'v3', 'v4'], false);
+      setSystemTime(began + 10_000);
+      await open.alarm();
+      expect(begun).toEqual(Array.from({ length: 8 }, (_, index) => `j1/v${String(index + 1)}`));
+      expect((await open.status())?.vessels.filter((vessel) => vessel.state === 'working' || vessel.state === 'waiting')).toHaveLength(4);
 
-    await formed(open, names);
+      const names = ['v5', 'v6', 'v7', 'v8'];
 
-    for (const name of names) await land(open, name, 1, { exitCode: 0 });
+      await formed(open, names);
 
-    const events = await open.events(0);
+      for (const name of names) await land(open, name, 1, { exitCode: 0 });
 
-    expect(events.done).toBe(true);
-    expect(events.events.map(({ outcome }) => [outcome.index, outcome.kind])).toEqual([[0, 'failed'], [1, 'exited']]);
+      const events = await open.events(0);
+
+      expect(events.done).toBe(true);
+      expect(events.events.map(({ outcome }) => [outcome.index, outcome.kind])).toEqual([[0, 'failed'], [1, 'exited']]);
+    } finally {
+      setSystemTime();
+    }
   });
 
-  test('heartbeating ranks cannot extend the formation deadline', async () => {
+  test('a forming gang waits for a rank busy past its start bound, which counts only once it formed (#35)', async () => {
     const began = Date.now();
 
     try {
       setSystemTime(began);
-      const { job: open, stopped, stored } = await job({ ...gang(4), gangStartTimeout: 10 });
+      const { job: open } = await job({ recipe: {}, run: { kind: 'command' }, pool: 2, gangStartTimeout: 300, items: [{ item: 'plain', argv: ['true'] }, { item: { gang: 2 }, argv: ['true'] }] });
+      const plain = await open.claim('v1');
 
-      await open.claim('v1');
-      await open.claim('v2');
-      expect(await stored.ctx.storage.getAlarm()).toBe(began + 10_000);
-      setSystemTime(began + 9_999);
-      expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
-      await open.alarm();
-      expect((await open.events(0)).events).toHaveLength(0);
-      setSystemTime(began + 10_000);
-      await open.claim('v1');
-      await open.alarm();
+      // v2 forms the gang and waits on v1, whose plain task runs 6 min, past the bound.
+      expect(await open.claim('v2')).toEqual({ waitMs: 1000 });
 
-      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { kind: 'failed', error: 'GangStartDeadlineExceeded' } }] });
-      expect(stopped).toEqual(['j1/v1', 'j1/v2']);
-      expect(await open.claim('v1')).toBeNull();
+      for (let minute = 1; minute <= 6; minute += 1) {
+        setSystemTime(began + minute * 60_000);
+        await open.still('v1', 0);
+        await open.claim('v2');
+        await open.alarm();
+      }
+
+      if (plain === null || 'waitMs' in plain) throw new Error('v1 got no plain task');
+      await land(open, 'v1', plain.index, { exitCode: 0 });
+      const held = await formed(open, ['v1', 'v2']);
+
+      for (const name of ['v1', 'v2']) await land(open, name, 1, { exitCode: 0 });
+
+      expect({ ranks: [held['v2']?.gang?.rank, held['v1']?.gang?.rank], events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind]) })
+        .toEqual({ ranks: [0, 1], events: [[0, 'exited'], [1, 'exited']] });
     } finally {
       setSystemTime();
     }
@@ -794,9 +810,11 @@ describe('a gang task', () => {
 
     try {
       setSystemTime(began);
-      const { job: open } = await job({ ...gang(2), gangStartTimeout: 10 });
+      const { job: open, stored } = await job({ ...gang(2), gangStartTimeout: 10 });
 
       await formed(open, ['v1', 'v2']);
+      // As an earlier Worker left it: a launch time it never filled, which says nothing of the ranks' launch (#35).
+      stored.ctx.storage.sql.exec('ALTER TABLE members ADD COLUMN started INTEGER');
       setSystemTime(began + 11_000);
       await open.alarm();
       expect((await open.events(0)).events).toHaveLength(0);
