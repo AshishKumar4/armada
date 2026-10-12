@@ -12,7 +12,7 @@ import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, ty
 import { retentionOf } from './environments';
 import { driverSpec, eventOf } from './hooks';
 import type { ArmadaFleet } from './fleet';
-import { fleetRefusal } from './job';
+import { fleetRefusal, VESSEL_NAME } from './job';
 
 export { ArmadaJob } from './job';
 
@@ -596,7 +596,7 @@ async function drive(request: Request, env: Env, { project, config, payload }: {
 /** `/relay/<job>/<vessel>?port=n`: a gang rank's relay, reaching the rank `vessel` runs. No container holds the
  *  deployment's bearer, so the relay presents its gang's token instead, which the vessel checks. */
 async function relayed(request: Request, env: Env, [job, vessel]: readonly string[]): Promise<Response> {
-  if (job === undefined || vessel === undefined || !JOB_ID.test(job) || !/^[vr]\d{1,4}$/u.test(vessel)) return notFound();
+  if (job === undefined || vessel === undefined || !JOB_ID.test(job) || !VESSEL_NAME.test(vessel)) return notFound();
 
   return await env.VESSEL.getByName(`${job}/${vessel}`).fetch(request);
 }

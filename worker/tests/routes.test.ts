@@ -148,3 +148,26 @@ describe('a job an earlier Worker made', () => {
     expect(answer.status).toBe(409);
   });
 });
+
+describe('a gang rank\'s relay', () => {
+  test('reaches any vessel its job names, however many the job started, an earlier Worker\'s replacements too, and nothing else', async () => {
+    const reached: string[] = [];
+
+    const env = world({
+      ARMADA_TOKEN: TOKEN,
+      VESSEL: namespace((name: string) => ({
+        fetch: async () => {
+          reached.push(name);
+
+          return new Response('relayed');
+        },
+      })),
+    });
+
+    const id = '20261011120000-0123abcd';
+    const ask = async (vessel: string) => (await worker.fetch(new Request(`https://armada.test/relay/${id}/${vessel}?port=1`), env)).status;
+
+    expect({ statuses: [await ask('v1'), await ask('v10000'), await ask('r12'), await ask('x1'), await ask('v'), await ask('v01')], reached })
+      .toEqual({ statuses: [200, 200, 200, 404, 404, 404], reached: [`${id}/v1`, `${id}/v10000`, `${id}/r12`] });
+  });
+});

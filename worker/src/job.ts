@@ -74,6 +74,12 @@ export interface Gang {
  *  full pool to end. */
 const WAIT_MS = 1_000;
 
+/** The name of a job's `number`th vessel. */
+const vesselName = (number: number): string => `v${String(number)}`;
+
+/** A name a job gives its vessels (`vesselName`), or an earlier Worker gave a replacement, `r` and its number. */
+export const VESSEL_NAME = /^[vr][1-9]\d*$/u;
+
 /** The states of a vessel that is alive: waiting for the fleet, starting, or taking tasks. */
 const ALIVE = `('waiting', 'booting', 'working')`;
 
@@ -422,7 +428,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const hedged = Math.min(spec.hedge, this.count(`${OPEN} AND json_type(item, '$.item.gang') IS NOT 'integer'`));
     // The places vessels lost past the job's replacements forfeited stay empty (`vesselFailed`).
     const wanted = this.needed(spec, hedged) - alive - ((await this.ctx.storage.get<number>('forfeited')) ?? 0);
-    const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => `v${String(named + index + 1)}`);
+    const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => vesselName(named + index + 1));
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat) VALUES (?, ?, ?)', name, 'waiting', Date.now());
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
