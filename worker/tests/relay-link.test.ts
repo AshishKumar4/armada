@@ -15,7 +15,8 @@ import { GANG_UP, Piped, RELAY_IN, RELAY_PY } from '../src/relay';
  *  client waiting for a server's greeting does, reading for 20 s at most. */
 const RELAYS = String.raw`
 import hashlib, socket, sys, threading
-total, port, origin, hold, source = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4] == "hold", sys.stdin.read()
+total, port, origin, mode, source = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.stdin.read()
+hold = mode == "hold"
 sys.argv = ["relay.py", "0", origin, "20261008000000-00000000", "token", "v1"]
 relay = {"__name__": "relay"}
 exec(source, relay)
@@ -25,14 +26,30 @@ print(server.getsockname()[1], flush=True)
 threading.Thread(target=lambda: [threading.Thread(target=guarded, args=(inbound, server.accept()[0]), daemon=True).start()
                                  for _ in iter(int, 1)], daemon=True).start()
 echo = socket.create_server((OWN, 0))
+answered = threading.Event()
 def answer(conn):
-    while data := conn.recv(1 << 16):
-        conn.sendall(data)
-    conn.shutdown(socket.SHUT_WR)
+    try:
+        while data := conn.recv(1 << 16):
+            conn.sendall(data)
+        conn.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+    answered.set()
 threading.Thread(target=lambda: [threading.Thread(target=answer, args=(echo.accept()[0],), daemon=True).start()
                                  for _ in iter(int, 1)], daemon=True).start()
+# A server that sends until its connection goes, whatever it is sent: a feed, say.
+feed = socket.create_server((OWN, 0))
+def stream(conn):
+    try:
+        while True:
+            conn.sendall(b"f" * (1 << 16))
+    except OSError:
+        pass
+    answered.set()
+threading.Thread(target=lambda: [threading.Thread(target=stream, args=(feed.accept()[0],), daemon=True).start()
+                                 for _ in iter(int, 1)], daemon=True).start()
 program, relayed = socket.socketpair()
-target = echo.getsockname()[1] if port == "echo" else int(port)
+target = {"echo": echo.getsockname()[1], "feed": feed.getsockname()[1]}.get(port) or int(port)
 threading.Thread(target=carry, args=(relayed, 0, target), daemon=True).start()
 block = hashlib.sha256(b"link").digest() * 2048
 def write():
@@ -43,6 +60,12 @@ def write():
         program.sendall(block)
     program.shutdown(socket.SHUT_WR)
 threading.Thread(target=write, daemon=True).start()
+if mode == "reset":
+    # The program reads a little of the feed, then its connection goes while the feed still sends.
+    program.recv(1 << 16)
+    program.close()
+    print("feed ended", answered.wait(15), flush=True)
+    sys.exit(0)
 program.settimeout(20)
 got, size = hashlib.sha256(), 0
 while data := program.recv(1 << 20):
@@ -54,7 +77,7 @@ print(size, got.hexdigest() == hashlib.sha256(block * (total // len(block))).hex
 /** A vessel's relay route over Bun's WebSockets and a TCP connection into the inbound end, each WebSocket piped
  *  (`Piped`) as a vessel pipes it. Each time `dropAfter` more of a link's outbound bytes arrive, its WebSocket drops
  *  without a Close frame, and every other time its connection in is cut too, as a vessel reset cuts it. */
-async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' = 'all') {
+async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' | 'reset' = 'all') {
   const reached = new Map<string, number>();
   const opened: string[] = [];
   let drops = 0;
@@ -147,6 +170,12 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
     const result = await run(1 << 16, '1', Number.POSITIVE_INFINITY);
 
     expect({ out: result.out, said: result.err.includes('holds no such link') }).toEqual({ out: '0 False', said: true });
+  }, 60_000);
+
+  test('ends the link at both ends when the program\'s connection goes while bytes still come for it', async () => {
+    const result = await run(0, 'feed', Number.POSITIVE_INFINITY, 'reset');
+
+    expect(result.out).toBe('feed ended True');
   }, 60_000);
 
   test('closes it at once while the program still holds its side open, waiting for a greeting', async () => {

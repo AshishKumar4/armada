@@ -496,13 +496,21 @@ class Link:
                 return
             try:
                 self.local.sendall(data)
-            except OSError:
+            except OSError as error:
+                self.cancel("the program's connection went: %r" % error)
                 return
             with self.changed:
                 self.received += len(data)
             if self.received - reported >= ACK:
                 reported = self.received
                 self.send(self.carrier, True, b"a%d" % self.received)
+
+    def cancel(self, why):
+        """The program can take nothing more: the far end is told this end holds the link no more ('g'), so it ends
+        too, and so does this end, both ways."""
+        self.log(why)
+        self.send(self.carrier, True, b"g")
+        self.finish()
 
     def settle(self):
         with self.changed:
