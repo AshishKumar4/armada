@@ -24,12 +24,13 @@ const LEASE_MS = INACTIVITY_MS;
 export const CAPACITY_RETRY_MS = 5_000;
 
 /** An object's container goes, and `holder`'s vCPUs, where it holds any, return to the fleet once it is gone: one that
- *  will not stop ends at its inactivity timeout, and holds them until then. Whether it is gone. */
-export async function letGo(ctx: DurableObjectState, env: Env, holder: string | undefined): Promise<boolean> {
+ *  will not stop ends at the inactivity timeout it was started with, `inactivityMs`, and holds them until then. Whether
+ *  it is gone. */
+export async function letGo(ctx: DurableObjectState, env: Env, { holder, inactivityMs }: { readonly holder: string | undefined; readonly inactivityMs: number }): Promise<boolean> {
   const [destroyed] = await Promise.allSettled([ctx.container?.destroy()]);
   const gone = destroyed.status === 'fulfilled';
 
-  if (holder !== undefined) await env.FLEET.getByName(SINGLE).release(holder, gone ? 0 : INACTIVITY_MS);
+  if (holder !== undefined) await env.FLEET.getByName(SINGLE).release(holder, gone ? 0 : inactivityMs);
 
   return gone;
 }

@@ -211,7 +211,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('state', state);
     await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
 
-    return await letGo(this.ctx, this.env, spec === undefined ? undefined : this.holder(spec));
+    return await letGo(this.ctx, this.env, { holder: spec === undefined ? undefined : this.holder(spec), inactivityMs: INACTIVITY_MS });
   }
 
   private holder(spec: VesselSpec): string {

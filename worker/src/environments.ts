@@ -450,7 +450,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
     } catch (cause) {
       await this.ctx.storage.delete('preparation');
       // The preparation failed already, whatever its container does.
-      await letGo(this.ctx, this.env, holderOf(preparation));
+      await letGo(this.ctx, this.env, { holder: holderOf(preparation), inactivityMs: LEASE_MS });
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
 
       if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
@@ -613,7 +613,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
     if (preparation.snapshot === null) throw new Error('a finished preparation has no snapshot');
     await this.ctx.storage.delete('preparation');
     // Made, the snapshot is the environment, whatever its container does.
-    await letGo(this.ctx, this.env, holderOf(preparation));
+    await letGo(this.ctx, this.env, { holder: holderOf(preparation), inactivityMs: LEASE_MS });
     const { recipe: { repo }, sha } = preparation;
     const shallow = repo !== undefined && sha !== null && boundaryOf({ sha, shallow: preparation.shallow }, repo.history).length > 0;
 
