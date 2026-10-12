@@ -171,7 +171,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         const fleet = this.env.FLEET.getByName(SINGLE);
 
         if (!(await fleet.acquire(this.holder(spec), spec.vcpus, { reserve: spec.reserve, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000 }))) {
-          await job.waiting(spec.name);
+          await job.moved(spec.name, 'waiting');
           await this.ctx.storage.setAlarm(Date.now() + SLOT_RETRY_MS);
 
           return;
@@ -180,6 +180,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         // The fleet's answer let other calls in: a vessel stopped meanwhile gives back what it was just granted.
         if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return await fleet.release(this.holder(spec));
         await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now() });
+        await job.moved(spec.name, 'booting');
       }
 
       if (state !== 'working') await this.boot(spec);

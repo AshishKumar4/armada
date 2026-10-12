@@ -366,6 +366,30 @@ describe('a job past its replacements', () => {
   });
 });
 
+describe('a vessel\'s watchdog', () => {
+  test('bounds a vessel granted capacity by its boot, not by the wait before it; a word from one that ended changes nothing', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+
+      await open.moved('v1', 'booting');
+      await open.moved('v2', 'waiting');
+      setSystemTime(began + 8 * 60_000 + 1);
+      await open.alarm();
+      const states = (await open.status())?.vessels.map((vessel) => [vessel.name, vessel.state]);
+
+      await open.moved('v1', 'booting');
+
+      expect({ states, late: (await open.status())?.vessels.find((vessel) => vessel.name === 'v1')?.state })
+        .toEqual({ states: [['v1', 'failed'], ['v2', 'waiting'], ['v3', 'waiting']], late: 'failed' });
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
 describe('a vessel that found no task', () => {
   test('no longer counts toward the pool, so an item an open job takes before the vessel retires gets a vessel', async () => {
     const task = { item: 'a', argv: ['true'] };

@@ -76,7 +76,7 @@ describe('a vessel stopped while the fleet answers', () => {
         },
         release: fleet.release.bind(fleet),
       })),
-      JOB: namespace(() => ({ waiting: async () => undefined })),
+      JOB: namespace(() => ({ moved: async () => undefined })),
     });
 
     const vessel = new ArmadaVessel(stored.ctx, env);

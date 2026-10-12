@@ -90,7 +90,7 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
 
   const job = {
     booted: async () => undefined,
-    waiting: async () => undefined,
+    moved: async () => undefined,
     claim: task.next,
     started: async (name: string, index: number, attempt: number) => {
       started.push({ name, index, attempt, afterLaunch: execs.some((argv) => argv[3] === 'launch'), stored: (await stored.ctx.storage.get('slot:0')) !== undefined });
@@ -224,7 +224,7 @@ describe('a task that names secrets', () => {
 
     const job = {
       booted: async () => undefined,
-      waiting: async () => undefined,
+      moved: async () => undefined,
       claim: once({ index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-launched' }, secrets: ['API_KEY'], duplicate: false }).next,
       still: async () => true,
       accept: async () => true,
@@ -282,7 +282,7 @@ describe('a gang rank', () => {
     }));
 
     const job = {
-      booted: async () => undefined, waiting: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+      booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
       accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
     };
 
@@ -321,7 +321,7 @@ describe('a gang rank', () => {
       }));
 
       const job = {
-        booted: async () => undefined, waiting: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
+        booted: async () => undefined, moved: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
         claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }).next,
         started: async () => true,
         still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
@@ -377,9 +377,10 @@ describe('a task\'s log tail', () => {
 });
 
 describe('a vessel\'s boot', () => {
-  test('is told by phase: the wait for capacity, the start with each start made again and why, and the setup', async () => {
+  test('is told by phase, as each begins and once it ended: the wait for capacity, the start with each start made again and why, and the setup', async () => {
     Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
     const booted: { bootMs: number; boot: Boot }[] = [];
+    const moved: string[] = [];
     let asked = 0;
     let firsts = 0;
     let now = Date.UTC(2026, 9, 12, 12, 0, 0);
@@ -407,7 +408,7 @@ describe('a vessel\'s boot', () => {
         // The fleet has no room at the first ask, and has 10 s later.
         FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1, release: async () => undefined })),
         JOB: namespace(() => ({
-          waiting: async () => undefined,
+          moved: async (_name: string, to: string) => { moved.push(to); },
           booted: async (_name: string, bootMs: number, boot: Boot) => { booted.push({ bootMs, boot }); },
           claim: async () => null, retired: async () => undefined,
         })),
@@ -421,7 +422,7 @@ describe('a vessel\'s boot', () => {
       Date.now = clock;
     }
 
-    expect(booted).toEqual([{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }]);
+    expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }] });
   });
 
   test('taken up again after its object restarted mid-start, tells the starts made before and its own', async () => {
