@@ -16,7 +16,7 @@ export const expectedOf = (want: v.InferOutput<typeof ExpectedRow>): { readonly 
 
 /** The plan: a GitHub-Actions-shaped matrix. */
 export const PlanSchema = v.object({
-  include: v.pipe(v.array(v.objectWithRest({ rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()) }, JsonSchema)), v.minLength(1)),
+  include: v.pipe(v.array(v.objectWithRest({ rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()), environment: v.optional(v.string()) }, JsonSchema)), v.minLength(1)),
 });
 
 export type PlanEntry = v.InferOutput<typeof PlanSchema>['include'][number];
@@ -43,9 +43,10 @@ export const VerdictFileSchema = v.looseObject({ rows: v.array(VerdictRowSchema)
 
 export const rowName = (row: VerdictRow): string => row.name ?? row.run ?? '';
 
-/** A task's name: the configured matrix key, else `name`, else the first string-valued key, else its position. */
+/** A task's name: the configured matrix key, else `name`, else the first string-valued key but the entry's
+ *  `environment`, which is the runner's, else its position. */
 export function taskName(entry: PlanEntry, key: string | undefined, index: number): string {
-  const strings = Object.entries(entry).flatMap(([name, value]) => v.is(v.string(), value) ? [[name, value] as const] : []);
+  const strings = Object.entries(entry).flatMap(([name, value]) => v.is(v.string(), value) && name !== 'environment' ? [[name, value] as const] : []);
   const named = strings.find(([name]) => name === (key ?? 'name'))?.[1] ?? strings[0]?.[1];
 
   return named !== undefined && /^[A-Za-z0-9._-]{1,80}$/u.test(named) ? named : `task-${String(index + 1)}`;

@@ -197,7 +197,7 @@ async function map(): Promise<number> {
 
   const artifacts = option('artifacts');
 
-  await cancelOnInterrupt(job, id, async () => {
+  await cancelOnInterrupt([{ id, job }], async () => {
     for await (const result of job) {
       metas.push(result.meta);
       let kept: string | undefined;

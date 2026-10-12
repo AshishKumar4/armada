@@ -5,6 +5,9 @@
  *   environment  the recipe: a base image, a root `setup` and a user `install` script from the commit (carried as text,
  *                so the key hashes them), run once per environment and snapshotted. `key` globs name the paths whose
  *                bytes also decide it: the lockfile, the manifests.
+ *   environments named recipes, each over `environment`'s fields, for the plan entries that name one in their
+ *                `environment`: each is prepared and snapshotted on its own, and its entries run in a task job of their
+ *                own, so a container restores only what its tasks need (#31).
  *   plan         a command run once on the commit that prints the tasks as a matrix, `{"include": [{...}, ...]}`, the
  *                shape a GitHub Actions matrix takes. An entry's keys fill the task command's `{placeholders}`; its
  *                optional `rows` name what that task must report, exactly once each; its `weight` (seconds) orders
@@ -20,16 +23,27 @@ import { BaseSchema, CI_DEADLINE_SECONDS, DEFAULT_BASE, JobSpecSchema, Project, 
 
 const Path = v.pipe(v.string(), v.minLength(1), v.check((path) => !path.startsWith('/') && !path.split('/').includes('..'), 'a path inside the commit'));
 
+const EnvironmentFields = { base: BaseSchema, setup: Path, install: Path, key: v.array(v.string()) };
+
+const EnvironmentSchema = v.object({
+  base: v.optional(EnvironmentFields.base, DEFAULT_BASE),
+  setup: v.optional(EnvironmentFields.setup),
+  install: v.optional(EnvironmentFields.install),
+  key: v.optional(EnvironmentFields.key, []),
+});
+
+export type Environment = v.InferOutput<typeof EnvironmentSchema>;
+
+/** A plan entry's `environment`: a name of `environments`. */
+export const EnvironmentName = v.pipe(v.string(), v.regex(/^[A-Za-z0-9._-]{1,40}$/u, 'an environment name is letters, digits, dot, dash or underscore'));
+
 const ConfigSchema = v.object({
   name: Project,
   /** The whole CI run's limit, plan and task jobs together, in seconds. */
   deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), CI_DEADLINE_SECONDS),
-  environment: v.object({
-    base: v.optional(BaseSchema, DEFAULT_BASE),
-    setup: v.optional(Path),
-    install: v.optional(Path),
-    key: v.optional(v.array(v.string()), []),
-  }),
+  environment: EnvironmentSchema,
+  /** Each one's fields over `environment`'s: a field it leaves out is the project environment's. */
+  environments: v.optional(v.record(EnvironmentName, v.partial(v.object(EnvironmentFields))), {}),
   /** Where the commit is checked out; by default three levels under the user's home, as a GitHub runner's is. */
   checkout: v.optional(v.pipe(v.string(), v.startsWith('/'))),
   history: v.optional(v.picklist(['full', 'commit']), 'full'),
@@ -60,6 +74,11 @@ export const CONFIG_FILE = '.armada.json';
 
 export function parseConfig(text: string): Config {
   return v.parse(ConfigSchema, JSON.parse(text));
+}
+
+/** The environment a plan entry runs in: the project's, or the one it names over the project's. */
+export function environmentOf(config: Config, name: string | undefined): Environment {
+  return name === undefined ? config.environment : { ...config.environment, ...config.environments[name] };
 }
 
 export function checkoutOf(config: Config): string {
