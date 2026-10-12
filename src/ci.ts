@@ -299,7 +299,7 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
 
   const recipe: Omit<Recipe, 'commit'> = {
     base: environment.base, setup: text(environment.setup), install: text(environment.install),
-    size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, environment) },
+    size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, environment), packer: PACKER },
   };
 
   const resolved = await armada.resolve(recipe);

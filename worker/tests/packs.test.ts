@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { JobSpecSchema, PROTOCOL } from '../../src/protocol';
+import { JobSpecSchema, PACKER, PROTOCOL } from '../../src/protocol';
 import worker from '../src/worker';
 import { bucket, namespace, world } from './harness';
 
@@ -24,23 +24,26 @@ function deployment(history: 'full' | 'commit', objects = new Map<string, string
 
 describe('a commit\'s pack', () => {
   test('is kept under its packer: an earlier client finds its own, and this client never takes one an earlier client made', async () => {
-    const { stored, call, job } = deployment('commit', new Map([[`packs/proj/${SHA}.root.pack`, 'an earlier client\'s pack']]));
-    const before = { earlier: await call('HEAD', `/packs/proj/${SHA}/root`), current: await call('HEAD', `/packs/proj/${SHA}/root?packer=2`), job: await job({ packer: 2 }) };
-    const put = await call('PUT', `/packs/proj/${SHA}/root?packer=2`, 'this client\'s pack');
+    const earlier = new Map([[`packs/proj/${SHA}.root.pack`, 'the first client\'s pack'], [`packs/proj/${SHA}.root.p2.pack`, 'a pack with no boundary']]);
+    const { stored, call, job } = deployment('commit', earlier);
+    const current = `/packs/proj/${SHA}/root?packer=${String(PACKER)}`;
+    const before = { first: await call('HEAD', `/packs/proj/${SHA}/root`), second: await call('HEAD', `/packs/proj/${SHA}/root?packer=2`), current: await call('HEAD', current), job: await job({ packer: PACKER }) };
+    const put = await call('PUT', current, 'this client\'s pack');
 
-    expect({ before, put, after: await job({ packer: 2 }), earlierJob: await job(), keys: [...stored.objects.keys()].sort() }).toEqual({
-      before: { earlier: 200, current: 404, job: 409 }, put: 200, after: 200, earlierJob: 200,
-      keys: [`packs/proj/${SHA}.root.p2.pack`, `packs/proj/${SHA}.root.pack`],
+    expect({ before, put, after: await job({ packer: PACKER }), earlierJobs: [await job(), await job({ packer: 2 })], keys: [...stored.objects.keys()].sort() }).toEqual({
+      before: { first: 200, second: 200, current: 404, job: 409 }, put: 200, after: 200, earlierJobs: [200, 200],
+      keys: [`packs/proj/${SHA}.root.p2.pack`, `packs/proj/${SHA}.root.p${String(PACKER)}.pack`, `packs/proj/${SHA}.root.pack`],
     });
   });
 
   test('is kept under its shallow boundary, so a shallow clone\'s pack is never taken for one with more history (#34)', async () => {
     const edge = 'b'.repeat(40);
     const { call, job } = deployment('full');
-    const put = await call('PUT', `/packs/proj/${SHA}/root?packer=2&shallow=${edge}`, 'a depth-1 clone\'s pack');
-    const held = { full: await call('HEAD', `/packs/proj/${SHA}/root?packer=2`), shallow: await call('HEAD', `/packs/proj/${SHA}/root?packer=2&shallow=${edge}`) };
+    const pack = `/packs/proj/${SHA}/root?packer=${String(PACKER)}`;
+    const put = await call('PUT', `${pack}&shallow=${edge}`, 'a depth-1 clone\'s pack');
+    const held = { full: await call('HEAD', pack), shallow: await call('HEAD', `${pack}&shallow=${edge}`) };
 
-    expect({ put, held, jobs: { full: await job({ packer: 2 }), shallow: await job({ packer: 2, shallow: [edge] }) } })
+    expect({ put, held, jobs: { full: await job({ packer: PACKER }), shallow: await job({ packer: PACKER, shallow: [edge] }) } })
       .toEqual({ put: 200, held: { full: 404, shallow: 200 }, jobs: { full: 409, shallow: 200 } });
   });
 });
