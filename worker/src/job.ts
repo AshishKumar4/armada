@@ -770,8 +770,11 @@ export class ArmadaJob extends DurableObject<Env> {
   async accept(name: string, index: number, exitCode: number, run?: RunEnd): Promise<boolean> {
     // The process exited: the run is over, whatever its answer is worth. A word that names no run ends none.
     if (run !== undefined) this.runs.ended({ vessel: name, index, ...run });
-    const task = this.sql.exec<{ state: string; vessel: string | null; dup: string | null }>('SELECT state, vessel, dup FROM tasks WHERE idx = ?', index).toArray()[0];
+    const task = this.sql.exec<{ state: string; vessel: string | null; dup: string | null; attempts: number }>('SELECT state, vessel, dup, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
     const member = this.member(name, index);
+
+    // An answer of an attempt the task has moved on from is no answer of the task's.
+    if (run !== undefined && task !== undefined && run.attempt !== task.attempts) return false;
 
     if (member !== undefined) {
       if (task?.state !== 'running' || member.state !== 'running') return false;
@@ -853,10 +856,10 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** The task an answer lands for, with its retries: a plain task landing on `name`, or a gang's, running. */
-  private landing(name: string, index: number, ganged: boolean): { readonly retries: number } | undefined {
-    if (ganged) return this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'running'`, index).toArray()[0];
+  private landing(name: string, { index, attempt }: Pick<Outcome, 'index' | 'attempt'>, ganged: boolean): { readonly retries: number } | undefined {
+    if (ganged) return this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND attempts = ? AND state = 'running'`, index, attempt).toArray()[0];
 
-    return this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND state = 'landing' AND vessel = ?`, index, name).toArray()[0];
+    return this.sql.exec<{ retries: number }>(`SELECT retries FROM tasks WHERE idx = ? AND attempts = ? AND state = 'landing' AND vessel = ?`, index, attempt, name).toArray()[0];
   }
 
   /** The kept answer, once its output and log are in R2: appended to the stream, or, for a failure the job's retries
@@ -868,7 +871,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const retries = (await this.spec())?.retries;
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
-    const task = kept === null ? undefined : this.landing(name, kept.index, member !== undefined);
+    const task = kept === null ? undefined : this.landing(name, kept, member !== undefined);
 
     // What a run used is learnt from the run that lands: not from a copy the other replaced, nor one after the job ended.
     if (task !== undefined && member === undefined) this.placement.learn(`${id}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, outcome.index, outcome);

@@ -41,7 +41,7 @@ async function finish(open: ArmadaJob, vessel: string, exitCode = 0, error?: str
   const claim = await open.claim(vessel);
 
   if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index, exitCode, { slot: 0, attempt: claim.attempt }))) throw new Error(`${vessel} got no task`);
-  await open.complete(vessel, exited(claim.index, vessel, exitCode, error), 1000);
+  await open.complete(vessel, { ...exited(claim.index, vessel, exitCode, error), attempt: claim.attempt }, 1000);
 }
 
 describe('a job that ends', () => {
@@ -363,6 +363,31 @@ describe('a job past its replacements', () => {
 
     expect({ spent, after: begun.length, events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind]) })
       .toEqual({ spent: 10, after: 11, events: [[0, 'exited'], [1, 'exited'], [2, 'exited']] });
+  });
+});
+
+describe('an answer of an earlier attempt', () => {
+  test('lands nothing for the attempt after it, though the same vessel runs that one', async () => {
+    const { job: open } = await job({
+      recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast', slots: 2, hedge: 1,
+      retries: { exitCodes: [1], attempts: 2, backoffSeconds: 0 },
+    });
+
+    await open.claim('v1', 0);
+    await open.claim('v2', 0);
+    // v1's green is uploading when its copy's red lands, and the task is queued again.
+    expect(await open.accept('v1', 0, 0, { slot: 0, attempt: 1 })).toBe(true);
+    expect(await open.accept('v2', 0, 1, { slot: 0, attempt: 1 })).toBe(true);
+    await open.complete('v2', { ...exited(0, 'v2', 1), attempt: 1 }, 1000);
+    const again = await open.claim('v1', 1);
+
+    expect(await open.accept('v1', 0, 1, { slot: 1, attempt: 2 })).toBe(true);
+    // The first green's upload ends now, after the second attempt's red was accepted.
+    await open.complete('v1', { ...exited(0, 'v1'), attempt: 1, slot: 0 }, 1000);
+    await open.complete('v1', { ...exited(0, 'v1', 1), attempt: 2, slot: 1 }, 1000);
+
+    expect({ again: again === null || 'waitMs' in again ? null : again.attempt, events: (await open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.attempt]) })
+      .toEqual({ again: 2, events: [[0, 1, 2]] });
   });
 });
 
@@ -696,8 +721,10 @@ async function formed(open: ArmadaJob, vessels: readonly string[], start = true)
 
 /** `vessel` lands its rank's answer, with `landed`'s exit code and the rest on its outcome. */
 async function land(open: ArmadaJob, vessel: string, index: number, landed: Partial<Outcome> & { readonly exitCode: number }): Promise<void> {
-  if (!(await open.accept(vessel, index, landed.exitCode, await runOf(open, vessel, index)))) throw new Error(`${vessel}'s answer was refused`);
-  await open.complete(vessel, { ...exited(index, vessel), tail: `${vessel} said this`, ...landed }, 1000);
+  const run = await runOf(open, vessel, index);
+
+  if (!(await open.accept(vessel, index, landed.exitCode, run))) throw new Error(`${vessel}'s answer was refused`);
+  await open.complete(vessel, { ...exited(index, vessel), attempt: run?.attempt ?? 1, tail: `${vessel} said this`, ...landed }, 1000);
 }
 
 describe('a gang task', () => {
