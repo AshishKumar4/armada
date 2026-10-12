@@ -9,10 +9,19 @@ import signal
 import sys
 import threading
 from types import FrameType, ModuleType
+from typing import NoReturn
 
 from .sh import Shell, execute, out_file
 from .task import Context, Task
 from .wire import ANSWER_PATH, ARTIFACTS_PATH, FILES_DIR, OUT_PATH
+
+
+def _end(code: int) -> NoReturn:
+    """Ends the task's process with `code` now, as runner.ts's process.exit does: its answer is written, and a thread its
+    body left running would hold the task open past it."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 def run_tasks(modules: list[ModuleType]) -> "None":
@@ -52,10 +61,10 @@ def run_tasks(modules: list[ModuleType]) -> "None":
     if isinstance(answer, Shell):
         with open(marker, "w") as file:
             file.write("command")
-        sys.exit(execute(answer.script, inherit=True).exit_code)
+        _end(execute(answer.script, inherit=True).exit_code)
     # The error's name follows, for the job to decide a retry by.
     with open(marker, "w") as file:
         file.write("value" if answer.error is None else f"value\n{answer.error}")
     with open(out, "w") as file:
         file.write(json.dumps(answer.body, separators=(",", ":")))
-    sys.exit(0 if answer.error is None else 1)
+    _end(0 if answer.error is None else 1)

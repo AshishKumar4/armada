@@ -113,6 +113,28 @@ def _ran(root: Path, task_id: str, item: object) -> tuple[int, str, str, str]:
         return ran.returncode, read("log"), read("answer"), read("out")
 
 
+class TestRunner(unittest.TestCase):
+    def test_ends_once_the_answer_is_written_whatever_threads_the_body_left(self) -> None:
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as scratch:
+            Path(scratch, "lingering.py").write_text(
+                "import threading, time\n"
+                "from armada import task\n"
+                "@task(id='lingering')\n"
+                "def lingering(n, ctx):\n"
+                "    threading.Thread(target=time.sleep, args=(60,)).start()\n"
+                "    return n + 1\n"
+            )
+            env = {
+                "PATH": "/usr/bin:/bin", "PYTHONPATH": f"{scratch}:{Path(__file__).parents[1]}",
+                "ARMADA_TASK": "lingering", "ARMADA_ITEM": "1", "ARMADA_OUT": f"{scratch}/out", "ARMADA_ANSWER": f"{scratch}/answer",
+            }
+            ran = subprocess.run([sys.executable, "-c", "import lingering; from armada.runner import run_tasks; run_tasks([lingering])"],
+                                 env=env, timeout=20, capture_output=True)
+            self.assertEqual((ran.returncode, json.loads(Path(scratch, "out").read_text())), (0, {"ok": True, "value": 2}))
+
+
 class TestBundle(unittest.TestCase):
     def test_refuses_a_task_folder_named_like_the_sdk_and_leaves_it_importable(self) -> None:
         import armada
