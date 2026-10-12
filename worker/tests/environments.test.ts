@@ -2,9 +2,9 @@ import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { RecipeSchema } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
-import { ArmadaEnvironments, expired, retentionOf, type Generation } from '../src/environments';
+import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
 import worker from '../src/worker';
-import { namespace, state, world } from './harness';
+import { container, namespace, state, world } from './harness';
 
 const MINUTE = 60_000;
 
@@ -418,5 +418,89 @@ describe('a preparation under way', () => {
 
     setSystemTime();
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
+  });
+});
+
+describe('a snapshot the account refuses for its storage (#30)', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    setSystemTime();
+  });
+
+  const FULL = 'The snapshot could not be completed because snapshot resource limits were exceeded.';
+
+  /** An account that holds three snapshots, full with a, b and c, a used 5 hours ago, b 4 and c 3; `pinned` are the
+   *  keys open jobs run on. A preparation of `new` has reached its snapshot, which the platform takes only while the
+   *  account has room, or refuses with `refusal`. */
+  const full = async (pinned: readonly string[], refusal = FULL) => {
+    const stored = state();
+    const fake = await registry(['a', 'b', 'c']);
+
+    globalThis.fetch = fakeFetch(fake.answer);
+
+    const environments = new ArmadaEnvironments(stored.ctx, world({
+      KEEP_ENVIRONMENTS: '3', REGISTRY_CREDENTIALS: 'user:secret',
+      FLEET: namespace(() => ({ open: async () => pinned.map((key) => `job-${key}`) })),
+      JOB: namespace((id: string) => ({ environment: async () => id.slice('job-'.length) })),
+      PREPARER: namespace(() => ({ begin: async () => undefined })),
+    }));
+
+    for (const [key, hoursAgo] of [['a', 5], ['b', 4], ['c', 3]] as const) {
+      await stored.ctx.storage.put(`env:${key}`, { state: 'ready', generation: generation(key), lastUsed: Date.now() - hoursAgo * HOUR });
+    }
+
+    const recipe = v.parse(RecipeSchema, {});
+
+    await environments.ensure('new', recipe, null);
+    const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get('env:new'));
+    let taken = 0;
+
+    const machine = Object.assign(container(() => ({ exitCode: 0, stdout: '' })), {
+      snapshotContainer: async () => {
+        taken += 1;
+
+        if (fake.manifests.size >= 3) throw new Error(refusal);
+
+        return { id: 'snapshot-new', size: 1 };
+      },
+    });
+
+    const preparing = state(machine);
+    const preparer = new ArmadaPreparer(preparing.ctx, world({ ENVIRONMENTS: namespace(() => environments) }));
+
+    await preparing.ctx.storage.put('preparation', { key: 'new', since, recipe, sha: null, phase: 'snapshot', seconds: {}, snapshot: null });
+
+    return { environments, preparer, fake, readiness: async () => await environments.ensure('new', recipe, null), taken: () => taken };
+  };
+
+  test('frees the least recently used environment no open job uses, and the jobs waiting on it wait for the snapshot taken again', async () => {
+    const { environments, preparer, fake, readiness, taken } = await full(['a']);
+
+    await preparer.alarm();
+    const waiting = (await readiness()).kind;
+
+    await preparer.alarm();
+
+    expect({ waiting, after: (await readiness()).kind, taken: taken(), kept: (await environments.list()).map((each) => each.key).sort(), left: fake.left() })
+      .toEqual({ waiting: 'preparing', after: 'ready', taken: 2, kept: ['a', 'c', 'new'], left: ['a', 'c'] });
+  });
+
+  test('waits while open jobs hold every snapshot, then fails saying what holds the storage; another failure fails at once', async () => {
+    const pinned = await full(['a', 'b', 'c']);
+
+    await pinned.preparer.alarm();
+    const waiting = (await pinned.readiness()).kind;
+
+    setSystemTime(Date.now() + 31 * MINUTE);
+    await pinned.preparer.alarm();
+    const ended = await pinned.readiness();
+    const other = await full([], 'internal error; reference = abc');
+
+    await other.preparer.alarm();
+
+    expect({ waiting, ended: ended.kind === 'failed' && /held by open jobs/u.test(ended.reason), left: pinned.fake.left(), other: (await other.readiness()).kind, otherLeft: other.fake.left() })
+      .toEqual({ waiting: 'preparing', ended: true, left: ['a', 'b', 'c'], other: 'failed', otherLeft: ['a', 'b', 'c'] });
   });
 });
