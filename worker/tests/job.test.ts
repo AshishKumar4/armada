@@ -487,6 +487,30 @@ describe('an answer of an earlier attempt', () => {
   });
 });
 
+describe('a copy\'s stop said again', () => {
+  test('stops not the copy of a later attempt its vessel runs now', async () => {
+    const { job: open } = await job({
+      recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast', slots: 2, hedge: 1,
+      retries: { exitCodes: [1], attempts: 2, backoffSeconds: 0 },
+    });
+
+    await open.claim('v1', 0);
+    await open.claim('v2', 0);
+    // The first attempt ends red, and is run again: its copy on v2 stops, and v2 copies the second attempt.
+    await open.accept('v1', 0, 1, { slot: 0, attempt: 1 });
+    await open.complete('v1', { ...exited(0, 'v1', 1), attempt: 1 }, 1000);
+    await open.stopped('v2', 0, { slot: 0, attempt: 1 });
+    await open.claim('v1', 1);
+    const copy = await open.claim('v2', 1);
+
+    // v2, restarted, says the first copy's stop again.
+    await open.stopped('v2', 0, { slot: 0, attempt: 1 });
+
+    expect({ copy: copy === null || 'waitMs' in copy ? null : [copy.attempt, copy.duplicate], heard: await open.accept('v2', 0, 1, { slot: 1, attempt: 2 }) })
+      .toEqual({ copy: [2, true], heard: true });
+  });
+});
+
 describe('a vessel\'s watchdog', () => {
   test('bounds a vessel granted capacity by its boot, not by the wait before it; a word from one that ended changes nothing', async () => {
     const began = Date.now();

@@ -844,9 +844,10 @@ export class ArmadaJob extends DurableObject<Env> {
    *  reported. */
   async stopped(name: string, index: number, run?: RunEnd): Promise<void> {
     if (run !== undefined) this.runs.ended({ vessel: name, index, ...run });
-    const task = this.sql.exec<{ dup: string | null }>('SELECT dup FROM tasks WHERE idx = ?', index).toArray()[0];
+    const task = this.sql.exec<{ dup: string | null; dup_slot: number | null; attempts: number }>('SELECT dup, dup_slot, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
 
-    if (task?.dup !== name) return;
+    // Only the copy running now: a word of a run before it, said again by its vessel restarted, stops it not.
+    if (task?.dup !== name || (run !== undefined && (run.attempt !== task.attempts || run.slot !== task.dup_slot))) return;
     this.sql.exec('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE idx = ?', index);
     await this.release(index);
     await this.settle();
