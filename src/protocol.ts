@@ -705,12 +705,15 @@ export function recordSamples(history: Readonly<Record<string, readonly number[]
   return next;
 }
 
+/** The median of `values`, the mean of the middle two of an even count; 0 of none. */
+export function median(values: readonly number[]): number {
+  const sorted = values.toSorted((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+
+  return sorted.length % 2 === 1 ? sorted[middle] ?? 0 : ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
+}
+
 /** Each key's median: one slow run moves no estimate. */
 export function medians(history: Readonly<Record<string, readonly number[]>>): Record<string, number> {
-  return Object.fromEntries(Object.entries(history).map(([key, values]) => {
-    const sorted = [...values].sort((left, right) => left - right);
-    const middle = Math.floor(sorted.length / 2);
-
-    return [key, sorted.length % 2 === 1 ? sorted[middle] ?? 0 : ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2];
-  }));
+  return Object.fromEntries(Object.entries(history).map(([key, values]) => [key, median(values)]));
 }

@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -317,7 +317,6 @@ export function summaryOf(status: JobStatus): Summary {
 /** A job's containers and their boots in one line: their first answers, then the median of each boot phase (#32). */
 export function describeBoots({ vessels, bootMs, boots }: Summary): string {
   const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
-  const median = (values: readonly number[]): number => values.toSorted((left, right) => left - right)[Math.floor(values.length / 2)] ?? 0;
   const answers = `${String(vessels)} containers; first answers ${seconds(bootMs[0] ?? 0)} to ${seconds(bootMs.at(-1) ?? 0)} (median ${seconds(median(bootMs))})`;
 
   if (boots.length === 0) return answers;
