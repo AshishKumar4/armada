@@ -44,10 +44,10 @@ export const VerdictFileSchema = v.looseObject({ rows: v.array(VerdictRowSchema)
 export const rowName = (row: VerdictRow): string => row.name ?? row.run ?? '';
 
 /** A task's name: the configured matrix key, else `name`, else the first string-valued key but the entry's
- *  `environment`, which is the runner's, else its position. */
+ *  `environment`, which names where it runs, else its position. */
 export function taskName(entry: PlanEntry, key: string | undefined, index: number): string {
-  const strings = Object.entries(entry).flatMap(([name, value]) => v.is(v.string(), value) && name !== 'environment' ? [[name, value] as const] : []);
-  const named = strings.find(([name]) => name === (key ?? 'name'))?.[1] ?? strings[0]?.[1];
+  const strings = Object.entries(entry).flatMap(([name, value]) => v.is(v.string(), value) ? [[name, value] as const] : []);
+  const named = strings.find(([name]) => name === (key ?? 'name'))?.[1] ?? strings.find(([name]) => name !== 'environment')?.[1];
 
   return named !== undefined && /^[A-Za-z0-9._-]{1,80}$/u.test(named) ? named : `task-${String(index + 1)}`;
 }

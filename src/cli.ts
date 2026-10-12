@@ -177,7 +177,8 @@ async function map(): Promise<number> {
   const mode = option('mode');
   const options = { armada, pool: whole('pool'), slots: whole('slots'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
-  const id = await job.id;
+  // An interrupt while the job is made cancels it once it is.
+  const id = await cancelOnInterrupt([job], async () => await job.id);
   let worst = 0;
   const metas: Meta[] = [];
 
@@ -200,7 +201,7 @@ async function map(): Promise<number> {
 
   const artifacts = option('artifacts');
 
-  await cancelOnInterrupt([{ id, job }], async () => {
+  await cancelOnInterrupt([job], async () => {
     for await (const result of job) {
       metas.push(result.meta);
       let kept: string | undefined;
