@@ -792,10 +792,26 @@ describe('armada run', () => {
     const tasked = new Map<string, Json[]>();
     const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
 
-    const status = (id: string) => ({
-      id, label: '', phase: 'done', key: 'k'.repeat(64), createdAt: 0, startedAt: 0, finishedAt: 1,
-      tasks: { total: 1, queued: 0, running: 0, exited: 1, red: 0, failed: 0 }, vessels: [], problems: [], environment: null,
-    });
+    /** What job `id` lands, the one description its events and its status both read: each task's exit code. The plan
+     *  lands one task; a task job, each of its items by `exitOf`, else each artifacts archive green, else one task. */
+    const exitsOf = (id: string): number[] => {
+      const items = tasked.get(id);
+
+      if (items === undefined) return [planExit];
+
+      if (exitOf !== undefined) return items.map(exitOf);
+
+      return artifacts === undefined ? [taskExit] : artifacts.map(() => 0);
+    };
+
+    const status = (id: string) => {
+      const exits = exitsOf(id);
+
+      return {
+        id, label: '', phase: 'done', key: 'k'.repeat(64), createdAt: 0, startedAt: 0, finishedAt: 1, vessels: [], problems: [], environment: null,
+        tasks: { total: exits.length, queued: 0, running: 0, exited: exits.length, red: exits.filter((exit) => exit !== 0).length, failed: 0 },
+      };
+    };
 
     const server = Bun.serve({
       port: 0,
@@ -829,15 +845,12 @@ describe('armada run', () => {
 
         const job = pathname.split('/')[2] ?? '';
 
-        if (exitOf !== undefined && tasked.has(job) && pathname.endsWith('/events')) {
-          return Response.json({ events: (tasked.get(job) ?? []).map((item, index) => ({ seq: index + 1, outcome: { ...outcome, index, exitCode: exitOf(item) } })), done: true });
-        }
+        if (pathname.endsWith('/events')) {
+          // A task job of artifacts lands each task with its archive.
+          const archives = tasked.has(job) && exitOf === undefined && artifacts !== undefined;
 
-        if (pathname.startsWith('/jobs/tasks/') && pathname.endsWith('/events') && artifacts !== undefined) {
-          return Response.json({ events: artifacts.map((_, index) => ({ seq: index + 1, outcome: { ...outcome, index, artifacts: true } })), done: true });
+          return Response.json({ events: exitsOf(job).map((exitCode, index) => ({ seq: index + 1, outcome: { ...outcome, index, exitCode, artifacts: archives } })), done: true });
         }
-
-        if (pathname.endsWith('/events')) return Response.json({ events: [{ seq: 1, outcome: { ...outcome, exitCode: pathname.startsWith('/jobs/tasks/') ? taskExit : planExit } }], done: true });
 
         const archive = /^\/jobs\/tasks\/tasks\/(\d+)\/artifacts$/u.exec(pathname)?.[1];
 
@@ -927,15 +940,14 @@ describe('armada run', () => {
     });
   });
 
-  test('runs environments in waves within the pool, each job on at least its widest gang (#31)', async () => {
-    const three: Json = { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }, { name: 'c', environment: 'py312' }] };
-    const waves = await run([], three, {}, { ...environments, config: { ...environments.config, pool: 2 }, taskConfig: { verdict: false }, exitOf });
+  test('runs every environment at once within the pool, each job on at least its widest gang, and refuses a plan that needs more (#31)', async () => {
     const gang = await run([], { include: [{ name: 'a' }, { name: 'g', environment: 'py314', gang: 6 }] }, {}, { ...environments, config: { ...environments.config, pool: 8 }, taskConfig: { verdict: false }, exitOf });
-    // The third job is asked for only once the first two were followed to their end.
-    const third = waves.seen.lastIndexOf('POST /jobs');
+    const three: Json = { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }, { name: 'c', environment: 'py312' }] };
+    const crowded = await run([], three, {}, { ...environments, config: { ...environments.config, pool: 2 }, taskConfig: { verdict: false }, exitOf });
+    const report = reportOf(crowded.report);
 
-    expect({ pools: taskJobs(waves.bodies).map(({ pool }) => pool), later: waves.seen.indexOf('GET /jobs/tasks-2') < third, gang: taskJobs(gang.bodies).map(({ pool }) => pool), exits: [waves.exit, gang.exit] })
-      .toEqual({ pools: [1, 1, 1], later: true, gang: [1, 6], exits: [0, 0] });
+    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool)], crowded: [crowded.exit, taskJobs(crowded.bodies).length, report.graded], said: report.problems.some((problem) => problem.includes('pool of 2')) })
+      .toEqual({ gang: [0, [1, 6]], crowded: [2, 0, 'not graded'], said: true });
   });
 
   test('is not graded, and leaves no task job running, when the plan names an unknown environment or a task job does not start (#31)', async () => {

@@ -368,48 +368,39 @@ export async function onCommit(armada: Armada, target: string): Promise<OnCommit
   return commit.spec;
 }
 
-/** A run's environments' task jobs in waves, each job with the containers it runs on. A wave's jobs run at once
- *  within the pool, each on at least its widest gang (and 1), and the rest of the pool goes to them in proportion to
- *  their estimated seconds (their tasks' count where any has no estimate), D'Hondt, up to what each can use. A job that
- *  does not fit beside the wave's others starts the next wave, which runs once the one before has ended. One job gets
- *  the pool as `lanesFor` would. */
-export function wavesFor(pool: number, slots: number, groups: readonly { readonly estimates: readonly (number | undefined)[]; readonly ranks: readonly number[] }[]): { readonly group: number; readonly share: number }[][] {
+/** The containers each of a run's environments' task jobs runs on, all at once within the pool: each on at least its
+ *  widest gang (and 1), and the rest of the pool given to them in proportion to their estimated seconds (their tasks'
+ *  count where any has no estimate), D'Hondt, up to what each can use. One job gets the pool as `lanesFor` would. When
+ *  their least is past the pool, how many containers they need instead. */
+export function sharesFor(pool: number, slots: number, groups: readonly { readonly estimates: readonly (number | undefined)[]; readonly ranks: readonly number[] }[]): number[] | { readonly need: number } {
   const known = groups.every(({ estimates }) => estimates.every((estimate) => estimate !== undefined));
 
-  const sized = groups.map(({ estimates, ranks }, group) => {
+  const sized = groups.map(({ estimates, ranks }) => {
     const widest = Math.min(pool, Math.max(1, ...ranks));
     const total = ranks.reduce((sum, each) => sum + each, 0);
     const weight = known ? estimates.reduce((sum: number, estimate, at) => sum + (estimate ?? 0) * (ranks[at] ?? 1), 0) : total;
 
-    return { group, least: widest, most: Math.max(widest, Math.ceil(total / slots)), weight };
+    return { least: widest, most: Math.max(widest, Math.ceil(total / slots)), weight };
   });
 
-  const waves: (typeof sized)[] = [];
+  const need = sized.reduce((sum, job) => sum + job.least, 0);
 
-  for (const job of sized) {
-    const wave = waves.at(-1);
+  if (need > pool) return { need };
+  const shares = sized.map((job) => job.least);
 
-    if (wave !== undefined && wave.reduce((sum, each) => sum + each.least, job.least) <= pool) wave.push(job);
-    else waves.push([job]);
+  for (let left = pool - need; left > 0; left -= 1) {
+    // The next container goes to the job with the most weight for each container it would then hold.
+    const next = sized.reduce((best, job, at) => {
+      const held = shares[at] ?? job.least;
+
+      return held < job.most && (best < 0 || job.weight / (held + 1) > (sized[best]?.weight ?? 0) / ((shares[best] ?? 0) + 1)) ? at : best;
+    }, -1);
+
+    if (next < 0) break;
+    shares[next] = (shares[next] ?? 0) + 1;
   }
 
-  return waves.map((wave) => {
-    const shares = wave.map((job) => job.least);
-
-    for (let left = pool - shares.reduce((sum, each) => sum + each, 0); left > 0; left -= 1) {
-      // The next container goes to the job with the most weight for each container it would then hold.
-      const next = wave.reduce((best, job, at) => {
-        const held = shares[at] ?? job.least;
-
-        return held < job.most && (best < 0 || job.weight / (held + 1) > (wave[best]?.weight ?? 0) / ((shares[best] ?? 0) + 1)) ? at : best;
-      }, -1);
-
-      if (next < 0) break;
-      shares[next] = (shares[next] ?? 0) + 1;
-    }
-
-    return wave.map((job, at) => ({ group: job.group, share: shares[at] ?? job.least }));
-  });
+  return shares;
 }
 
 /** A run's task jobs' summaries as one: its counts and containers summed, its times the longest. One job's is its own. */
@@ -648,7 +639,12 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     owns.set(name, own);
   }
 
-  const waves = wavesFor(config.pool, slots, groups.map((group) => ({ estimates: group.indexes.map((index) => estimates[index]), ranks: group.indexes.map((index) => ranks[index] ?? 1) })));
+  const shares = sharesFor(config.pool, slots, groups.map((group) => ({ estimates: group.indexes.map((index) => estimates[index]), ranks: group.indexes.map((index) => ranks[index] ?? 1) })));
+
+  // Every environment's job runs at once, so none of a run's jobs waits on another's end, deadline or cancel.
+  if ('need' in shares) {
+    return await ungraded(`the plan's ${String(groups.length)} environments run at once and need ${String(shares.need)} containers for it, one each or their widest gang, past the pool of ${String(config.pool)}: raise pool in .armada.json`);
+  }
 
   /** Group `at`'s task job, started on `share` containers. Its deadline is what is left of the run's, and bounds its
    *  tasks' timeout. */
@@ -727,45 +723,36 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
 
   // Every job started, its creation perhaps in flight, for an interrupt to cancel; and those started and followed.
   const started: Job<Json, string | null>[] = [];
-  const jobs: { readonly name: string | undefined; readonly id: string; readonly job: Job<Json, string | null> }[] = [];
+  const jobs: { readonly name: string | undefined; readonly id: string; readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }[] = [];
 
   const tasked = await cancelOnInterrupt(started, async () => {
-    const landed: Result<Json, string | null>[] = [];
+    const starting = groups.map((_, at) => start(at, shares[at] ?? 1));
 
-    for (const [at, wave] of waves.entries()) {
-      if (waves.length > 1) note(`wave ${String(at + 1)} of ${String(waves.length)}: ${wave.map(({ group }) => groups[group]?.name ?? 'the project\'s environment').join(', ')}`);
-      const starting = wave.map(({ group, share }) => start(group, share));
+    started.push(...starting.map(({ job }) => job));
+    const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
+    const refused = created.find((each) => each.status === 'rejected');
 
-      started.push(...starting.map(({ job }) => job));
-      const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
-      const refused = created.find((each) => each.status === 'rejected');
+    // A job that did not start leaves the run ungraded, and the others, started with it and not yet followed, end.
+    if (refused !== undefined) {
+      await Promise.allSettled(started.map(async (job) => { await job.cancel(); }));
 
-      // A job that did not start leaves the run ungraded: the others it started with, and any before, end with it.
-      if (refused !== undefined) {
-        await Promise.allSettled(started.map(async (job) => { await job.cancel(); }));
-
-        return { refused: errorOf({ cause: refused.reason }).message };
-      }
-
-      const wavesJobs = starting.map((each, place) => {
-        const id = created[place]?.status === 'fulfilled' ? created[place].value : '';
-
-        note(`task job ${id}${each.name === undefined ? '' : ` (${each.name})`}: ${String(each.size)} tasks on ${String(each.pool)} containers${slots > 1 ? ` of ${String(slots)} slots` : ''}`
-          + `${each.lanes < each.most ? `, which the plan's estimates say finish as soon as ${String(Math.ceil(each.most / slots))} would` : ''}`);
-
-        return { ...each, id };
-      });
-
-      jobs.push(...wavesJobs);
-
-      for (const results of await Promise.all(wavesJobs.map(followed))) landed.push(...results);
+      return { refused: errorOf({ cause: refused.reason }).message };
     }
 
-    return { landed };
+    for (const [place, each] of starting.entries()) {
+      const id = created[place]?.status === 'fulfilled' ? created[place].value : '';
+
+      note(`task job ${id}${each.name === undefined ? '' : ` (${each.name})`}: ${String(each.size)} tasks on ${String(each.pool)} containers${slots > 1 ? ` of ${String(slots)} slots` : ''}`
+        + `${each.lanes < each.most ? `, which the plan's estimates say finish as soon as ${String(Math.ceil(each.most / slots))} would` : ''}`);
+      jobs.push({ ...each, id });
+    }
+
+    return { landed: (await Promise.all(jobs.map(followed))).flat() };
   });
 
-  if ('refused' in tasked) return await ungraded(`a task job did not start, so none of the plan's tasks ran to the end: ${tasked.refused}`);
+  if ('refused' in tasked) return await ungraded(`a task job did not start, so the run's task jobs were cancelled: ${tasked.refused}`);
   const results = tasked.landed;
+
   const statuses = await Promise.all(jobs.map(async ({ job }) => await job.status()));
   const [first] = jobs;
   const [status] = statuses;
