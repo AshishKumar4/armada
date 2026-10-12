@@ -252,6 +252,22 @@ describe('a pushed task', () => {
   });
 });
 
+describe('a push of one task under two names', () => {
+  test('takes it once, whether a file exports it twice or an index exports it again', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-alias-'));
+
+    try {
+      mkdirSync(join(scratch, 'armada'));
+      writeFileSync(join(scratch, 'armada', 'job.ts'), `import { task } from ${JSON.stringify(join(import.meta.dir, '..', 'src', 'index.ts'))};\nexport const job = task({ id: 'one', run: (n: number) => n });\nexport { job as alias };\n`);
+      writeFileSync(join(scratch, 'armada', 'index.ts'), `export { job } from './job';\n`);
+
+      expect((await bundleTasks(scratch, ['armada'])).ids).toEqual(['one']);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('a push\'s bundle', () => {
   test('is the same bytes for the same task files, wherever the project is and whichever push made it', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-bundle-'));

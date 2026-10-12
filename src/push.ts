@@ -43,12 +43,12 @@ export async function findProject(from: string): Promise<{ readonly root: string
   }
 }
 
-/** Every task the project's folders export, by the file and the export name it is under, refusing an id two of them
- *  share. A file is read as this process imported it, so a push after an edit runs in a new process, as `armada dev`
- *  does. */
+/** Every task the project's folders export, by the first file and export name it is under: one task under two names
+ *  is one task, as Python's push takes it, and two tasks of one id are refused. A file is read as this process imported
+ *  it, so a push after an edit runs in a new process, as `armada dev` does. */
 async function tasksOf(root: string, folders: readonly string[]): Promise<{ readonly exports: { readonly file: string; readonly name: string }[]; readonly ids: string[] }> {
   const exports: { readonly file: string; readonly name: string }[] = [];
-  const owners = new Map<string, string>();
+  const owners = new Map<string, { readonly task: object; readonly file: string }>();
 
   for (const folder of folders) {
     const glob = new Bun.Glob('**/*.{ts,tsx,mts,js,mjs}');
@@ -62,8 +62,10 @@ async function tasksOf(root: string, folders: readonly string[]): Promise<{ read
         if (!v.is(RunnableSchema, value)) continue;
         const owner = owners.get(value.id);
 
-        if (owner !== undefined) throw new Error(`two tasks have the id ${value.id}: in ${relative(root, owner)} and ${relative(root, path)}`);
-        owners.set(value.id, path);
+        if (owner?.task === value) continue;
+
+        if (owner !== undefined) throw new Error(`two tasks have the id ${value.id}: in ${relative(root, owner.file)} and ${relative(root, path)}`);
+        owners.set(value.id, { task: value, file: path });
         exports.push({ file: path, name });
       }
     }
