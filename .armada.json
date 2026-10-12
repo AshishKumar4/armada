@@ -3,7 +3,7 @@
   "environment": {
     "setup": "ci/setup.sh",
     "install": "ci/install.sh",
-    "key": ["bun.lock", "package.json"]
+    "key": ["bun.lock", "package.json", "lean/lean-toolchain"]
   },
   "pool": 8,
   "size": "auto",

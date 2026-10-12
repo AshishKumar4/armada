@@ -15,13 +15,14 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install
 python3 -m venv /opt/armada-python
 /opt/armada-python/bin/pip install -q 'mypy==1.18.1' 'ruff==0.14.3'
 
-# elan + the pinned Lean toolchain for the proofs row (ci/proofs.sh), installed
-# under the task user's ~/.elan so the shims resolve without PATH or env work.
+# elan for the proofs row (ci/proofs.sh), under the task user's ~/.elan so the
+# shims resolve without PATH or env work. The toolchain is the checkout's own,
+# lean/lean-toolchain, which ci/install.sh installs.
 ELAN_VERSION=4.2.4
 ELAN_SHA256=42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
 curl -fsSL -o /tmp/elan.tar.gz "https://github.com/leanprover/elan/releases/download/v${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz"
 echo "${ELAN_SHA256}  /tmp/elan.tar.gz" | sha256sum -c
 tar xzf /tmp/elan.tar.gz -C /tmp
-ELAN_HOME=/home/ci/.elan /tmp/elan-init -y --no-modify-path --default-toolchain leanprover/lean4:v4.34.1
+ELAN_HOME=/home/ci/.elan /tmp/elan-init -y --no-modify-path --default-toolchain none
 chown -R ci: /home/ci/.elan
 rm -f /tmp/elan.tar.gz /tmp/elan-init
