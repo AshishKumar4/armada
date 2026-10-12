@@ -7,7 +7,7 @@ import { argvOf, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } fr
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
-import { runKey } from '../src/env';
+import { bundleKey, runKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
 
 
@@ -47,10 +47,12 @@ interface Run {
   readonly packed?: boolean;
   readonly gang?: Gang;
   readonly startAllowed?: boolean;
+  /** For a pushed task: what reading its runner's answer marker gives. */
+  readonly marker?: { readonly exitCode: number; readonly stdout: string } | Error;
 }
 
 /** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
-async function run(lost: number, { argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true }: Run = {}) {
+async function run(lost: number, { argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   const execs: (readonly string[])[] = [];
@@ -75,6 +77,8 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
     if (argv[0] === 'stat') return { exitCode: 0, stdout: '0' };
 
     if (argv[0] === 'cat' && argv[1] === '/armada/task/artifacts.tar.gz') return { exitCode: 0, stdout: '', bytes: ARCHIVE };
+
+    if (argv[0] === 'head' && argv[3] === '/armada/task/answer') return marker ?? { exitCode: 1, stdout: '' };
 
     if (argv[0] === 'cat') return { exitCode: 0, stdout: argv[1] === '/armada/task/out' ? out ?? '' : '' };
 
@@ -101,10 +105,11 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
     vesselFailed: async (_name: string, error: string) => { failed.push(error); },
   };
 
-  const artifacts = bucket();
+  // A pushed task's bundle, which its container takes in at boot.
+  const artifacts = bucket(new Map(marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};']]));
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
 
-  await vessel.begin({ ...spec, output: out !== undefined });
+  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64) });
 
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
   // storage.
@@ -164,6 +169,16 @@ describe('a finished task', () => {
 
     expect([measured, killed, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds, outcome.oomKilled ?? false]))
       .toEqual([[0, 734003200, 2.5, false], [0, 12884901888, 9, true], [0, undefined, undefined, false]]);
+  });
+});
+
+describe('a pushed task\'s answer', () => {
+  test('is the body\'s value or its command\'s, as its runner wrote; none where it wrote none; and a marker the platform lost loses the run', async () => {
+    const said = await Promise.all([{ exitCode: 0, stdout: 'value\n' }, { exitCode: 0, stdout: 'command\n' }, { exitCode: 1, stdout: '' }, new Error('Network connection lost.')]
+      .map(async (marker) => await run(0, { marker })));
+
+    expect(said.map(({ completed, failed }) => [completed.map((outcome) => outcome.answer ?? null), failed.length > 0]))
+      .toEqual([[['value'], false], [['command'], false], [[null], false], [[], true]]);
   });
 });
 

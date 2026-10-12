@@ -567,8 +567,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
-    // A pushed task's runner says whether its out file is the body's envelope or its command's answer.
-    const marker = spec.bundle === null ? '' : (await this.optional(container, 'answer', ['head', '-c', '256', `${dir}/answer`]) ?? '').trim();
+    // A pushed task's runner says whether its out file is the body's envelope or its command's answer; a runner that
+    // ended before it said leaves no file. The answer is no measurement: a read the platform lost loses the run.
+    const marker = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS })).stdout.trim();
     const [kind = '', error] = marker.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
 
@@ -587,7 +588,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** What a command printed, or null, said in the log, when it could not run: for what a task's outcome reads but
-   *  never fails over, its usage and its answer's marker. */
+   *  never fails over, its usage. */
   private async optional(container: Container, what: string, argv: readonly string[]): Promise<string | null> {
     try {
       return (await run(container, [...argv], { ms: EXEC_MS })).stdout;
