@@ -1048,6 +1048,14 @@ describe('armada run', () => {
       .toEqual({ exit: 2, graded: 'not graded', jobs: 1, passed: true, report: true });
   });
 
+  test('a task cut off before its verdict makes its rows red, also rows that declare files (#36)', async () => {
+    const rows = [{ name: 'unit-a', files: ['a.test.ts'] }, 'unit-b'];
+    const ran = await run([], { include: [{ name: 'unit', rows }] }, null, { taskExit: 124 });
+
+    expect({ exit: ran.exit, graded: ran.stdout.includes('NOT GRADED') ? 'not graded' : 'graded', red: ['unit-a', 'unit-b'].every((row) => ran.stdout.includes(`RED  ${row}`)) })
+      .toEqual({ exit: 1, graded: 'graded', red: true });
+  });
+
   test('a task gets the deployment secrets its config names, and the plan gets none', async () => {
     const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { taskConfig: { secrets: ['CACHE_TOKEN'] } });
     const secrets = ran.bodies.map((body) => v.parse(v.object({ secrets: v.optional(v.array(v.string())) }), body).secrets ?? []);
