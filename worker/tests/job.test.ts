@@ -509,6 +509,17 @@ describe('a copy\'s stop said again', () => {
     expect({ copy: copy === null || 'waitMs' in copy ? null : [copy.attempt, copy.duplicate], heard: await open.accept('v2', 0, 1, { slot: 1, attempt: 2 }) })
       .toEqual({ copy: [2, true], heard: true });
   });
+
+  test('stops the copy an earlier Worker started, which has no slot recorded', async () => {
+    const { job: open, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast', hedge: 1 });
+
+    await open.claim('v1');
+    await open.claim('v2');
+    stored.ctx.storage.sql.exec('UPDATE tasks SET dup_slot = NULL');
+    await open.stopped('v2', 0, { slot: 0, attempt: 1 });
+
+    expect((await open.status())?.running?.map((run) => run.vessel)).toEqual(['v1']);
+  });
 });
 
 describe('a vessel\'s watchdog', () => {

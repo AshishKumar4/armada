@@ -847,7 +847,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = this.sql.exec<{ dup: string | null; dup_slot: number | null; attempts: number }>('SELECT dup, dup_slot, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
 
     // Only the copy running now: a word of a run before it, said again by its vessel restarted, stops it not.
-    if (task?.dup !== name || (run !== undefined && (run.attempt !== task.attempts || run.slot !== task.dup_slot))) return;
+    // A copy an earlier Worker started has no slot recorded: it ran in slot 0, as `still` reads it.
+    if (task?.dup !== name || (run !== undefined && (run.attempt !== task.attempts || run.slot !== (task.dup_slot ?? 0)))) return;
     this.sql.exec('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE idx = ?', index);
     await this.release(index);
     await this.settle();
