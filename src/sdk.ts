@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Boot, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, PACKER, PROTOCOL, PROTOCOL_HEADER, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -55,6 +55,12 @@ export function connect(): Armada {
   if (!existsSync(file)) throw new Error(named === undefined ? 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN' : `no connection file at ${file}`);
 
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
+}
+
+/** `env` without what `connect` reaches a deployment by, its bearer or a file holding one: the environment for code
+ *  armada runs that is not its own, such as a commit's local plan (#33). */
+export function unconnected(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).flatMap(([name, value]) => value === undefined || name === 'ARMADA_TOKEN' || name === 'ARMADA_CONNECTION' ? [] : [[name, value]]));
 }
 
 /** A failed response in one line: the Worker's own error, or the status and the title or first line of any other page,
@@ -171,11 +177,12 @@ export class Armada {
     return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe }));
   }
 
-  /** Stores a commit's pack once, under this client's `PACKER`; `pack` is called only when the runner lacks it. One
-   *  larger than a request may carry goes in parts of PACK_PART bytes, and an upload that fails is aborted, so its
-   *  parts don't stay in the bucket; the bucket's lifecycle aborts what a client that died left. */
-  async uploadPack(project: string, sha: string, base: string, pack: () => Blob): Promise<number | null> {
-    const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}`;
+  /** Stores a commit's pack once, under this client's `PACKER` and its shallow boundary (`CommitSchema`); `pack` is
+   *  called only when the runner lacks it. One larger than a request may carry goes in parts of PACK_PART bytes, and an
+   *  upload that fails is aborted, so its parts don't stay in the bucket; the bucket's lifecycle aborts what a client
+   *  that died left. */
+  async uploadPack(project: string, { sha, base, shallow = [] }: Pick<Commit, 'sha' | 'base' | 'shallow'>, pack: () => Blob): Promise<number | null> {
+    const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}${shallow.length === 0 ? '' : `&shallow=${shallow.join(',')}`}`;
 
     if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
     const body = pack();

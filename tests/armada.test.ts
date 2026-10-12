@@ -3,7 +3,8 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { extractTar, lanesFor, manifestOf, packBase, packOf, poolFor, remainingDeadline } from '../src/ci';
+import { extractTar, lanesFor, poolFor, remainingDeadline } from '../src/ci';
+import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { fileTimings, grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { environmentKey, JsonSchema, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Json, type Outcome, type Recipe } from '../src/protocol';
@@ -366,9 +367,9 @@ describe('uploading a pack', () => {
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
-      expect(await armada.uploadPack('app', 'a'.repeat(40), 'root', () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
+      expect(await armada.uploadPack('app', { sha: 'a'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
       expect(seen.splice(0)).toEqual(['HEAD root?packer=2', 'PUT root?packer=2']);
-      expect(await armada.uploadPack('app', 'b'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
+      expect(await armada.uploadPack('app', { sha: 'b'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
       expect(seen).toEqual([
         'HEAD root?packer=2', 'POST root?packer=2&uploads', 'PUT root?packer=2&upload=u1&part=1', 'PUT root?packer=2&upload=u1&part=2',
         'PUT root?packer=2&upload=u1&part=3', 'POST root?packer=2&upload=u1',
@@ -402,7 +403,7 @@ describe('uploading a pack', () => {
       let failed = '';
 
       try {
-        await armada.uploadPack('app', 'c'.repeat(40), 'root', () => new Blob([new Uint8Array(2 * PACK_PART + 5)]));
+        await armada.uploadPack('app', { sha: 'c'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(2 * PACK_PART + 5)]));
       } catch (cause) {
         failed = errorOf({ cause }).message;
       }
@@ -933,15 +934,22 @@ describe('armada run', () => {
     const ran = await run([], plan, {}, { ...environments, config: { ...environments.config, pool: 6 }, taskConfig: { command: ['task', '{name}', '{index}'], verdict: false }, exitOf });
     const report = reportOf(ran.report);
 
-    expect({ exit: ran.exit, jobs: taskJobs(ran.bodies), rows: report.verdicts.rows.map(({ name, exitCode }) => [name, exitCode]), each: report.jobs?.map(({ environment, job }) => [environment, job]) }).toEqual({
+    // The jobs are made at once, so the runner may get them in any order: each is told by its environment's install.
+    const byInstall = Object.fromEntries(taskJobs(ran.bodies).map(({ install, argv, pool }) => [install, { argv, pool }]));
+
+    expect({
+      exit: ran.exit, jobs: byInstall, rows: report.verdicts.rows.map(({ name, exitCode }) => [name, exitCode]),
+      each: report.jobs?.map(({ environment }) => environment), ids: report.jobs?.map(({ job }) => job).toSorted((left, right) => left.localeCompare(right)),
+    }).toEqual({
       exit: 1,
-      jobs: [
-        { install: 'echo project', argv: [['task', 'a', '0']], pool: 1 },
-        { install: 'echo 3.14', argv: [['task', 'b', '1'], ['task', 'red', '2']], pool: 2 },
-        { install: 'echo 3.12', argv: [['task', 'd', '3']], pool: 1 },
-      ],
+      jobs: {
+        'echo project': { argv: [['task', 'a', '0']], pool: 1 },
+        'echo 3.14': { argv: [['task', 'b', '1'], ['task', 'red', '2']], pool: 2 },
+        'echo 3.12': { argv: [['task', 'd', '3']], pool: 1 },
+      },
       rows: [['a', 0], ['b', 0], ['red', 1], ['d', 0]],
-      each: [['', 'tasks'], ['py314', 'tasks-2'], ['py312', 'tasks-3']],
+      each: ['', 'py314', 'py312'],
+      ids: ['tasks', 'tasks-2', 'tasks-3'],
     });
   });
 
@@ -953,7 +961,7 @@ describe('armada run', () => {
     const wide = await run([], { include: [{ name: 'a' }, { name: 'g', environment: 'py314', gang: 6 }] }, {}, { ...environments, config: { ...environments.config, pool: 4 }, taskConfig: { verdict: false }, exitOf });
     const said = [crowded, wide].map((ran) => reportOf(ran.report).problems.find((problem) => problem.includes('containers')) ?? '');
 
-    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool)], refused: [crowded, wide].map((ran) => [ran.exit, taskJobs(ran.bodies).length, reportOf(ran.report).graded]), need: said.map((problem) => /need (\d+) containers/u.exec(problem)?.[1]) })
+    expect({ gang: [gang.exit, taskJobs(gang.bodies).map(({ pool }) => pool).toSorted((left, right) => left - right)], refused: [crowded, wide].map((ran) => [ran.exit, taskJobs(ran.bodies).length, reportOf(ran.report).graded]), need: said.map((problem) => /need (\d+) containers/u.exec(problem)?.[1]) })
       .toEqual({ gang: [0, [1, 6]], refused: [[2, 0, 'not graded'], [2, 0, 'not graded']], need: ['3', '7'] });
   });
 
@@ -1033,6 +1041,23 @@ describe('armada run', () => {
       .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true } });
   });
 
+  test('a CI deadline passed before the task jobs could start leaves the run ungraded, with its report and its --json object (#37)', async () => {
+    // The plan job ends green, but its answer comes 1.5 s in, past the run's 1 s.
+    const ran = await run(['--deadline=1', '--json'], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planDelayMs: 1500 });
+    const result = v.parse(v.looseObject({ graded: v.string(), report: v.string(), problems: v.array(v.string()) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, graded: result.graded, jobs: ran.bodies.length, passed: result.problems.some((problem) => problem.includes('before its task jobs could start')), report: result.report.endsWith('.json') })
+      .toEqual({ exit: 2, graded: 'not graded', jobs: 1, passed: true, report: true });
+  });
+
+  test('a task cut off before its verdict makes its rows red, also rows that declare files (#36)', async () => {
+    const rows = [{ name: 'unit-a', files: ['a.test.ts'] }, 'unit-b'];
+    const ran = await run([], { include: [{ name: 'unit', rows }] }, null, { taskExit: 124 });
+
+    expect({ exit: ran.exit, graded: ran.stdout.includes('NOT GRADED') ? 'not graded' : 'graded', red: ['unit-a', 'unit-b'].every((row) => ran.stdout.includes(`RED  ${row}`)) })
+      .toEqual({ exit: 1, graded: 'graded', red: true });
+  });
+
   test('a task gets the deployment secrets its config names, and the plan gets none', async () => {
     const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { taskConfig: { secrets: ['CACHE_TOKEN'] } });
     const secrets = ran.bodies.map((body) => v.parse(v.object({ secrets: v.optional(v.array(v.string())) }), body).secrets ?? []);
@@ -1040,10 +1065,11 @@ describe('armada run', () => {
     expect({ exit: ran.exit, secrets }).toEqual({ exit: 0, secrets: [[], ['CACHE_TOKEN']] });
   });
 
-  test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job', async () => {
+  test('a local plan runs in the checkout of the commit, with its target and timings filled, no plan job, and no bearer', async () => {
     const printed = JSON.stringify({ include: [{ name: 'a', rows: ['x'] }] });
-    // The plan checks what it was given: the timings file the runner answered, and the default target.
-    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
+    // The plan checks what it was given: the timings file the runner answered, and the default target; and that the
+    // deployment's bearer the CLI holds is not among it, since a plan is the commit's own code (#33).
+    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && [ -z "\${ARMADA_TOKEN:-}" ] && echo '${printed}'`, 'plan', '{timings}', '{target}'];
     const ran = await run([], null, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planConfig: { command, local: true } });
 
     expect({ exit: ran.exit, jobs: ran.commands.length, task: ran.commands[0]?.slice(-2), here: ran.stdout.includes('plan run here') })
@@ -1162,7 +1188,7 @@ describe('a CI deadline', () => {
       setSystemTime(began + 300_000);
       expect(remainingDeadline(began + 1800_000)).toBe(1500);
       setSystemTime(began + 1800_000);
-      expect(() => remainingDeadline(began + 1800_000)).toThrow('CiDeadlineExceeded');
+      expect(remainingDeadline(began + 1800_000)).toBe(null);
     } finally {
       setSystemTime();
     }

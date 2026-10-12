@@ -6,23 +6,41 @@ import { bucket, namespace, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
 
+const SHA = 'a'.repeat(40);
+
+/** A deployment whose bucket holds `objects`, asked as the CLI asks it: a request's status, and a job of `SHA` on a
+ *  repository of `history`, packed under `packer` with `shallow` as its boundary. */
+function deployment(history: 'full' | 'commit', objects = new Map<string, string>()) {
+  const stored = bucket(objects);
+  const env = world({ ARTIFACTS: stored, ARMADA_TOKEN: TOKEN, JOB: namespace(() => ({ create: async () => undefined })) });
+  const call = async (method: string, path: string, body?: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env)).status;
+
+  const job = async ({ packer, shallow }: { readonly packer?: number; readonly shallow?: string[] } = {}) => await call('POST', '/jobs', JSON.stringify(v.parse(JobSpecSchema, {
+    recipe: { repo: { project: 'proj', checkout: '/home/ci/work', history, manifest: [] } }, commit: { sha: SHA, base: 'root', packer, shallow }, items: [{ item: 1, argv: ['true'] }], run: { kind: 'command' },
+  })));
+
+  return { stored, call, job };
+}
+
 describe('a commit\'s pack', () => {
   test('is kept under its packer: an earlier client finds its own, and this client never takes one an earlier client made', async () => {
-    const sha = 'a'.repeat(40);
-    const stored = bucket(new Map([[`packs/proj/${sha}.root.pack`, 'an earlier client\'s pack']]));
-    const env = world({ ARTIFACTS: stored, ARMADA_TOKEN: TOKEN, JOB: namespace(() => ({ create: async () => undefined })) });
-    const call = async (method: string, path: string, body?: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env)).status;
+    const { stored, call, job } = deployment('commit', new Map([[`packs/proj/${SHA}.root.pack`, 'an earlier client\'s pack']]));
+    const before = { earlier: await call('HEAD', `/packs/proj/${SHA}/root`), current: await call('HEAD', `/packs/proj/${SHA}/root?packer=2`), job: await job({ packer: 2 }) };
+    const put = await call('PUT', `/packs/proj/${SHA}/root?packer=2`, 'this client\'s pack');
 
-    const job = async (packer?: number) => await call('POST', '/jobs', JSON.stringify(v.parse(JobSpecSchema, {
-      recipe: { repo: { project: 'proj', checkout: '/home/ci/work', history: 'commit', manifest: [] } }, commit: { sha, base: 'root', packer }, items: [{ item: 1, argv: ['true'] }], run: { kind: 'command' },
-    })));
-
-    const before = { earlier: await call('HEAD', `/packs/proj/${sha}/root`), current: await call('HEAD', `/packs/proj/${sha}/root?packer=2`), job: await job(2) };
-    const put = await call('PUT', `/packs/proj/${sha}/root?packer=2`, 'this client\'s pack');
-
-    expect({ before, put, after: await job(2), earlierJob: await job(), keys: [...stored.objects.keys()].sort() }).toEqual({
+    expect({ before, put, after: await job({ packer: 2 }), earlierJob: await job(), keys: [...stored.objects.keys()].sort() }).toEqual({
       before: { earlier: 200, current: 404, job: 409 }, put: 200, after: 200, earlierJob: 200,
-      keys: [`packs/proj/${sha}.root.p2.pack`, `packs/proj/${sha}.root.pack`],
+      keys: [`packs/proj/${SHA}.root.p2.pack`, `packs/proj/${SHA}.root.pack`],
     });
+  });
+
+  test('is kept under its shallow boundary, so a shallow clone\'s pack is never taken for one with more history (#34)', async () => {
+    const edge = 'b'.repeat(40);
+    const { call, job } = deployment('full');
+    const put = await call('PUT', `/packs/proj/${SHA}/root?packer=2&shallow=${edge}`, 'a depth-1 clone\'s pack');
+    const held = { full: await call('HEAD', `/packs/proj/${SHA}/root?packer=2`), shallow: await call('HEAD', `/packs/proj/${SHA}/root?packer=2&shallow=${edge}`) };
+
+    expect({ put, held, jobs: { full: await job({ packer: 2 }), shallow: await job({ packer: 2, shallow: [edge] }) } })
+      .toEqual({ put: 200, held: { full: 404, shallow: 200 }, jobs: { full: 409, shallow: 200 } });
   });
 });

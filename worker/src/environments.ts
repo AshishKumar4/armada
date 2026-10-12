@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
+import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { packKey, said, SINGLE, type Env } from './env';
@@ -52,17 +52,20 @@ export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>
 }
 
 export class ArmadaEnvironments extends DurableObject<Env> {
-  /** What a client packs a commit against: the environment's commit once there is one, else the root. */
-  async base(key: string): Promise<string> {
+  /** What a client packs a commit of `history` against: the environment's commit once there is one, else the root. A
+   *  shallow environment holds nothing before its commit's boundary, so a pack of `full` history, which leaves out all
+   *  its base's history holds, goes from the root (#34). */
+  async base(key: string, history: 'full' | 'commit'): Promise<string> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+    const of = (sha: string | null, shallow: boolean) => sha === null || (shallow && history === 'full') ? 'root' : sha;
 
-    if (entry?.state === 'ready') return entry.generation.sha ?? 'root';
+    if (entry?.state === 'ready') return of(entry.generation.sha, entry.generation.shallow);
 
-    return preparing(entry, Date.now()) ? entry.sha ?? 'root' : 'root';
+    return preparing(entry, Date.now()) ? of(entry.sha, entry.shallow) : 'root';
   }
 
   /** The key's environment, or its preparation begun; a repository recipe prepares only from a `root` pack. */
-  async ensure(key: string, recipe: Recipe, commit: { readonly sha: string; readonly base: string; readonly packer?: number } | null, now = Date.now()): Promise<Readiness> {
+  async ensure(key: string, recipe: Recipe, commit: Commit | null, now = Date.now()): Promise<Readiness> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     if (entry?.state === 'ready') {
@@ -76,10 +79,12 @@ export class ArmadaEnvironments extends DurableObject<Env> {
     if (entry?.state === 'failed' && now - entry.at < FAILURE_HOLD_MS) return { kind: 'failed', reason: entry.reason };
 
     if (recipe.repo !== undefined && commit?.base !== 'root') return { kind: 'failed', reason: 'the environment this job was packed against is gone; run again, which packs from the root' };
-    await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: commit?.sha ?? null, since: now } satisfies Entry);
+    const shallow = recipe.repo !== undefined && commit !== null && boundaryOf(commit, recipe.repo.history).length > 0;
+
+    await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: commit?.sha ?? null, shallow, since: now } satisfies Entry);
     // Each attempt on its own object: one key's preparer refused every standard-4 start for 20 minutes while a new
     // object on the same account started one at once.
-    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, { recipe, sha: commit?.sha ?? null, packer: commit?.packer });
+    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow });
 
     return { kind: 'preparing', since: now };
   }
@@ -335,8 +340,10 @@ interface Preparation {
   readonly since: number;
   readonly recipe: Recipe;
   readonly sha: string | null;
-  /** The packer of the commit's pack: absent for an earlier client's. */
+  /** The packer of the commit's pack, and the shallow boundary its client sent (`CommitSchema`): absent for an earlier
+   *  client's. */
   readonly packer?: number;
+  readonly shallow?: readonly string[];
   readonly phase: Phase;
   /** When the phase's command was given its inputs; absent until then. */
   readonly started?: number;
@@ -389,8 +396,8 @@ interface Command {
 }
 
 export class ArmadaPreparer extends DurableObject<Env> {
-  async begin(key: string, since: number, { recipe, sha, packer }: { readonly recipe: Recipe; readonly sha: string | null; readonly packer?: number | undefined }): Promise<void> {
-    await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
+  async begin(key: string, since: number, { recipe, sha, packer, shallow }: Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow'>): Promise<void> {
+    await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, shallow, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
     await this.ctx.storage.setAlarm(Date.now());
   }
 
@@ -452,9 +459,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
         const { sha } = preparation;
 
         return repo === undefined || sha === null ? {} : await this.command(preparation, {
-          doing: 'the checkout', asUser: true, env, cwd: workdir, argv: ['/bin/sh', '-c', receive(workdir, repo.history), 'receive', sha],
+          doing: 'the checkout', asUser: true, env, cwd: workdir, argv: ['/bin/sh', '-c', receive(workdir), 'receive', sha, ...boundaryOf({ sha, shallow: preparation.shallow }, repo.history)],
           inputs: async () => {
-            const pack = await this.env.ARTIFACTS.get(packKey(repo.project, sha, 'root', preparation.packer));
+            const pack = await this.env.ARTIFACTS.get(await packKey(repo.project, { sha, base: 'root', packer: preparation.packer, shallow: preparation.shallow }));
 
             if (pack === null) throw new Error(`the pack of ${sha} is not in R2`);
             await pipeIn(container, pack.body, `${STATE}/pack`);
@@ -576,7 +583,10 @@ export class ArmadaPreparer extends DurableObject<Env> {
   private async done(preparation: Preparation): Promise<void> {
     if (preparation.snapshot === null) throw new Error('a finished preparation has no snapshot');
     await this.ctx.storage.delete('preparation');
-    await this.env.ENVIRONMENTS.getByName(SINGLE).prepared({ key: preparation.key, snapshot: preparation.snapshot, sha: preparation.sha, created: Date.now(), seconds: preparation.seconds });
+    const { recipe: { repo }, sha } = preparation;
+    const shallow = repo !== undefined && sha !== null && boundaryOf({ sha, shallow: preparation.shallow }, repo.history).length > 0;
+
+    await this.env.ENVIRONMENTS.getByName(SINGLE).prepared({ key: preparation.key, snapshot: preparation.snapshot, sha, shallow, created: Date.now(), seconds: preparation.seconds });
   }
 
   private container(): Container {

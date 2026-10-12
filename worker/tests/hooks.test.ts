@@ -1,7 +1,7 @@
 /** The GitHub webhook's checks: its signature gate, the event filter, the two dedupes, and the driver job's spec —
  *  exercised through `webhooked` with the DO's own methods on in-memory storage. */
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import worker from '../src/worker';
@@ -233,21 +233,18 @@ describe('the github webhook', () => {
     expect(JSON.stringify(spec.env)).not.toContain(TOKEN);
     expect(JSON.stringify(spec)).not.toContain('gh-token-value');
     expect(spec.env['ARMADA_GITHUB_SECRET']).toBe('GITHUB_TOKEN');
-    // The environment is bun alone, checked by its digest, and the same for every deployed commit: a redeploy takes
-    // no new snapshot. The driver fetches armada at the deployed commit when it runs.
-    expect(spec.recipe.setup).toContain('sha256sum -c');
+    // The environment is the same for every deployed commit: a redeploy takes no new snapshot. The driver fetches
+    // armada at the deployed commit when it runs (`the driver script`).
     expect(v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'c'.repeat(40) }, CONFIG)).recipe).toEqual(spec.recipe);
     expect(spec.env['ARMADA_DEPLOYED']).toBe('b'.repeat(40));
-    const script = spec.items[0]?.argv?.[2] ?? '';
-    expect(script).toContain('"$ARMADA_DEPLOYED"');
-    expect(script).toContain('src/cli.ts" run "$ARMADA_COMMIT" --json');
-    expect(script).not.toContain('bun.sh/install');
   });
 });
 
 describe('the driver script', () => {
-  /** The driver against stub tools: curl answers each status post `posted`, git does nothing, and `armada run` (bun on
-   *  the CLI) exits `ran`. The driver's exit, and each status it posted. */
+  /** The driver against stub tools: curl answers each status post `posted`, git does nothing but leave the commit's
+   *  `bunfig.toml` in the checkout, and `armada run` (bun on the CLI) exits `ran`. The driver's exit, each status it
+   *  posted, and, for each bun it ran but the install, which it was, where it started, the GitHub token it held, and
+   *  whether that directory had the commit's bunfig.toml. */
   function drive(ran: number, posted: number) {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-driver-'));
     const bin = join(scratch, 'bin');
@@ -255,8 +252,16 @@ describe('the driver script', () => {
 
     mkdirSync(bin);
     writeFileSync(join(bin, 'curl'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/posted\nprintf '${String(posted)}'\n`);
-    writeFileSync(join(bin, 'git'), '#!/bin/sh\nexit 0\n');
-    writeFileSync(join(bin, 'bun'), `#!/bin/sh\ncase "$1" in -e) echo '6 of 6 rows green'; exit 0 ;; install) exit 0 ;; esac\nexit ${String(ran)}\n`);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${scratch}/git\n`);
+    writeFileSync(join(bin, 'bun'), `#!/bin/sh
+case "$1" in install) exit 0 ;; -e) kind=count ;; *) kind=cli ;; esac
+printf '%s %s %s %s\\n' "$kind" "$(pwd)" "\${GITHUB_TOKEN:-none}" "$([ -f bunfig.toml ] && echo bunfig || echo clean)" >> ${scratch}/bun
+case "$1" in -e) echo '6 of 6 rows green'; exit 0 ;; esac
+exit ${String(ran)}
+`);
+    // What a commit under test may hold: a preload bun runs where it starts.
+    mkdirSync(join(scratch, 'repo'));
+    writeFileSync(join(scratch, 'repo', 'bunfig.toml'), 'preload = ["./x.ts"]\n');
 
     for (const tool of ['curl', 'git', 'bun']) chmodSync(join(bin, tool), 0o755);
 
@@ -268,19 +273,30 @@ describe('the driver script', () => {
 
       const exit = Bun.spawnSync(['/bin/sh', '-c', script], { env, stdout: 'pipe', stderr: 'pipe' }).exitCode;
       const states = readFileSync(join(scratch, 'posted'), 'utf8').match(/"state":"\w+"/gu) ?? [];
+      const buns = readFileSync(join(scratch, 'bun'), 'utf8').trim().split('\n').map((line) => line.replaceAll(scratch, '~').split(' '));
+      // Each commit it fetched, and from where.
+      const fetched = readFileSync(join(scratch, 'git'), 'utf8').split('\n').flatMap((line) => /fetch -q (?:--depth 1 )?(\S+) (\S+)/u.exec(line)?.slice(1) ?? []);
 
-      return { exit, states };
+      return { exit, states, buns, fetched, verdict: existsSync(join(scratch, 'repo', 'verdict.json')) ? 'in the checkout' : 'outside it' };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
   }
 
   test('exits as armada run did, whatever GitHub answered its status posts', () => {
-    expect([drive(0, 201), drive(1, 201), drive(0, 500)]).toEqual([
+    expect([drive(0, 201), drive(1, 201), drive(0, 500)].map(({ exit, states }) => ({ exit, states }))).toEqual([
       { exit: 0, states: ['"state":"pending"', '"state":"success"'] },
       { exit: 1, states: ['"state":"pending"', '"state":"failure"'] },
       { exit: 0, states: ['"state":"pending"', '"state":"success"'] },
     ]);
+  });
+
+  test('fetches armada at the deployed commit and the commit under test, and runs none of its code where its credentials are (#33)', () => {
+    expect(drive(0, 201)).toMatchObject({
+      fetched: ['https://github.com/AshishKumar4/armada.git', 'b'.repeat(40), 'https://github.com/owner/armada.git', SHA],
+      buns: [['cli', '~/run', 'none', 'clean'], ['count', '~/run', 'gh', 'clean']],
+      verdict: 'outside it',
+    });
   });
 });
 

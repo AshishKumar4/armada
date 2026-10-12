@@ -109,7 +109,7 @@ export interface MapOptions {
   readonly mode?: Mode;
   /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
   readonly deadline?: number;
-  /** The limit for a gang to gather and launch all its ranks, in seconds. Default 300. */
+  /** The limit for a formed gang to launch all its ranks, once every one has a container, in seconds. Default 300. */
   readonly gangStartTimeout?: number;
   readonly label?: string;
   readonly env?: Readonly<Record<string, string>>;

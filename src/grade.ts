@@ -171,7 +171,9 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
   return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0) };
 }
 
-/** A task whose plan entry names its rows reported exactly those, each with exactly its declared files' timings. */
+/** A task whose plan entry names its rows reported exactly those, and each green one exactly its declared files'
+ *  timings: a green row timing fewer may have skipped some. A red row is red whatever it timed, such as each row a task
+ *  cut off before its verdict is given (`underExit`, #36). */
 function coverage(answer: TaskAnswer, flag: Flag): void {
   const expected = answer.entry.rows;
 
@@ -190,7 +192,7 @@ function coverage(answer: TaskAnswer, flag: Flag): void {
     reported.delete(name);
     const timed = Object.keys(row.timings ?? {});
 
-    if (files !== undefined && (timed.length !== files.length || files.some((file) => !timed.includes(file)))) {
+    if (row.exitCode === 0 && files !== undefined && (timed.length !== files.length || files.some((file) => !timed.includes(file)))) {
       flag(`${answer.name}: ${name} timed ${String(timed.length)} of its ${String(files.length)} files`, row);
     }
   }

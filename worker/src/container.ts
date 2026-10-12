@@ -135,16 +135,27 @@ rm -rf /var/lib/apt/lists/*`;
  *  argv a launch sources as root, the mask file. */
 export const OWN_STATE = `chown root:root ${STATE} && chmod 755 ${STATE}`;
 
-/** As the user: the pack at /armada/pack into the checkout's repository (a new one while preparing), then the commit
+/** As the user: the pack at /armada/pack into the checkout's repository (a new one while preparing), then its boundary,
+ *  the arguments after the commit, marked shallow, and of what was marked before only the commits still lacking a
+ *  parent, which a later pack may have brought: so git walks exactly what the repository holds (#34). Then the commit
  *  checked out on a local branch, as a GitHub runner's checkout leaves it, and clean. */
-export function receive(checkout: string, history: 'full' | 'commit'): string {
+export function receive(checkout: string): string {
   return String.raw`set -eu
 sha="$1"
+shift
 cd ${checkout}
 [ -d .git ] || git init -q .
 git index-pack --stdin < ${STATE}/pack >/dev/null
 rm -f ${STATE}/pack
-${history === 'commit' ? 'echo "$sha" >> .git/shallow' : ':'}
+for boundary in "$@"; do echo "$boundary" >> .git/shallow; done
+if [ -f .git/shallow ]; then
+  sort -u .git/shallow | while read -r commit; do
+    git cat-file -p "$commit" | sed -n 's/^parent //p' | while read -r parent; do
+      git cat-file -e "$parent" 2>/dev/null || { echo "$commit"; break; }
+    done
+  done > .git/shallow.held
+  if [ -s .git/shallow.held ]; then mv .git/shallow.held .git/shallow; else rm -f .git/shallow.held .git/shallow; fi
+fi
 git checkout -q -f -B armada "$sha"
 dirty="$(git status --porcelain)"
 if [ -n "$dirty" ]; then printf 'the checkout of %s is not clean:\n%s\n' "$sha" "$dirty" >&2; exit 1; fi`;

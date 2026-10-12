@@ -8,6 +8,7 @@
  * manifest by digest. The catalog pages its names 1000 at a time across every repository, tags and digests alike.
  */
 import * as v from 'valibot';
+import { sha256 } from './protocol';
 
 const Minted = v.object({
   success: v.boolean(),
@@ -20,10 +21,6 @@ const Manifest = v.pipe(v.string(), v.parseJson(), v.object({ annotations: v.opt
 const Catalog = v.object({ repositories: v.record(v.string(), v.nullable(v.array(v.string()))) });
 
 const ACCEPT = 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json';
-
-/** WebCrypto, which both Bun and the Workers runtime have. */
-const sha256 = async (value: string): Promise<string> =>
-  [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 
 /** `user:password` for the account's registry, valid `minutes`, minted with `token`: an API token that may edit
  *  Containers, or wrangler's own login. */

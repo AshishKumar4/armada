@@ -6,15 +6,16 @@
  * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the green rows' timings
  * stored on the runner. Exits 0 when every planned row ran once and passed, 1 when one was red, 2 when not graded.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config, type Environment } from './config';
+import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
+import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { listSchedule } from './dispatch';
 import { expectedOf, fileTimings, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Manifest, type Size, type Timings } from './protocol';
-import { describeBoots, type Armada, type Summary } from './sdk';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { describeBoots, unconnected, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
 const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
@@ -23,37 +24,6 @@ const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
 const TAIL_LINES = 60;
 
 const TIMINGS_FILE = 'timings.json';
-
-/** This process's environment without GIT_DIR and its like, which a hook that runs armada sets for its own repo. */
-const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
-
-/** Git in `cwd`'s repository. */
-function git(cwd: string, args: readonly string[], stdin?: Uint8Array): Buffer {
-  const ran = Bun.spawnSync(['git', ...args], { cwd, env: GIT_ENV, stdin: stdin ?? 'ignore', stdout: 'pipe', stderr: 'pipe' });
-
-  if (ran.exitCode !== 0) throw new Error(`git ${args.join(' ')}: ${ran.stderr.toString().trim()}`);
-
-  return ran.stdout;
-}
-
-interface Commit {
-  readonly sha: string;
-  /** A repository holding it, to read and pack it from. */
-  readonly repo: string;
-}
-
-/** The commit a target names; a worktree must be committed, since the commit is what is proved. */
-function resolveCommit(target: string): Commit {
-  if (existsSync(target) && statSync(target).isDirectory()) {
-    const dirty = git(target, ['status', '--porcelain']).toString().trim();
-
-    if (dirty !== '') throw new Error(`${target} has uncommitted changes; armada proves a commit, so commit them first:\n${dirty}`);
-
-    return { sha: git(target, ['rev-parse', 'HEAD']).toString().trim(), repo: target };
-  }
-
-  return { sha: git(process.cwd(), ['rev-parse', '--verify', `${target}^{commit}`]).toString().trim(), repo: process.cwd() };
-}
 
 /** A plan run on this machine: the checkout and commit it runs in, its command, the run's target and timings, and the
  *  config's env. */
@@ -67,18 +37,21 @@ interface LocalPlan {
   readonly deadlineAt?: number;
 }
 
-/** Each job gets only what remains of the CI run's deadline: a slow plan must not reset the task job's clock. */
-export function remainingDeadline(deadlineAt: number): number {
+/** Each job gets only what remains of the CI run's deadline, in whole seconds: a slow plan must not reset the task
+ *  job's clock. Null once it has passed, when no job may start, and the run is ungraded (#37). */
+export function remainingDeadline(deadlineAt: number): number | null {
   const remaining = Math.ceil((deadlineAt - Date.now()) / 1000);
 
-  if (remaining <= 0) throw new Error('CiDeadlineExceeded: the CI run passed its deadline before the next job could start');
-
-  return remaining;
+  return remaining > 0 ? remaining : null;
 }
+
+/** Why a run that could start no further job is ungraded. */
+const PASSED = (next: string) => `CiDeadlineExceeded: the CI run passed its deadline before its ${next} could start`;
 
 /** The plan's stdout, run in `repo` where its checkout is `sha` and clean, with `{target}` and `{timings}` filled here;
  *  undefined where it is not that commit, and the plan runs in a container. A container's start, cold on a new machine,
- *  was 61 of the 70 seconds Dew's plan took. */
+ *  was 61 of the 70 seconds Dew's plan took. The plan is the commit's own code, so it runs without the deployment's
+ *  bearer this process holds (#33). */
 export function localPlan({ repo, sha, command, target, timings, env, deadlineAt }: LocalPlan): string | undefined {
   if (git(repo, ['rev-parse', 'HEAD']).toString().trim() !== sha || git(repo, ['status', '--porcelain']).toString().trim() !== '') return undefined;
   const scratch = mkdtempSync(join(tmpdir(), 'armada-plan-'));
@@ -87,7 +60,10 @@ export function localPlan({ repo, sha, command, target, timings, env, deadlineAt
     writeFileSync(join(scratch, TIMINGS_FILE), JSON.stringify(timings));
     const argv = command.map((word) => word.replaceAll('{target}', String(target)).replaceAll('{timings}', join(scratch, TIMINGS_FILE)));
     const filled = Object.fromEntries(Object.entries(env).map(([name, value]) => [name, value.replaceAll('{workdir}', repo)]));
-    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...process.env, ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt) * 1000, killSignal: 'SIGKILL' });
+    const left = deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt);
+
+    if (left === null) throw new Error(PASSED('plan'));
+    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...unconnected(process.env), ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: left === undefined ? undefined : left * 1000, killSignal: 'SIGKILL' });
 
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new Error('CiDeadlineExceeded: the local plan passed the CI run\'s deadline');
 
@@ -97,39 +73,6 @@ export function localPlan({ repo, sha, command, target, timings, env, deadlineAt
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-}
-
-/** The commit's paths that key `environment`: its `key` globs and its two recipe scripts. Records are NUL-ended, so
- *  a path git would otherwise quote (non-ASCII, a tab or a newline in it) is read as it is. */
-export function manifestOf(repo: string, sha: string, environment: Environment): Manifest {
-  const globs = [...environment.key, environment.setup ?? '', environment.install ?? ''].filter((glob) => glob !== '').map((glob) => new Bun.Glob(glob));
-
-  return git(repo, ['ls-tree', '-r', '-z', '--full-tree', sha]).toString().split('\0').flatMap((record) => {
-    const tab = record.indexOf('\t');
-    const path = record.slice(tab + 1);
-    const id = record.slice(0, tab).split(' ')[2] ?? '';
-
-    return tab !== -1 && globs.some((glob) => glob.match(path)) ? [{ path, id }] : [];
-  });
-}
-
-/** What the commit is packed against: the environment's commit, where this repository has it. A shallow clone (a CI
- *  runner's checkout) does not, and a pack from the root carries the whole commit. */
-export function packBase(repo: string, environment: string): string {
-  return environment !== 'root' && Bun.spawnSync(['git', 'cat-file', '-e', `${environment}^{commit}`], { cwd: repo, env: GIT_ENV }).exitCode === 0 ? environment : 'root';
-}
-
-/** The commit from the root (with its history, or alone), or what it adds to the environment's commit. A `commit`
- *  checkout holds the environment commit's tree and nothing of its history, so the pack is every object of the
- *  commit's tree that tree lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the
- *  base, which the checkout never received. */
-export function packOf(repo: string, sha: string, base: string, history: Config['history']): Blob {
-  const listed = (...args: string[]) => git(repo, ['rev-list', '--objects', ...args]).toString().split('\n').filter((line) => line !== '');
-  const id = (line: string) => line.split(' ')[0] ?? '';
-  const held = new Set(history === 'commit' && base !== 'root' ? listed('--no-walk', base).map(id) : []);
-  const objects = history === 'commit' ? listed('--no-walk', sha).filter((line) => !held.has(id(line))) : listed(sha, ...base === 'root' ? [] : ['--not', base]);
-
-  return new Blob([new Uint8Array(git(repo, ['-c', 'pack.threads=4', 'pack-objects', '--stdout', '-q'], new TextEncoder().encode(objects.map((line) => `${line}\n`).join(''))))]);
 }
 
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
@@ -361,9 +304,10 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
 
   const resolved = await armada.resolve(recipe);
   const base = packBase(repo, resolved.base);
-  const spec: OnCommit = { recipe: { ...recipe, commit: { sha, base, packer: PACKER } }, env: config.env, tmpfs: config.tmpfs };
+  const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
+  const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs };
 
-  return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, sha, base, () => packOf(repo, sha, base, config.history)) };
+  return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, commit, () => packOf(repo, sha, base, config.history)) };
 }
 
 /** A commit's job fields, its pack uploaded. */
@@ -590,6 +534,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   if (here === undefined) {
     // The plan's stdout is its output; its stderr stays in its log.
     const planDeadline = remainingDeadline(deadlineAt);
+
+    if (planDeadline === null) return await ungraded(PASSED('plan job'));
     const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: Math.min(900, planDeadline) });
     const remote = planTask.stream([{}], { ...options, deadline: planDeadline, pool: 1 });
 
@@ -659,6 +605,11 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     return await ungraded(`the plan's ${String(groups.length)} environments run at once and need ${String(shares.need)} containers for it, one each or their widest gang, past the pool of ${String(config.pool)}: raise pool in .armada.json`);
   }
 
+  // What is left of the run's deadline, read once for every task job, so all of them start or none does.
+  const left = remainingDeadline(deadlineAt);
+
+  if (left === null) return await ungraded(PASSED('task jobs'));
+
   /** Group `at`'s task job, started on `share` containers. Its deadline is what is left of the run's, and bounds its
    *  tasks' timeout. */
   const start = (at: number, share: number) => {
@@ -679,7 +630,6 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
       return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry;
     });
 
-    const left = remainingDeadline(deadlineAt);
     const taskOptions = { timeout: Math.min(config.task.timeout, left), speculative: config.task.speculative, hedge: config.task.hedge, secrets: taskSecrets };
     const jobOptions = { ...options, deadline: left, pool };
     const job = config.task.verdict ? commandTask(own.spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(own.spec.recipe, argv, taskOptions).stream(entries, jobOptions);

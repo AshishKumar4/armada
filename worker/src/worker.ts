@@ -6,7 +6,7 @@
 import * as v from 'valibot';
 import {
   briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
-  HookConfigSchema, TaskSchema, TimingsSchema, type HookConfig, type Json,
+  HookConfigSchema, hex, TaskSchema, TimingsSchema, type HookConfig, type Json,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
@@ -63,13 +63,15 @@ type Handler = (request: Request, env: Env, path: readonly string[], url: URL) =
 
 const Parts = v.object({ parts: v.array(v.object({ partNumber: v.pipe(v.number(), v.integer(), v.minValue(1)), etag: v.string() })) });
 
-/** `/packs/<project>/<sha>/<base>`: a commit's pack, stored once (`packKey`). A pack larger than a request may carry
+/** `/packs/<project>/<sha>/<base>[?shallow=<sha>,…]`: a commit's pack, stored once (`packKey`), with the shallow
+ *  boundary its client sent (`CommitSchema`). A pack larger than a request may carry
  *  arrives in parts: `POST ?uploads` opens it, `PUT ?upload=<id>&part=<n>` stores each, `POST ?upload=<id>` with the
  *  parts' etags completes it, and `DELETE ?upload=<id>` aborts one that failed, whose parts would otherwise stay. */
 const packs: Handler = async (request, env, [project, sha, base], url) => {
   if (!v.is(Project, project) || !v.is(Sha, sha) || !v.is(PackBase, base)) return undefined;
   const packer = url.searchParams.get('packer');
-  const key = packKey(project, sha, base, v.parse(Packer, packer === null ? undefined : Number(packer)));
+  const shallow = v.parse(v.array(Sha), url.searchParams.get('shallow')?.split(',') ?? []);
+  const key = await packKey(project, { sha, base, packer: v.parse(Packer, packer === null ? undefined : Number(packer)), shallow });
   const upload = url.searchParams.get('upload');
 
   if (request.method === 'HEAD') return new Response(null, { status: (await env.ARTIFACTS.head(key)) === null ? 404 : 200 });
@@ -141,7 +143,7 @@ const bundles: Handler = async (request, env, [digest]) => {
 
   if (request.method !== 'PUT') return undefined;
   const bytes = await request.arrayBuffer();
-  const actual = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const actual = hex(await crypto.subtle.digest('SHA-256', bytes));
 
   if (actual !== digest) return Response.json({ error: `the bundle's digest is ${actual}, not ${digest}` }, { status: 400 });
   await env.ARTIFACTS.put(bundleKey(digest), bytes);
@@ -184,7 +186,7 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
   if (spec.commit !== undefined) {
     if (spec.recipe.repo === undefined) return Response.json({ error: 'a commit needs a repository recipe' }, { status: 400 });
 
-    if ((await env.ARTIFACTS.head(packKey(spec.recipe.repo.project, spec.commit.sha, spec.commit.base, spec.commit.packer))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
+    if ((await env.ARTIFACTS.head(await packKey(spec.recipe.repo.project, spec.commit))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
   }
 
   await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin);
@@ -361,9 +363,10 @@ const environments: Handler = async (request, env, [key]) => {
   if (key === 'inventory' && request.method === 'GET') return Response.json({ snapshots: await registry.inventory(), credentialsExpire: env.REGISTRY_CREDENTIALS_EXPIRE });
 
   if (key === 'resolve' && request.method === 'POST') {
-    const resolved = await environmentKey(v.parse(v.object({ recipe: RecipeSchema }), await request.json()).recipe);
+    const { recipe } = v.parse(v.object({ recipe: RecipeSchema }), await request.json());
+    const resolved = await environmentKey(recipe);
 
-    return Response.json({ key: resolved, base: await registry.base(resolved) });
+    return Response.json({ key: resolved, base: await registry.base(resolved, recipe.repo?.history ?? 'full') });
   }
 
   if (key === 'prune' && request.method === 'POST') {

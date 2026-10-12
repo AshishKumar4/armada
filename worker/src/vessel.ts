@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Outcome } from '../../src/protocol';
+import { boundaryOf, BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Outcome } from '../../src/protocol';
 import {
   ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
@@ -25,7 +25,7 @@ export interface VesselSpec {
   readonly instance: ContainerStartupOptions['instance'];
   readonly vcpus: number;
   readonly workdir: string;
-  readonly commit: { readonly sha: string; readonly base: string; readonly packer?: number; readonly project: string; readonly history: 'full' | 'commit' } | null;
+  readonly commit: (Commit & { readonly project: string; readonly history: 'full' | 'commit' }) | null;
   readonly tmpfs: readonly string[];
   readonly files: Record<string, string>;
   /** A function job's bundle, by digest. */
@@ -240,12 +240,14 @@ export class ArmadaVessel extends DurableObject<Env> {
     await must(container, 'the tmpfs mounts', ['/bin/sh', '-c', mounts(spec.tmpfs)], { ms: EXEC_MS });
 
     if (spec.commit !== null) {
-      const pack = await this.env.ARTIFACTS.get(packKey(spec.commit.project, spec.commit.sha, spec.commit.base, spec.commit.packer));
+      const pack = await this.env.ARTIFACTS.get(await packKey(spec.commit.project, spec.commit));
 
       if (pack === null) throw new Error(`the pack of ${spec.commit.sha} is not in R2`);
       await pipeIn(container, pack.body, `${STATE}/pack`);
       // As the user under its own home, or git warns it cannot read root's, pushing its real error down.
-      await must(container, 'the checkout', ['/bin/sh', '-c', receive(spec.workdir, spec.commit.history), 'receive', spec.commit.sha], { asUser: true, env: { HOME: USER_HOME }, cwd: spec.workdir, ms: EXEC_MS });
+      const argv = ['/bin/sh', '-c', receive(spec.workdir), 'receive', spec.commit.sha, ...boundaryOf(spec.commit, spec.commit.history)];
+
+      await must(container, 'the checkout', argv, { asUser: true, env: { HOME: USER_HOME }, cwd: spec.workdir, ms: EXEC_MS });
     }
 
     await must(container, 'owning the state', ['/bin/sh', '-c', OWN_STATE], { ms: EXEC_MS });

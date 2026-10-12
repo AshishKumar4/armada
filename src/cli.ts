@@ -10,7 +10,7 @@ import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './regi
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
-import { BaseSchema, deadlineRefusal, describeUsage, errorOf, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -55,7 +55,7 @@ map options:
                        (default efficient)
   --timeout=S          a task's limit, in seconds (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
-  --gang-start-timeout=S  all gang ranks must launch within this many seconds (default 300)
+  --gang-start-timeout=S  once every rank has a container, all must launch within this many seconds (default 300)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
   --speculative        let an idle container run a straggler again
@@ -521,7 +521,7 @@ async function install(account: string, name: string, file: string, { vcpus, tok
     .replace(/"FLEET_VCPUS": "\d+"/u, (all) => vcpus === undefined ? all : `"FLEET_VCPUS": "${String(vcpus)}"`)
     .replace('"ARMADA_SHA": ""', `"ARMADA_SHA": "${sourceSha()}"`));
 
-  const token = kept ?? [...crypto.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));
   const secretsFile = join(tmpdir(), `armada-secrets-${String(process.pid)}.json`);
 
   // Uploaded with the version, so every object that starts on it has them: a secret put after the deploy reached no
@@ -684,7 +684,7 @@ async function webhook(armada: Armada, verb: string | undefined, project: string
 
   if (repo === undefined) throw new Error('webhook add needs --repo=<owner/name>');
   v.parse(Project, project);
-  const signing = [...crypto.getRandomValues(new Uint8Array(24))].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const signing = hex(crypto.getRandomValues(new Uint8Array(24)));
   const url = `${new URL(armada.connection.url).origin}/webhooks/github/${project}`;
   const pullRequests = flag('pull-requests');
   const events = pullRequests ? ['push', 'pull_request'] : ['push'];

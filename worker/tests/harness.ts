@@ -207,7 +207,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
 
 /** What a container's exec answers: its exit code and output, or a throw for an exec the platform lost. */
 /** An environment ready to start containers from. */
-export const READY: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, created: 0, seconds: {} };
+export const READY: Generation = { key: 'k'.repeat(64), snapshot: { id: 'snapshot', size: 1 }, sha: null, shallow: false, created: 0, seconds: {} };
 
 /** A registry whose every environment is `READY`. */
 export const readyRegistry = () => namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation: READY }) }));
