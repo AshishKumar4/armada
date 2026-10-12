@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from .wire import PROTOCOL, PROTOCOL_HEADER, Json, JsonObject, list_of, maybe_text_of, maybe_whole_of, number_of, object_of, text_of
+from .wire import PROTOCOL, PROTOCOL_HEADER, Fields, Json
 
 CONFIG_DIR = Path.home() / ".config" / "armada"
 
@@ -133,14 +133,11 @@ class Armada:
     def post(self, path: str, body: object) -> Json:
         return self.call(path, "POST", json.dumps(body).encode(), {"content-type": "application/json"}).json()
 
-    def health(self) -> JsonObject:
-        return object_of(self.call("/health").json())
+    def health(self) -> Fields:
+        return Fields(self.call("/health").json(), "GET /health")
 
     def create(self, spec: Mapping[str, object]) -> str:
-        job = text_of(object_of(self.post("/jobs", spec)), "id")
-        if job == "":
-            raise RequestError(200, "POST /jobs answered without a job id")
-        return job
+        return Fields(self.post("/jobs", spec), "POST /jobs").text("id")
 
     def add(self, job: str, items: Sequence[Mapping[str, object]]) -> None:
         self.post(f"/jobs/{job}/items", {"items": items})
@@ -155,14 +152,13 @@ class Armada:
         answer = self.call(f"/jobs/{job}")
         if answer.status == 404:
             raise RequestError(404, f"no job {job} in this deployment")
-        return JobStatus.of(answer.json())
+        return JobStatus.of(Fields(answer.json(), f"GET /jobs/{job}"))
 
-    def events(self, job: str, after: int) -> JsonObject:
-        return object_of(self.call(f"/jobs/{job}/events?after={after}").json())
+    def events(self, job: str, after: int) -> Fields:
+        return Fields(self.call(f"/jobs/{job}/events?after={after}").json(), f"GET /jobs/{job}/events")
 
     def items(self, job: str) -> list[Json]:
-        items = object_of(self.call(f"/jobs/{job}/items").json()).get("items")
-        return items if isinstance(items, list) else []
+        return Fields(self.call(f"/jobs/{job}/items").json(), f"GET /jobs/{job}/items").array("items")
 
     def output(self, job: str, index: int) -> bytes | None:
         response = self.call(f"/jobs/{job}/tasks/{index}/output")
@@ -193,15 +189,14 @@ class Armada:
         self.call(f"/secrets/{name}", "PUT", value.encode())
 
     def secrets(self) -> list[str]:
-        names = object_of(self.call("/secrets").json()).get("names")
-        return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+        return Fields(self.call("/secrets").json(), "GET /secrets").texts("names")
 
     def delete_secret(self, name: str) -> bool:
-        return object_of(self.call(f"/secrets/{name}", "DELETE").json()).get("deleted") is True
+        return Fields(self.call(f"/secrets/{name}", "DELETE").json(), f"DELETE /secrets/{name}").flag("deleted")
 
     def resolve(self, recipe: Mapping[str, object]) -> dict[str, str]:
-        answer = object_of(self.post("/environments/resolve", {"recipe": recipe}))
-        return {"key": text_of(answer, "key"), "base": text_of(answer, "base")}
+        answer = Fields(self.post("/environments/resolve", {"recipe": recipe}), "POST /environments/resolve")
+        return {"key": answer.text("key"), "base": answer.text("base")}
 
 
 @dataclass(frozen=True)
@@ -272,46 +267,40 @@ class JobStatus:
     running: list[Running] | None
 
     @staticmethod
-    def of(raw: Json) -> "JobStatus":
-        fields = object_of(raw)
-        counts = object_of(fields.get("tasks"))
-        environment = fields.get("environment")
+    def of(fields: Fields) -> "JobStatus":
+        counts = fields.object("tasks")
+        environment = fields.optional_object("environment")
+        running = fields.optional_objects("running")
         return JobStatus(
-            id=text_of(fields, "id"), label=text_of(fields, "label"), phase=text_of(fields, "phase"), key=text_of(fields, "key"),
-            created_at=int(number_of(fields, "createdAt", 0)), started_at=maybe_whole_of(fields, "startedAt"),
-            finished_at=maybe_whole_of(fields, "finishedAt"),
-            tasks=TaskCounts(**{key: int(number_of(counts, key, 0)) for key in ("total", "queued", "running", "exited", "red", "failed")}),
-            vessels=[_vessel(object_of(each)) for each in list_of(fields.get("vessels"))],
-            problems=[each for each in list_of(fields.get("problems")) if isinstance(each, str)],
-            environment=None if not isinstance(environment, dict) else _environment(environment),
-            running=None if fields.get("running") is None else [_running(object_of(each)) for each in list_of(fields.get("running"))],
+            id=fields.text("id"), label=fields.text("label"), phase=fields.text("phase"), key=fields.text("key"),
+            created_at=fields.whole("createdAt"), started_at=fields.optional_whole("startedAt"),
+            finished_at=fields.optional_whole("finishedAt"),
+            tasks=TaskCounts(**{key: counts.whole(key) for key in ("total", "queued", "running", "exited", "red", "failed")}),
+            vessels=[_vessel(each) for each in fields.objects("vessels")],
+            problems=fields.texts("problems"),
+            environment=None if environment is None else _environment(environment),
+            running=None if running is None else [_running(each) for each in running],
         )
 
 
-def _vessel(fields: JsonObject) -> Vessel:
-    boot = fields.get("boot")
+def _vessel(fields: Fields) -> Vessel:
+    boot = fields.optional_object("boot")
     return Vessel(
-        text_of(fields, "name"), text_of(fields, "state"), int(number_of(fields, "tasks", 0)), maybe_whole_of(fields, "bootMs"),
-        number_of(fields, "busyMs", 0), maybe_text_of(fields, "error"), None if not isinstance(boot, dict) else _boot(boot),
+        fields.text("name"), fields.text("state"), fields.whole("tasks"), fields.optional_whole("bootMs"),
+        fields.number("busyMs"), fields.optional_text("error"), None if boot is None else _boot(boot),
     )
 
 
-def _boot(fields: JsonObject) -> Boot:
-    restarts = [each for each in list_of(fields.get("restarts")) if isinstance(each, str)]
-    return Boot(number_of(fields, "waitMs", 0), number_of(fields, "startMs", 0), restarts, number_of(fields, "setupMs", 0))
+def _boot(fields: Fields) -> Boot:
+    return Boot(fields.number("waitMs"), fields.number("startMs"), fields.texts("restarts"), fields.number("setupMs"))
 
 
-def _environment(fields: JsonObject) -> Environment:
-    seconds = object_of(fields.get("seconds"))
-    return Environment(
-        text_of(fields, "key"), maybe_text_of(fields, "sha"), int(number_of(fields, "created", 0)),
-        {key: number_of(seconds, key, 0) for key in seconds},
-    )
+def _environment(fields: Fields) -> Environment:
+    return Environment(fields.text("key"), fields.optional_text("sha"), fields.whole("created"), fields.object("seconds").numbers())
 
 
-def _running(fields: JsonObject) -> Running:
-    started = int(number_of(fields, "started", 0))
-    return Running(int(number_of(fields, "index", 0)), text_of(fields, "vessel"), started, maybe_whole_of(fields, "slot"))
+def _running(fields: Fields) -> Running:
+    return Running(fields.whole("index"), fields.text("vessel"), fields.whole("started"), fields.optional_whole("slot"))
 
 
 @dataclass(frozen=True)

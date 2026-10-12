@@ -1,8 +1,9 @@
 """The wire's constants, shared by the client, the pusher and the in-container runner — the same values
 protocol.ts holds, so a Python task and a TypeScript one speak the same bytes."""
 
+import json
 from collections.abc import Mapping, Sequence
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 # A JSON value, as protocol.ts's `Json` — what items and envelopes carry.
 Json: TypeAlias = str | float | int | bool | None | list["Json"] | dict[str, "Json"]
@@ -14,41 +15,81 @@ JsonObject = dict[str, Json]
 Answerable: TypeAlias = str | float | int | bool | None | bytes | Sequence["Answerable"] | Mapping[str, "Answerable"]
 
 
-def object_of(value: Json) -> JsonObject:
-    """`value` as a JSON object, or an empty one when the wire sent something else."""
-    return value if isinstance(value, dict) else {}
+class WireError(ValueError):
+    """An answer of the deployment's that is not what the wire says it is."""
 
 
-def list_of(value: Json) -> list[Json]:
-    """`value` as a JSON array, or an empty one when the wire sent something else."""
-    return value if isinstance(value, list) else []
+class Fields:
+    """A JSON object of the wire's, read field by field as protocol.ts's schemas say: a required field holds its type,
+    an optional one its type or nothing (absent or null). Anything else is a WireError naming the field."""
 
+    def __init__(self, value: Json, where: str) -> None:
+        if not isinstance(value, dict):
+            raise WireError(f"{where} is not an object: {json.dumps(value)[:200]}")
+        self._fields = value
+        self.where = where
 
-def text_of(fields: Mapping[str, Json], key: str, default: str = "") -> str:
-    value = fields.get(key)
-    return value if isinstance(value, str) else default
+    def _held(self, key: str, kinds: tuple[type, ...], name: str, *, required: bool) -> Json:
+        value = self._fields.get(key)
+        # A boolean is no number, though Python counts it an int.
+        if (value is None and not required) or (isinstance(value, kinds) and (bool in kinds or not isinstance(value, bool))):
+            return self._fields.get(key)
+        raise WireError(f"{self.where}.{key} is not {name}: {json.dumps(value)[:200]}")
 
+    def text(self, key: str) -> str:
+        return str(self._held(key, (str,), "a string", required=True))
 
-def maybe_number_of(fields: Mapping[str, Json], key: str) -> float | None:
-    """A JSON number's value; a boolean, which Python counts as an int, is none."""
-    value = fields.get(key)
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    def optional_text(self, key: str) -> str | None:
+        value = self._held(key, (str,), "a string", required=False)
+        return None if value is None else str(value)
 
+    def number(self, key: str) -> float:
+        return float(cast(float, self._held(key, (int, float), "a number", required=True)))
 
-def number_of(fields: Mapping[str, Json], key: str, default: float) -> float:
-    value = maybe_number_of(fields, key)
-    return default if value is None else value
+    def optional_number(self, key: str) -> float | None:
+        value = self._held(key, (int, float), "a number", required=False)
+        return None if value is None else float(cast(float, value))
 
+    def whole(self, key: str) -> int:
+        return int(self.number(key))
 
-def maybe_whole_of(fields: Mapping[str, Json], key: str) -> int | None:
-    """A JSON number's value as a whole number, or none when the field is absent or no number."""
-    value = maybe_number_of(fields, key)
-    return None if value is None else int(value)
+    def optional_whole(self, key: str) -> int | None:
+        value = self.optional_number(key)
+        return None if value is None else int(value)
 
+    def flag(self, key: str) -> bool:
+        return self._held(key, (bool,), "a boolean", required=False) is True
 
-def maybe_text_of(fields: Mapping[str, Json], key: str) -> str | None:
-    value = fields.get(key)
-    return value if isinstance(value, str) else None
+    def object(self, key: str) -> "Fields":
+        return Fields(self._fields.get(key), f"{self.where}.{key}")
+
+    def optional_object(self, key: str) -> "Fields | None":
+        value = self._fields.get(key)
+        return None if value is None else Fields(value, f"{self.where}.{key}")
+
+    def array(self, key: str) -> list[Json]:
+        return list(cast(list[Json], self._held(key, (list,), "an array", required=True)))
+
+    def objects(self, key: str) -> list["Fields"]:
+        return [Fields(each, f"{self.where}.{key}[{at}]") for at, each in enumerate(self.array(key))]
+
+    def optional_objects(self, key: str) -> list["Fields"] | None:
+        return None if self._fields.get(key) is None else self.objects(key)
+
+    def texts(self, key: str) -> list[str]:
+        listed = self.array(key)
+        if not all(isinstance(each, str) for each in listed):
+            raise WireError(f"{self.where}.{key} is not an array of strings: {json.dumps(listed)[:200]}")
+        return [str(each) for each in listed]
+
+    def numbers(self) -> dict[str, float]:
+        """Every field, each a number: a record of numbers."""
+        return {key: self.number(key) for key in self._fields}
+
+    def raw(self, key: str) -> Json:
+        """A field carried as it is, whatever its type: an item, a value."""
+        return self._fields.get(key)
+
 
 # The wire's version, which every request names in PROTOCOL_HEADER.
 PROTOCOL = 7

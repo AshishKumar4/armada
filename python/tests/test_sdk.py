@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from armada import Armada, Connection, Context, RequestError, SchemaError, ShellError, out_file, sh, task
 from armada.push import PushError, bundle_tasks, find_project
 from armada.task import Envelope, RemoteError, _Value
+from armada.wire import Fields
 
 
 class TestSh(unittest.TestCase):
@@ -99,9 +100,9 @@ class TestEnvelope(unittest.TestCase):
             return n * n
 
         outcome = {"answer": "value", "value": json.dumps({"ok": True, "value": 9}), "exitCode": 0, "tail": ""}
-        self.assertEqual(square.answer(outcome, lambda: None), _Value(9))
+        self.assertEqual(square.answer(Fields(outcome, "outcome"), lambda: None), _Value(9))
         dead = {"answer": "value", "exitCode": 137, "tail": "killed", "output": True}
-        error = square.answer(dead, lambda: b"")
+        error = square.answer(Fields(dead, "outcome"), lambda: b"")
         self.assertEqual((type(error).__name__, error.name if isinstance(error, RemoteError) else ""), ("RemoteError", "Exit"))
 
 
@@ -123,6 +124,29 @@ def _ran(root: Path, task_id: str, item: object) -> tuple[int, str, str, str]:
             return Path(box, name).read_text() if Path(box, name).exists() else ""
 
         return ran.returncode, read("log"), read("answer"), read("out")
+
+
+class TestWire(unittest.TestCase):
+    def test_reads_an_answer_as_the_wire_says_and_names_the_field_that_is_not(self) -> None:
+        from armada.client import JobStatus
+        from armada.wire import WireError
+
+        status = {
+            "id": "j", "label": "", "phase": "running", "key": "k", "createdAt": 1, "startedAt": None, "finishedAt": None,
+            "tasks": {"total": 1, "queued": 1, "running": 0, "exited": 0, "red": 0, "failed": 0},
+            "vessels": [{"name": "v1", "state": "waiting", "tasks": 0, "bootMs": None, "busyMs": 0, "error": None}],
+            "problems": [], "environment": None,
+        }
+        read = JobStatus.of(Fields(status, "GET /jobs/j"))
+        vessel = {"name": "v1", "state": "waiting", "tasks": 0, "bootMs": None, "busyMs": True, "error": None}
+        broken = [{**status, "tasks": None}, {**status, "vessels": [vessel]}, {**status, "problems": [3]}]
+        refused = []
+        for each in broken:
+            with self.assertRaises(WireError) as raised:
+                JobStatus.of(Fields(each, "GET /jobs/j"))
+            refused.append(str(raised.exception).split(" is not ")[0])
+        named = ["GET /jobs/j.tasks", "GET /jobs/j.vessels[0].busyMs", "GET /jobs/j.problems"]
+        self.assertEqual((read.tasks.queued, read.vessels[0].busy_ms, refused), (1, 0, named))
 
 
 class TestRunner(unittest.TestCase):
@@ -293,7 +317,8 @@ class TestClient(unittest.TestCase):
             armada = Armada(Connection(f"http://127.0.0.1:{server.server_port}", "tok"))
             self.assertEqual(armada.create({"recipe": {}, "items": [], "run": {"kind": "command"}}), "j")
             # A 502 on a read is asked again; the second answer is the job's events.
-            self.assertEqual(armada.events("j", 0), {"events": [], "done": True})
+            page = armada.events("j", 0)
+            self.assertEqual((page.objects("events"), page.flag("done")), ([], True))
             self.assertEqual(counts["events"], 2)
             self.assertEqual(seen["protocol"], "7")
             self.assertEqual(seen["auth"], "Bearer tok")
@@ -339,8 +364,9 @@ class TestTaskShapes(unittest.TestCase):
         sent = point.run_envelope(3, _ctx())
         assert isinstance(sent, Envelope)
         self.assertEqual(json.loads(json.dumps(sent.body)), {"ok": True, "value": {"x": 3.0}})
-        landed = point.answer({"answer": "value", "value": json.dumps(sent.body), "exitCode": 0}, lambda: None)
-        refused = point.answer({"answer": "value", "value": json.dumps({"ok": True, "value": {"y": 1}}), "exitCode": 0}, lambda: None)
+        landed = point.answer(Fields({"answer": "value", "value": json.dumps(sent.body), "exitCode": 0}, "outcome"), lambda: None)
+        wrong = {"answer": "value", "value": json.dumps({"ok": True, "value": {"y": 1}}), "exitCode": 0}
+        refused = point.answer(Fields(wrong, "outcome"), lambda: None)
         assert isinstance(landed, _Value)
         assert isinstance(landed.value, Point)
         self.assertEqual((landed.value.x, isinstance(refused, RemoteError)), (3.0, True))

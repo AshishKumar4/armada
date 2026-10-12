@@ -8,7 +8,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Generic, Literal, Protocol, TypedDict, TypeVar, Union, cast, overload
@@ -16,7 +16,7 @@ from typing import BinaryIO, Generic, Literal, Protocol, TypedDict, TypeVar, Uni
 from .client import Armada, JobStatus, Summary, connect, summary_of
 from .recipe import Recipe, RecipeBuilder, recipe as default_recipe
 from .sh import OutFile, Shell, ShellError, execute, out_file
-from .wire import Answerable, Json, maybe_number_of, maybe_text_of, number_of, object_of, remote_error, text_of
+from .wire import Answerable, Fields, Json, remote_error
 
 # A job's items travel as JSON, so an item type is one JSON can carry.
 In = TypeVar("In", bound=Json)
@@ -216,23 +216,21 @@ def _command_answer(
         return RemoteError(**remote_error(cause))
 
 
-def _envelope_answer(outcome: Mapping[str, Json], read: Callable[[], bytes | None]) -> _Value | RemoteError:
-    """A pushed task's answer: the envelope its process wrote, or an Exit when it died before answering."""
-    inline = outcome.get("value")
+def _envelope_answer(outcome: Fields, read: Callable[[], bytes | None]) -> _Value | RemoteError:
+    """A pushed task's answer: the envelope its process wrote, or an Exit when it died before writing a whole one."""
+    inline = outcome.optional_text("value")
     try:
-        text = inline if isinstance(inline, str) else (read() or b"").decode()
-        parsed: Json = json.loads(text)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        parsed = None
-    envelope = object_of(parsed)
-    ok = envelope.get("ok")
-    if not isinstance(ok, bool):
-        return RemoteError("Exit", f"the task's process exited {number_of(outcome, 'exitCode', 1):.0f}", text_of(outcome, "tail"))
+        envelope = Fields(json.loads(inline if inline is not None else (read() or b"").decode()), "the envelope")
+        ok = envelope.flag("ok") if envelope.raw("ok") is not None else None
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        ok = None
+    if ok is None:
+        return RemoteError("Exit", f"the task's process exited {outcome.whole('exitCode')}", outcome.text("tail"))
     if not ok:
-        error = object_of(envelope.get("error"))
-        return RemoteError(text_of(error, "name", "Error"), text_of(error, "message"), text_of(error, "stack"))
-    encoded = envelope.get("bytes")
-    return _Value(base64.b64decode(encoded) if isinstance(encoded, str) else envelope.get("value"))
+        error = envelope.object("error")
+        return RemoteError(error.text("name"), error.text("message"), error.optional_text("stack") or "")
+    encoded = envelope.optional_text("bytes")
+    return _Value(base64.b64decode(encoded) if encoded is not None else envelope.raw("value"))
 
 
 class Submission(Generic[In]):
@@ -335,23 +333,22 @@ class Job(Generic[In, Out]):
         # The items a job holds are the ones its caller gave this task, as task.ts trusts them too.
         return cast(In, self._held[index])
 
-    def _result(self, index: int, outcome: Mapping[str, Json]) -> Result[In, Out]:
+    def _result(self, index: int, outcome: Fields) -> Result[In, Out]:
         item = self._item(index)
-        peak = maybe_number_of(outcome, "peakMemory")
-        disk = maybe_number_of(outcome, "diskBytes")
         meta = Meta(
-            seconds=number_of(outcome, "seconds", 0), attempt=int(number_of(outcome, "attempt", 1)), container=text_of(outcome, "vessel"),
-            exit_code=int(number_of(outcome, "exitCode", 0)), tail=text_of(outcome, "tail"),
-            peak_memory=None if peak is None else int(peak), cpu_seconds=maybe_number_of(outcome, "cpuSeconds"),
-            artifacts=outcome.get("artifacts") is True, cached=outcome.get("cached") is True,
-            oom_killed=outcome.get("oomKilled") is True, disk_bytes=None if disk is None else int(disk),
-            alone_after=maybe_text_of(outcome, "aloneAfter"),
+            seconds=outcome.number("seconds"), attempt=outcome.whole("attempt"), container=outcome.text("vessel"),
+            exit_code=outcome.whole("exitCode"), tail=outcome.text("tail"),
+            peak_memory=outcome.optional_whole("peakMemory"), cpu_seconds=outcome.optional_number("cpuSeconds"),
+            artifacts=outcome.flag("artifacts"), cached=outcome.flag("cached"),
+            oom_killed=outcome.flag("oomKilled"), disk_bytes=outcome.optional_whole("diskBytes"),
+            alone_after=outcome.optional_text("aloneAfter"),
         )
-        if outcome.get("kind") == "failed":
-            if outcome.get("reason") == "cancelled":
+        reason = outcome.optional_text("reason")
+        if outcome.text("kind") == "failed":
+            if reason == "cancelled":
                 return Cancelled(index, item, meta, meta.tail)
             return Lost(index, item, meta, meta.tail)
-        if outcome.get("reason") == "timeout":
+        if reason == "timeout":
             return TimedOut(index, item, meta)
         answered = self._task.answer(outcome, lambda: self.armada.output(self.id, index))
         if isinstance(answered, RemoteError):
@@ -364,17 +361,16 @@ class Job(Generic[In, Out]):
         seen: set[int] = set()
         while True:
             page = self.armada.events(self.id, after)
-            listed = page.get("events")
-            events = listed if isinstance(listed, list) else []
-            for event in map(object_of, events):
-                outcome = object_of(event.get("outcome"))
-                index = int(number_of(outcome, "index", -1))
-                after = max(after, int(number_of(event, "seq", after)))
-                if index < 0 or index in seen:
+            events = page.objects("events")
+            for event in events:
+                outcome = event.object("outcome")
+                index = outcome.whole("index")
+                after = max(after, event.whole("seq"))
+                if index in seen:
                     continue
                 seen.add(index)
                 yield self._result(index, outcome)
-            if page.get("done") is True:
+            if page.flag("done"):
                 self.submission.stopped = True
                 if self.submission.failure is not None:
                     raise self.submission.failure
@@ -573,12 +569,11 @@ class Task(Generic[In, Out]):
             _check(self.input, item, f"item {index}")
         return {"item": item}
 
-    def answer(self, outcome: Mapping[str, Json], read: Callable[[], bytes | None]) -> _Value | RemoteError:
+    def answer(self, outcome: Fields, read: Callable[[], bytes | None]) -> _Value | RemoteError:
         """An exited task's answer. A body's value crosses as JSON, and a validator output checks it here, so the
         result holds what the validator gives; one that refuses it is this item's error."""
-        if outcome.get("answer") == "command":
-            exit_code = int(number_of(outcome, "exitCode", 1))
-            return _command_answer(self.output, exit_code, text_of(outcome, "tail"), read, outcome.get("value"))
+        if outcome.optional_text("answer") == "command":
+            return _command_answer(self.output, outcome.whole("exitCode"), outcome.text("tail"), read, outcome.optional_text("value"))
         answered = _envelope_answer(outcome, read)
         if isinstance(answered, RemoteError) or self.output is None or isinstance(self.output, str):
             return answered
