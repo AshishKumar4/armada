@@ -25,14 +25,16 @@
       { "name": "FLEET", "class_name": "ArmadaFleet" },
       { "name": "TASKS", "class_name": "ArmadaTasks" },
       { "name": "SECRETS", "class_name": "ArmadaSecrets" },
-      { "name": "WEBHOOKS", "class_name": "ArmadaWebhooks" }
+      { "name": "WEBHOOKS", "class_name": "ArmadaWebhooks" },
+      { "name": "ESTIMATES", "class_name": "ArmadaEstimates" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ArmadaJob", "ArmadaVessel", "ArmadaEnvironments", "ArmadaPreparer", "ArmadaTimings", "ArmadaFleet"] },
     { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] },
     { "tag": "v3", "new_sqlite_classes": ["ArmadaSecrets"] },
-    { "tag": "v4", "new_sqlite_classes": ["ArmadaWebhooks"] }
+    { "tag": "v4", "new_sqlite_classes": ["ArmadaWebhooks"] },
+    { "tag": "v5", "new_sqlite_classes": ["ArmadaEstimates"] }
   ],
   // The dashboard (worker/dashboard), built here by `armada deploy` (src/dashboard.ts) and served under /ui/ before the
   // Worker runs; every other path runs the Worker.

@@ -31,6 +31,7 @@ import {
 import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
+import { classOf, itemKey, Learned } from './estimates';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
 import type { VesselSpec } from './vessel';
@@ -121,6 +122,10 @@ const STRAGGLER_WEIGHTS = 1.5;
 const STANDBY_MS = 60_000;
 
 
+/** Whether a job packs its tasks into its containers by their measured use: in `efficient` mode, unless it fixed its
+ *  slots. */
+const packs = (spec: Pick<Kept, 'mode' | 'slots'>): boolean => spec.mode === 'efficient' && spec.slots === 1;
+
 /** Where a task's green answer waits while its other copy may still end red (`complete`, `release`). */
 const heldKey = (index: number) => `held/${String(index)}`;
 
@@ -131,6 +136,9 @@ export class ArmadaJob extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
 
   private readonly runs = new Runs(this.ctx.storage.sql);
+
+  /** What its tasks' classes used, as its store and its own tasks tell (`estimates.ts`). */
+  private readonly learned = new Learned(this.ctx.storage.sql);
 
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
@@ -158,6 +166,12 @@ export class ArmadaJob extends DurableObject<Env> {
       if (!tasks.includes(column)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column} INTEGER`);
     }
 
+    // A task's class and item key (`estimates.ts`), what it is expected to use once looked up, whether it runs alone, and
+    // whether it ran beside another task.
+    for (const [column, type] of [['class', 'TEXT'], ['ikey', 'TEXT'], ['looked', 'INTEGER'], ['est_cores', 'REAL'], ['est_mem', 'REAL'], ['est_disk', 'REAL'], ['alone', 'INTEGER'], ['shared', 'INTEGER']]) {
+      if (!tasks.includes(column ?? '')) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column ?? ''} ${type ?? ''}`);
+    }
+
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(members)').toArray().some((column) => column.name === 'started')) this.sql.exec('ALTER TABLE members ADD COLUMN started INTEGER');
 
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(events)').toArray().some((column) => column.name === 'at')) this.sql.exec('ALTER TABLE events ADD COLUMN at INTEGER');
@@ -168,9 +182,10 @@ export class ArmadaJob extends DurableObject<Env> {
   async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     const { items, env, open, ...kept } = spec;
+    const key = await environmentKey(spec.recipe);
 
-    this.insert(items);
-    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key: await environmentKey(spec.recipe), createdAt: Date.now(), problems: [], replaced: 0 });
+    await this.insert(items, kept, key);
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key, createdAt: Date.now(), problems: [], replaced: 0 });
     // Counted open before it can run, so its conclusion, which counts it closed, comes after.
     await this.env.FLEET.getByName(SINGLE).opened(id);
     await this.ctx.storage.setAlarm(Date.now());
@@ -181,12 +196,13 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('INSERT INTO events (outcome, at) VALUES (?, ?)', JSON.stringify(outcome), Date.now());
   }
 
-  /** The new tasks' indexes. */
-  private insert(items: readonly Task[]): number[] {
+  /** The new tasks, each with its class and item key on environment `key`; their indexes. */
+  private async insert(items: readonly Task[], spec: Pick<Kept, 'run'>, key: string): Promise<number[]> {
+    const keys = await Promise.all(items.map(async (task) => await itemKey(task)));
     const first = this.count('1 = 1');
 
     for (const [at, task] of items.entries()) {
-      this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued');
+      this.sql.exec('INSERT INTO tasks (idx, item, weight, state, class, ikey) VALUES (?, ?, ?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued', classOf(spec, task, key), keys[at] ?? null);
     }
 
     return items.map((_, at) => first + at);
@@ -202,9 +218,10 @@ export class ArmadaJob extends DurableObject<Env> {
       ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
 
     if (refused !== null) return refused;
-    const added = this.insert(items);
+    const added = await this.insert(items, spec, (await this.ctx.storage.get<string>('key')) ?? '');
 
     await this.answerFromCache(spec, added);
+    await this.estimate(spec);
     await this.grow();
     await this.settle();
 
@@ -226,10 +243,11 @@ export class ArmadaJob extends DurableObject<Env> {
    *  their defaults. One stored before its env had a key of its own holds the env, which moves there while the job
    *  runs and is gone once it is done. */
   private async spec(): Promise<Kept | undefined> {
-    const stored = await this.ctx.storage.get<Kept & { readonly env?: Record<string, string> }>('spec');
+    const stored = await this.ctx.storage.get<Kept & { readonly env?: Record<string, string>; readonly mode?: Kept['mode'] }>('spec');
 
     if (stored === undefined) return undefined;
-    const kept = v.parse(KeptSchema, stored);
+    // A job an earlier Worker stored ran one task a container, and keeps that layout to its end.
+    const kept = { ...v.parse(KeptSchema, stored), mode: stored.mode ?? 'fast' };
 
     if (stored.env === undefined) return kept;
 
@@ -254,6 +272,7 @@ export class ArmadaJob extends DurableObject<Env> {
       await this.watchGangs(spec);
 
       if ((await this.ctx.storage.get<Phase>('phase')) !== 'done') await this.watch();
+      await this.send();
     }
 
     if ((await this.ctx.storage.get<Generation>('environment')) === undefined) await this.awaitEnvironment(spec);
@@ -304,8 +323,59 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     await this.ctx.storage.put('environment', readiness.generation);
+    await this.estimate(spec);
     await this.grow();
     await this.settle();
+  }
+
+  /** Each task not looked up yet, estimated from its class's store and what this job learned of the class (`Learned`):
+   *  its own record where its item ran before, else its class's estimate. One left without either runs alone, and is
+   *  estimated once its class is learned (`learn`). Only a job that packs its tasks looks. */
+  private async estimate(spec: Kept): Promise<void> {
+    if (!packs(spec)) return;
+    const unlooked = this.sql.exec<{ idx: number; class: string; ikey: string }>('SELECT idx, class, ikey FROM tasks WHERE looked IS NULL AND class IS NOT NULL AND ikey IS NOT NULL').toArray();
+
+    for (const cls of new Set(unlooked.map((row) => row.class))) {
+      const rows = unlooked.filter((row) => row.class === cls);
+      const read = await this.env.ESTIMATES.getByName(cls).read(rows.map((row) => row.ikey));
+
+      this.learned.seed(cls, read.samples);
+      const learnt = this.learned.estimate(cls);
+
+      for (const row of rows) {
+        const own = read.items[row.ikey];
+        const expected = own ?? learnt;
+
+        this.sql.exec('UPDATE tasks SET looked = 1, alone = ?, est_cores = ?, est_mem = ?, est_disk = ? WHERE idx = ?',
+          own?.alone === true ? 1 : 0, expected?.cores ?? null, expected?.memory ?? null, expected?.disk ?? null, row.idx);
+      }
+    }
+  }
+
+  /** What a landed run of a task used, learned for its class, and the class's tasks without an estimate estimated by
+   *  it once there is one. Only a run measured whole, its disk included, which a task in a slot of its own is. */
+  private learn(outcome: Outcome): void {
+    const { cpuSeconds, peakMemory, diskBytes, seconds } = outcome;
+
+    if (cpuSeconds === undefined || peakMemory === undefined || diskBytes === undefined || seconds <= 0) return;
+    const task = this.sql.exec<{ class: string | null; ikey: string | null }>('SELECT class, ikey FROM tasks WHERE idx = ?', outcome.index).toArray()[0];
+
+    if (task?.class === null || task?.class === undefined || task.ikey === null) return;
+    this.learned.add(task.class, task.ikey, { cores: cpuSeconds / seconds, memory: peakMemory, disk: diskBytes });
+    const learnt = this.learned.estimate(task.class);
+
+    if (learnt === null) return;
+    this.sql.exec('UPDATE tasks SET est_cores = ?, est_mem = ?, est_disk = ? WHERE class = ? AND looked = 1 AND est_mem IS NULL AND alone = 0',
+      learnt.cores, learnt.memory, learnt.disk, task.class);
+  }
+
+  /** What the job learned, sent to its classes' stores; a store that does not answer has it at the next send. */
+  private async send(): Promise<void> {
+    try {
+      await this.learned.flush(this.env.ESTIMATES);
+    } catch (cause) {
+      console.error(JSON.stringify({ estimates: said({ cause }) }));
+    }
   }
 
   /**
@@ -747,6 +817,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
     const retries = (await this.spec())?.retries;
 
+    if (member === undefined) this.learn(outcome);
     // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
     const task = kept === null ? undefined : this.landing(name, kept.index, member !== undefined);
 
@@ -1007,6 +1078,7 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.env.FLEET.getByName(SINGLE).closed((await this.ctx.storage.get<string>('id')) ?? '');
     // The environment was in use until now: its recent hour starts here (`ArmadaEnvironments.used`).
     await this.env.ENVIRONMENTS.getByName(SINGLE).used(await this.environment());
+    await this.send();
   }
 
   /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */

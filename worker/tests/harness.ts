@@ -196,6 +196,8 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
     FLEET_VCPUS: '1500',
     ARTIFACTS: bucket(),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined })),
+    // A store with nothing learned yet: every task runs alone until its class is.
+    ESTIMATES: namespace(() => ({ read: async () => ({ samples: [], items: {} }), record: async () => undefined })),
     ...bindings,
   });
 

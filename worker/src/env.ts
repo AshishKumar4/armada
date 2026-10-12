@@ -1,5 +1,6 @@
 import { errorOf } from '../../src/protocol';
 import type { ArmadaEnvironments, ArmadaPreparer } from './environments';
+import type { ArmadaEstimates } from './estimates';
 import type { ArmadaFleet } from './fleet';
 import type { ArmadaWebhooks } from './hooks';
 import type { ArmadaSecrets } from './secrets';
@@ -18,6 +19,8 @@ export interface Env {
   readonly TASKS: DurableObjectNamespace<ArmadaTasks>;
   readonly SECRETS: DurableObjectNamespace<ArmadaSecrets>;
   readonly WEBHOOKS: DurableObjectNamespace<ArmadaWebhooks>;
+  /** What each class of task used, by class (`estimates.ts`). */
+  readonly ESTIMATES: DurableObjectNamespace<ArmadaEstimates>;
   /** Packs, task outputs and logs, verdicts. */
   readonly ARTIFACTS: R2Bucket;
   /** The bearer the SDK presents (`~/.config/armada/connection.json`). */

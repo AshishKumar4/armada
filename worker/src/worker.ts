@@ -30,6 +30,8 @@ export { ArmadaSecrets } from './secrets';
 
 export { ArmadaWebhooks } from './hooks';
 
+export { ArmadaEstimates } from './estimates';
+
 /** The bearer, compared in constant time. */
 function authorized(request: Request, env: Env): boolean {
   return env.ARMADA_TOKEN.length >= 32 && equal(`Bearer ${env.ARMADA_TOKEN}`, request.headers.get('authorization') ?? '');

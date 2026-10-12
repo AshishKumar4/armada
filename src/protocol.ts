@@ -284,10 +284,15 @@ export const JobSpecSchema = v.object({
   files: v.optional(v.record(v.pipe(v.string(), v.regex(/^[A-Za-z0-9._-]+$/u)), v.string()), {}),
   env: v.optional(v.record(v.string(), v.string()), {}),
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
-  /** The most containers this job runs at once; the account's ceiling and the item count bound it too. */
+  /** The most tasks this job runs at once, and so the most containers; the account's ceiling and the item count bound
+   *  it too. With `slots`, the most containers, each running `slots` tasks. */
   pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 50),
-  /** The tasks one container runs at once, each isolated in its own slot: the job's lanes are pool × slots. */
+  /** The tasks one container runs at once, each isolated in its own slot: the job's lanes are pool × slots. More than
+   *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
+  /** `efficient` runs as many tasks in each container as their measured use fits, each in a slot of its own, so the job
+   *  holds fewer containers; a task not yet measured runs alone. `fast` runs one task a container. */
+  mode: v.optional(v.picklist(['efficient', 'fast']), 'efficient'),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
