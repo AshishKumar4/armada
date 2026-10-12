@@ -441,7 +441,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
       made = step.snapshot ?? made;
       const seconds = { ...preparation.seconds, [preparation.phase]: (Date.now() - (preparation.started ?? began)) / 1000 };
       const next = NEXT[preparation.phase];
-      const advanced = { ...preparation, seconds, started: undefined, snapshot: step.snapshot ?? preparation.snapshot };
+      // A new phase starts with no lost exec counted, as with no start: its execs are its own.
+      const advanced = { ...preparation, seconds, started: undefined, lost: undefined, snapshot: step.snapshot ?? preparation.snapshot };
 
       if (next === null) return await this.done(advanced);
       await this.ctx.storage.put('preparation', { ...advanced, phase: next } satisfies Preparation);

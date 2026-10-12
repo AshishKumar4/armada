@@ -472,6 +472,52 @@ describe('a preparation phase whose every exec times out', () => {
   });
 });
 
+describe('a preparation phase after one whose execs were lost', () => {
+  test('counts its own lost execs from none, though the phase before lost two, each a slice, before it answered', async () => {
+    const start = Date.now();
+    const failures: string[] = [];
+    const prepared: string[] = [];
+    let now = start;
+    let lost = 0;
+
+    try {
+      setSystemTime(start);
+
+      // Each phase's waits are lost twice, each running out its bound past its slice, then answer.
+      const stored = state(Object.assign(container((argv) => {
+        if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+
+        if (lost < 2) {
+          lost += 1;
+          now += 90_000;
+          setSystemTime(now);
+
+          return new Error('the exec timed out');
+        }
+
+        lost = 0;
+
+        return { exitCode: 0, stdout: '0\n' };
+      }), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+
+      const preparer = new ArmadaPreparer(stored.ctx, world({
+        ENVIRONMENTS: namespace(() => ({
+          beat: async () => undefined, prepared: async () => { prepared.push('made'); },
+          preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); },
+        })),
+      }));
+
+      await preparer.begin('k'.repeat(64), start, { recipe: v.parse(RecipeSchema, { setup: 'true', install: 'true' }), sha: null });
+
+      for (let alarm = 0; alarm < 40 && failures.length + prepared.length === 0; alarm += 1) await preparer.alarm();
+
+      expect({ failures, prepared }).toEqual({ failures: [], prepared: ['made'] });
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
 describe('a snapshot the account refuses for its storage (#30)', () => {
   const realFetch = globalThis.fetch;
 
