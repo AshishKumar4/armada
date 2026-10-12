@@ -167,6 +167,7 @@ function groupSetup(group: string, memoryBytes?: number, tasksMemoryBytes?: numb
 mkdir -p ${PARENT_GROUP}
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 ${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PARENT_GROUP}/memory.max
+[ ! -e ${PARENT_GROUP}/memory.swap.max ] || echo 0 > ${PARENT_GROUP}/memory.swap.max
 `}${endGroup(group)}
 mkdir -p ${group}/runner
 echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
@@ -193,7 +194,8 @@ setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgrou
  *  overlays whose writes land under the slot's root — so no slot reads another's files or writes the real checkout,
  *  slot 0 included. The `cd` is inside the namespace or it would pin the checkout below the overlay. Its cgroup caps at
  *  `memoryBytes`: the container's memory split evenly across fixed slots, or, packing, what every task holds together,
- *  which also caps the group over all of them (`tasksMemoryBytes`). Network is shared: two tasks binding one fixed
+ *  which also caps the group over all of them (`tasksMemoryBytes`), in memory alone: with no swap past it, a task past
+ *  its estimate is killed and runs again alone, rather than every task slowed by swapping. Network is shared: two tasks binding one fixed
  *  port collide. */
 export function launchSlot(workdir: string, slot: number, { memoryBytes, tasksMemoryBytes }: { readonly memoryBytes: number; readonly tasksMemoryBytes?: number }, tmpfs: readonly string[]): string {
   const root = slotRoot(slot);

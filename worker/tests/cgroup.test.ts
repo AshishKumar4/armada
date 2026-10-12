@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { killOf, launchSlot, launchTask, slotTask, STATE, TASK, TASK_GROUP, WAIT, waitOn } from '../src/container';
+import { killOf, launchSlot, launchTask, slotRoot, slotTask, STATE, TASK, TASK_GROUP, taskGroup, usageFrom, usageOf, WAIT, waitOn } from '../src/container';
 
 const host = process.getuid?.() === 0 && Bun.spawnSync(['id', 'ci']).exitCode === 0 && readFileSync('/proc/self/mounts', 'utf8').includes(' /sys/fs/cgroup cgroup2 ');
 
@@ -74,4 +74,33 @@ describe.skipIf(!host)('a slotted task', () => {
     expect({ exit, log, checkout: Bun.spawnSync(['ls', workdir]).stdout.toString(), tmp: existsSync('/dev/shm/scratch') })
       .toEqual({ exit: '0', log: [Bun.spawnSync(['id', '-u', 'ci']).stdout.toString().trim(), '0::/armada/task-2/runner', String(64 * 1024 * 1024), 'artifacts', 'log', 'pid', '0'], checkout: before, tmp: false });
   });
+});
+
+describe.skipIf(!host)('packed tasks', () => {
+  test('share one memory cap over them all, past which the kernel kills a task, never the container, and its usage says so', () => {
+    const cap = 96 * 1024 * 1024;
+    // Each holds dd's 80 MiB buffer until its timeout ends it (124): two of them pass the cap.
+    const hold = ['timeout', '4', 'dd', 'if=/dev/zero', 'of=/dev/null', 'bs=80M'];
+
+    try {
+      for (const slot of [0, 1]) {
+        expect(sh(launchSlot(workdir, slot, { memoryBytes: cap, tasksMemoryBytes: cap }, []), ...hold).exitCode).toBe(0);
+        Bun.sleepSync(1500);
+      }
+
+      const exits = [0, 1].map((slot) => sh(waitOn(slotTask(slot)), '20').stdout.toString().trim());
+      const usage = [0, 1].map((slot) => usageFrom(sh(usageOf(taskGroup(slot), slotRoot(slot))).stdout.toString()));
+      const parent = readFileSync(`${taskGroup(0)}/../memory.max`, 'utf8').trim();
+
+      // Whichever the kernel chose: one task killed, its own usage saying so, and both measured on disk.
+      const ended = [0, 1].map((slot) => [exits[slot], usage[slot]?.oomKilled ?? false, (usage[slot]?.diskBytes ?? -1) >= 0]);
+
+      expect({ parent, ended: ended.toSorted((left, right) => String(left[0]).localeCompare(String(right[0]))) })
+        .toEqual({ parent: String(cap), ended: [['124', false, true], ['137', true, true]] });
+    } finally {
+      for (const slot of [0, 1]) sh(killOf(slotTask(slot), taskGroup(slot)));
+      sh(`echo max > ${taskGroup(0)}/../memory.max; [ ! -e ${taskGroup(0)}/../memory.swap.max ] || echo max > ${taskGroup(0)}/../memory.swap.max`);
+    }
+    // Each task holds its memory for 4 s, one after another starts.
+  }, 30_000);
 });
