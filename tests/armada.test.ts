@@ -1039,6 +1039,15 @@ describe('armada run', () => {
       .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true } });
   });
 
+  test('a CI deadline passed before the task jobs could start leaves the run ungraded, with its report and its --json object (#37)', async () => {
+    // The plan job ends green, but its answer comes 1.5 s in, past the run's 1 s.
+    const ran = await run(['--deadline=1', '--json'], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { planDelayMs: 1500 });
+    const result = v.parse(v.looseObject({ graded: v.string(), report: v.string(), problems: v.array(v.string()) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, graded: result.graded, jobs: ran.bodies.length, passed: result.problems.some((problem) => problem.includes('before its task jobs could start')), report: result.report.endsWith('.json') })
+      .toEqual({ exit: 2, graded: 'not graded', jobs: 1, passed: true, report: true });
+  });
+
   test('a task gets the deployment secrets its config names, and the plan gets none', async () => {
     const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { taskConfig: { secrets: ['CACHE_TOKEN'] } });
     const secrets = ran.bodies.map((body) => v.parse(v.object({ secrets: v.optional(v.array(v.string())) }), body).secrets ?? []);
@@ -1169,7 +1178,7 @@ describe('a CI deadline', () => {
       setSystemTime(began + 300_000);
       expect(remainingDeadline(began + 1800_000)).toBe(1500);
       setSystemTime(began + 1800_000);
-      expect(() => remainingDeadline(began + 1800_000)).toThrow('CiDeadlineExceeded');
+      expect(remainingDeadline(began + 1800_000)).toBe(null);
     } finally {
       setSystemTime();
     }

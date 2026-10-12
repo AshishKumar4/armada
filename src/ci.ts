@@ -67,14 +67,16 @@ interface LocalPlan {
   readonly deadlineAt?: number;
 }
 
-/** Each job gets only what remains of the CI run's deadline: a slow plan must not reset the task job's clock. */
-export function remainingDeadline(deadlineAt: number): number {
+/** Each job gets only what remains of the CI run's deadline, in whole seconds: a slow plan must not reset the task
+ *  job's clock. Null once it has passed, when no job may start, and the run is ungraded (#37). */
+export function remainingDeadline(deadlineAt: number): number | null {
   const remaining = Math.ceil((deadlineAt - Date.now()) / 1000);
 
-  if (remaining <= 0) throw new Error('CiDeadlineExceeded: the CI run passed its deadline before the next job could start');
-
-  return remaining;
+  return remaining > 0 ? remaining : null;
 }
+
+/** Why a run that could start no further job is ungraded. */
+const PASSED = (next: string) => `CiDeadlineExceeded: the CI run passed its deadline before its ${next} could start`;
 
 /** The plan's stdout, run in `repo` where its checkout is `sha` and clean, with `{target}` and `{timings}` filled here;
  *  undefined where it is not that commit, and the plan runs in a container. A container's start, cold on a new machine,
@@ -88,7 +90,10 @@ export function localPlan({ repo, sha, command, target, timings, env, deadlineAt
     writeFileSync(join(scratch, TIMINGS_FILE), JSON.stringify(timings));
     const argv = command.map((word) => word.replaceAll('{target}', String(target)).replaceAll('{timings}', join(scratch, TIMINGS_FILE)));
     const filled = Object.fromEntries(Object.entries(env).map(([name, value]) => [name, value.replaceAll('{workdir}', repo)]));
-    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...unconnected(process.env), ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt) * 1000, killSignal: 'SIGKILL' });
+    const left = deadlineAt === undefined ? undefined : remainingDeadline(deadlineAt);
+
+    if (left === null) throw new Error(PASSED('plan'));
+    const ran = Bun.spawnSync(argv, { cwd: repo, env: { ...unconnected(process.env), ...filled }, stdout: 'pipe', stderr: 'pipe', timeout: left === undefined ? undefined : left * 1000, killSignal: 'SIGKILL' });
 
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new Error('CiDeadlineExceeded: the local plan passed the CI run\'s deadline');
 
@@ -589,6 +594,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   if (here === undefined) {
     // The plan's stdout is its output; its stderr stays in its log.
     const planDeadline = remainingDeadline(deadlineAt);
+
+    if (planDeadline === null) return await ungraded(PASSED('plan job'));
     const planTask = commandTask(spec.recipe, argvOf(['sh', '-c', '"$@" > "$0"', '{out}', ...config.plan.command.map(placed), ...planArgs], spec.recipe), { output: 'text', timeout: Math.min(900, planDeadline) });
     const remote = planTask.stream([{}], { ...options, deadline: planDeadline, pool: 1 });
 
@@ -658,6 +665,11 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     return await ungraded(`the plan's ${String(groups.length)} environments run at once and need ${String(shares.need)} containers for it, one each or their widest gang, past the pool of ${String(config.pool)}: raise pool in .armada.json`);
   }
 
+  // What is left of the run's deadline, read once for every task job, so all of them start or none does.
+  const left = remainingDeadline(deadlineAt);
+
+  if (left === null) return await ungraded(PASSED('task jobs'));
+
   /** Group `at`'s task job, started on `share` containers. Its deadline is what is left of the run's, and bounds its
    *  tasks' timeout. */
   const start = (at: number, share: number) => {
@@ -678,7 +690,6 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
       return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry;
     });
 
-    const left = remainingDeadline(deadlineAt);
     const taskOptions = { timeout: Math.min(config.task.timeout, left), speculative: config.task.speculative, hedge: config.task.hedge, secrets: taskSecrets };
     const jobOptions = { ...options, deadline: left, pool };
     const job = config.task.verdict ? commandTask(own.spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(own.spec.recipe, argv, taskOptions).stream(entries, jobOptions);
