@@ -502,9 +502,8 @@ export async function signed(secret: string, signature: string, body: string): P
 
 /** `POST /webhooks/github/<project>`: outside the bearer, checked only by GitHub's signature. A valid push to a
  *  built branch or a same-repo pull request starts that commit's driver job — `armada run <sha> --json` on the
- *  deployment itself — once per delivery and once per commit. */
+ *  deployment itself — once per commit. */
 export async function webhooked(request: Request, env: Env, project: string): Promise<Response> {
-  const ignored = (note: string) => Response.json({ note });
   const hooks = env.WEBHOOKS.getByName(SINGLE);
   const config = await hooks.configOf(project);
 
@@ -515,16 +514,11 @@ export async function webhooked(request: Request, env: Env, project: string): Pr
 
   if (!(await signed(config.secret, signature, body))) return Response.json({ error: 'bad signature' }, { status: 401 });
 
-  const delivery = request.headers.get('X-GitHub-Delivery') ?? '';
-
-  if (delivery !== '' && await hooks.seen(delivery)) return ignored('duplicate');
-
-  // A delivery that starts no job is forgotten, so GitHub's redelivery, once the cause is fixed, is taken.
+  // A delivery GitHub sends again is answered by its commit's driver (`drive`): its job, its verdict, or a new driver
+  // where the last ended with neither, so a redelivery once a refusal's cause is fixed is taken.
   try {
     return await drive(request, env, { project, config, payload: jsonOf(body) });
   } catch (cause) {
-    if (delivery !== '') await hooks.unseen(delivery);
-
     if (cause instanceof Refused) return Response.json({ error: cause.message }, { status: cause.status });
 
     throw cause;

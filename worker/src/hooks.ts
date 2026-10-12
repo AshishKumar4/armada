@@ -1,7 +1,8 @@
 /**
  * ArmadaWebhooks: the projects whose pushes and same-repository pull requests start a CI driver. One object,
- * `SINGLE`, holds each project's config (its repo, branches and webhook secret), the delivery ids seen in the last
- * day, and the driver job each commit started in the last week. The endpoint itself is `webhooked` in worker.ts;
+ * `SINGLE`, holds each project's config (its repo, branches and webhook secret) and the driver job each commit
+ * started in the last week, which answers a delivery GitHub sends again as it answers a second event of the commit.
+ * The endpoint itself is `webhooked` in worker.ts;
  * `eventOf` and `driverSpec` are pure, so the tests exercise them without a request.
  */
 import { DurableObject } from 'cloudflare:workers';
@@ -60,10 +61,10 @@ export function eventOf(event: string, payload: Json, config: Pick<HookConfig, '
   return head.repo?.full_name === config.repo ? { kind: 'pr', sha: head.sha } : { kind: 'fork' };
 }
 
-/** How long a delivery id is kept against GitHub's redeliveries, and a commit's driver against a second run. */
-const DELIVERY_MS = 24 * 60 * 60_000;
-
+/** How long a commit's driver is kept against a second run, and how often the ones past it are forgotten. */
 const DRIVER_MS = 7 * 24 * 60 * 60_000;
+
+const PRUNE_MS = 24 * 60 * 60_000;
 
 export class ArmadaWebhooks extends DurableObject<Env> {
   /** Stores or replaces a project's config. */
@@ -94,20 +95,6 @@ export class ArmadaWebhooks extends DurableObject<Env> {
     return { repo: config.repo, hook: config.hook };
   }
 
-  /** Whether a delivery was answered in the last day, recording it: a delivery GitHub sends again is answered once. */
-  async seen(delivery: string): Promise<boolean> {
-    if ((await this.ctx.storage.get<number>(`del:${delivery}`)) !== undefined) return true;
-    await this.ctx.storage.put(`del:${delivery}`, Date.now());
-    await this.prunes();
-
-    return false;
-  }
-
-  /** Forgets a delivery that started nothing, so GitHub's redelivery is taken. */
-  async unseen(delivery: string): Promise<void> {
-    await this.ctx.storage.delete(`del:${delivery}`);
-  }
-
   /** Reserves the commit's driver for job `job` and answers null, or answers the job it already has and when it was
    *  claimed. Storage alone, so two deliveries of one commit never both get it. */
   async claim(project: string, sha: string, job: string): Promise<{ readonly job: string; readonly at: number } | null> {
@@ -125,23 +112,21 @@ export class ArmadaWebhooks extends DurableObject<Env> {
     if ((await this.ctx.storage.get<{ readonly job: string }>(`driver:${project}/${sha}`))?.job === job) await this.ctx.storage.delete(`driver:${project}/${sha}`);
   }
 
-  /** Forgets deliveries and drivers past their windows, then sleeps until the next one is due. */
+  /** Forgets drivers past their window, then sleeps until the next is due. Delivery ids an earlier Worker kept go with
+   *  them. */
   override async alarm(): Promise<void> {
     const now = Date.now();
-    const deliveries = await this.ctx.storage.list<number>({ prefix: 'del:' });
+    const deliveries = await this.ctx.storage.list({ prefix: 'del:' });
     const drivers = await this.ctx.storage.list<{ readonly at: number }>({ prefix: 'driver:' });
 
-    await this.ctx.storage.delete([
-      ...[...deliveries].flatMap(([key, at]) => now - at > DELIVERY_MS ? [key] : []),
-      ...[...drivers].flatMap(([key, { at }]) => now - at > DRIVER_MS ? [key] : []),
-    ]);
+    await this.ctx.storage.delete([...deliveries.keys(), ...[...drivers].flatMap(([key, { at }]) => now - at > DRIVER_MS ? [key] : [])]);
 
-    if (deliveries.size + drivers.size > 0) await this.ctx.storage.setAlarm(now + DELIVERY_MS);
+    if (drivers.size > 0) await this.ctx.storage.setAlarm(now + PRUNE_MS);
   }
 
   /** The pruning alarm, set once something is kept. */
   private async prunes(): Promise<void> {
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + DELIVERY_MS);
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + PRUNE_MS);
   }
 }
 

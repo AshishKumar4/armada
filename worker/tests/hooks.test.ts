@@ -140,7 +140,7 @@ describe('the github webhook', () => {
     expect(eventOf('pull_request', pr('opened'), { ...config, pullRequests: false })).toEqual({ kind: 'ignore' });
   });
 
-  test('dedupes a redelivered id, a commit with a verdict, and a commit with an open driver, a push and a PR at once included', async () => {
+  test('answers a redelivery as its commit\'s driver says: a commit with a verdict, or an open driver, a push and a PR at once included, starts none', async () => {
     const object = await configured();
     const objects = new Map<string, string>();
     const push = pushed('refs/heads/main');
@@ -158,20 +158,20 @@ describe('the github webhook', () => {
     expect({
       again: v.parse(Said, await again.json()), judged: v.parse(Said, await judged.json()), running: v.parse(Said, await running.json()), done: Object.keys(v.parse(Said, await done.json())),
       both: (await Promise.all(both.map(async (answer) => Object.keys(v.parse(Said, await answer.json())).join()))).toSorted(),
-    }).toEqual({ again: { note: 'duplicate' }, judged: { note: 'already' }, running: { note: 'already' }, done: ['started'], both: ['note', 'started'] });
+    }).toEqual({ again: { note: 'already' }, judged: { note: 'already' }, running: { note: 'already' }, done: ['started'], both: ['note', 'started'] });
   });
 
-  test('takes a commit whose claim has no job behind it once a making would have finished, and not before', async () => {
+  test('takes a commit whose claim has no job behind it once a making would have finished, and not before, the same delivery sent again included', async () => {
     const object = await configured();
 
-    // A delivery that died between its claim and its job's making.
+    // A delivery that died between its claim and its job's making, sent again by GitHub.
     await object.claim('armada', SHA, 'never-made');
     const soon = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-a' } });
 
     setSystemTime(new Date(Date.now() + 6 * 60_000));
 
     try {
-      const later = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-b' } });
+      const later = await deliver(object, pushed('refs/heads/main'), { headers: { 'X-GitHub-Delivery': 'del-a' } });
 
       expect({ soon: v.parse(Said, await soon.json()), later: Object.keys(v.parse(Said, await later.json())) }).toEqual({ soon: { note: 'already' }, later: ['started'] });
     } finally {
@@ -201,16 +201,15 @@ describe('the github webhook', () => {
     expect({ refused: [unknown.status, unset.status], redelivered: Object.keys(v.parse(Said, await redelivered.json())) }).toEqual({ refused: [503, 409], redelivered: ['started'] });
   });
 
-  test('forgets a delivery after a day and a commit\'s driver after a week', async () => {
+  test('forgets a commit\'s driver after a week', async () => {
     const object = hooks();
 
     try {
       setSystemTime(new Date('2026-10-01T00:00:00Z'));
-      await object.seen('del-old');
       await object.claim('armada', SHA, 'job-1');
       setSystemTime(new Date('2026-10-02T01:00:00Z'));
       await object.alarm();
-      expect({ redelivered: await object.seen('del-old'), driver: (await object.claim('armada', SHA, 'job-2'))?.job }).toEqual({ redelivered: false, driver: 'job-1' });
+      expect((await object.claim('armada', SHA, 'job-2'))?.job).toBe('job-1');
       setSystemTime(new Date('2026-10-08T02:00:00Z'));
       await object.alarm();
       expect(await object.claim('armada', SHA, 'job-3')).toBeNull();
