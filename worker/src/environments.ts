@@ -98,16 +98,27 @@ export class ArmadaEnvironments extends ArmadaSingle {
     if (recipe.repo !== undefined && commit?.base !== 'root') return { kind: 'failed', reason: 'the environment this job was packed against is gone; run again, which packs from the root' };
     const shallow = recipe.repo !== undefined && commit !== null && boundaryOf(commit, recipe.repo.history).length > 0;
 
-    await this.attempt(key, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow }, { shallow, attempt: 1 }, now);
-
-    return { kind: 'preparing' };
+    return await this.attempt(key, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow }, { shallow, attempt: 1 }, now);
   }
 
-  /** Attempt number `attempt` at `key`'s environment from `inputs`, on its own object: one key's preparer refused every
-   *  standard-4 start for 20 minutes while a new object on the same account started one at once. */
-  private async attempt(key: string, inputs: Inputs, { shallow, attempt }: { readonly shallow: boolean; readonly attempt: number }, now = Date.now()): Promise<void> {
-    await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: inputs.sha, shallow, since: now, attempt } satisfies Entry);
-    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, inputs);
+  /** Attempt number `attempt` at `key`'s environment from `inputs`, begun `since`, on an object of its own, named and
+   *  holding its fleet's vCPUs by `since`: one key's preparer refused every standard-4 start for 20 minutes while a new
+   *  object on the same account started one at once. One whose object cannot be told to begin fails here, rather than
+   *  leave its jobs waiting on a preparation no object runs. */
+  private async attempt(key: string, inputs: Inputs, { shallow, attempt }: { readonly shallow: boolean; readonly attempt: number }, since: number): Promise<Readiness> {
+    await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: inputs.sha, shallow, since, attempt } satisfies Entry);
+
+    try {
+      await this.env.PREPARER.getByName(`${key}.${String(since)}`).begin(key, since, inputs);
+    } catch (cause) {
+      const reason = `its preparer could not begin: ${said({ cause })}`;
+
+      await this.ctx.storage.put(`env:${key}`, { state: 'failed', at: Date.now(), reason } satisfies Entry);
+
+      return { kind: 'failed', reason };
+    }
+
+    return { kind: 'preparing' };
   }
 
   /** A job that ran on the key's environment ended: its recent hour starts now. */
@@ -312,7 +323,10 @@ export class ArmadaEnvironments extends ArmadaSingle {
     if (again !== undefined && attempt < PREPARE_ATTEMPTS) {
       console.error(JSON.stringify({ environment: key, attempt, again: reason }));
 
-      return await this.attempt(key, again, { shallow: entry.shallow, attempt: attempt + 1 });
+      // Begun after the attempt it replaces, if within the same millisecond, so it has an object of its own.
+      await this.attempt(key, again, { shallow: entry.shallow, attempt: attempt + 1 }, Math.max(Date.now(), since + 1));
+
+      return;
     }
 
     const failure = again === undefined ? reason : `${reason} (the platform failed all ${String(PREPARE_ATTEMPTS)} attempts, each in a fresh container)`;

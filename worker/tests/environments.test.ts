@@ -437,6 +437,15 @@ describe('a preparation under way', () => {
     setSystemTime();
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
   });
+
+  test('fails at once whose preparer cannot be told to begin, rather than keep its jobs waiting on it for the lease', async () => {
+    const environments = new ArmadaEnvironments(state().ctx, world({ PREPARER: namespace(() => ({ begin: async () => { throw new Error('the object was reset'); } })) }));
+    const recipe = v.parse(RecipeSchema, {});
+
+    expect([await environments.ensure('k', recipe, null), await environments.ensure('k', recipe, null)]).toEqual([
+      { kind: 'failed', reason: 'its preparer could not begin: the object was reset' }, { kind: 'failed', reason: 'its preparer could not begin: the object was reset' },
+    ]);
+  });
 });
 
 describe('a preparation phase whose every exec times out', () => {

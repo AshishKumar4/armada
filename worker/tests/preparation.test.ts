@@ -186,17 +186,15 @@ describe('an environment whose preparation the platform fails', () => {
   /** A registry whose preparations each run on a fresh object, the `n`th answered by `answers[n]`, every attempt's
    *  alarms run until the environment is ready or has failed: how it ended, and how many attempts it took. */
   async function attempted(answers: readonly Answer[]) {
-    const preparers: ArmadaPreparer[] = [];
+    // Each name its own object, as the platform's are, so an attempt on a name already used finds that one.
+    const preparers = new Map<string, ArmadaPreparer>();
     const stored = state();
 
     const environments: ArmadaEnvironments = new ArmadaEnvironments(stored.ctx, world({
-      PREPARER: namespace(() => {
-        const box = Object.assign(container(answers[preparers.length] ?? answering('none', 0)), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) });
-        const preparer = new ArmadaPreparer(state(box).ctx, world({ ENVIRONMENTS: namespace(() => environments) }));
+      PREPARER: namespace((name: string) => {
+        const box = Object.assign(container(answers[preparers.size] ?? answering('none', 0)), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) });
 
-        preparers.push(preparer);
-
-        return preparer;
+        return preparers.get(name) ?? preparers.set(name, new ArmadaPreparer(state(box).ctx, world({ ENVIRONMENTS: namespace(() => environments) }))).get(name);
       }),
     }));
 
@@ -204,11 +202,11 @@ describe('an environment whose preparation the platform fails', () => {
     let readiness = await environments.ensure(key, recipe, null);
 
     for (let alarm = 0; alarm < 200 && readiness.kind === 'preparing'; alarm += 1) {
-      await preparers.at(-1)?.alarm();
+      await [...preparers.values()].at(-1)?.alarm();
       readiness = await environments.ensure(key, recipe, null);
     }
 
-    return { kind: readiness.kind, reason: readiness.kind === 'failed' ? readiness.reason : '', attempts: preparers.length };
+    return { kind: readiness.kind, reason: readiness.kind === 'failed' ? readiness.reason : '', attempts: preparers.size };
   }
 
   /** A container whose start the platform ends, as it did with `internal error`. */
@@ -221,8 +219,10 @@ describe('an environment whose preparation the platform fails', () => {
     return (argv, options) => argv[3] === 'wait' && (argv[2] ?? '').includes('/phases/setup/') ? { exitCode: 0, stdout: '2\n' } : otherwise(argv, options);
   };
 
-  test('attempts it again in a fresh container, up to three in all; a failure of its recipe fails at once', async () => {
+  test('attempts it again in a fresh container, up to three in all, whatever the clock; a failure of its recipe fails at once', async () => {
     Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
+    // A clock that stands still: every attempt begins in one millisecond.
+    setSystemTime(new Date(Date.UTC(2026, 9, 13, 12, 0, 0)));
     const once = await attempted([unstarted]);
     const always = await attempted([unstarted, unstarted, unstarted]);
     const recipeFailed = await attempted([failing()]);
@@ -235,6 +235,7 @@ describe('an environment whose preparation the platform fails', () => {
       },
       recipeFailed: { kind: 'failed', reason: 'setup', attempts: 1 },
     });
+    setSystemTime();
   });
 });
 
