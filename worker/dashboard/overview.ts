@@ -6,7 +6,7 @@
  */
 import * as v from 'valibot';
 import { briefOf, detach, errorOf, FleetSchema, HealthSchema, JobsSchema, JobStatusSchema, type Fleet, type Health, type JobBrief } from '../../src/protocol';
-import { SignedOut, type Client } from './api';
+import { labelOf, SignedOut, type Client } from './api';
 import { ago, count, duration, h, icon, replace } from './dom';
 import { jobPill, nameOf, progress, tookOf } from './status';
 import { describe, empty, failed, poll, type View } from './view';
@@ -29,6 +29,9 @@ interface Listed {
   readonly at: Client;
   readonly job: JobBrief;
 }
+
+/** Whether `read` has an older page to show: one that does not answer has none. */
+const pages = (read: Read): boolean => !read.exhausted && !(read.now instanceof Error);
 
 /** A deployment as last read: every job read so far by id (each poll's first page and each older page merged in, so a
  *  job that a newer one pushes off the first page stays where it was), whether an older page is left, and its fleet or
@@ -72,6 +75,13 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
       : h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Deployments'), h('span', { class: 'aside' }, 'containers now')), fleetBody),
     h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', {}, 'Recent jobs'), filters), jobsBody));
 
+  /** A deployment's failure is its own, shown in its row, when the page reads others; this page's own refusing its
+   *  bearer signs the page out. */
+  const ownFailure = (read: Read, error: Error): void => {
+    if (error instanceof SignedOut || single) throw error;
+    read.now = error;
+  };
+
   const all = (): Listed[] => [...reads].flatMap(([at, read]) => [...read.listed.values()].map((job) => ({ at, job })))
     .sort((left, right) => right.job.createdAt - left.job.createdAt || right.job.id.localeCompare(left.job.id));
 
@@ -79,23 +89,30 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
     const { job, at } = listed;
     const text = filter.text.trim().toLowerCase();
 
-    return (filter.project === '' || job.project === filter.project) && (filter.deployment === '' || at.name === filter.deployment)
+    return (filter.project === '' || job.project === filter.project) && (filter.deployment === '' || at.host === filter.deployment)
       && (text === '' || [job.label, job.id, job.project ?? ''].some((each) => each.toLowerCase().includes(text)));
   };
 
   /** A select's options: every value, the chosen one kept even once no job has it, and none shown while there is
    *  nothing to choose. Drawn again only when they change, so a poll never closes a list being picked from. */
-  const options = (select: HTMLSelectElement, everyone: string, values: readonly string[], chosen: string): void => {
-    const choices = [...new Set([...values, ...chosen === '' ? [] : [chosen]])].sort();
-    const drawn = choices.join('\n');
+  const options = (select: HTMLSelectElement, everyone: string, choices: ReadonlyMap<string, string>, chosen: string): void => {
+    const kept = [...new Map([...chosen === '' ? [] : [[chosen, chosen] as const], ...choices])].sort(([, left], [, right]) => left.localeCompare(right));
+    const drawn = kept.map((choice) => choice.join('\t')).join('\n');
 
-    select.hidden = choices.length === 0;
+    select.hidden = kept.length === 0;
 
     if (select.dataset['drawn'] === drawn) return;
     const any = h('option', {}, everyone);
 
     any.value = '';
-    replace(select, any, choices.map((value) => h('option', {}, value)));
+
+    replace(select, any, kept.map(([value, label]) => {
+      const option = h('option', {}, label);
+
+      option.value = value;
+
+      return option;
+    }));
     select.value = chosen;
     select.dataset['drawn'] = drawn;
   };
@@ -103,8 +120,8 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
   const drawJobs = (): void => {
     const listed = all();
 
-    options(projects, 'Every project', listed.flatMap(({ job }) => job.project === null ? [] : [job.project]), filter.project);
-    options(places, 'Every deployment', deployments.map((at) => at.name), filter.deployment);
+    options(projects, 'Every project', new Map(listed.flatMap(({ job }) => job.project === null ? [] : [[job.project, job.project] as const])), filter.project);
+    options(places, 'Every deployment', new Map(deployments.map((at) => [at.host, labelOf(at, deployments)])), filter.deployment);
 
     if (listed.length === 0) {
       replace(jobsBody, empty('No jobs yet', 'Start one with ', h('span', { class: 'mono' }, 'armada map --times=3 -- echo hello {item}')));
@@ -113,7 +130,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
     }
 
     const rows = listed.filter(shown);
-    const exhausted = [...reads.values()].every((read) => read.exhausted);
+    const exhausted = ![...reads.values()].some(pages);
 
     const more = exhausted ? null : h('div', { class: 'more' }, h('button', {
       class: 'button', type: 'button',
@@ -121,13 +138,18 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
         const button = event.currentTarget;
 
         if (button instanceof HTMLButtonElement) button.disabled = true;
-        detach(Promise.all([...reads].filter(([, read]) => !read.exhausted).map(async ([at, read]) => {
-          const oldest = [...read.listed.keys()].sort().at(0) ?? '';
-          const { jobs } = await at.get(`/jobs?limit=${String(PAGE)}&before=${encodeURIComponent(oldest)}`, JobsSchema);
+        // Each deployment pages back by itself: one that fails says so in its row, and the others' pages show.
+        detach(Promise.all([...reads].filter(([, read]) => pages(read)).map(async ([at, read]) => {
+          try {
+            const oldest = [...read.listed.keys()].sort().at(0) ?? '';
+            const { jobs } = await at.get(`/jobs?limit=${String(PAGE)}&before=${encodeURIComponent(oldest)}`, JobsSchema);
 
-          read.exhausted = jobs.length < PAGE;
+            read.exhausted = jobs.length < PAGE;
 
-          for (const job of jobs) read.listed.set(job.id, job);
+            for (const job of jobs) read.listed.set(job.id, job);
+          } catch (cause) {
+            ownFailure(read, errorOf({ cause }));
+          }
         })).then(() => {
           older = true;
           drawJobs();
@@ -141,7 +163,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
     replace(jobsBody, rows.length === 0 ? empty('No job matches', 'Clear the search, or show older jobs.') : h('table', { class: 'table' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Job'), single ? null : h('th', { class: 'wide' }, 'Deployment'), h('th', {}, 'Status'), h('th', {}, 'Tasks'),
         h('th', { class: 'right wide' }, 'Containers'), h('th', { class: 'wide' }, 'Started'), h('th', { class: 'right' }, 'Took'))),
-      h('tbody', {}, rows.map((each) => row(each, single)))), more);
+      h('tbody', {}, rows.map((each) => row(each, single ? null : labelOf(each.at, deployments))))), more);
   };
 
   search.addEventListener('input', () => {
@@ -177,8 +199,8 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
       if (!older) read.exhausted = jobs.jobs.length < PAGE;
       read.now = { health, fleet };
     } catch (cause) {
-      if (cause instanceof SignedOut || single || signal.aborted) throw cause;
-      read.now = errorOf({ cause });
+      if (signal.aborted) throw errorOf({ cause });
+      ownFailure(read, errorOf({ cause }));
     }
   };
 
@@ -210,7 +232,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
         ? h('p', { class: 'muted' }, 'None set. ', h('span', { class: 'mono' }, 'armada secret set NAME'), ' sets one; no page reads a value back.')
         : h('div', { class: 'button-row' }, set.map((name) => h('span', { class: 'pill mono' }, name))));
     } else {
-      replace(fleetBody, h('div', { class: 'deployments' }, [...reads].map(([at, read]) => deploymentRow(at, read, names))));
+      replace(fleetBody, h('div', { class: 'deployments' }, [...reads].map(([at, read]) => deploymentRow(at, labelOf(at, deployments), read, names))));
     }
 
     drawJobs();
@@ -228,8 +250,8 @@ function stat(label: string, value: string, unit?: string): HTMLDivElement {
 
 /** A deployment beside others: its name, its fleet in a row of cells, and how many jobs and containers it has open, or
  *  why it did not answer. */
-function deploymentRow(at: Client, read: Read, names: ReadonlyMap<string, string>): HTMLElement {
-  const title = h('a', { class: 'deployment-name', href: at.href('') }, at.name);
+function deploymentRow(at: Client, label: string, read: Read, names: ReadonlyMap<string, string>): HTMLElement {
+  const title = h('a', { class: 'deployment-name', href: at.href('') }, label);
 
   if (read.now === null) return h('div', { class: 'deployment' }, title, h('div', { class: 'skeleton' }));
 
@@ -281,13 +303,13 @@ function fleetPicture(at: Client, fleet: Fleet, names: ReadonlyMap<string, strin
   ];
 }
 
-function row({ at, job }: Listed, single: boolean): HTMLTableRowElement {
+function row({ at, job }: Listed, label: string | null): HTMLTableRowElement {
   const done = job.tasks.exited + job.tasks.failed;
   const href = at.href(`jobs/${job.id}`);
 
   return h('tr', { data: { href }, onclick: () => { location.hash = href; } },
     h('td', {}, h('a', { class: 'job-name', href }, h('strong', {}, nameOf(job)), h('span', {}, [job.project, job.label === '' ? null : job.id].filter((each) => each !== null).join(' · ')))),
-    single ? null : h('td', { class: 'muted wide' }, at.name),
+    label === null ? null : h('td', { class: 'muted wide' }, label),
     h('td', {}, jobPill(job)),
     h('td', {}, h('div', { class: 'progress-cell' }, progress(job.tasks), h('span', { class: 'num muted' }, `${count(done)}/${count(job.tasks.total)}`))),
     h('td', { class: 'right num wide' }, job.phase === 'done' ? count(job.containers) : `${count(job.alive)} up`),

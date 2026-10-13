@@ -3,7 +3,7 @@
  * verdicts. The Worker serves it as static files under /ui/; `armada dashboard` opens it signed in.
  */
 import { detach, errorOf, type Health } from '../../src/protocol';
-import { deployment, otherDeployments, signIn, signOut, SignedOut, takeToken, token, type Client } from './api';
+import { deployments as read, labelOf, signIn, signOut, SignedOut, takeToken, token, type Client } from './api';
 import { ci } from './ci';
 import { environments } from './environments';
 import { count, h, icon, replace } from './dom';
@@ -17,8 +17,8 @@ type Page =
   | { readonly page: 'environments' }
   | { readonly page: 'ci'; readonly project: string | null; readonly sha: string | null };
 
-/** A page, and the deployment it is of: one named `#/@<name>/…`, else this page's own, whose fleet page shows every
- *  deployment the browser reads. */
+/** A page, and the deployment it is of: the one on the host `#/@<host>/…` names, else this page's own, whose fleet
+ *  page shows every deployment the browser reads. */
 type Route = Page & { readonly at: string | null };
 
 function routeOf(hash: string): Route {
@@ -42,7 +42,7 @@ interface Deployments {
 }
 
 /** The deployment `route` is of: one named and read here, else this page's own. */
-const clientOf = (route: Route, { own, others }: Deployments): Client => [own, ...others].find((each) => each.name === route.at) ?? own;
+const clientOf = (route: Route, { own, others }: Deployments): Client => [own, ...others].find((each) => each.host === route.at) ?? own;
 
 function viewOf(route: Route, deployments: Deployments): View {
   const api = clientOf(route, deployments);
@@ -134,7 +134,7 @@ function shell(health: Health, { own, others }: Deployments): Frame {
         host,
         themeButton,
         // A dashboard served from this machine (`armada dashboard --serve`) signs its requests itself, and holds no token.
-        token() === null ? null : h('button', { class: 'icon-button', type: 'button', label: 'Sign out', title: 'Sign out', onclick: () => { signOut(); signInPage(); } }, icon('out'))))),
+        token() === null ? null : h('button', { class: 'icon-button', type: 'button', label: 'Sign out', title: 'Sign out', onclick: signedOut }, icon('out'))))),
     main);
 
   return { main, nav, host };
@@ -151,7 +151,8 @@ function show({ main, nav, host }: Frame, deployments: Deployments): void {
   replace(main, current.element);
 
   for (const link of nav.querySelectorAll('a')) {
-    link.href = api.href(link.dataset['path'] ?? '');
+    // The fleet page of every deployment stays there; any other page is of the deployment shown.
+    link.href = route.at === null && link.dataset['page'] === 'overview' ? '#/' : api.href(link.dataset['path'] ?? '');
 
     if (link.dataset['page'] === (route.page === 'job' ? 'overview' : route.page)) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
@@ -159,22 +160,35 @@ function show({ main, nav, host }: Frame, deployments: Deployments): void {
 
   const every = route.at === null && route.page === 'overview' && deployments.others.length > 0;
 
-  replace(host, h('span', { class: 'dot ok' }), every ? `${count(deployments.others.length + 1)} deployments` : api.name);
+  replace(host, h('span', { class: 'dot ok' }), every ? `${count(deployments.others.length + 1)} deployments` : labelOf(api, [deployments.own, ...deployments.others]));
 
   window.scrollTo(0, 0);
 }
 
 let routed: (() => void) | null = null;
 
-async function start(): Promise<void> {
+/** The page shows nothing and follows no address: its view and its routing hold the deployments' bearers. */
+function stop(): void {
   current?.dispose();
   current = null;
 
   if (routed !== null) window.removeEventListener('hashchange', routed);
+  routed = null;
+}
+
+/** Signs this browser out of every deployment it reads. */
+function signedOut(): void {
+  stop();
+  signOut();
+  signInPage();
+}
+
+async function start(): Promise<void> {
+  stop();
 
   try {
-    const { own, health } = await deployment();
-    const deployments = { own, others: otherDeployments() };
+    const { own, others, health } = await read();
+    const deployments = { own, others };
     const frame = shell(health, deployments);
 
     routed = () => { show(frame, deployments); };
@@ -197,12 +211,7 @@ function restart(): void {
   detach(start(), unanswered);
 }
 
-whenSignedOut(() => {
-  current?.dispose();
-  current = null;
-  signOut();
-  signInPage();
-});
+whenSignedOut(signedOut);
 
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
 

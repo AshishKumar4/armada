@@ -623,12 +623,12 @@ export default {
     if (first === undefined && (request.method === 'GET' || request.method === 'HEAD')) return Response.redirect(new URL('/ui/', request.url).href, 302);
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+    // Set on the answer itself: one made again would lose how its body is encoded, and gzip a stored log twice.
     const answer = await api(request, env);
-    const headers = new Headers(answer.headers);
 
-    for (const [name, value] of Object.entries(CORS)) headers.set(name, value);
+    for (const [name, value] of Object.entries(CORS)) answer.headers.set(name, value);
 
-    return new Response(answer.body, { status: answer.status, statusText: answer.statusText, headers });
+    return answer;
   },
 } satisfies ExportedHandler<Env>;
 
