@@ -36,6 +36,18 @@ const preparing = (entry: Entry | undefined, now: number): entry is Extract<Entr
 /** A failed preparation is the answer for this long, so the jobs waiting on it end; then it may be asked again. */
 const FAILURE_HOLD_MS = 5 * 60_000;
 
+/** Attempts at an environment the platform, not its recipe, fails (`PlatformFailed`), each in a fresh container, before
+ *  the jobs waiting on it fail: Nimbus's failed twice in three minutes on 2026-10-13 ("the container does not meet the
+ *  required snapshot prerequisites") and was prepared at the next attempt. */
+const PREPARE_ATTEMPTS = 3;
+
+/** What a preparation starts from, which a fresh attempt is given again. */
+type Inputs = Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow'>;
+
+/** A preparation the platform failed rather than its recipe: its container would not start, the platform lost three of
+ *  its execs in a row, or it would not snapshot it. */
+class PlatformFailed extends Error {}
+
 /** A snapshot no environment records any more and whose delete is still owed, under `debt:<ref>`: one a later
  *  generation of its key displaced, one a preparation made and could not publish, or one whose delete failed. `ref` is
  *  its id, or the digest a delete left once the tags were gone. */
@@ -86,12 +98,16 @@ export class ArmadaEnvironments extends ArmadaSingle {
     if (recipe.repo !== undefined && commit?.base !== 'root') return { kind: 'failed', reason: 'the environment this job was packed against is gone; run again, which packs from the root' };
     const shallow = recipe.repo !== undefined && commit !== null && boundaryOf(commit, recipe.repo.history).length > 0;
 
-    await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: commit?.sha ?? null, shallow, since: now } satisfies Entry);
-    // Each attempt on its own object: one key's preparer refused every standard-4 start for 20 minutes while a new
-    // object on the same account started one at once.
-    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow });
+    await this.attempt(key, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow }, { shallow, attempt: 1 }, now);
 
     return { kind: 'preparing' };
+  }
+
+  /** Attempt number `attempt` at `key`'s environment from `inputs`, on its own object: one key's preparer refused every
+   *  standard-4 start for 20 minutes while a new object on the same account started one at once. */
+  private async attempt(key: string, inputs: Inputs, { shallow, attempt }: { readonly shallow: boolean; readonly attempt: number }, now = Date.now()): Promise<void> {
+    await this.ctx.storage.put(`env:${key}`, { state: 'preparing', sha: inputs.sha, shallow, since: now, attempt } satisfies Entry);
+    await this.env.PREPARER.getByName(`${key}.${String(now)}`).begin(key, now, inputs);
   }
 
   /** A job that ran on the key's environment ended: its recent hour starts now. */
@@ -284,12 +300,24 @@ export class ArmadaEnvironments extends ArmadaSingle {
     if (entry?.state === 'preparing' && entry.since === since) await this.ctx.storage.put(`env:${key}`, { ...entry, beat: Date.now() } satisfies Entry);
   }
 
-  /** A failure ends the key's preparation only if it is the attempt begun `since`, not one a later attempt replaced. */
-  async preparationFailed(key: string, since: number, reason: string): Promise<void> {
+  /** A failure ends the key's preparation only if it is the attempt begun `since`, not one a later attempt replaced. One
+   *  the platform failed, which says what it started from (`again`), is attempted again in a fresh container, up to
+   *  PREPARE_ATTEMPTS in all. */
+  async preparationFailed(key: string, since: number, reason: string, again?: Inputs): Promise<void> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     if (entry?.state !== 'preparing' || entry.since !== since) return;
-    await this.ctx.storage.put(`env:${key}`, { state: 'failed', at: Date.now(), reason } satisfies Entry);
+    const attempt = entry.attempt ?? 1;
+
+    if (again !== undefined && attempt < PREPARE_ATTEMPTS) {
+      console.error(JSON.stringify({ environment: key, attempt, again: reason }));
+
+      return await this.attempt(key, again, { shallow: entry.shallow, attempt: attempt + 1 });
+    }
+
+    const failure = again === undefined ? reason : `${reason} (the platform failed all ${String(PREPARE_ATTEMPTS)} attempts, each in a fresh container)`;
+
+    await this.ctx.storage.put(`env:${key}`, { state: 'failed', at: Date.now(), reason: failure } satisfies Entry);
   }
 
   async list(): Promise<{ key: string; entry: Entry }[]> {
@@ -473,7 +501,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
 
       if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
-      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`);
+      const { recipe, sha, packer, shallow } = preparation;
+
+      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? { recipe, sha, packer, shallow } : undefined);
     }
   }
 
@@ -489,7 +519,15 @@ export class ArmadaPreparer extends DurableObject<Env> {
       case 'base':
         return await this.command(preparation, {
           doing: 'the runner layer', asUser: false, argv: ['/bin/sh', '-c', runnerLayer(workdir)],
-          inputs: async () => { await startAndAnswer(container, { image: recipe.base, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ['sleep', 'infinity'] }, { ms: 300_000, inactivityMs: LEASE_MS }); },
+          inputs: async () => {
+            try {
+              await startAndAnswer(container, { image: recipe.base, instance: instanceOf(recipe.size), enableInternet: true, entrypoint: ['sleep', 'infinity'] }, { ms: 300_000, inactivityMs: LEASE_MS });
+            } catch (cause) {
+              if (cause instanceof AccountFull) throw cause;
+
+              throw new PlatformFailed('the container would not start', { cause });
+            }
+          },
         });
 
       case 'setup':
@@ -527,7 +565,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
         if (taken.status === 'rejected') {
           const refusal = said({ cause: taken.reason });
 
-          if (!SNAPSHOT_FULL.test(refusal)) throw new Error(refusal);
+          if (!SNAPSHOT_FULL.test(refusal)) throw new PlatformFailed(refusal);
 
           return await this.roomFor(preparation, refusal);
         }
@@ -594,7 +632,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       if (answered.status === 'rejected') {
         lost += 1;
 
-        if (lost >= LOST_EXECS) throw new Error(`${what} failed to run`, { cause: answered.reason });
+        if (lost >= LOST_EXECS) throw new PlatformFailed(`${what} failed to run`, { cause: answered.reason });
         await this.ctx.storage.put('preparation', { ...preparation, started, lost } satisfies Preparation);
 
         return null;

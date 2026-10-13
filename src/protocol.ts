@@ -495,8 +495,9 @@ export const GenerationSchema = v.object({
 
 /** An environment in the deployment's registry: being prepared, ready, or failed a while ago. */
 export const EnvironmentEntrySchema = v.variant('state', [
-  /** A preparation: begun `since`, its preparer last heard from at `beat`. */
-  v.object({ state: v.literal('preparing'), sha: v.nullable(v.string()), shallow: v.optional(v.boolean(), false), since: v.number(), beat: v.optional(v.number()) }),
+  /** A preparation: begun `since`, its preparer last heard from at `beat`, the `attempt`th the platform let fail (absent
+   *  for the first). */
+  v.object({ state: v.literal('preparing'), sha: v.nullable(v.string()), shallow: v.optional(v.boolean(), false), since: v.number(), beat: v.optional(v.number()), attempt: v.optional(v.number()) }),
   v.object({ state: v.literal('ready'), generation: GenerationSchema, lastUsed: v.number() }),
   v.object({ state: v.literal('failed'), at: v.number(), reason: v.string() }),
 ]);

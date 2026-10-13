@@ -616,7 +616,7 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
     ]);
   });
 
-  test('waits while open jobs hold every snapshot, then fails saying what holds the storage; another failure fails at once', async () => {
+  test('waits while open jobs hold every snapshot, then fails saying what holds the storage; another refusal, the platform\'s, is attempted again', async () => {
     const pinned = await full(['a', 'b', 'c']);
 
     await pinned.preparer.alarm();
@@ -630,7 +630,7 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
     await other.preparer.alarm();
 
     expect({ waiting, ended: ended.kind === 'failed' && /held by open jobs/u.test(ended.reason), left: pinned.fake.left(), other: (await other.readiness()).kind, otherLeft: other.fake.left() })
-      .toEqual({ waiting: 'preparing', ended: true, left: ['a', 'b', 'c'], other: 'failed', otherLeft: ['a', 'b', 'c'] });
+      .toEqual({ waiting: 'preparing', ended: true, left: ['a', 'b', 'c'], other: 'preparing', otherLeft: ['a', 'b', 'c'] });
   });
 
   test('asks again where asking for room failed, owes a delete that failed with a look due for it, and says when it has no credentials to delete with', async () => {
