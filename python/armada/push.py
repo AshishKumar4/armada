@@ -122,11 +122,15 @@ def _task_files(root: Path, folders: list[str]) -> tuple[list[Path], list[str], 
                     owners[value.id] = (value, path)
                 if tasks:
                     files.append(path)
+        # A module whose __file__ is no file's path is no project module: torch.classes says "_classes.py", which would
+        # otherwise resolve against whatever directory this process is in.
         loaded = {
             name: Path(source).resolve()
             for name, module in sys.modules.items()
             if isinstance(source := getattr(module, "__file__", None), str)
             and source.endswith(".py")
+            and Path(source).is_absolute()
+            and Path(source).is_file()
             and Path(source).resolve().is_relative_to(root)
         }
     finally:

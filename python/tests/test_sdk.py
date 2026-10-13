@@ -253,6 +253,25 @@ class TestBundle(unittest.TestCase):
         self.assertEqual([json.loads(ran[3]) for ran in (first, second, again)], [{"ok": True, "value": value} for value in (20, 30, 50)])
         self.assertEqual([name for name in sys.modules if name.split(".")[0] in ("tasks", "helpers")], [])
 
+    def test_bundles_from_its_root_beside_a_loaded_module_whose_file_is_not_a_path(self) -> None:
+        import os
+        import types
+
+        # torch.classes is such a module: its __file__ is "_classes.py", which no directory holds.
+        fake = types.ModuleType("torch_classes")
+        fake.__file__ = "_classes.py"
+        sys.modules["torch_classes"] = fake
+        here = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                self._project(scratch)
+                os.chdir(scratch)
+                _, ids = bundle_tasks(Path(scratch), ["tasks"])
+        finally:
+            os.chdir(here)
+            del sys.modules["torch_classes"]
+        self.assertEqual(ids, ["square"])
+
     def test_refuses_two_tasks_sharing_an_id_in_two_files_or_one_and_takes_one_task_under_two_names(self) -> None:
         refused: list[str] = []
         for more in (
