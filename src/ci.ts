@@ -601,19 +601,36 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   // Its own secrets join the config's only for this run.
   const taskSecrets = [...new Set([...config.task.secrets, ...secrets])];
 
-  // Every environment resolved again, and its pack uploaded where its base moved, right before the task jobs start: a
-  // base resolved before the plan may have been rebuilt or deleted since (#39), and resolving it counts as a use that
-  // keeps it until they open. Each before any task job starts: one that fails leaves none running.
-  const owns = new Map(await Promise.all(groups.map(async ({ name }) => {
+  /** Every environment resolved again and its pack uploaded where its base moved, each before any task job starts: one
+   *  that fails leaves none running. */
+  const resolveAll = async () => new Map(await Promise.all(groups.map(async ({ name }) => {
     const own = await of(name);
-
-    if (name !== undefined) note(`environment ${name} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
     const sent = await own.upload();
 
     if (sent !== null) note(`uploaded its pack${name === undefined ? ' again' : ` for ${name}`}, ${(sent / 1e6).toFixed(1)} MB`);
 
     return [name, own] as const;
   })));
+
+  // A base resolved before the plan, or before another environment's upload ended, may have been rebuilt or deleted
+  // since (#39): the jobs start once a pass finds every base where the last left it, and resolving counts as a use that
+  // keeps each until they open.
+  let owns = await resolveAll();
+
+  for (let moved = true; moved;) {
+    const again = await resolveAll();
+
+    moved = groups.some(({ name }) => again.get(name)?.environment.base !== owns.get(name)?.environment.base);
+    owns = again;
+
+    if (moved && remainingDeadline(deadlineAt) === null) return await ungraded(PASSED('task jobs'));
+  }
+
+  for (const name of named) {
+    const own = owns.get(name);
+
+    if (own !== undefined) note(`environment ${name} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
+  }
 
   const shares = sharesFor(config.pool, slots, groups.map((group) => ({ estimates: group.indexes.map((index) => estimates[index]), ranks: group.indexes.map((index) => ranks[index] ?? 1) })));
 

@@ -1064,13 +1064,19 @@ describe('armada run', () => {
     });
   });
 
-  test('packs its task job against the environment as it is once the plan is done, not as it was before (#39)', async () => {
+  test('packs its task job against the environment as it is when the job opens, not as it was before its plan or its uploads (#39)', async () => {
     const plan: Json = { include: [{ name: 'a' }] };
-    // The environment holds the commit when the run starts, and is gone by the time its local plan is done.
-    const ran = await run([], plan, {}, { planConfig: { command: ['sh', '-c', `echo '${JSON.stringify(plan)}'`], local: true }, taskConfig: { verdict: false }, baseOf: (asked) => asked === 0 ? 'HEAD' : 'root' });
-    const bases = ran.bodies.map((body) => v.parse(v.object({ commit: v.object({ base: v.string() }) }), body).commit.base);
+    const planConfig = { command: ['sh', '-c', `echo '${JSON.stringify(plan)}'`], local: true };
 
-    expect({ exit: ran.exit, bases }).toEqual({ exit: 0, bases: ['root'] });
+    // The environment holds the commit when the run starts, and is gone once the local plan is done, or once the
+    // uploads after it are.
+    const bases = await Promise.all([1, 2].map(async (gone) => {
+      const ran = await run([], plan, {}, { planConfig, taskConfig: { verdict: false }, baseOf: (asked) => asked < gone ? 'HEAD' : 'root' });
+
+      return [ran.exit, ...ran.bodies.map((body) => v.parse(v.object({ commit: v.object({ base: v.string() }) }), body).commit.base)];
+    }));
+
+    expect(bases).toEqual([[0, 'root'], [0, 'root']]);
   });
 
   test('passes a row its task reported green only alone, after failing beside others, and says so in every row it reported (#38)', async () => {
