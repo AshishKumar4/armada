@@ -54,12 +54,17 @@ export function commandEnv(recipe: Recipe, env: Readonly<Record<string, string>>
 export class ArmadaEnvironments extends ArmadaSingle {
   /** What a client packs a commit of `history` against: the environment's commit once there is one, else the root. A
    *  shallow environment holds nothing before its commit's boundary, so a pack of `full` history, which leaves out all
-   *  its base's history holds, goes from the root (#34). */
+   *  its base's history holds, goes from the root (#34). Asked of a ready environment, it counts as a use: the client's
+   *  job opens on it once its plan and its upload are done, and no room is made from it meanwhile (`makeRoom`). */
   async base(key: string, history: 'full' | 'commit'): Promise<string> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
     const of = (sha: string | null, shallow: boolean) => sha === null || (shallow && history === 'full') ? 'root' : sha;
 
-    if (entry?.state === 'ready') return of(entry.generation.sha, entry.generation.shallow);
+    if (entry?.state === 'ready') {
+      await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: Date.now() } satisfies Entry);
+
+      return of(entry.generation.sha, entry.generation.shallow);
+    }
 
     return preparing(entry, Date.now()) ? of(entry.sha, entry.shallow) : 'root';
   }
@@ -173,9 +178,10 @@ export class ArmadaEnvironments extends ArmadaSingle {
   }
 
   /** The account refused a snapshot of `key` for its storage (#30): this frees one snapshot of this deployment's, an
-   *  owed delete first, else the least recently used environment no open job uses, past the kept count and the recent
-   *  hour. A full account fails every job that needs a new environment, which is worse than preparing an older one again.
-   *  Whether a snapshot was deleted, else why none could be. */
+   *  owed delete first, else the least recently used environment no open job uses, past the kept count but not used in
+   *  the recent hour, as a client that packed against one opens its job on it (`base`). A full account fails every job
+   *  that needs a new environment, which is worse than preparing an older one again. Whether a snapshot was deleted,
+   *  else why none could be. */
   async makeRoom(key: string): Promise<Room> {
     const credentials = this.env.REGISTRY_CREDENTIALS;
 
@@ -185,7 +191,7 @@ export class ArmadaEnvironments extends ArmadaSingle {
 
     if (await this.settle(credentials, used)) return 'freed';
 
-    for (const candidate of expired(listed, used, Date.now(), { keep: 0, recentMs: 0 }).filter((each) => each.key !== key).toReversed()) {
+    for (const candidate of expired(listed, used, Date.now(), { keep: 0, recentMs: RECENT_MS }).filter((each) => each.key !== key).toReversed()) {
       if (await this.evict(credentials, candidate) === true) return 'freed';
     }
 

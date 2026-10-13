@@ -584,6 +584,28 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
       .toEqual({ waiting: 'preparing', after: 'ready', taken: 2, kept: ['a', 'c', 'new'], left: ['a', 'c'] });
   });
 
+  test('spares an environment a client is packing against, frees the least recently used other, and waits while none is left', async () => {
+    const sha = 'a'.repeat(40);
+    const repo = v.parse(RecipeSchema, { repo: { project: 'p', checkout: '/home/ci/work', history: 'full', manifest: [] } });
+    const kept = [];
+
+    // a was last used 5 hours ago, the least recently, with b and c free; or a second ago, with open jobs on b and c.
+    for (const [lastUsed, pinned] of [[5 * HOUR, []], [1000, ['b', 'c']]] as const) {
+      const { stored, environments, preparer, fake, readiness } = await full(pinned);
+
+      await stored.ctx.storage.put('env:a', { state: 'ready', generation: { ...generation('a'), sha }, lastUsed: Date.now() - lastUsed });
+      // The client resolves its pack's base and runs its plan; meanwhile another key's snapshot is refused for room.
+      const base = await environments.base('a', 'full');
+
+      await preparer.alarm();
+      const opened = await environments.ensure('a', repo, { sha: 'b'.repeat(40), base, packer: PACKER });
+
+      kept.push({ opened: opened.kind, left: fake.left(), other: (await readiness()).kind });
+    }
+
+    expect(kept).toEqual([{ opened: 'ready', left: ['a', 'c'], other: 'preparing' }, { opened: 'ready', left: ['a', 'b', 'c'], other: 'preparing' }]);
+  });
+
   test('waits while open jobs hold every snapshot, then fails saying what holds the storage; another failure fails at once', async () => {
     const pinned = await full(['a', 'b', 'c']);
 
