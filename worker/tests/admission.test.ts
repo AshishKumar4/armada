@@ -108,6 +108,36 @@ describe('a drained version', () => {
     expect(answers).toEqual([refused, refused, refused, 'admitted']);
   });
 
+  test('refuses a job as being redeployed while its fleet still runs code that lacks the method the Worker calls', async () => {
+    const { armada } = deployment(undefined, 'b', {
+      FLEET: namespace(() => ({ admitJob: async () => { throw new TypeError('The RPC receiver does not implement the method "admitJob".'); } })),
+    });
+
+    expect(await settled(armada.create(spec), 'admitted')).toBe('RequestError: POST /jobs: 503 armada is being redeployed and its objects still run the earlier code; run again in a few minutes (The RPC receiver does not implement the method "admitJob".)');
+  });
+
+  test('admits no job whose objects answered their interface only after it drained', async () => {
+    const asked = Promise.withResolvers<void>();
+    const answered = Promise.withResolvers<void>();
+
+    const slow = namespace(() => ({
+      contract: async () => {
+        asked.resolve();
+        await answered.promise;
+      },
+    }));
+
+    const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100', ENVIRONMENTS: slow }));
+    const admitting = fleet.admitJob('a', undefined, 'j');
+
+    await asked.promise;
+    const open = await fleet.drain('a');
+
+    answered.resolve();
+
+    expect({ open, admitted: await admitting, after: await fleet.jobs() }).toEqual({ open: 0, admitted: false, after: 0 });
+  });
+
   test('counts a job admitted before it but still being made, so a deploy waits for it', async () => {
     const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' }));
     const jobs = new Map<string, ArmadaJob>();

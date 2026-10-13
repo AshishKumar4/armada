@@ -639,10 +639,18 @@ export default {
       return await route(request, env);
     } catch (cause) {
       if (cause instanceof v.ValiError) return Response.json({ error: cause.message }, { status: 400 });
-      // Said in the answer and the log alike: a bare "Worker threw exception" names nothing to fix (#17).
-      console.error(JSON.stringify({ route: `${request.method} ${new URL(request.url).pathname}`, error: said({ cause }) }));
+      const error = said({ cause });
 
-      return Response.json({ error: said({ cause }) }, { status: 500 });
+      // Said in the answer and the log alike: a bare "Worker threw exception" names nothing to fix (#17).
+      console.error(JSON.stringify({ route: `${request.method} ${new URL(request.url).pathname}`, error }));
+
+      // An object keeps the code a deploy replaced for minutes, and lacks what the new code calls (armada-ci2 on
+      // 2026-10-13: its fleet, for five).
+      if (error.includes('The RPC receiver does not implement the method')) {
+        return Response.json({ error: `armada is being redeployed and its objects still run the earlier code; run again in a few minutes (${error})` }, { status: 503 });
+      }
+
+      return Response.json({ error }, { status: 500 });
     }
   },
 } satisfies ExportedHandler<Env>;

@@ -7,7 +7,10 @@
  * only to how the code works, behind the same declarations, takes over the running jobs.
  *
  * Outside it: SQL tables, which each object migrates as it opens them; what runs in a container and how it answers,
- * which `DRIVER` versions; and what a type cannot say, such as a regex's pattern or a storage key's name.
+ * which `DRIVER` versions; and what a type cannot say, such as a regex's pattern or a storage key's name. A drain ends
+ * the jobs, not the records of the objects they share, so code that changes a stored shape still reads the earlier
+ * one. After the drain, the fleet waits for the deployment-wide objects to run the new code (`ArmadaFleet.admitJob`),
+ * not for those named by project or task class (`TIMINGS`, `ESTIMATES`), which idle once the jobs end.
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';

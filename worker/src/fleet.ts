@@ -117,9 +117,10 @@ export class ArmadaFleet extends ArmadaSingle {
   /** Admits `job` unless `version` is drained, or this fleet or another deployment-wide object runs an interface other
    *  than `contract`, the asking Worker's; and counts it open in the same step, so a drain sees every job it did not
    *  refuse. After a deploy that changed the interface, the first job waits for the objects that kept the earlier code
-   *  (`ArmadaSingle`). */
+   *  (`ArmadaSingle`). They are asked first: a drain may come while they answer, and none can between the fleet's own
+   *  read and write. */
   async admitJob(version: string, contract: string | undefined, job: string): Promise<boolean> {
-    if (!(await this.admits(version)) || !(await this.runs(contract))) return false;
+    if (!(await this.runs(contract)) || !(await this.admits(version))) return false;
     await this.ctx.storage.put(`job:${job}`, Date.now());
 
     return true;
