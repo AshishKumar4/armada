@@ -443,34 +443,41 @@ describe('a preparation under way', () => {
     const refused = new ArmadaEnvironments(state().ctx, world({ PREPARER: namespace(() => ({ begin: async () => { throw new Error('the object was reset'); } })) }));
     const alone = [await refused.ensure('k', recipe, null), await refused.ensure('k', recipe, null)];
 
-    // The first attempt's call is out while the environment is deleted, asked again and prepared.
+    // The first attempt's call is out while the environment is deleted and asked again; then that call fails.
+    const entered = Promise.withResolvers<void>();
     const told = Promise.withResolvers<void>();
     let calls = 0;
 
-    const stored = state();
-
-    const overtaken: ArmadaEnvironments = new ArmadaEnvironments(stored.ctx, world({
+    const overtaken: ArmadaEnvironments = new ArmadaEnvironments(state().ctx, world({
       PREPARER: namespace(() => ({
         begin: async () => {
           calls += 1;
 
           if (calls > 1) return;
+          entered.resolve();
           await told.promise;
           throw new Error('the object was reset');
         },
       })),
     }));
 
+    setSystemTime(new Date(Date.UTC(2026, 9, 13, 12, 0, 0)));
     const first = overtaken.ensure('k', recipe, null);
 
+    await entered.promise;
     await overtaken.forget('k');
+    setSystemTime(new Date(Date.UTC(2026, 9, 13, 12, 0, 1)));
     await overtaken.ensure('k', recipe, null);
-    await overtaken.prepared(generation('k'));
     told.resolve();
+    const failedLate = (await first).kind;
+    const meanwhile = (await overtaken.ensure('k', recipe, null)).kind;
 
-    expect({ alone, first: (await first).kind, after: (await overtaken.ensure('k', recipe, null)).kind }).toEqual({
+    await overtaken.prepared(generation('k'));
+    setSystemTime();
+
+    expect({ alone, calls, failedLate, meanwhile, after: (await overtaken.ensure('k', recipe, null)).kind }).toEqual({
       alone: [{ kind: 'failed', reason: 'its preparer could not begin: the object was reset' }, { kind: 'failed', reason: 'its preparer could not begin: the object was reset' }],
-      first: 'ready', after: 'ready',
+      calls: 2, failedLate: 'preparing', meanwhile: 'preparing', after: 'ready',
     });
   });
 });
