@@ -438,13 +438,40 @@ describe('a preparation under way', () => {
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
   });
 
-  test('fails at once whose preparer cannot be told to begin, rather than keep its jobs waiting on it for the lease', async () => {
-    const environments = new ArmadaEnvironments(state().ctx, world({ PREPARER: namespace(() => ({ begin: async () => { throw new Error('the object was reset'); } })) }));
+  test('fails at once whose preparer cannot be told to begin, unless a later preparation took its place while it was told', async () => {
     const recipe = v.parse(RecipeSchema, {});
+    const refused = new ArmadaEnvironments(state().ctx, world({ PREPARER: namespace(() => ({ begin: async () => { throw new Error('the object was reset'); } })) }));
+    const alone = [await refused.ensure('k', recipe, null), await refused.ensure('k', recipe, null)];
 
-    expect([await environments.ensure('k', recipe, null), await environments.ensure('k', recipe, null)]).toEqual([
-      { kind: 'failed', reason: 'its preparer could not begin: the object was reset' }, { kind: 'failed', reason: 'its preparer could not begin: the object was reset' },
-    ]);
+    // The first attempt's call is out while the environment is deleted, asked again and prepared.
+    const told = Promise.withResolvers<void>();
+    let calls = 0;
+
+    const stored = state();
+
+    const overtaken: ArmadaEnvironments = new ArmadaEnvironments(stored.ctx, world({
+      PREPARER: namespace(() => ({
+        begin: async () => {
+          calls += 1;
+
+          if (calls > 1) return;
+          await told.promise;
+          throw new Error('the object was reset');
+        },
+      })),
+    }));
+
+    const first = overtaken.ensure('k', recipe, null);
+
+    await overtaken.forget('k');
+    await overtaken.ensure('k', recipe, null);
+    await overtaken.prepared(generation('k'));
+    told.resolve();
+
+    expect({ alone, first: (await first).kind, after: (await overtaken.ensure('k', recipe, null)).kind }).toEqual({
+      alone: [{ kind: 'failed', reason: 'its preparer could not begin: the object was reset' }, { kind: 'failed', reason: 'its preparer could not begin: the object was reset' }],
+      first: 'ready', after: 'ready',
+    });
   });
 });
 

@@ -113,9 +113,13 @@ export class ArmadaEnvironments extends ArmadaSingle {
     } catch (cause) {
       const reason = `its preparer could not begin: ${said({ cause })}`;
 
-      await this.ctx.storage.put(`env:${key}`, { state: 'failed', at: Date.now(), reason } satisfies Entry);
+      // As any attempt's failure: it ends the key's preparation only if no later one replaced it while the call was out.
+      await this.preparationFailed(key, since, reason);
+      const now = await this.ctx.storage.get<Entry>(`env:${key}`);
 
-      return { kind: 'failed', reason };
+      if (now?.state === 'ready') return { kind: 'ready', generation: now.generation };
+
+      return now?.state === 'failed' ? { kind: 'failed', reason: now.reason } : { kind: 'preparing' };
     }
 
     return { kind: 'preparing' };
