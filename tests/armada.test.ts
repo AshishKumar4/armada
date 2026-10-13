@@ -865,6 +865,8 @@ interface Runner {
   readonly files?: Readonly<Record<string, string>>;
   /** Each task job then lands every one of its tasks, exiting with this for its item. */
   readonly exitOf?: (item: Json) => number;
+  /** How a task job's task of this item ended beside others before it landed alone; undefined for one that did not. */
+  readonly aloneOf?: (item: Json) => string | undefined;
   /** The task job, counted from 1, whose creation the runner refuses. */
   readonly refuse?: number;
   /** The task job, counted from 1, whose results the runner no longer has. */
@@ -877,7 +879,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, refuse, lose } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, refuse, lose } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -947,7 +949,18 @@ describe('armada run', () => {
           // A task job of artifacts lands each task with its archive.
           const archives = tasked.has(job) && exitOf === undefined && artifacts !== undefined;
 
-          return Response.json({ events: exitsOf(job).map((exitCode, index) => ({ seq: index + 1, outcome: { ...outcome, index, exitCode, artifacts: archives } })), done: true });
+          const items = tasked.get(job) ?? [];
+
+          return Response.json({
+            events: exitsOf(job).map((exitCode, index) => {
+              const item = items[index];
+              const landed = { ...outcome, index, exitCode, artifacts: archives };
+              const aloneAfter = item === undefined ? undefined : aloneOf?.(item);
+
+              return { seq: index + 1, outcome: aloneAfter === undefined ? landed : { ...landed, aloneAfter } };
+            }),
+            done: true,
+          });
         }
 
         const archive = /^\/jobs\/tasks\/tasks\/(\d+)\/artifacts$/u.exec(pathname)?.[1];
@@ -990,8 +1003,9 @@ describe('armada run', () => {
       const exit = await cli.exited;
       const stdout = await new Response(cli.stdout).text();
       const stderr = await new Response(cli.stderr).text();
-      // The report it names, and the evidence each artifact directory holds, read before its home goes.
-      const path = /^report: (.+)$/mu.exec(stdout)?.[1];
+      // The report it names, where `--json` leaves stdout to the result, and the evidence each artifact directory holds,
+      // read before its home goes.
+      const path = /^report: (.+)$/mu.exec(`${stdout}\n${stderr}`)?.[1];
       const report = path === undefined || !existsSync(path) ? '' : readFileSync(path, 'utf8');
       const directories = report === '' ? {} : v.parse(v.looseObject({ artifacts: v.optional(v.record(v.string(), v.string()), {}) }), JSON.parse(report)).artifacts;
       const evidence = Object.fromEntries(Object.entries(directories).map(([index, dir]) => [index, { dir, files: Object.fromEntries(readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), 'utf8')])) }]));
@@ -1045,6 +1059,19 @@ describe('armada run', () => {
       each: ['', 'py314', 'py312'],
       ids: ['tasks', 'tasks-2', 'tasks-3'],
     });
+  });
+
+  test('passes a row its task reported green only alone, after failing beside others, and says so in every row it reported (#38)', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] };
+    const aloneOf = (item: Json) => v.is(v.object({ name: v.literal('b') }), item) ? 'exit 1' : undefined;
+    const rows = v.array(v.looseObject({ name: v.string(), exitCode: v.number(), aloneAfter: v.optional(v.string()) }));
+    const ran = await run(['--json'], plan, {}, { taskConfig: { command: ['task', '{name}'], verdict: false }, exitOf: () => 0, aloneOf });
+    const said = v.parse(v.looseObject({ rows }), JSON.parse(ran.stdout)).rows;
+    const reported = v.parse(v.looseObject({ verdicts: v.object({ rows }) }), JSON.parse(ran.report)).verdicts.rows;
+    const shown = (each: v.InferOutput<typeof rows>) => each.map(({ name, exitCode, aloneAfter }) => [name, exitCode, aloneAfter ?? null]);
+    const rowsOfRun = [['a', 0, null], ['b', 0, 'exit 1'], ['c', 0, null]];
+
+    expect({ exit: ran.exit, said: shown(said), reported: shown(reported) }).toEqual({ exit: 0, said: rowsOfRun, reported: rowsOfRun });
   });
 
   test('runs every environment at once within the pool, each job on at least its widest gang, and refuses a plan that needs more (#31)', async () => {

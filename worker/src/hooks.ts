@@ -191,7 +191,7 @@ set +e
 env -u "$ARMADA_GITHUB_SECRET" bun "$HOME/armada/src/cli.ts" run "$ARMADA_COMMIT" --json > "$HOME/verdict.json"
 code=$?
 set -e
-count=$(bun -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).rows; console.log(r.filter((x) => x.exitCode === 0).length + " of " + r.length + " rows green"); } catch { console.log("the run did not grade"); }' "$HOME/verdict.json")
+count=$(bun -e 'const { greenOf } = await import(process.argv[1]); try { console.log(greenOf(JSON.parse(require("fs").readFileSync(process.argv[2], "utf8")).rows)); } catch { console.log("the run did not grade"); }' "$HOME/armada/src/grade.ts" "$HOME/verdict.json")
 case "$code" in 0) status success "$count" ;; 1) status failure "$count" ;; *) status error "armada's run failed" ;; esac
 exit "$code"
 `;

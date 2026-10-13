@@ -13,7 +13,7 @@ import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { listSchedule } from './dispatch';
-import { expectedOf, grade, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
@@ -226,14 +226,18 @@ export function extractTar(archive: Uint8Array, dir: string): string[] {
   return members.filter((member) => !member.endsWith('/'));
 }
 
-function printReds(reds: readonly VerdictRow[], evidence: ReadonlyMap<VerdictRow, string>, note: (line: string) => void = console.log): void {
-  for (const row of reds) {
+/** Each red row, with the end of its output and its evidence, then each row green only alone. */
+function printRows(rows: readonly VerdictRow[], evidence: ReadonlyMap<VerdictRow, string>, note: (line: string) => void = console.log): void {
+  for (const row of rows.filter((each) => each.exitCode !== 0)) {
     note(`\nRED  ${rowName(row)}  (exit ${String(row.exitCode)}, ${seconds(row.seconds * 1000)})`);
     note(row.output.split('\n').slice(-TAIL_LINES).map((line) => `  | ${line}`).join('\n'));
     const dir = evidence.get(row);
 
     if (dir !== undefined) for (const path of row.artifacts ?? []) note(`  evidence: ${join(dir, path)}`);
   }
+
+  // A row green only alone may hide a race the packed run met: it is named, though it grades green.
+  for (const row of rows.filter((each) => each.exitCode === 0 && each.aloneAfter !== undefined)) note(`ALONE  ${rowName(row)}: green alone, after it failed beside other tasks (${row.aloneAfter ?? ''})`);
 }
 
 /** The verdict `armada run` stored for a commit: 0 when every row is green, 1 when a row is red, and 2 when the commit
@@ -257,8 +261,8 @@ export async function verdictCI(armada: Armada, target: string, json: boolean): 
 
   if (json) console.log(text);
   else {
-    printReds(reds, new Map());
-    console.log(`${reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(rows.length - reds.length)} of ${String(rows.length)} rows green, ${config.name} ${sha}`);
+    printRows(rows, new Map());
+    console.log(`${reds.length === 0 ? 'PASS' : 'FAIL'}: ${greenOf(rows)}, ${config.name} ${sha}`);
   }
 
   return reds.length === 0 ? 0 : 1;
@@ -439,8 +443,11 @@ async function verdictText(job: Job<Json, string | null>, index: number): Promis
  *  by) when the config grades by verdict, else one row of its own exit. */
 function rowsOf(result: Result<Json, string | null> | undefined, name: string, verdict: VerdictRow[] | null | undefined): VerdictRow[] | null {
   if (result === undefined || result.kind === 'lost' || result.kind === 'cancelled') return null;
+  const rows = verdict === undefined ? [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] : verdict;
+  const { aloneAfter } = result.meta;
 
-  return verdict === undefined ? [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] : verdict;
+  // Each row of a task that ran again alone after failing beside others says how the packed run ended (#38).
+  return rows === null || aloneAfter === undefined ? rows : rows.map((row) => ({ ...row, aloneAfter }));
 }
 
 /** What `armada run --json` prints when it ends: one object, whose `graded` is what its exit code says. */
@@ -774,7 +781,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
 
   if (graded.problems.length > 0) {
     note(`\nNOT GRADED:\n${graded.problems.map((problem) => `  ${problem}`).join('\n')}`);
-    printReds(graded.reds, evidence, note);
+    printRows(graded.rows, evidence, note);
     note(`report: ${report}`);
 
     return { ...ran, problems: [...problems, ...graded.problems], rows: graded.rows };
@@ -794,8 +801,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   }
 
-  printReds(graded.reds, evidence, note);
-  note(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${String(graded.rows.length - graded.reds.length)} of ${String(graded.rows.length)} rows green, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
+  printRows(graded.rows, evidence, note);
+  note(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${greenOf(graded.rows)}, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
   note(describeBoots(summary));
 
   if (usage !== null) note(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);

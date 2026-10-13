@@ -35,9 +35,19 @@ const VerdictRowSchema = v.looseObject({
   cached: v.optional(v.string()),
   /** Why the run could not grade this row, which then reads red. */
   problem: v.optional(v.string()),
+  /** How its task ended beside other tasks before it ran again alone and reported this row (`Outcome.aloneAfter`). */
+  aloneAfter: v.optional(v.string()),
 });
 
 export type VerdictRow = v.InferOutput<typeof VerdictRowSchema>;
+
+/** How many of `rows` are green, and how many of those only alone, after their task failed beside other tasks. */
+export function greenOf(rows: readonly VerdictRow[]): string {
+  const green = rows.filter((row) => row.exitCode === 0);
+  const alone = green.filter((row) => row.aloneAfter !== undefined).length;
+
+  return `${String(green.length)} of ${String(rows.length)} rows green${alone === 0 ? '' : `, ${String(alone)} only alone after failing beside other tasks`}`;
+}
 
 export const VerdictFileSchema = v.looseObject({ rows: v.array(VerdictRowSchema) });
 

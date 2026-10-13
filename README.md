@@ -279,6 +279,11 @@ Every run writes its report and prints `report: <path>`, including a run that ca
 `{sha, planJob, job, report, graded: "pass" | "fail" | "not graded", problems, rows}`. The report file holds the same
 `graded` and rows. A row a problem names exits 2 and carries the `problem`, so it never reads green.
 
+A task that fails beside others runs again alone. If its rows are then green, they grade green, as they would have
+with `mode: 'fast'`. Each of those rows carries `aloneAfter`, which says how the packed run ended. This holds in the
+stored verdict, the report and `--json`. `armada run` and `armada verdict` name each such row, and their count shows
+in the summary line and in the commit status.
+
 A task can keep files beside its verdict. It writes them under `{artifacts}` (`ARMADA_ARTIFACTS`), and a row names
 its evidence: `"artifacts": ["shots/home.png"]`. `armada run` extracts them next to the report and prints each named
 file under a red row. A row naming a file its task did not keep leaves the run ungraded. Artifacts are kept as
