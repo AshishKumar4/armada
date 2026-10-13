@@ -444,10 +444,11 @@ async function verdictText(job: Job<Json, string | null>, index: number): Promis
 function rowsOf(result: Result<Json, string | null> | undefined, name: string, verdict: VerdictRow[] | null | undefined): VerdictRow[] | null {
   if (result === undefined || result.kind === 'lost' || result.kind === 'cancelled') return null;
   const rows = verdict === undefined ? [{ name, exitCode: result.meta.exitCode, seconds: result.meta.seconds, output: result.meta.tail }] : verdict;
-  const { aloneAfter } = result.meta;
+  const { aloneAfter, host } = result.meta;
 
-  // Each row of a task that ran again alone after failing beside others says how the packed run ended (#38).
-  return rows === null || aloneAfter === undefined ? rows : rows.map((row) => ({ ...row, aloneAfter }));
+  // Each row says the host its task ran on (#40), and, where its task ran again alone after failing beside others, how
+  // the packed run ended (#38).
+  return rows?.map((row) => ({ ...row, aloneAfter, host })) ?? null;
 }
 
 /** What `armada run --json` prints when it ends: one object, whose `graded` is what its exit code says. */
@@ -663,7 +664,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     });
 
     const taskOptions = { timeout: Math.min(config.task.timeout, left), speculative: config.task.speculative, hedge: config.task.hedge, secrets: taskSecrets };
-    const jobOptions = { ...options, deadline: left, pool };
+    const jobOptions = { ...options, deadline: left, pool, cpu: config.task.cpu };
     const job = config.task.verdict ? commandTask(own.spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(own.spec.recipe, argv, taskOptions).stream(entries, jobOptions);
 
     return { ...group, job, lanes, most, pool, size: entries.length };

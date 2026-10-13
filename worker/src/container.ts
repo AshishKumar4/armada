@@ -500,6 +500,37 @@ export class AccountFull extends Error {
   }
 }
 
+/** A container on a host whose CPU lacks flags its job requires (`JobSpec.cpu`): its job replaces it (#40). */
+export class Misplaced extends Error {
+  constructor(readonly host: string, missing: readonly string[]) {
+    super(`its host, ${host}, lacks ${missing.join(', ')}`);
+  }
+}
+
+/** The first CPU's lines of /proc/cpuinfo, which `hostOf` reads. */
+export const CPU_INFO = String.raw`sed '/^$/q' /proc/cpuinfo`;
+
+/** The flags each x86-64 level adds to the one below it (the psABI's microarchitecture levels). */
+const LEVELS: readonly (readonly string[])[] = [
+  ['cx16', 'lahf_lm', 'popcnt', 'pni', 'sse4_1', 'sse4_2', 'ssse3'],
+  ['avx', 'avx2', 'bmi1', 'bmi2', 'f16c', 'fma', 'abm', 'movbe', 'xsave'],
+  ['avx512f', 'avx512bw', 'avx512cd', 'avx512dq', 'avx512vl'],
+];
+
+/** A host as `CPU_INFO` prints it: its CPU's model, family/model and x86-64 level (`AMD EPYC 25/17 (x86-64-v4)`), and
+ *  its flags. Two hosts of one name run a program's float operations alike. */
+export function hostOf(cpuinfo: string) {
+  const field = (name: string) => new RegExp(String.raw`^${name}\s*:\s*(.*)$`, 'mu').exec(cpuinfo)?.[1]?.trim();
+  const flags = new Set((field('flags') ?? '').split(/\s+/u).filter((flag) => flag !== ''));
+  const family = field('cpu family');
+  const model = field('model');
+  const level = LEVELS.findIndex((added) => !added.every((flag) => flags.has(flag)));
+  const reached = level === -1 ? LEVELS.length : level;
+  const name = [field('model name') ?? 'an unnamed CPU', family === undefined || model === undefined ? null : `${family}/${model}`].filter((part) => part !== null).join(' ');
+
+  return { host: flags.size === 0 ? name : `${name} (x86-64${reached === 0 ? '' : `-v${String(reached + 1)}`})`, flags };
+}
+
 /** How long a start may take to answer, the container's inactivity timeout once it does, and who hears of each start
  *  made again. */
 interface Starting {

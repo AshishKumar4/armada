@@ -37,6 +37,8 @@ const VerdictRowSchema = v.looseObject({
   problem: v.optional(v.string()),
   /** How its task ended beside other tasks before it ran again alone and reported this row (`Outcome.aloneAfter`). */
   aloneAfter: v.optional(v.string()),
+  /** The host its task ran on (`Outcome.host`). */
+  host: v.optional(v.string()),
 });
 
 export type VerdictRow = v.InferOutput<typeof VerdictRowSchema>;

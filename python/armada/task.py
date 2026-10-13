@@ -100,6 +100,7 @@ class Meta:
     oom_killed: bool = False
     disk_bytes: int | None = None
     alone_after: str | None = None
+    host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,6 +343,7 @@ class Job(Generic[In, Out]):
             artifacts=outcome.flag("artifacts"), cached=outcome.flag("cached"),
             oom_killed=outcome.flag("oomKilled"), disk_bytes=outcome.optional_whole("diskBytes"),
             alone_after=outcome.optional_text("aloneAfter"),
+            host=outcome.optional_text("host"),
         )
         reason = outcome.optional_text("reason")
         if outcome.text("kind") == "failed":
@@ -471,12 +473,13 @@ class Task(Generic[In, Out]):
         built = given.spec if isinstance(given, RecipeBuilder) else given
         return built if isinstance(built, dict) else default_recipe().spec
 
-    def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, label: str, env: dict[str, str] | None,
-              files: dict[str, str] | None, tmpfs: list[str] | None, bundle: str | None) -> dict[str, object]:
+    def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, cpu: list[str] | None, label: str,
+              env: dict[str, str] | None, files: dict[str, str] | None, tmpfs: list[str] | None,
+              bundle: str | None) -> dict[str, object]:
         spec = {
             "recipe": self.recipe,
             "run": {"kind": "task", "id": self.id, **({"bundle": bundle, "runtime": "python"} if bundle is not None else {})},
-            "output": True, "pool": pool, "slots": slots, "mode": mode, "label": label,
+            "output": True, "pool": pool, "slots": slots, "mode": mode, "cpu": cpu, "label": label,
             "env": env or {}, "files": files or {}, "tmpfs": tmpfs,
             "timeout": self.timeout, "speculative": self.speculative, "retries": _retries(self.retries),
             "secrets": self.secrets, "cache": self.cache,
@@ -484,11 +487,13 @@ class Task(Generic[In, Out]):
         return {key: value for key, value in spec.items() if value is not None}
 
     def stream(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-               label: str = "", env: dict[str, str] | None = None, files: dict[str, str] | None = None,
-               tmpfs: list[str] | None = None, armada: Armada | None = None) -> Job[In, Out]:
+               cpu: list[str] | None = None, label: str = "", env: dict[str, str] | None = None,
+               files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
+               armada: Armada | None = None) -> Job[In, Out]:
         """The job, whose results arrive as they land. Items stream in when given as a generator. `mode` is how it places
         its tasks: "efficient", the default, packs them into containers by their measured use; "fast" runs one a
-        container. More than one slot turns packing off."""
+        container. More than one slot turns packing off. `cpu` names CPU flags (as /proc/cpuinfo does, "avx512f") every
+        container's host must have; a container on another host is replaced before it takes a task."""
         client = armada or connect()
         from .push import pushed
 
@@ -500,10 +505,10 @@ class Task(Generic[In, Out]):
                 if isinstance(items, list):
                     submission.sent = list(items)
                     wired = [self._wire(item, at) for at, item in enumerate(items)]
-                    spec = {**self._spec(pool, slots, mode, label, env, files, tmpfs, bundle), "items": wired}
+                    spec = {**self._spec(pool, slots, mode, cpu, label, env, files, tmpfs, bundle), "items": wired}
                     submission.resolve(client.create(spec))
                 else:
-                    spec = {**self._spec(pool, slots, mode, label, env, files, tmpfs, bundle), "items": [], "open": True}
+                    spec = {**self._spec(pool, slots, mode, cpu, label, env, files, tmpfs, bundle), "items": [], "open": True}
                     submission.resolve(client.create(spec))
                     submission.pump(items, self._wire)
             except BaseException as cause:
@@ -513,17 +518,20 @@ class Task(Generic[In, Out]):
         return Job(client, self, submission)
 
     def map(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-            label: str = "", env: dict[str, str] | None = None, files: dict[str, str] | None = None,
-            tmpfs: list[str] | None = None, armada: Armada | None = None) -> list[Out]:
+            cpu: list[str] | None = None, label: str = "", env: dict[str, str] | None = None,
+            files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
+            armada: Armada | None = None) -> list[Out]:
         """Every item's value, in input order, or a MapError holding every result when one is not ok."""
-        streamed = self.stream(items, pool=pool, slots=slots, mode=mode, label=label, env=env, files=files, tmpfs=tmpfs, armada=armada)
+        streamed = self.stream(items, pool=pool, slots=slots, mode=mode, cpu=cpu, label=label, env=env, files=files,
+                               tmpfs=tmpfs, armada=armada)
         return streamed.values()
 
     def run(self, item: In, *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-            label: str = "", env: dict[str, str] | None = None, files: dict[str, str] | None = None,
-            tmpfs: list[str] | None = None, armada: Armada | None = None) -> Out:
+            cpu: list[str] | None = None, label: str = "", env: dict[str, str] | None = None,
+            files: dict[str, str] | None = None, tmpfs: list[str] | None = None, armada: Armada | None = None) -> Out:
         """One item's value, on one container."""
-        streamed = self.stream([item], pool=pool, slots=slots, mode=mode, label=label, env=env, files=files, tmpfs=tmpfs, armada=armada)
+        streamed = self.stream([item], pool=pool, slots=slots, mode=mode, cpu=cpu, label=label, env=env, files=files,
+                               tmpfs=tmpfs, armada=armada)
         results = streamed.settled()
         first = results[0] if results else None
         if not isinstance(first, Ok):

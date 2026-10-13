@@ -315,6 +315,9 @@ export const JobSpecSchema = v.object({
    *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
   mode: v.optional(ModeSchema, 'efficient'),
+  /** CPU flags, as /proc/cpuinfo names them, that every container's host must have. A container on a host without them
+   *  is replaced before it takes a task: a program's float results can differ between hosts (#40). */
+  cpu: v.optional(v.pipe(v.array(v.pipe(v.string(), v.regex(/^[a-z0-9_]+$/u, 'a CPU flag is as /proc/cpuinfo names it'))), v.maxLength(32)), []),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
@@ -378,6 +381,8 @@ export const OutcomeSchema = v.object({
   diskBytes: v.optional(v.number()),
   /** Answered from the job's cache: nothing ran. */
   cached: v.optional(v.boolean()),
+  /** The host it ran on: its CPU's model and x86-64 level (`hostOf`). */
+  host: v.optional(v.string()),
 });
 
 export type Outcome = v.InferOutput<typeof OutcomeSchema>;
@@ -394,6 +399,8 @@ export const BootSchema = v.object({
   startMs: v.number(),
   restarts: v.array(v.string()),
   setupMs: v.number(),
+  /** The host it started on (`Outcome.host`); absent from an earlier Worker. */
+  host: v.optional(v.string()),
 });
 
 export type Boot = v.InferOutput<typeof BootSchema>;

@@ -197,6 +197,10 @@ encoded in 9.1 s on 2 containers; the slowest encode took 6.4 s
   again alone, before its own retries. Its result says how the packed run ended. If it then passes, its item always
   runs alone after that.
 - `mode: 'fast'` runs one task a container. Packed tasks share the network, so tasks that bind one fixed port need it.
+- Containers land on hosts of more than one CPU kind, and a program's float results can differ between them. `cpu:
+  ['avx512f']` (`--cpu=avx512f`) names the CPU flags, as `/proc/cpuinfo` has them, that every container's host must
+  have. A container on another host is replaced before it takes a task. Each result's `meta.host` and each CI row's
+  `host` name the host's CPU and its x86-64 level, and the run's summary counts the containers on each.
 - `slots` runs exactly that many tasks at once in each container, each with an even share of the memory, and turns
   packing off. A gang cannot run in slots.
 - A task takes a `timeout`. `speculative` lets an idle container rerun a straggler, and `hedge` runs that many of the
@@ -331,6 +335,7 @@ for the other.
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.slots` | `1` | The tasks one container runs at once, each in its own slot. More than one turns packing off. |
 | `task.mode` | `efficient` | `efficient` packs tasks into containers by their recorded use; `fast` runs one a container. |
+| `task.cpu` | `[]` | CPU flags every container's host must have, such as `["avx512f"]`. A container on another host is replaced before it takes a task. |
 | `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept, so a slow container holds the run up no longer than the other copy takes. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
 | `task.secrets` | `[]` | The secrets each task gets in its environment, by name (`armada secret set <name>`). |

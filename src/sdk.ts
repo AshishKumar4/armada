@@ -320,14 +320,18 @@ export function summaryOf(status: JobStatus): Summary {
   };
 }
 
-/** A job's containers and their boots in one line: their first answers, then the median of each boot phase (#32). */
+/** A job's containers and their boots in one line: their first answers, then the median of each boot phase (#32), and
+ *  the hosts they ran on, most first (#40). */
 export function describeBoots({ vessels, bootMs, boots }: Summary): string {
   const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
   const answers = `${String(vessels)} containers; first answers ${seconds(bootMs[0] ?? 0)} to ${seconds(bootMs.at(-1) ?? 0)} (median ${seconds(median(bootMs))})`;
 
   if (boots.length === 0) return answers;
   const restarts = boots.reduce((sum, boot) => sum + boot.restarts.length, 0);
+  const hosts = Map.groupBy(boots.flatMap((boot) => boot.host === undefined ? [] : [boot.host]), (host) => host);
+  const onHosts = [...hosts].toSorted(([, left], [, right]) => right.length - left.length).map(([host, each]) => `${String(each.length)} on ${host}`);
 
   return `${answers}; median boot: ${seconds(median(boots.map((boot) => boot.waitMs)))} waiting for capacity, ${seconds(median(boots.map((boot) => boot.startMs)))} starting, `
-    + `${seconds(median(boots.map((boot) => boot.setupMs)))} setting up${restarts > 0 ? `; ${String(restarts)} start${restarts === 1 ? '' : 's'} made again` : ''}`;
+    + `${seconds(median(boots.map((boot) => boot.setupMs)))} setting up${restarts > 0 ? `; ${String(restarts)} start${restarts === 1 ? '' : 's'} made again` : ''}`
+    + `${onHosts.length === 0 ? '' : `; ${onHosts.join(', ')}`}`;
 }

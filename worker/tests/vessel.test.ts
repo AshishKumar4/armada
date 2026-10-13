@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Boot, Outcome } from '../../src/protocol';
-import { argvOf, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
+import { argvOf, CPU_INFO, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
@@ -53,15 +53,19 @@ interface Run {
   /** How many tasks its job has, and the fleet its vessel holds its vCPUs from. */
   readonly tasks?: number;
   readonly fleet?: object;
+  /** The CPU flags its job requires, and what its host's /proc/cpuinfo says. */
+  readonly cpu?: readonly string[];
+  readonly cpuinfo?: string;
 }
 
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
-  fleet = { acquire: async () => 'held', release: async () => undefined },
+  fleet = { acquire: async () => 'held', release: async () => undefined }, cpu, cpuinfo = '',
 }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
+  const misplaced: (string | undefined)[] = [];
   const execs: (readonly string[])[] = [];
   const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
@@ -77,6 +81,8 @@ async function run(lost: number, {
     if (argv[2] === usageOf(TASK_GROUP)) return usage;
 
     if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
+
+    if (argv[2] === CPU_INFO) return { exitCode: 0, stdout: cpuinfo };
 
     if (argv[0] === 'stat' && argv[3] === '/armada/task/artifacts.tar.gz') return packed ? { exitCode: 0, stdout: String(ARCHIVE.byteLength) } : { exitCode: 1, stdout: '' };
 
@@ -110,14 +116,17 @@ async function run(lost: number, {
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
-    vesselFailed: async (_name: string, error: string) => { failed.push(error); },
+    vesselFailed: async (_name: string, error: string, how?: { readonly misplaced?: string }) => {
+      failed.push(error);
+      misplaced.push(how?.misplaced);
+    },
   };
 
   // A pushed task's bundle, which its container takes in at boot.
   const artifacts = bucket(new Map(marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};']]));
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts, FLEET: namespace(() => fleet) }));
 
-  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64) });
+  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu });
 
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
   // storage.
@@ -128,8 +137,14 @@ async function run(lost: number, {
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, claims: task.given.claims, retired, stored: artifacts.objects, execs, envs, piped, started };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, stored: artifacts.objects, execs, envs, piped, started };
 }
+
+/** The first CPU of a host's /proc/cpuinfo, `flags` its flags. */
+const cpuinfoOf = (family: number, model: number, flags: string): string =>
+  `processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: ${String(family)}\nmodel\t\t: ${String(model)}\nmodel name\t: AMD EPYC\nflags\t\t: ${flags}\n\n`;
+
+const V3 = 'fpu sse2 pni ssse3 cx16 sse4_1 sse4_2 popcnt lahf_lm movbe xsave avx f16c fma abm bmi1 bmi2 avx2';
 
 describe('a vessel\'s place in its fleet', () => {
   test('takes no new task once the fleet recalls them: it finishes the one it runs, then retires', async () => {
@@ -146,6 +161,21 @@ describe('a vessel\'s place in its fleet', () => {
     const { exits, claims, execs } = await run(0, { fleet: { acquire: async () => false, release: async () => undefined } });
 
     expect({ exits, claims, execs: execs.length }).toEqual({ exits: [], claims: 0, execs: 0 });
+  });
+});
+
+describe('a vessel whose job requires CPU flags (#40)', () => {
+  test('takes no task on a host without them, and says which host; on one with them, each outcome names its host', async () => {
+    const zen3 = await run(0, { cpu: ['avx512f'], cpuinfo: cpuinfoOf(25, 1, V3) });
+    const zen4 = await run(0, { cpu: ['avx512f'], cpuinfo: cpuinfoOf(25, 17, `${V3} avx512f avx512dq avx512cd avx512bw avx512vl avx512_bf16`) });
+
+    expect({
+      zen3: { claims: zen3.claims, misplaced: zen3.misplaced, failed: zen3.failed },
+      zen4: { exits: zen4.exits, hosts: zen4.completed.map((outcome) => outcome.host), failed: zen4.failed },
+    }).toEqual({
+      zen3: { claims: 0, misplaced: ['AMD EPYC 25/1 (x86-64-v3)'], failed: ['its host, AMD EPYC 25/1 (x86-64-v3), lacks avx512f'] },
+      zen4: { exits: [0], hosts: ['AMD EPYC 25/17 (x86-64-v4)'], failed: [] },
+    });
   });
 });
 
@@ -541,7 +571,7 @@ describe('a vessel\'s boot', () => {
           return firsts === 1 ? { exitCode: 137, stdout: '' } : { exitCode: 0, stdout: 'ready\n' };
         }
 
-        // The setup's execs (mounts, owning the state) take 2 s in all.
+        // The setup's execs (reading the host's CPU, the mounts, owning the state) take 3 s in all.
         now += 1000;
 
         return { exitCode: 0, stdout: '' };
@@ -565,7 +595,7 @@ describe('a vessel\'s boot', () => {
       Date.now = clock;
     }
 
-    expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }] });
+    expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 3000, host: 'an unnamed CPU' } }] });
   });
 
   /** A vessel whose container's every start the platform ends while the account is full, and whose fleet gives a

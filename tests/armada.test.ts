@@ -891,7 +891,7 @@ describe('armada run', () => {
     const cancelled: string[] = [];
     // Each task job's items, by its id: the first is `tasks`, the next `tasks-2` and on.
     const tasked = new Map<string, Json[]>();
-    const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true };
+    const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true, host: 'AMD EPYC 25/17 (x86-64-v4)' };
 
     /** What job `id` lands, the one description its events and its status both read: each task's exit code. The plan
      *  lands one task; a task job, each of its items by `exitOf`, else each artifacts archive green, else one task. */
@@ -1079,15 +1079,16 @@ describe('armada run', () => {
     expect(bases).toEqual([[0, 'root'], [0, 'root']]);
   });
 
-  test('passes a row its task reported green only alone, after failing beside others, and says so in every row it reported (#38)', async () => {
+  test('passes a row its task reported green only alone, after failing beside others, and says so in every row it reported (#38), each naming its host (#40)', async () => {
     const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] };
     const aloneOf = (item: Json) => v.is(v.object({ name: v.literal('b') }), item) ? 'exit 1' : undefined;
-    const rows = v.array(v.looseObject({ name: v.string(), exitCode: v.number(), aloneAfter: v.optional(v.string()) }));
+    const rows = v.array(v.looseObject({ name: v.string(), exitCode: v.number(), aloneAfter: v.optional(v.string()), host: v.optional(v.string()) }));
     const ran = await run(['--json'], plan, {}, { taskConfig: { command: ['task', '{name}'], verdict: false }, exitOf: () => 0, aloneOf });
     const said = v.parse(v.looseObject({ rows }), JSON.parse(ran.stdout)).rows;
     const reported = v.parse(v.looseObject({ verdicts: v.object({ rows }) }), JSON.parse(ran.report)).verdicts.rows;
-    const shown = (each: v.InferOutput<typeof rows>) => each.map(({ name, exitCode, aloneAfter }) => [name, exitCode, aloneAfter ?? null]);
-    const rowsOfRun = [['a', 0, null], ['b', 0, 'exit 1'], ['c', 0, null]];
+    const shown = (each: v.InferOutput<typeof rows>) => each.map(({ name, exitCode, aloneAfter, host }) => [name, exitCode, aloneAfter ?? null, host]);
+    const zen4 = 'AMD EPYC 25/17 (x86-64-v4)';
+    const rowsOfRun = [['a', 0, null, zen4], ['b', 0, 'exit 1', zen4], ['c', 0, null, zen4]];
 
     expect({ exit: ran.exit, said: shown(said), reported: shown(reported) }).toEqual({ exit: 0, said: rowsOfRun, reported: rowsOfRun });
   });

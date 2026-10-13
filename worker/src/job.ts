@@ -125,6 +125,10 @@ interface Attempt {
  *  job's pool and at least as many as these (`vesselFailed`). */
 const REPLACEMENTS = 8;
 
+/** Containers in a row that start on hosts without the job's CPU flags (`JobSpec.cpu`) before the job ends: about one
+ *  in ten of them lands on such a host (2026-10-13, 3 of 32), so this many in a row says no host here has them. */
+const MISPLACED_LIMIT = 20;
+
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
  *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. */
 const INFRA_ATTEMPTS = 3;
@@ -473,6 +477,7 @@ export class ArmadaJob extends DurableObject<Env> {
       slotMemoryBytes: packs(spec) ? tasksMemoryOf(spec.recipe.size) : Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
       reserve: Number(this.sql.exec('SELECT ranks FROM vessels WHERE name = ?', name).one()['ranks']) * SIZES[spec.recipe.size].vcpus,
       deadlineAt: ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + (spec.deadline ?? JOB_DEADLINE_SECONDS) * 1000,
+      cpu: spec.cpu,
     };
 
     try {
@@ -494,6 +499,7 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
    *  vessel). */
   async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
+    await this.ctx.storage.delete('misplaced');
     this.sql.exec(`UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
@@ -983,7 +989,7 @@ export class ArmadaJob extends DurableObject<Env> {
    *  while there is work it could take. A vessel whose start found its snapshot `missing` is not replaced from it:
    *  every start from it would fail alike, so the pool refills from the job's environment, prepared again. Its runs
    *  end only once its container is `gone`. */
-  async vesselFailed(name: string, error: string, { missing, gone = false }: { readonly missing?: string; readonly gone?: boolean } = {}): Promise<void> {
+  async vesselFailed(name: string, error: string, { missing, gone = false, misplaced }: { readonly missing?: string; readonly gone?: boolean; readonly misplaced?: string } = {}): Promise<void> {
     const spec = await this.spec();
 
     if (spec === undefined) return;
@@ -1002,7 +1008,13 @@ export class ArmadaJob extends DurableObject<Env> {
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
 
-    if (missing === undefined && live) {
+    // One on a host without the job's CPU flags is replaced at no cost to its budget, until so many in a row say no host
+    // has them.
+    const misplacedInRow = misplaced !== undefined && live ? ((await this.ctx.storage.get<number>('misplaced')) ?? 0) + 1 : 0;
+
+    if (misplacedInRow > 0) await this.ctx.storage.put('misplaced', misplacedInRow);
+
+    if (missing === undefined && live && misplaced === undefined) {
       // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
       // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
       // pool, which would refill the place for nothing.
@@ -1042,6 +1054,10 @@ export class ArmadaJob extends DurableObject<Env> {
       }
 
       await this.awaitEnvironment(spec);
+    }
+
+    if (misplacedInRow >= MISPLACED_LIMIT) {
+      return await this.cancel(`${String(misplacedInRow)} containers in a row started on hosts without ${spec.cpu.join(', ')}, the last on ${misplaced ?? ''}: no host this job reaches has them`, 'lost');
     }
 
     await this.grow();
