@@ -69,6 +69,9 @@
     (`ArmadaFleet.admitJob`). Each type an object stores is exported, so its shape is in the fingerprint. Either way a
     redeploy needs the owner's go-ahead. On 2026-10-12 a takeover of armada-dew3 across an interface change, before
     this check, let objects on the old code misread the new calls for minutes: its fleet dropped every hold.
+  - Their next deploy from `main` drains (their Workers report no contract), then refuses new jobs for about 5 min
+    while the deployment-wide objects still run the old code (measured on armada-ci2: 296 s). Borrowing past the cap
+    needs `ARMADA_ACCOUNT_TOKEN` at that deploy.
 - `connection.json`, `armada-kinu.json`, `armada-kinu-v1.json` and `armada-dew.json` belong to deployments that are
   gone. Leave them alone; an agent may still read one. Dew's `armada-dew2.destroy.json` is its own unfinished destroy.
 
@@ -116,6 +119,12 @@
   2026-10-12, packed jobs lost 6 of 32 containers and unpacked ones about 6 of 150. A packed container's loss takes
   more tasks with it; whether packing raises the rate needs more runs and the platform's own telemetry.
 - Not proved: the LPT 4/3 bound. Only the differential test ties the Lean model to the TypeScript `listSchedule`.
+- Dew's suite takes 12 to 16 min on armada-dew3, whatever its pool and target (2026-10-13, client 1879a66). Pool 96
+  packs about 2 tasks a container on 48 containers (13.7 min median); pool 192 ran on 95 containers in 11.9 min.
+  Target 90 added about 13% more task time and gained nothing; one task a container (`mode: fast`) on 96 took 18.6
+  min. Packed, a task takes about twice its recorded time, and the run waits on its heaviest tasks: the halves of
+  tests/test_imports.py and the splits of test_decoder_export.py, at 600 to 650 s. The next levers are running the
+  critical path's tasks unpacked and splitting those files.
 - Kinu's starts take longer than a small snapshot's: a median of 1.8 s against 0.3 s. The 100 ms start poll cuts the
   part that waited for the next whole second. The rest is its 4.8 GiB snapshots; smaller environments would help.
 
