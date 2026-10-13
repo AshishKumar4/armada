@@ -389,11 +389,14 @@ class Link:
 
     def handover(self, carrier):
         """The vessel's next connection in, for an inbound link: the one before it, and one handed over and not yet
-        taken, are closed, which hands over."""
+        taken, are closed, which hands over. One that comes once the link is over is closed itself."""
         with self.changed:
-            earlier, unused, self.pending = self.carrier, self.pending, carrier
-            self.changed.notify_all()
-        for replaced in (earlier, unused):
+            if self.over:
+                closing = (carrier,)
+            else:
+                closing, self.pending = (self.carrier, self.pending), carrier
+                self.changed.notify_all()
+        for replaced in closing:
             if replaced is not None:
                 replaced.close()
 
@@ -536,10 +539,11 @@ class Link:
     def finish(self):
         with self.changed:
             self.over = True
-            carrier = self.carrier
+            carrier, pending, self.pending = self.carrier, self.pending, None
             self.changed.notify_all()
-        if carrier is not None:
-            carrier.close()
+        for each in (carrier, pending):
+            if each is not None:
+                each.close()
         # Shut down before closing: close() alone neither wakes from_local's recv on it nor sends the program a FIN.
         try:
             self.local.shutdown(socket.SHUT_RDWR)
