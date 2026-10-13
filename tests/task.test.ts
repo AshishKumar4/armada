@@ -525,15 +525,21 @@ describe('a job\'s items', () => {
 
   test('reach their stream as each lands, while another item still runs', async () => {
     const { armada } = await fleet();
-    const held = join(mkdtempSync(join(tmpdir(), 'armada-held-')), 'go');
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-held-'));
+    const held = join(scratch, 'go');
     const job = commandTask(recipe.debian().spec, (n: number) => (n === 0 ? ['true'] : ['sh', '-c', `while [ ! -f ${held} ]; do sleep 0.05; done`])).stream([0, 1], { armada });
-    const iterator = job[Symbol.asyncIterator]();
-    const first = await iterator.next();
 
-    writeFileSync(held, '');
-    const rest = await job.settled().then((all) => all.length, () => -1);
+    try {
+      const iterator = job[Symbol.asyncIterator]();
+      const first = await iterator.next();
 
-    expect({ first: first.done ? null : first.value.index, rest }).toEqual({ first: 0, rest: 2 });
+      writeFileSync(held, '');
+      const rest = await job.settled().then((all) => all.length, () => -1);
+
+      expect({ first: first.done ? null : first.value.index, rest }).toEqual({ first: 0, rest: 2 });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   test('that are not JSON as they are, such as NaN, are refused before anything is sent', async () => {
