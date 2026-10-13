@@ -6,7 +6,7 @@ import { detach, errorOf, type Health } from '../../src/protocol';
 import { deployment, otherDeployments, signIn, signOut, SignedOut, takeToken, token, type Client } from './api';
 import { ci } from './ci';
 import { environments } from './environments';
-import { h, icon, replace } from './dom';
+import { count, h, icon, replace } from './dom';
 import { jobView } from './job';
 import { overview } from './overview';
 import { describe, whenSignedOut, type View } from './view';
@@ -48,7 +48,7 @@ function viewOf(route: Route, deployments: Deployments): View {
   const api = clientOf(route, deployments);
 
   switch (route.page) {
-    case 'overview': return route.at === null ? overview(api, deployments.others) : overview(api);
+    case 'overview': return route.at === null ? overview(api, deployments.others) : overview(api, [], deployments.others.length > 0);
     case 'job': return jobView(api, route.id, route.task);
     case 'environments': return environments(api);
     case 'ci': return ci(api, route.project, route.sha);
@@ -98,12 +98,11 @@ function signInPage(): void {
   field.focus();
 }
 
-/** The page's frame: its navigation, the deployment it shows when it reads others too, and the main element each view
- *  fills. */
+/** The page's frame: its navigation, the deployment it shows, and the main element each view fills. */
 interface Frame {
   readonly main: HTMLElement;
   readonly nav: HTMLElement;
-  readonly picker: HTMLSelectElement | null;
+  readonly host: HTMLAnchorElement;
 }
 
 /** Each page of the navigation, by the address of its first page on a deployment. */
@@ -111,15 +110,10 @@ const PAGES = [['overview', '', 'Fleet'], ['environments', 'environments', 'Envi
 
 function shell(health: Health, { own, others }: Deployments): Frame {
   const nav = h('nav', { class: 'nav', label: 'Pages' }, PAGES.map(([page, path, name]) => h('a', { data: { page, path } }, name)));
+  // The deployment shown, which leads back to every one's fleet when the page reads others.
+  const host = h('a', { class: 'host', href: '#/', title: `${own.name}: runner layer ${String(health.driver)}, wire ${String(health.protocol)}` });
 
-  // Beside others, the deployment shown is picked here: every one's fleet and jobs, or one's own pages.
-  const picker = others.length === 0 ? null : h('select', { class: 'input deployment-pick', label: 'Deployment' },
-    h('option', {}, 'Every deployment'), [own, ...others].map((each) => h('option', {}, each.name)));
-
-  if (picker !== null) {
-    picker.options[0]?.setAttribute('value', '');
-    picker.addEventListener('change', () => { location.hash = picker.value === '' ? '#/' : `#/@${picker.value}/`; });
-  }
+  if (others.length === 0) host.removeAttribute('href');
 
   const themeButton = h('button', { class: 'icon-button', type: 'button', label: 'Switch between light and dark' });
   const drawTheme = (): void => { replace(themeButton, icon(theme() === 'dark' ? 'sun' : 'moon')); };
@@ -137,18 +131,18 @@ function shell(health: Health, { own, others }: Deployments): Frame {
       brand(),
       nav,
       h('div', { class: 'topbar-end' },
-        picker ?? h('span', { class: 'host', title: `${own.name}: runner layer ${String(health.driver)}, wire ${String(health.protocol)}` }, h('span', { class: 'dot ok' }), own.name),
+        host,
         themeButton,
         // A dashboard served from this machine (`armada dashboard --serve`) signs its requests itself, and holds no token.
         token() === null ? null : h('button', { class: 'icon-button', type: 'button', label: 'Sign out', title: 'Sign out', onclick: () => { signOut(); signInPage(); } }, icon('out'))))),
     main);
 
-  return { main, nav, picker };
+  return { main, nav, host };
 }
 
 let current: View | null = null;
 
-function show({ main, nav, picker }: Frame, deployments: Deployments): void {
+function show({ main, nav, host }: Frame, deployments: Deployments): void {
   const route = routeOf(location.hash);
   const api = clientOf(route, deployments);
 
@@ -163,7 +157,9 @@ function show({ main, nav, picker }: Frame, deployments: Deployments): void {
     else link.removeAttribute('aria-current');
   }
 
-  if (picker !== null) picker.value = route.at === null && route.page === 'overview' ? '' : api.name;
+  const every = route.at === null && route.page === 'overview' && deployments.others.length > 0;
+
+  replace(host, h('span', { class: 'dot ok' }), every ? `${count(deployments.others.length + 1)} deployments` : api.name);
 
   window.scrollTo(0, 0);
 }

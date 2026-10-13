@@ -7,7 +7,7 @@
 import * as v from 'valibot';
 import { briefOf, detach, errorOf, FleetSchema, HealthSchema, JobsSchema, JobStatusSchema, type Fleet, type Health, type JobBrief } from '../../src/protocol';
 import { SignedOut, type Client } from './api';
-import { ago, count, duration, h, replace } from './dom';
+import { ago, count, duration, h, icon, replace } from './dom';
 import { jobPill, nameOf, progress, tookOf } from './status';
 import { describe, empty, failed, poll, type View } from './view';
 
@@ -39,9 +39,13 @@ interface Read {
   now: { readonly health: Health; readonly fleet: Fleet } | Error | null;
 }
 
-export function overview(first: Client, rest: readonly Client[] = []): View {
+/** The fleet of `first`, beside `rest`'s; `beside` when the page reads other deployments, so one's own fleet page leads
+ *  back to every one's. */
+export function overview(first: Client, rest: readonly Client[] = [], beside = false): View {
   const deployments = [first, ...rest];
   const single = rest.length === 0;
+  // One deployment's own page beside others is named for it.
+  const named = beside ? first.name : 'Fleet';
   const banner = h('div');
   const figure = h('div', { class: 'stats' });
   const fleetBody = h('div', { class: 'card-body' });
@@ -58,7 +62,8 @@ export function overview(first: Client, rest: readonly Client[] = []): View {
   const filters = h('div', { class: 'filters' }, search, projects, single ? null : places);
 
   const element = h('div', { class: 'page' },
-    h('div', { class: 'page-head' }, h('div', {}, h('h1', {}, single ? 'Fleet' : 'Fleets'), lead)),
+    h('div', { class: 'page-head' }, h('div', {},
+      beside ? h('a', { class: 'back', href: '#/' }, icon('back'), 'Every deployment') : null, h('h1', {}, single ? named : 'Fleets'), lead)),
     banner,
     single
       ? h('div', { class: 'grid grid-overview' },
@@ -78,13 +83,21 @@ export function overview(first: Client, rest: readonly Client[] = []): View {
       && (text === '' || [job.label, job.id, job.project ?? ''].some((each) => each.toLowerCase().includes(text)));
   };
 
-  /** A select's options: every value, the chosen one kept even once no job has it. */
+  /** A select's options: every value, the chosen one kept even once no job has it, and none shown while there is
+   *  nothing to choose. Drawn again only when they change, so a poll never closes a list being picked from. */
   const options = (select: HTMLSelectElement, everyone: string, values: readonly string[], chosen: string): void => {
+    const choices = [...new Set([...values, ...chosen === '' ? [] : [chosen]])].sort();
+    const drawn = choices.join('\n');
+
+    select.hidden = choices.length === 0;
+
+    if (select.dataset['drawn'] === drawn) return;
     const any = h('option', {}, everyone);
 
     any.value = '';
-    replace(select, any, [...new Set([...values, ...chosen === '' ? [] : [chosen]])].sort().map((value) => h('option', {}, value)));
+    replace(select, any, choices.map((value) => h('option', {}, value)));
     select.value = chosen;
+    select.dataset['drawn'] = drawn;
   };
 
   const drawJobs = (): void => {
@@ -221,8 +234,8 @@ function deploymentRow(at: Client, read: Read, names: ReadonlyMap<string, string
   if (read.now === null) return h('div', { class: 'deployment' }, title, h('div', { class: 'skeleton' }));
 
   if (read.now instanceof Error) {
-    // A Worker from before CORS, or one too old for this page's wire, answers this page nothing it can read.
-    const why = read.now instanceof TypeError ? 'It did not answer this page: armada deploy gives it what a page elsewhere needs.' : describe(read.now);
+    // A Worker from before this page could read it from elsewhere answers nothing a browser lets it read.
+    const why = read.now instanceof TypeError ? 'Unreadable from this page until armada deploy updates its Worker.' : describe(read.now);
 
     return h('div', { class: 'deployment' }, title, h('p', { class: 'error' }, why));
   }
@@ -233,8 +246,8 @@ function deploymentRow(at: Client, read: Read, names: ReadonlyMap<string, string
 
   return h('div', { class: 'deployment' }, title,
     cellsOf(fleet, ROW_CELLS, names),
-    h('span', { class: 'muted num' }, `${count(health.jobs)} open · ${count(containers)} container${containers === 1 ? '' : 's'}`),
-    h('span', { class: 'num' }, `${count(used)} of ${count(fleet.cap)} vCPU`));
+    h('span', { class: 'deployment-open muted num' }, `${count(health.jobs)} open · ${count(containers)} container${containers === 1 ? '' : 's'}`),
+    h('span', { class: 'deployment-use num' }, `${count(used)} of ${count(fleet.cap)} vCPU`));
 }
 
 /** The fleet as `cells` cells: each job's share in its shade, largest first, then what is free. */
