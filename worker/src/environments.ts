@@ -178,10 +178,10 @@ export class ArmadaEnvironments extends ArmadaSingle {
   }
 
   /** The account refused a snapshot of `key` for its storage (#30): this frees one snapshot of this deployment's, an
-   *  owed delete first, else the least recently used environment no open job uses, past the kept count but not used in
-   *  the recent hour, as a client that packed against one opens its job on it (`base`). A full account fails every job
-   *  that needs a new environment, which is worse than preparing an older one again. Whether a snapshot was deleted,
-   *  else why none could be. */
+   *  owed delete first, else the least recently used environment no open job uses, past the kept count and the recent
+   *  hour but not used within `IN_USE_MS`, as a client that packed against one opens its job on it (`base`). A full
+   *  account fails every job that needs a new environment, which is worse than preparing an older one again. Whether a
+   *  snapshot was deleted, else why none could be. */
   async makeRoom(key: string): Promise<Room> {
     const credentials = this.env.REGISTRY_CREDENTIALS;
 
@@ -191,7 +191,7 @@ export class ArmadaEnvironments extends ArmadaSingle {
 
     if (await this.settle(credentials, used)) return 'freed';
 
-    for (const candidate of expired(listed, used, Date.now(), { keep: 0, recentMs: RECENT_MS }).filter((each) => each.key !== key).toReversed()) {
+    for (const candidate of expired(listed, used, Date.now(), { keep: 0, recentMs: IN_USE_MS }).filter((each) => each.key !== key).toReversed()) {
       if (await this.evict(credentials, candidate) === true) return 'freed';
     }
 
@@ -312,8 +312,8 @@ export class ArmadaEnvironments extends ArmadaSingle {
   }
 }
 
-/** What `makeRoom` did: deleted a snapshot, found every one it may delete held by an open job, or could delete none for
- *  want of registry credentials. */
+/** What `makeRoom` did: deleted a snapshot, found every one it may delete held by an open job or in use by a client
+ *  (`IN_USE_MS`), or could delete none for want of registry credentials. */
 export type Room = 'freed' | 'held' | 'no credentials';
 
 /** What a prune keeps beyond the environments open jobs use: the `keep` most recently used of the rest, and each used
@@ -326,6 +326,11 @@ export interface Retention {
 /** An environment used this recently stays beyond the kept count: a busy hour's working set, larger than the count, is
  *  not prepared again for each job, and it shrinks back to the count once that hour is quiet. */
 const RECENT_MS = 60 * 60_000;
+
+/** How long making room spares an environment after its last use: a client that resolved its pack base on it opens its
+ *  job once its plan and its upload are done, and the open job then holds it (`makeRoom`). Well within `ROOM_WAIT_MS`,
+ *  so an environment used just before a refusal can still make room before the preparation fails. */
+const IN_USE_MS = 10 * 60_000;
 
 /** How often the registry looks for snapshots past those it keeps. */
 const LOOK_MS = 60 * 60_000;
@@ -543,7 +548,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
       throw new Error(preparation.room === 'no credentials'
         ? `${refusal} It was refused for ${minutes} min, and this deployment has no registry credentials to delete its own snapshots with (armada deploy mints them)`
-        : `${refusal} It was refused for ${minutes} min while this deployment deleted the snapshots no open job uses: the rest of the account's snapshot storage is held by open jobs, other deployments or other apps (armada prune on another deployment, or a higher limit from Cloudflare, makes room)`);
+        : `${refusal} It was refused for ${minutes} min while this deployment deleted the snapshots it could: the rest of the account's snapshot storage is held by open jobs, runs in the last ${String(IN_USE_MS / 60_000)} min, other deployments or other apps (armada prune on another deployment, or a higher limit from Cloudflare, makes room)`);
     }
 
     // Kept before the registry is asked, so a failed ask still counts toward the bound.

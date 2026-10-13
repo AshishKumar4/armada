@@ -601,9 +601,19 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
       const opened = await environments.ensure('a', repo, { sha: 'b'.repeat(40), base, packer: PACKER });
 
       kept.push({ opened: opened.kind, left: fake.left(), other: (await readiness()).kind });
+
+      // Once its run has had time to open its job, a used no more frees room for the preparation, well before it fails.
+      setSystemTime(Date.now() + 11 * MINUTE);
+      await preparer.alarm();
+      await preparer.alarm();
+      kept.push({ later: fake.left(), other: (await readiness()).kind });
+      setSystemTime();
     }
 
-    expect(kept).toEqual([{ opened: 'ready', left: ['a', 'c'], other: 'preparing' }, { opened: 'ready', left: ['a', 'b', 'c'], other: 'preparing' }]);
+    expect(kept).toEqual([
+      { opened: 'ready', left: ['a', 'c'], other: 'preparing' }, { later: ['a', 'c'], other: 'ready' },
+      { opened: 'ready', left: ['a', 'b', 'c'], other: 'preparing' }, { later: ['b', 'c'], other: 'ready' },
+    ]);
   });
 
   test('waits while open jobs hold every snapshot, then fails saying what holds the storage; another failure fails at once', async () => {
