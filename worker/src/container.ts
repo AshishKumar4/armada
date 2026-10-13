@@ -366,14 +366,14 @@ fs.renameSync(file + '.masked', file);
 fs.rmSync(kept, { force: true });`;
 
 /** Ends the task in `dir` and everything it started: its session a TERM, a KILL once it has had 2 s to end, then its
- *  whole `group`. */
+ *  whole `group`. No `--` before a group: dash's `kill`, the image's /bin/sh, refuses it as "Illegal number". */
 export const killOf = (dir: string, group: string): string => String.raw`set -eu
 pid="$(cat ${dir}/pid 2>/dev/null || true)"
 if [ -n "$pid" ]; then
-  kill -TERM -- "-$pid" 2>/dev/null || true
+  kill -TERM "-$pid" 2>/dev/null || true
   n=0
-  while kill -0 -- "-$pid" 2>/dev/null && [ "$n" -lt 40 ]; do n=$((n + 1)); sleep 0.05; done
-  kill -KILL -- "-$pid" 2>/dev/null || true
+  while kill -0 "-$pid" 2>/dev/null && [ "$n" -lt 40 ]; do n=$((n + 1)); sleep 0.05; done
+  kill -KILL "-$pid" 2>/dev/null || true
 fi
 ${endGroup(group)}`;
 

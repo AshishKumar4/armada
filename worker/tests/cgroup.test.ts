@@ -76,6 +76,13 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     expect(sh(killOf(TASK, TASK_GROUP)).exitCode).toBe(0);
     expect({ left: [alive('sleep 603'), alive('sleep 604')], group: existsSync(TASK_GROUP), soon: Date.now() - began < 1_000 }).toEqual({ left: [false, false], group: false, soon: true });
   });
+
+  test('a killed task hears the TERM, so its own handler runs before the KILL', () => {
+    expect(sh(launchTask(workdir, ALL), 'sh', '-c', 'trap "echo heard; exit 0" TERM; sleep 605 & wait').exitCode).toBe(0);
+    expect(sh(WAIT, '1').stdout.toString().trim()).toBe('');
+    expect(sh(killOf(TASK, TASK_GROUP)).exitCode).toBe(0);
+    expect(readFileSync(`${TASK}/log`, 'utf8').trim()).toBe('heard');
+  });
 });
 
 describe.skipIf(!host)('a slotted task', () => {
