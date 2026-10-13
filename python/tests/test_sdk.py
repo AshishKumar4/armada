@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from armada import Armada, Connection, Context, RequestError, SchemaError, ShellError, out_file, sh, task
 from armada.push import PushError, bundle_tasks, find_project
 from armada.task import Envelope, RemoteError, _Value
-from armada.wire import Fields
+from armada.wire import PROTOCOL, Fields
 
 
 class TestSh(unittest.TestCase):
@@ -320,7 +320,7 @@ class TestClient(unittest.TestCase):
             page = armada.events("j", 0)
             self.assertEqual((page.objects("events"), page.flag("done")), ([], True))
             self.assertEqual(counts["events"], 2)
-            self.assertEqual(seen["protocol"], "7")
+            self.assertEqual(seen["protocol"], str(PROTOCOL))
             self.assertEqual(seen["auth"], "Bearer tok")
             self.assertEqual(armada.output("j", 0), b'{"n": 4}')
             with self.assertRaises(RequestError):

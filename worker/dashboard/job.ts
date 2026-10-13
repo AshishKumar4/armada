@@ -4,7 +4,7 @@
  * so a job of 100 000 tasks costs a poll only what landed since the last.
  */
 import * as v from 'valibot';
-import { detach, EventsSchema, JobStatusSchema, JsonSchema, type JobStatus, type Json, type Outcome } from '../../src/protocol';
+import { detach, EventsSchema, hostLabel, JobStatusSchema, JsonSchema, type JobStatus, type Json, type Outcome } from '../../src/protocol';
 import type { Client } from './api';
 import { TaskGrid, Timeline, type Lane, type Segment, type TaskState } from './charts';
 import { ago, bytes, count, duration, h, icon, pill, replace, save, when, type Tone } from './dom';
@@ -121,7 +121,7 @@ export function jobView(api: Client, id: string, opened: number | null): View {
         h('span', { class: `dot ${VESSEL_TONES[vessel.state]}` }), h('span', { class: 'mono' }, vessel.name),
         h('span', {
           class: 'muted num',
-          title: vessel.boot === undefined ? undefined : `waited ${duration(vessel.boot.waitMs)} for capacity, started in ${duration(vessel.boot.startMs)}${vessel.boot.restarts.length === 0 ? '' : ` (${vessel.boot.restarts.join('; ')})`}, set up in ${duration(vessel.boot.setupMs)}${vessel.boot.host === undefined ? '' : `, on ${vessel.boot.host}`}`,
+          title: vessel.boot === undefined ? undefined : `waited ${duration(vessel.boot.waitMs)} for capacity, started in ${duration(vessel.boot.startMs)}${vessel.boot.restarts.length === 0 ? '' : ` (${vessel.boot.restarts.join('; ')})`}, set up in ${duration(vessel.boot.setupMs)}${vessel.boot.host === undefined ? '' : `, on ${hostLabel(vessel.boot.host)}`}`,
         }, `${count(vessel.tasks)} task${vessel.tasks === 1 ? '' : 's'}${vessel.busyMs > 0 ? ` · busy ${duration(vessel.busyMs)}` : ''}${vessel.bootMs === null ? '' : ` · up in ${duration(vessel.bootMs)}`}`),
         h('span', { class: 'faint' }, vessel.state),
         vessel.error === null ? null : h('span', { class: 'error' }, vessel.error))));

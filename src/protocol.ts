@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 9;
+export const PROTOCOL = 10;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -282,6 +282,27 @@ export const ModeSchema = v.picklist(['efficient', 'fast']);
 
 export type Mode = v.InferOutput<typeof ModeSchema>;
 
+/** A host's CPU as /proc/cpuinfo has it: its vendor (`AuthenticAMD`), family and model. Hosts of one model compute a
+ *  float operation alike, and of two models need not: an approximate one such as `vrsqrtps` differs between them,
+ *  whatever the instructions XLA chose (#40). */
+export const CpuSchema = v.object({ vendor: v.string(), family: v.pipe(v.number(), v.integer()), model: v.pipe(v.number(), v.integer()) });
+
+export type Cpu = v.InferOutput<typeof CpuSchema>;
+
+/** A host that ran a task: its CPU, the CPU's name, and its x86-64 level (`x86-64-v4` is 4; 0 below v2 or off x86). */
+export const HostSchema = v.object({ ...CpuSchema.entries, name: v.string(), level: v.number() });
+
+export type Host = v.InferOutput<typeof HostSchema>;
+
+/** A host as a person reads it: `AMD EPYC 25/17 (x86-64-v4)`. */
+export const hostLabel = ({ name, family, model, level }: Host): string => `${name} ${String(family)}/${String(model)}${level === 0 ? '' : ` (x86-64-v${String(level)})`}`;
+
+/** A CPU as `--cpu` takes it and a person reads it: `AuthenticAMD/25/17`. */
+export const cpuLabel = ({ vendor, family, model }: Cpu): string => `${vendor}/${String(family)}/${String(model)}`;
+
+/** Whether `host` has the CPU `cpu`. */
+export const hasCpu = (host: Host, cpu: Cpu): boolean => host.vendor === cpu.vendor && host.family === cpu.family && host.model === cpu.model;
+
 /** For a repository recipe: the commit each container checks out, packed against `base`. `shallow` is the pack's
  *  boundary, the commits it holds whose parents it does not (`boundaryOf`): the commit itself for a `commit` history, a
  *  shallow clone's own boundary for a `full` one (#34). */
@@ -315,9 +336,8 @@ export const JobSpecSchema = v.object({
    *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
   mode: v.optional(ModeSchema, 'efficient'),
-  /** CPU flags, as /proc/cpuinfo names them, that every container's host must have. A container on a host without them
-   *  is replaced before it takes a task: a program's float results can differ between hosts (#40). */
-  cpu: v.optional(v.pipe(v.array(v.pipe(v.string(), v.regex(/^[a-z0-9_]+$/u, 'a CPU flag is as /proc/cpuinfo names it'))), v.maxLength(32)), []),
+  /** The CPU every container's host has (`CpuSchema`). A container on another host is replaced before it takes a task. */
+  cpu: v.optional(CpuSchema),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
@@ -381,8 +401,8 @@ export const OutcomeSchema = v.object({
   diskBytes: v.optional(v.number()),
   /** Answered from the job's cache: nothing ran. */
   cached: v.optional(v.boolean()),
-  /** The host it ran on: its CPU's model and x86-64 level (`hostOf`). */
-  host: v.optional(v.string()),
+  /** The host it ran on. */
+  host: v.optional(HostSchema),
 });
 
 export type Outcome = v.InferOutput<typeof OutcomeSchema>;
@@ -399,8 +419,8 @@ export const BootSchema = v.object({
   startMs: v.number(),
   restarts: v.array(v.string()),
   setupMs: v.number(),
-  /** The host it started on (`Outcome.host`); absent from an earlier Worker. */
-  host: v.optional(v.string()),
+  /** The host it started on; absent from an earlier Worker. */
+  host: v.optional(HostSchema),
 });
 
 export type Boot = v.InferOutput<typeof BootSchema>;

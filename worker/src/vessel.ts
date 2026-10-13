@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { boundaryOf, BUNDLE_PATH, detach, failureTail, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Outcome } from '../../src/protocol';
+import { boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
   AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
@@ -53,22 +53,20 @@ export interface VesselSpec {
   /** When its job's deadline ends it, so the fleet holds its vCPUs no longer than it may run. Absent for an earlier
    *  Worker's spec, whose jobs ended at six hours. */
   readonly deadlineAt?: number;
-  /** The CPU flags its host must have (`JobSpec.cpu`); absent for an earlier Worker's spec, which requires none. */
-  readonly cpu?: readonly string[];
+  /** The CPU its host must have (`JobSpec.cpu`); absent for any. */
+  readonly cpu?: Cpu;
 }
 
-/** A stored spec with its later fields filled: an earlier Worker's lacks `slots`, `slotMemoryBytes`, `runtime` and
- *  `cpu`. */
+/** A stored spec with its later fields filled: an earlier Worker's lacks `slots`, `slotMemoryBytes` and `runtime`. */
 export interface SlotSpec extends VesselSpec {
   readonly runtime: 'node' | 'python';
   readonly slots: number;
   readonly slotMemoryBytes: number;
-  readonly cpu: readonly string[];
 }
 
 /** The spec `begin` stored, every later field defaulted, so a use site never re-derives them. */
 export function specOf(stored: VesselSpec): SlotSpec {
-  return { ...stored, runtime: stored.runtime ?? 'node', slots: stored.slots ?? 1, slotMemoryBytes: stored.slotMemoryBytes ?? 0, cpu: stored.cpu ?? [] };
+  return { ...stored, runtime: stored.runtime ?? 'node', slots: stored.slots ?? 1, slotMemoryBytes: stored.slotMemoryBytes ?? 0 };
 }
 
 /** Everything that differs between a shared container's task and one slot of a slotted container: the slot's task
@@ -267,10 +265,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('restarts', restarts);
     await startAndAnswer(container, { containerSnapshot: { id: spec.snapshot }, instance: spec.instance, enableInternet: true, entrypoint: ENTRYPOINT }, { ms: START_MS, inactivityMs: INACTIVITY_MS, restarted });
     const answered = Date.now();
-    const { host, flags } = hostOf((await must(container, 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
-    const missing = spec.cpu.filter((flag) => !flags.has(flag));
+    const host = hostOf((await must(container, 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
 
-    if (missing.length > 0) throw new Misplaced(host, missing);
+    if (spec.cpu !== undefined && !hasCpu(host, spec.cpu)) throw new Misplaced(host, spec.cpu);
     await this.ctx.storage.put('host', host);
 
     await must(container, 'the tmpfs mounts', ['/bin/sh', '-c', mounts(spec.tmpfs)], { ms: EXEC_MS });
@@ -657,7 +654,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     return {
       index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, error, ...usage,
-      host: await this.ctx.storage.get<string>('host'),
+      host: await this.ctx.storage.get<Host>('host'),
     };
   }
 

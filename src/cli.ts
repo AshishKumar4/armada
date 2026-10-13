@@ -13,7 +13,7 @@ import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './regi
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
-import { BaseSchema, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Health, type Push } from './protocol';
+import { BaseSchema, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -58,8 +58,8 @@ map options:
   --slots=N            the tasks one container runs at once, each in its own slot (default 1; more turns packing off)
   --mode=<mode>        efficient packs tasks into containers by their measured use; fast runs one a container
                        (default efficient)
-  --cpu=F,G            CPU flags every container's host must have (as /proc/cpuinfo names them, e.g.
-                       avx512f); a container on another host is replaced before it takes a task
+  --cpu=V/F/M          the CPU every container's host has, vendor/family/model as /proc/cpuinfo says
+                       (AuthenticAMD/25/17); a container on another host is replaced before it takes a task
   --timeout=S          a task's limit, in seconds (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
   --gang-start-timeout=S  once every rank has a container, all must launch within this many seconds (default 300)
@@ -159,6 +159,18 @@ function itemsFrom(source: string): Json[] {
   return text.split('\n').filter((line) => line.trim() !== '');
 }
 
+/** `--cpu`'s CPU: vendor/family/model, as `cpuLabel` writes it. */
+function cpuOf(given: string | undefined): Cpu | undefined {
+  if (given === undefined) return undefined;
+  const [vendor, family, model, ...extra] = given.split('/');
+
+  if (vendor === undefined || vendor === '' || family === undefined || model === undefined || extra.length > 0 || !/^\d+$/u.test(family) || !/^\d+$/u.test(model)) {
+    throw new Error(`--cpu takes vendor/family/model as /proc/cpuinfo has them, such as AuthenticAMD/25/17, not ${given}`);
+  }
+
+  return { vendor, family: Number(family), model: Number(model) };
+}
+
 async function map(): Promise<number> {
   const items = option('items');
   const times = whole('times');
@@ -183,7 +195,7 @@ async function map(): Promise<number> {
   const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const mode = option('mode');
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: option('cpu')?.split(',').filter(Boolean), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   // An interrupt while the job is made cancels it once it is.
   const id = await cancelOnInterrupt([job], async () => await job.id);

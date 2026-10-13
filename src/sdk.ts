@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -328,7 +328,7 @@ export function describeBoots({ vessels, bootMs, boots }: Summary): string {
 
   if (boots.length === 0) return answers;
   const restarts = boots.reduce((sum, boot) => sum + boot.restarts.length, 0);
-  const hosts = Map.groupBy(boots.flatMap((boot) => boot.host === undefined ? [] : [boot.host]), (host) => host);
+  const hosts = Map.groupBy(boots.flatMap((boot) => boot.host === undefined ? [] : [hostLabel(boot.host)]), (host) => host);
   const onHosts = [...hosts].toSorted(([, left], [, right]) => right.length - left.length).map(([host, each]) => `${String(each.length)} on ${host}`);
 
   return `${answers}; median boot: ${seconds(median(boots.map((boot) => boot.waitMs)))} waiting for capacity, ${seconds(median(boots.map((boot) => boot.startMs)))} starting, `

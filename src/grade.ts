@@ -6,7 +6,7 @@
  * problem names: that one carries the `problem`, and exits 2 where it reported green, so no reader counts it green.
  */
 import * as v from 'valibot';
-import { JsonSchema } from './protocol';
+import { HostSchema, JsonSchema } from './protocol';
 
 /** One row a task must report, and the files it must report a timing for, when the project splits rows by file. */
 const ExpectedRow = v.union([v.string(), v.object({ name: v.string(), files: v.optional(v.array(v.string())) })]);
@@ -37,8 +37,8 @@ const VerdictRowSchema = v.looseObject({
   problem: v.optional(v.string()),
   /** How its task ended beside other tasks before it ran again alone and reported this row (`Outcome.aloneAfter`). */
   aloneAfter: v.optional(v.string()),
-  /** The host its task ran on (`Outcome.host`). */
-  host: v.optional(v.string()),
+  /** The host its task ran on. */
+  host: v.optional(HostSchema),
 });
 
 export type VerdictRow = v.InferOutput<typeof VerdictRowSchema>;

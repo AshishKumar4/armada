@@ -218,6 +218,26 @@ class Boot:
     start_ms: float
     restarts: list[str]
     setup_ms: float
+    # The host it started on; None from an earlier Worker.
+    host: "Host | None" = None
+
+
+@dataclass(frozen=True)
+class Host:
+    """A host that ran a task: its CPU (vendor, family and model, as /proc/cpuinfo has them), the CPU's name, and its
+    x86-64 level (4 for x86-64-v4; 0 below v2 or off x86). Hosts of one CPU compute a float operation alike."""
+
+    vendor: str
+    family: int
+    model: int
+    name: str
+    level: int
+
+    @staticmethod
+    def of(fields: Fields | None) -> "Host | None":
+        if fields is None:
+            return None
+        return Host(fields.text("vendor"), fields.whole("family"), fields.whole("model"), fields.text("name"), fields.whole("level"))
 
 
 @dataclass(frozen=True)
@@ -292,7 +312,8 @@ def _vessel(fields: Fields) -> Vessel:
 
 
 def _boot(fields: Fields) -> Boot:
-    return Boot(fields.number("waitMs"), fields.number("startMs"), fields.texts("restarts"), fields.number("setupMs"))
+    return Boot(fields.number("waitMs"), fields.number("startMs"), fields.texts("restarts"), fields.number("setupMs"),
+                Host.of(fields.optional_object("host")))
 
 
 def _environment(fields: Fields) -> Environment:

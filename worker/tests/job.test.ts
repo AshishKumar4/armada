@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { environmentKey, JobSpecSchema, RecipeSchema, refusal, SIZES, type Outcome } from '../../src/protocol';
+import { environmentKey, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Outcome } from '../../src/protocol';
 import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
@@ -339,22 +339,23 @@ describe('a vessel lost before it took a task', () => {
   });
 });
 
-describe('a job whose containers start on hosts without its CPU flags (#40)', () => {
-  test('replaces each at no cost to its budget while others boot, and ends once so many in a row say no host has them', async () => {
-    const zen3 = 'AMD EPYC 25/1 (x86-64-v3)';
-    const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const }, pool: 1, cpu: ['avx512f'] };
+describe('a job whose containers start on hosts of another CPU than its own (#40)', () => {
+  test('replaces each at no cost to its budget while others boot, and ends once so many in a row say no host has it', async () => {
+    const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
+    const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const }, pool: 1, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } };
+    const misplace = async (open: ArmadaJob, begun: readonly string[]) => await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'its host is another', { misplaced: zen3 });
     const { job: lucky, begun: luckyBegun } = await job(spec);
 
     // Thirty land on such hosts, one in every ten boots in between: past any budget for lost starts, which is the pool.
     for (let misplaced = 1; misplaced <= 30; misplaced += 1) {
-      await lucky.vesselFailed((luckyBegun.at(-1) ?? '').slice('j1/'.length), `its host, ${zen3}, lacks avx512f`, { misplaced: zen3 });
+      await misplace(lucky, luckyBegun);
 
       if (misplaced % 10 === 0) await lucky.booted((luckyBegun.at(-1) ?? '').slice('j1/'.length), 1000);
     }
 
     const { job: unlucky, begun } = await job(spec);
 
-    while ((await unlucky.events(0)).done !== true && begun.length < 100) await unlucky.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), `its host, ${zen3}, lacks avx512f`, { misplaced: zen3 });
+    while ((await unlucky.events(0)).done !== true && begun.length < 100) await misplace(unlucky, begun);
     const [ended] = (await unlucky.events(0)).events;
 
     expect({
@@ -362,7 +363,7 @@ describe('a job whose containers start on hosts without its CPU flags (#40)', ()
       unlucky: { begun: begun.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail },
     }).toEqual({
       lucky: { done: false, begun: 31 },
-      unlucky: { begun: 20, kind: 'failed', tail: `20 containers in a row started on hosts without avx512f, the last on ${zen3}: no host this job reaches has them` },
+      unlucky: { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it' },
     });
   });
 });

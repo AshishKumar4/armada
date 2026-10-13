@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Boot, Outcome } from '../../src/protocol';
+import type { Boot, Cpu, Host, Outcome } from '../../src/protocol';
 import { argvOf, CPU_INFO, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
@@ -53,8 +53,8 @@ interface Run {
   /** How many tasks its job has, and the fleet its vessel holds its vCPUs from. */
   readonly tasks?: number;
   readonly fleet?: object;
-  /** The CPU flags its job requires, and what its host's /proc/cpuinfo says. */
-  readonly cpu?: readonly string[];
+  /** The CPU its job requires, and what its host's /proc/cpuinfo says. */
+  readonly cpu?: Cpu;
   readonly cpuinfo?: string;
 }
 
@@ -65,7 +65,7 @@ async function run(lost: number, {
 }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
-  const misplaced: (string | undefined)[] = [];
+  const misplaced: (Host | undefined)[] = [];
   const execs: (readonly string[])[] = [];
   const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
@@ -116,7 +116,7 @@ async function run(lost: number, {
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
-    vesselFailed: async (_name: string, error: string, how?: { readonly misplaced?: string }) => {
+    vesselFailed: async (_name: string, error: string, how?: { readonly misplaced?: Host }) => {
       failed.push(error);
       misplaced.push(how?.misplaced);
     },
@@ -164,17 +164,18 @@ describe('a vessel\'s place in its fleet', () => {
   });
 });
 
-describe('a vessel whose job requires CPU flags (#40)', () => {
-  test('takes no task on a host without them, and says which host; on one with them, each outcome names its host', async () => {
-    const zen3 = await run(0, { cpu: ['avx512f'], cpuinfo: cpuinfoOf(25, 1, V3) });
-    const zen4 = await run(0, { cpu: ['avx512f'], cpuinfo: cpuinfoOf(25, 17, `${V3} avx512f avx512dq avx512cd avx512bw avx512vl avx512_bf16`) });
+describe('a vessel whose job requires a CPU (#40)', () => {
+  test('takes no task on a host of another CPU, and says which host; on its own, each outcome names its host', async () => {
+    const cpu = { vendor: 'AuthenticAMD', family: 25, model: 17 };
+    const zen3 = await run(0, { cpu, cpuinfo: cpuinfoOf(25, 1, V3) });
+    const zen4 = await run(0, { cpu, cpuinfo: cpuinfoOf(25, 17, `${V3} avx512f avx512dq avx512cd avx512bw avx512vl avx512_bf16`) });
 
     expect({
       zen3: { claims: zen3.claims, misplaced: zen3.misplaced, failed: zen3.failed },
       zen4: { exits: zen4.exits, hosts: zen4.completed.map((outcome) => outcome.host), failed: zen4.failed },
     }).toEqual({
-      zen3: { claims: 0, misplaced: ['AMD EPYC 25/1 (x86-64-v3)'], failed: ['its host, AMD EPYC 25/1 (x86-64-v3), lacks avx512f'] },
-      zen4: { exits: [0], hosts: ['AMD EPYC 25/17 (x86-64-v4)'], failed: [] },
+      zen3: { claims: 0, misplaced: [{ ...cpu, model: 1, name: 'AMD EPYC', level: 3 }], failed: ['its host, AMD EPYC 25/1 (x86-64-v3), is not the AuthenticAMD/25/17 its job requires'] },
+      zen4: { exits: [0], hosts: [{ ...cpu, name: 'AMD EPYC', level: 4 }], failed: [] },
     });
   });
 });
@@ -595,7 +596,7 @@ describe('a vessel\'s boot', () => {
       Date.now = clock;
     }
 
-    expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 3000, host: 'an unnamed CPU' } }] });
+    expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 3000, host: { vendor: '', family: -1, model: -1, name: '', level: 0 } } }] });
   });
 
   /** A vessel whose container's every start the platform ends while the account is full, and whose fleet gives a

@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, summaryOf, type Armada, type Summary } from './sdk';
@@ -107,9 +107,9 @@ export interface MapOptions {
   readonly slots?: number;
   /** How the job places its tasks (`ModeSchema`). Default `efficient`. */
   readonly mode?: Mode;
-  /** CPU flags, as /proc/cpuinfo names them (`avx512f`), that every container's host must have; a container on another
-   *  host is replaced before it takes a task. For results that must not depend on the host. */
-  readonly cpu?: readonly string[];
+  /** The CPU every container's host has (`Cpu`, as a result's `meta.host` says it): a container on another host is
+   *  replaced before it takes a task. For float results that must not differ between hosts. */
+  readonly cpu?: Cpu;
   /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
   readonly deadline?: number;
   /** The limit for a formed gang to launch all its ranks, once every one has a container, in seconds. Default 300. */
@@ -152,8 +152,8 @@ export interface Meta {
   readonly diskBytes?: number;
   /** How its run beside other tasks ended, when it failed there and this is its run alone. */
   readonly aloneAfter?: string;
-  /** The host it ran on: its CPU's model and x86-64 level. */
-  readonly host?: string;
+  /** The host it ran on. */
+  readonly host?: Host;
   /** Whether the task's artifacts directory was kept; `job.artifacts(index)` reads it. */
   readonly artifacts: boolean;
   /** Answered from the task's cache, with nothing run. */
@@ -415,7 +415,7 @@ abstract class Base<I extends Json, O> {
     const { commit, ...environment } = this.recipe;
 
     const spec = {
-      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, cpu: options.cpu === undefined ? undefined : [...options.cpu], label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, cpu: options.cpu, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       deadline: options.deadline, gangStartTimeout: options.gangStartTimeout,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,

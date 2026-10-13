@@ -25,8 +25,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
-  type Boot, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
@@ -125,8 +125,9 @@ interface Attempt {
  *  job's pool and at least as many as these (`vesselFailed`). */
 const REPLACEMENTS = 8;
 
-/** Containers in a row that start on hosts without the job's CPU flags (`JobSpec.cpu`) before the job ends: about one
- *  in ten of them lands on such a host (2026-10-13, 3 of 32), so this many in a row says no host here has them. */
+/** Containers in a row, past one a place in the pool, that start on hosts of another CPU than the job's (`JobSpec.cpu`)
+ *  before the job ends. Of 62 containers on 2026-10-13, 52 were AMD 25/17, 7 AMD 26/17, 2 AMD 25/1 and 1 AMD 23/49, so
+ *  even a pool of the rarest boots past this, and this many in a row says no host here has it. */
 const MISPLACED_LIMIT = 20;
 
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
@@ -989,7 +990,7 @@ export class ArmadaJob extends DurableObject<Env> {
    *  while there is work it could take. A vessel whose start found its snapshot `missing` is not replaced from it:
    *  every start from it would fail alike, so the pool refills from the job's environment, prepared again. Its runs
    *  end only once its container is `gone`. */
-  async vesselFailed(name: string, error: string, { missing, gone = false, misplaced }: { readonly missing?: string; readonly gone?: boolean; readonly misplaced?: string } = {}): Promise<void> {
+  async vesselFailed(name: string, error: string, { missing, gone = false, misplaced }: { readonly missing?: string; readonly gone?: boolean; readonly misplaced?: Host } = {}): Promise<void> {
     const spec = await this.spec();
 
     if (spec === undefined) return;
@@ -1008,8 +1009,7 @@ export class ArmadaJob extends DurableObject<Env> {
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
 
-    // One on a host without the job's CPU flags is replaced at no cost to its budget, until so many in a row say no host
-    // has them.
+    // One on a host of another CPU is replaced at no cost to its budget, until so many in a row say no host has it.
     const misplacedInRow = misplaced !== undefined && live ? ((await this.ctx.storage.get<number>('misplaced')) ?? 0) + 1 : 0;
 
     if (misplacedInRow > 0) await this.ctx.storage.put('misplaced', misplacedInRow);
@@ -1056,8 +1056,8 @@ export class ArmadaJob extends DurableObject<Env> {
       await this.awaitEnvironment(spec);
     }
 
-    if (misplacedInRow >= MISPLACED_LIMIT) {
-      return await this.cancel(`${String(misplacedInRow)} containers in a row started on hosts without ${spec.cpu.join(', ')}, the last on ${misplaced ?? ''}: no host this job reaches has them`, 'lost');
+    if (misplaced !== undefined && spec.cpu !== undefined && misplacedInRow >= MISPLACED_LIMIT + spec.pool) {
+      return await this.cancel(`${String(misplacedInRow)} containers in a row started on hosts of another CPU than ${cpuLabel(spec.cpu)}, the last on ${hostLabel(misplaced)}: no host this job reaches has it`, 'lost');
     }
 
     await this.grow();

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Generic, Literal, Protocol, TypedDict, TypeVar, Union, cast, overload
 
-from .client import Armada, JobStatus, Summary, connect, summary_of
+from .client import Armada, Host, JobStatus, Summary, connect, summary_of
 from .recipe import Recipe, RecipeBuilder, recipe as default_recipe
 from .sh import OutFile, Shell, ShellError, execute, out_file
 from .wire import Answerable, Fields, Json, remote_error
@@ -100,7 +100,7 @@ class Meta:
     oom_killed: bool = False
     disk_bytes: int | None = None
     alone_after: str | None = None
-    host: str | None = None
+    host: Host | None = None
 
 
 @dataclass(frozen=True)
@@ -343,7 +343,7 @@ class Job(Generic[In, Out]):
             artifacts=outcome.flag("artifacts"), cached=outcome.flag("cached"),
             oom_killed=outcome.flag("oomKilled"), disk_bytes=outcome.optional_whole("diskBytes"),
             alone_after=outcome.optional_text("aloneAfter"),
-            host=outcome.optional_text("host"),
+            host=Host.of(outcome.optional_object("host")),
         )
         reason = outcome.optional_text("reason")
         if outcome.text("kind") == "failed":
@@ -424,6 +424,15 @@ class Job(Generic[In, Out]):
         return self.armada.artifacts(self.id, index)
 
 
+class Cpu(TypedDict):
+    """A host's CPU as /proc/cpuinfo has it, `{"vendor": "AuthenticAMD", "family": 25, "model": 17}`, as a result's
+    `meta.host` says it."""
+
+    vendor: str
+    family: int
+    model: int
+
+
 class Retries(TypedDict, total=False):
     """`{"attempts": 3, "on": [137, "TimeoutError"]}` — runs again on those exit codes or error names."""
 
@@ -473,7 +482,7 @@ class Task(Generic[In, Out]):
         built = given.spec if isinstance(given, RecipeBuilder) else given
         return built if isinstance(built, dict) else default_recipe().spec
 
-    def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, cpu: list[str] | None, label: str,
+    def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, cpu: Cpu | None, label: str,
               env: dict[str, str] | None, files: dict[str, str] | None, tmpfs: list[str] | None,
               bundle: str | None) -> dict[str, object]:
         spec = {
@@ -487,13 +496,13 @@ class Task(Generic[In, Out]):
         return {key: value for key, value in spec.items() if value is not None}
 
     def stream(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-               cpu: list[str] | None = None, label: str = "", env: dict[str, str] | None = None,
+               cpu: Cpu | None = None, label: str = "", env: dict[str, str] | None = None,
                files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
                armada: Armada | None = None) -> Job[In, Out]:
         """The job, whose results arrive as they land. Items stream in when given as a generator. `mode` is how it places
         its tasks: "efficient", the default, packs them into containers by their measured use; "fast" runs one a
-        container. More than one slot turns packing off. `cpu` names CPU flags (as /proc/cpuinfo does, "avx512f") every
-        container's host must have; a container on another host is replaced before it takes a task."""
+        container. More than one slot turns packing off. `cpu` is the CPU every container's host has (`Cpu`); a container on
+        another host is replaced before it takes a task, so float results do not differ between hosts."""
         client = armada or connect()
         from .push import pushed
 
@@ -518,7 +527,7 @@ class Task(Generic[In, Out]):
         return Job(client, self, submission)
 
     def map(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-            cpu: list[str] | None = None, label: str = "", env: dict[str, str] | None = None,
+            cpu: Cpu | None = None, label: str = "", env: dict[str, str] | None = None,
             files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
             armada: Armada | None = None) -> list[Out]:
         """Every item's value, in input order, or a MapError holding every result when one is not ok."""
@@ -527,7 +536,7 @@ class Task(Generic[In, Out]):
         return streamed.values()
 
     def run(self, item: In, *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-            cpu: list[str] | None = None, label: str = "", env: dict[str, str] | None = None,
+            cpu: Cpu | None = None, label: str = "", env: dict[str, str] | None = None,
             files: dict[str, str] | None = None, tmpfs: list[str] | None = None, armada: Armada | None = None) -> Out:
         """One item's value, on one container."""
         streamed = self.stream([item], pool=pool, slots=slots, mode=mode, cpu=cpu, label=label, env=env, files=files,
