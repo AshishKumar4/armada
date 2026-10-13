@@ -232,7 +232,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
       const used = now.fleet.jobs.reduce((sum, job) => sum + job.vcpus, 0);
 
       replace(figure,
-        stat('vCPUs in use', count(used), `of ${count(now.fleet.cap)}`),
+        stat('vCPUs in use', count(used), `of ${count(limitOf(now.fleet))}`),
         stat('Containers', count(containers)),
         stat('Tasks running', count(now.fleet.tasks?.running ?? 0)),
         stat('Tasks queued', count(now.fleet.tasks?.queued ?? 0)));
@@ -277,13 +277,17 @@ function deploymentRow(at: Client, label: string, read: Read, names: ReadonlyMap
   return h('div', { class: 'deployment' }, title,
     cellsOf(fleet, ROW_CELLS, names),
     h('span', { class: 'deployment-open muted num' }, `${count(health.jobs)} open · ${count(containers)} container${containers === 1 ? '' : 's'}`),
-    h('span', { class: 'deployment-use num' }, `${count(used)} of ${count(fleet.cap)} vCPU`));
+    h('span', { class: 'deployment-use num' }, `${count(used)} of ${count(limitOf(fleet))} vCPU`));
 }
+
+/** The most a fleet holds now: its cap, or more while it borrows what the account leaves idle. */
+const limitOf = (fleet: Fleet): number => fleet.limit ?? fleet.cap;
 
 /** The fleet as `cells` cells: each job's share in its shade, largest first, then what is free. */
 function cellsOf(fleet: Fleet, cells: number, names: ReadonlyMap<string, string>): HTMLElement {
   const used = fleet.jobs.reduce((sum, job) => sum + job.vcpus, 0);
-  const per = fleet.cap / cells;
+  // While its recalled loans finish their tasks, a fleet holds more than it may now.
+  const per = Math.max(limitOf(fleet), used) / cells;
   const drawn: HTMLElement[] = [];
 
   for (const [rank, job] of fleet.jobs.entries()) {
@@ -295,7 +299,7 @@ function cellsOf(fleet: Fleet, cells: number, names: ReadonlyMap<string, string>
 
   while (drawn.length < cells) drawn.push(h('i', { class: 'free' }));
 
-  return h('div', { class: 'cells', label: `${count(used)} of ${count(fleet.cap)} vCPUs in use` }, drawn);
+  return h('div', { class: 'cells', label: `${count(used)} of ${count(limitOf(fleet))} vCPUs in use` }, drawn);
 }
 
 /** A deployment's fleet: how much it uses of its cap, its cells, and each job's share. */
@@ -303,7 +307,8 @@ function fleetPicture(at: Client, fleet: Fleet, names: ReadonlyMap<string, strin
   const used = fleet.jobs.reduce((sum, job) => sum + job.vcpus, 0);
 
   return [
-    h('div', { class: 'fleet-figure' }, h('strong', {}, count(used)), h('span', {}, `of ${count(fleet.cap)} vCPUs`)),
+    h('div', { class: 'fleet-figure' }, h('strong', {}, count(used)), h('span', {}, `of ${count(limitOf(fleet))} vCPUs`),
+      limitOf(fleet) > fleet.cap ? h('span', { class: 'muted' }, `its cap ${count(fleet.cap)}, the rest lent while the account is idle`) : null),
     cellsOf(fleet, CELLS, names),
     fleet.jobs.length === 0 ? h('p', { class: 'muted' }, 'No container is up.') : h('div', { class: 'legend' }, fleet.jobs.map((job, rank) => h('a', { class: 'legend-row', href: at.href(`jobs/${job.id}`) },
       h('span', { class: `legend-swatch ${shade(rank)}` }), h('span', { class: 'legend-name' }, names.get(job.id) ?? job.id),
