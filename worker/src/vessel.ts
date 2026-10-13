@@ -503,13 +503,16 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     await pipeIn(container, positional(claim.argv, exported), argv, { secret: true });
 
+    // A container of fewer than one vCPU runs on one CPU.
+    const cpus = Math.max(1, Math.ceil(spec.vcpus));
+
     if (layout.isolated) {
-      const limits = { memoryBytes: spec.slotMemoryBytes, tasksMemoryBytes: spec.pack === true ? spec.slotMemoryBytes : undefined };
+      const limits = { cpus, memoryBytes: spec.slotMemoryBytes, tasksMemoryBytes: spec.pack === true ? spec.slotMemoryBytes : undefined };
 
       await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, limits, spec.tmpfs)), 'launch'], { env: rest, ms: EXEC_MS });
       await keep();
     } else {
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir)), 'launch'], { env: rest, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus)), 'launch'], { env: rest, ms: EXEC_MS });
     }
   }
 

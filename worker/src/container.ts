@@ -170,13 +170,19 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
 }
 
 /** The launch preamble both shapes share: refuse a container the platform is stopping, the parent cgroup and its
- *  controllers, the task's own group emptied (`endGroup`), a runner sub-group, an even memory cap for a slot, and
- *  the group handed to the user. The groups are set up here, at each launch, so a container an earlier Worker
- *  started has them. */
-function groupSetup(group: string, memoryBytes?: number, tasksMemoryBytes?: number): string {
+ *  controllers, its CPUs, the task's own group emptied (`endGroup`), a runner sub-group, an even memory cap for a
+ *  slot, and the group handed to the user. The groups are set up here, at each launch, so a container an earlier
+ *  Worker started has them.
+ *
+ *  A container shows more CPUs than its vCPUs: a medium one shows 8 and runs 4 CPUs' worth, so a task that sizes its
+ *  threads by what it sees gets a third or more of its time taken back by the host, and no more work done (8 threads
+ *  of BLAS 12% slower than 4, 44% of their CPU stolen; 2026-10-13). Every task runs on as many CPUs as the container
+ *  has vCPUs, so what counts CPUs (nproc, OpenMP, BLAS, XLA) counts those. */
+function groupSetup(group: string, { cpus, memoryBytes, tasksMemoryBytes }: { readonly cpus: number; readonly memoryBytes?: number; readonly tasksMemoryBytes?: number }): string {
   return String.raw`if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
+[ ! -e ${PARENT_GROUP}/cpuset.cpus ] || if [ ${String(cpus)} -lt "$(nproc --all)" ]; then echo 0-${String(cpus - 1)}; else echo; fi > ${PARENT_GROUP}/cpuset.cpus
 ${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PARENT_GROUP}/memory.max
 [ ! -e ${PARENT_GROUP}/memory.swap.max ] || echo 0 > ${PARENT_GROUP}/memory.swap.max
 `}${endGroup(group)}
@@ -190,9 +196,9 @@ ${memoryBytes === undefined ? '' : `echo ${String(memoryBytes)} > ${group}/memor
  *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
  *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
  *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. */
-export function launchTask(workdir: string): string {
+export function launchTask(workdir: string, cpus: number): string {
   return String.raw`set -eu
-${groupSetup(TASK_GROUP)}
+${groupSetup(TASK_GROUP, { cpus })}
 rm -rf ${TASK}
 mkdir -p ${TASK} ${ARTIFACTS_PATH}
 chown ci:ci ${TASK} ${ARTIFACTS_PATH}
@@ -208,14 +214,14 @@ setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgrou
  *  which also caps the group over all of them (`tasksMemoryBytes`), in memory alone: with no swap past it, a task past
  *  its estimate is killed and runs again alone, rather than every task slowed by swapping. Network is shared: two tasks binding one fixed
  *  port collide. */
-export function launchSlot(workdir: string, slot: number, { memoryBytes, tasksMemoryBytes }: { readonly memoryBytes: number; readonly tasksMemoryBytes?: number }, tmpfs: readonly string[]): string {
+export function launchSlot(workdir: string, slot: number, limits: { readonly cpus: number; readonly memoryBytes: number; readonly tasksMemoryBytes?: number }, tmpfs: readonly string[]): string {
   const root = slotRoot(slot);
   const dir = slotTask(slot);
   const group = taskGroup(slot);
   const fresh = tmpfs.map((path) => `mount -t tmpfs -o mode=1777,size=6g tmpfs ${path}`).join('\n');
 
   return String.raw`set -eu
-${groupSetup(group, memoryBytes, tasksMemoryBytes)}
+${groupSetup(group, limits)}
 rm -rf ${root}
 mkdir -p ${dir} ${dir}/artifacts ${root}/upper ${root}/work ${root}/home-upper ${root}/home-work
 chown -R ci:ci ${root}

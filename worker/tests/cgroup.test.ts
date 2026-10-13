@@ -6,7 +6,7 @@
  */
 import { afterAll, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clearTask, killOf, launchSlot, launchTask, slotRoot, slotTask, STATE, TASK, TASK_GROUP, taskGroup, usageFrom, usageOf, WAIT, waitOn } from '../src/container';
 
@@ -22,9 +22,16 @@ afterAll(() => rmSync(workdir, { recursive: true, force: true }));
 
 const sh = (script: string, ...args: string[]) => Bun.spawnSync(['/bin/sh', '-c', script, 'armada', ...args], { cwd: workdir, env: { PATH: process.env['PATH'] ?? '', ARMADA_CGROUP: TASK_GROUP }, stdout: 'pipe', stderr: 'pipe' });
 
-/** One task, launched and waited for: its exit code and its log. */
+/** This host's CPUs: a container of as many vCPUs runs its tasks on all of them. */
+const ALL = availableParallelism();
+
+/** One task, launched and waited for in a container of `cpus` vCPUs: its exit code and its log. */
 function task(...argv: string[]) {
-  expect(sh(launchTask(workdir), ...argv).exitCode).toBe(0);
+  return taskOn(ALL, ...argv);
+}
+
+function taskOn(cpus: number, ...argv: string[]) {
+  expect(sh(launchTask(workdir, cpus), ...argv).exitCode).toBe(0);
   const exit = sh(WAIT, '20').stdout.toString().trim();
 
   return { exit, log: readFileSync(`${TASK}/log`, 'utf8') };
@@ -48,6 +55,13 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
       .toEqual({ exit: '0', log: '0::/armada/task/runner', left: [false, false], nested: false });
   });
 
+  test('runs on as many CPUs as its container has vCPUs, where the container shows more, so what counts CPUs counts those', () => {
+    const one = taskOn(1, 'nproc');
+    const all = taskOn(ALL, 'nproc');
+
+    expect({ one: one.log.trim(), all: all.log.trim() }).toEqual({ one: '1', all: String(ALL) });
+  });
+
   test('a task starts with SIGINT and SIGQUIT at their defaults, so a ^C it sends ends what it reaches', () => {
     const interrupted = task('sh', '-c', 'grep SigIgn /proc/self/status; kill -INT $$; echo survived');
 
@@ -55,7 +69,7 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
   });
 
   test('a killed task ends with all it started, as soon as its session goes at the TERM', () => {
-    expect(sh(launchTask(workdir), 'sh', '-c', 'setsid sleep 603 >/dev/null 2>&1 < /dev/null & sleep 604').exitCode).toBe(0);
+    expect(sh(launchTask(workdir, ALL), 'sh', '-c', 'setsid sleep 603 >/dev/null 2>&1 < /dev/null & sleep 604').exitCode).toBe(0);
     expect(sh(WAIT, '1').stdout.toString().trim()).toBe('');
     const began = Date.now();
 
@@ -67,7 +81,7 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
 describe.skipIf(!host)('a slotted task', () => {
   test('runs as the user in its own mounts and capped group, sees its own task dir, and leaves the checkout as it was', () => {
     const before = Bun.spawnSync(['ls', workdir]).stdout.toString();
-    const script = launchSlot(workdir, 2, { memoryBytes: 64 * 1024 * 1024 }, ['/dev/shm']);
+    const script = launchSlot(workdir, 2, { cpus: ALL, memoryBytes: 64 * 1024 * 1024 }, ['/dev/shm']);
 
     expect(sh(script, 'sh', '-c', `id -u; cat /proc/self/cgroup; cat ${TASK_GROUP}-2/memory.max; touch here /dev/shm/scratch; ls ${TASK}; ls ${STATE}/slots | wc -l`).exitCode).toBe(0);
     const exit = sh(waitOn(slotTask(2)), '20').stdout.toString().trim();
@@ -86,7 +100,7 @@ describe.skipIf(!host)('packed tasks', () => {
 
     try {
       for (const slot of [0, 1]) {
-        expect(sh(launchSlot(workdir, slot, { memoryBytes: cap, tasksMemoryBytes: cap }, []), ...hold).exitCode).toBe(0);
+        expect(sh(launchSlot(workdir, slot, { cpus: ALL, memoryBytes: cap, tasksMemoryBytes: cap }, []), ...hold).exitCode).toBe(0);
         Bun.sleepSync(1500);
       }
 
@@ -109,7 +123,7 @@ describe.skipIf(!host)('packed tasks', () => {
   test('a cleared slot keeps nothing its task left: no process it detached, no file it wrote, no group', () => {
     const slot = 2;
 
-    expect(sh(launchSlot(workdir, slot, { memoryBytes: 64 * 1024 * 1024 }, []), 'sh', '-c', 'setsid sleep 300 & echo x > left').exitCode).toBe(0);
+    expect(sh(launchSlot(workdir, slot, { cpus: ALL, memoryBytes: 64 * 1024 * 1024 }, []), 'sh', '-c', 'setsid sleep 300 & echo x > left').exitCode).toBe(0);
     expect(sh(waitOn(slotTask(slot)), '20').stdout.toString().trim()).toBe('0');
     const before = [alive('sleep 300'), existsSync(`${slotRoot(slot)}/upper/left`)];
 
