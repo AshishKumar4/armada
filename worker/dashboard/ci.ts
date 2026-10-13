@@ -61,11 +61,10 @@ function verdict(file: File): HTMLElement {
     h('div', { class: 'card-body flush' }, ordered.map(rowOf)));
 }
 
-/** What a row says beside its name: the proof it reused, or that it was green only alone. */
+/** What a row says beside its name: the proof it reused, and that its task ran again alone, whichever way it ended. */
 function noteOf({ cached, aloneAfter }: VerdictRow): string {
-  if (cached !== undefined) return `reused from ${cached.slice(0, 10)}`;
-
-  return aloneAfter === undefined ? '' : `green alone, after it failed beside other tasks (${aloneAfter})`;
+  return [cached === undefined ? null : `reused from ${cached.slice(0, 10)}`, aloneAfter === undefined ? null : `ran alone after failing beside other tasks (${aloneAfter})`]
+    .filter((note) => note !== null).join(' · ');
 }
 
 function rowOf(row: VerdictRow): HTMLElement {
