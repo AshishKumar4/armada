@@ -601,27 +601,27 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   // Its own secrets join the config's only for this run.
   const taskSecrets = [...new Set([...config.task.secrets, ...secrets])];
 
-  /** Every environment resolved again; resolving counts as a use that keeps each until the jobs open. */
-  const resolveAll = async () => new Map(await Promise.all(groups.map(async ({ name }) => [name, await of(name)] as const)));
+  // A base resolved before the plan, or before the uploads ended, may have been rebuilt or deleted since (#39). Every
+  // environment is resolved again and its pack goes up; then each is resolved alone, with nothing between those
+  // resolves and the jobs' start, as resolving counts as a use that keeps it until they open. One whose base moved is
+  // packed again and the check repeats. Each before any task job starts: one that fails leaves none running.
+  let built = await Promise.all(groups.map(async ({ name }) => [name, await of(name)] as const));
+  let owns = new Map(built);
 
-  // A base resolved before the plan, or before the uploads ended, may have been rebuilt or deleted since (#39): the packs
-  // go up, and the jobs start once the resolves that follow find every base where the uploads left it. Each before any
-  // task job starts: one that fails leaves none running.
-  let owns = await resolveAll();
-
-  for (let moved = true; moved;) {
-    await Promise.all([...owns].map(async ([name, own]) => {
+  for (;;) {
+    await Promise.all(built.map(async ([name, own]) => {
       const sent = await own.upload();
 
       if (sent !== null) note(`uploaded its pack${name === undefined ? ' again' : ` for ${name}`}, ${(sent / 1e6).toFixed(1)} MB`);
     }));
 
-    const again = await resolveAll();
+    const moved = (await Promise.all([...owns].map(async ([name, own]) => (await armada.resolve(own.spec.recipe)).base === own.environment.base ? [] : [name]))).flat();
 
-    moved = groups.some(({ name }) => again.get(name)?.environment.base !== owns.get(name)?.environment.base);
-    owns = again;
+    if (moved.length === 0) break;
 
-    if (moved && remainingDeadline(deadlineAt) === null) return await ungraded(PASSED('task jobs'));
+    if (remainingDeadline(deadlineAt) === null) return await ungraded(PASSED('task jobs'));
+    built = await Promise.all(moved.map(async (name) => [name, await of(name)] as const));
+    owns = new Map([...owns, ...built]);
   }
 
   for (const name of named) {
