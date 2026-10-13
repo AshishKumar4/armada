@@ -2,13 +2,13 @@
  *  last started from. */
 import * as v from 'valibot';
 import { EnvironmentsSchema, type EnvironmentEntrySchema } from '../../src/protocol';
-import { get } from './api';
+import type { Client } from './api';
 import { ago, bytes, duration, h, pill, replace, when } from './dom';
 import { empty, poll, type View } from './view';
 
 type Entry = v.InferOutput<typeof EnvironmentEntrySchema>;
 
-export function environments(): View {
+export function environments(api: Client): View {
   const banner = h('div');
   const body = h('div', { class: 'card-body flush' }, h('div', { class: 'card-body' }, h('div', { class: 'skeleton' })));
 
@@ -21,7 +21,7 @@ export function environments(): View {
   document.title = 'Environments · armada';
 
   const pollster = poll(10_000, banner, async (signal) => {
-    const listed = await get('/environments', EnvironmentsSchema, signal);
+    const listed = await api.get('/environments', EnvironmentsSchema, signal);
 
     const order = (entry: Entry): number => {
       switch (entry.state) {

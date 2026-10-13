@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { EventsSchema, FleetSchema, JobSpecSchema, JobsSchema, JobStatusSchema, ProjectsSchema, VerdictsSchema, type Outcome } from '../../src/protocol';
+import { EventsSchema, FleetSchema, JobSpecSchema, JobsSchema, JobStatusSchema, PACKER, ProjectsSchema, VerdictsSchema, type Outcome } from '../../src/protocol';
 import type { Env } from '../src/env';
 import { ArmadaFleet, RECENT } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
@@ -200,6 +200,37 @@ describe('a browser at the deployment\'s root', () => {
     const answer = await worker.fetch(new Request('https://armada.test/'), world({ ARMADA_TOKEN: TOKEN }));
 
     expect([answer.status, answer.headers.get('location')]).toEqual([302, 'https://armada.test/ui/']);
+  });
+});
+
+describe('another deployment\'s dashboard', () => {
+  test('reads this one\'s API from its own origin, and each job\'s brief names its repository\'s project', async () => {
+    const { ask, json } = deployment();
+    const sha = 'a'.repeat(40);
+    const origin = { origin: 'https://armada-other.example.workers.dev' };
+    const repo = { project: 'proj', checkout: '/home/ci/work', history: 'full', manifest: [] };
+
+    await ask(`/packs/proj/${sha}/root?packer=${String(PACKER)}`, { method: 'PUT', body: 'a pack' });
+    setSystemTime(new Date(Date.UTC(2026, 9, 13, 12, 0, 1)));
+    await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: { repo }, commit: { sha, base: 'root', packer: PACKER }, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }) });
+    setSystemTime(new Date(Date.UTC(2026, 9, 13, 12, 0, 2)));
+    await ask('/jobs', { method: 'POST', body: JSON.stringify({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } }) });
+
+    // A browser asks before it sends the bearer to another origin, and sends none with that question.
+    const asked = await worker.fetch(new Request('https://armada.test/jobs', {
+      method: 'OPTIONS', headers: { ...origin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization,armada-protocol' },
+    }), world({ ARMADA_TOKEN: TOKEN }));
+
+    const listed = await ask('/jobs', { headers: origin });
+    const refused = await worker.fetch(new Request('https://armada.test/jobs', { headers: origin }), world({ ARMADA_TOKEN: TOKEN }));
+
+    expect({
+      asked: { status: asked.status, origin: asked.headers.get('access-control-allow-origin'), methods: asked.headers.get('access-control-allow-methods'), headers: asked.headers.get('access-control-allow-headers') },
+      read: [listed.status, listed.headers.get('access-control-allow-origin')], refused: [refused.status, refused.headers.get('access-control-allow-origin')],
+      projects: (await json('/jobs', JobsSchema)).jobs.map((job) => job.project),
+    }).toEqual({
+      asked: { status: 204, origin: '*', methods: 'GET, HEAD', headers: 'authorization, armada-protocol' }, read: [200, '*'], refused: [403, '*'], projects: [null, 'proj'],
+    });
   });
 });
 

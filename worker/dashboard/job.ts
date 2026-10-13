@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import { detach, EventsSchema, JobStatusSchema, JsonSchema, type JobStatus, type Json, type Outcome } from '../../src/protocol';
-import { blob, get } from './api';
+import type { Client } from './api';
 import { TaskGrid, Timeline, type Lane, type Segment, type TaskState } from './charts';
 import { ago, bytes, count, duration, h, icon, pill, replace, save, when, type Tone } from './dom';
 import { counts, jobPill, nameOf, progress, STATE_WORDS, stateOf, tookOf } from './status';
@@ -20,7 +20,7 @@ const VESSEL_TONES: Readonly<Record<JobStatus['vessels'][number]['state'], Tone>
 
 const KEY: readonly TaskState[] = ['queued', 'running', 'green', 'red', 'timeout', 'lost', 'cancelled'];
 
-export function jobView(id: string, opened: number | null): View {
+export function jobView(api: Client, id: string, opened: number | null): View {
   // The task the page was opened at, shown in its drawer once the job is first read.
   let opening = opened;
   const banner = h('div');
@@ -55,9 +55,9 @@ export function jobView(id: string, opened: number | null): View {
   const left = new AbortController();
   const { signal } = left;
 
-  const drawer = new TaskDrawer(() => {
+  const drawer = new TaskDrawer(api, () => {
     shown = null;
-    history.replaceState(null, '', `#/jobs/${id}`);
+    history.replaceState(null, '', api.href(`jobs/${id}`));
   });
 
   /** The containers that ran tasks in more than one slot, as of the last render. */
@@ -84,7 +84,7 @@ export function jobView(id: string, opened: number | null): View {
 
   const element = h('div', { class: 'page' },
     h('div', {},
-      h('a', { class: 'back', href: '#/' }, icon('back'), 'Fleet'),
+      h('a', { class: 'back', href: api.href('') }, icon('back'), 'Fleet'),
       h('div', { class: 'page-head' }, h('div', {}, title, meta), pillSlot)),
     banner,
     h('section', { class: 'card' }, summary),
@@ -144,12 +144,12 @@ export function jobView(id: string, opened: number | null): View {
 
   const open = (index: number): void => {
     shown = index;
-    history.replaceState(null, '', `#/jobs/${id}/${String(index)}`);
+    history.replaceState(null, '', api.href(`jobs/${id}/${String(index)}`));
     drawTask(index);
 
     if (index < items.length) return;
     detach((async () => {
-      items = (await get(`/jobs/${id}/items`, v.object({ items: v.array(JsonSchema) }), signal)).items;
+      items = (await api.get(`/jobs/${id}/items`, v.object({ items: v.array(JsonSchema) }), signal)).items;
 
       if (shown === index) drawTask(index);
     })(), (error) => {
@@ -158,10 +158,10 @@ export function jobView(id: string, opened: number | null): View {
   };
 
   const pollster = poll(1500, banner, async (polled) => {
-    status = await get(`/jobs/${id}`, JobStatusSchema, polled);
+    status = await api.get(`/jobs/${id}`, JobStatusSchema, polled);
 
     for (let more = true; more;) {
-      const batch = await get(`/jobs/${id}/events?after=${String(seq)}`, EventsSchema, polled);
+      const batch = await api.get(`/jobs/${id}/events?after=${String(seq)}`, EventsSchema, polled);
 
       for (const event of batch.events) outcomes.set(event.outcome.index, { outcome: event.outcome, at: event.at });
       seq = batch.events.at(-1)?.seq ?? seq;
@@ -271,12 +271,13 @@ class TaskDrawer {
   private readonly problem = h('p', { class: 'error' });
   private readonly item = h('pre', { class: 'code' });
   private readonly since = h('dd');
-  private readonly log = new LogDialog();
+  private readonly log: LogDialog;
   private task = '';
   private drawn = '';
   private disposing = false;
 
-  constructor(closed: () => void) {
+  constructor(private readonly api: Client, closed: () => void) {
+    this.log = new LogDialog(api);
     const closer = h('button', { class: 'icon-button', type: 'button', label: 'Close', onclick: () => { this.dialog.close(); } }, icon('close'));
 
     this.dialog.append(h('div', { class: 'drawer-head' }, this.heading, h('div', { class: 'button-row' }, this.head, closer)), this.body);
@@ -307,7 +308,7 @@ class TaskDrawer {
     this.task = task;
     this.drawn = drawn;
     const fact = (term: string, value: string | null) => value === null ? null : h('div', {}, h('dt', {}, term), h('dd', {}, value));
-    const fetched = (path: string, name: string) => () => { detach(download(path, name), (error) => { replace(this.problem, describe(error)); }); };
+    const fetched = (path: string, name: string) => () => { detach(download(this.api, path, name), (error) => { replace(this.problem, describe(error)); }); };
 
     replace(this.item, known ? JSON.stringify(item, null, 2) : '…');
     this.dialog.setAttribute('aria-label', `Task ${String(index)}`);
@@ -354,8 +355,8 @@ class TaskDrawer {
   }
 }
 
-async function download(path: string, name: string): Promise<void> {
-  const found = await blob(path);
+async function download(api: Client, path: string, name: string): Promise<void> {
+  const found = await api.blob(path);
 
   if (found !== null) save(found, name);
 }
@@ -369,7 +370,7 @@ class LogDialog {
   private name = '';
   private reading: AbortController | null = null;
 
-  constructor() {
+  constructor(private readonly api: Client) {
     this.dialog.append(
       h('div', { class: 'drawer-head' }, this.heading, h('div', { class: 'button-row' },
         h('button', { class: 'button', type: 'button', onclick: () => { save(new Blob([this.text], { type: 'text/plain' }), this.name); } }, icon('download'), 'Save'),
@@ -397,7 +398,7 @@ class LogDialog {
     replace(this.body, 'Reading the log…');
     this.dialog.showModal();
     detach((async () => {
-      const found = await blob(`/jobs/${job}/tasks/${String(index)}/log`, reading.signal);
+      const found = await this.api.blob(`/jobs/${job}/tasks/${String(index)}/log`, reading.signal);
       const text = found === null ? '' : await found.text();
 
       // A log closed, or another opened, while its text was read: this one shows nothing now.

@@ -427,6 +427,8 @@ export const JobStatusSchema = v.object({
   /** The tasks running now, one row per container each runs on (every rank of a gang, a straggler's second run), with
    *  when it began there. Absent from an earlier Worker. */
   running: v.optional(v.array(v.object({ index: v.number(), vessel: v.string(), started: v.number(), slot: v.optional(v.number()) }))),
+  /** A repository job's project (`recipe.repo.project`), null for any other. Null from an earlier Worker too. */
+  project: v.optional(v.nullable(v.string()), null),
 });
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
@@ -450,7 +452,7 @@ export type TaskStatus = v.InferOutput<typeof TaskStatusSchema>;
 
 /** A job in its deployment's list of recent ones: its status less each container's and task's own rows. */
 export const JobBriefSchema = v.object({
-  ...v.pick(JobStatusSchema, ['id', 'label', 'phase', 'createdAt', 'startedAt', 'finishedAt', 'tasks']).entries,
+  ...v.pick(JobStatusSchema, ['id', 'label', 'phase', 'createdAt', 'startedAt', 'finishedAt', 'tasks', 'project']).entries,
   /** The containers it started, and those still up. */
   containers: v.number(),
   alive: v.number(),
@@ -462,10 +464,10 @@ export type JobBrief = v.InferOutput<typeof JobBriefSchema>;
 export const JobsSchema = v.object({ jobs: v.array(JobBriefSchema) });
 
 export function briefOf(status: JobStatus): JobBrief {
-  const { id, label, phase, createdAt, startedAt, finishedAt, tasks, vessels, problems } = status;
+  const { id, label, phase, createdAt, startedAt, finishedAt, tasks, vessels, problems, project } = status;
 
   return {
-    id, label, phase, createdAt, startedAt, finishedAt, tasks, problems,
+    id, label, phase, createdAt, startedAt, finishedAt, tasks, problems, project,
     containers: vessels.length, alive: vessels.filter((vessel) => vessel.state === 'waiting' || vessel.state === 'booting' || vessel.state === 'working').length,
   };
 }

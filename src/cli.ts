@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
-import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
+import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { contractOf } from './contract';
 import { deploymentConfig } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
@@ -34,8 +34,10 @@ Usage:
   armada push                          send this project's tasks (armada.config.ts) to armada
   armada dev                           push them again on every save
   armada status <job-id>               print a job's status as JSON
-  armada dashboard [--serve=<port>]    open the deployment's dashboard in your browser, signed in;
-                                       --serve serves it from this machine instead
+  armada dashboard [--serve=<port>] [--all]
+                                       open the deployment's dashboard in your browser, signed in;
+                                       --serve serves it from this machine instead; --all reads every
+                                       deployment this machine has a connection to beside it
   armada secret set <NAME>             set a secret from stdin, for the tasks that name it
   armada secret list | delete <NAME>   list the secrets' names, or delete one
   armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]
@@ -98,7 +100,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
   ['status', { options: [], words: 1 }],
-  ['dashboard', { options: ['serve='], words: 0 }],
+  ['dashboard', { options: ['serve=', 'all'], words: 0 }],
   ['secret', { options: [], words: 2 }],
   ['webhook', { options: ['repo=', 'branches=', 'pull-requests', 'token-secret='], words: 2 }],
   ['prune', { options: ['keep='], words: 0 }],
@@ -811,8 +813,10 @@ async function main(): Promise<number> {
     case 'dashboard': {
       const port = whole('serve');
 
+      if (port !== undefined && flag('all')) throw new Error('--serve serves one deployment\'s dashboard; --all opens one that reads every deployment');
+
       if (port !== undefined) return await serveDashboard(connect(), port);
-      const url = dashboardUrl(connect());
+      const url = flag('all') ? await everyDashboardUrl(connect()) : dashboardUrl(connect());
 
       // The address holds the bearer, so it is printed only when no browser took it.
       if (openInBrowser(url)) console.log('opened the dashboard in your browser');

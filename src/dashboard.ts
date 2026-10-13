@@ -3,11 +3,12 @@
  * hands the Worker as its static assets, which serve it under /ui/; and `armada dashboard`, which opens a deployment's
  * signed in, or serves one from here for a deployment whose Worker has none.
  */
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEPLOYMENT_HEADER } from './protocol';
-import type { Armada } from './sdk';
+import * as v from 'valibot';
+import { DEPLOYMENT_HEADER, jsonOf, PROTOCOL, PROTOCOL_HEADER } from './protocol';
+import { CONFIG_DIR, ConnectionSchema, type Armada, type Connection } from './sdk';
 
 const SOURCE = join(import.meta.dir, '..', 'worker', 'dashboard');
 
@@ -31,6 +32,34 @@ export async function buildDashboard(out: string): Promise<void> {
 
 /** The deployment's dashboard, signed in: the bearer rides in the fragment, which a browser sends to no server. */
 export const dashboardUrl = (armada: Armada): string => `${armada.connection.url.replace(/\/$/u, '')}/ui/#token=${armada.connection.token}`;
+
+/** How long a deployment has to answer before the dashboard leaves it out. */
+const ASKED_MS = 5000;
+
+/** `armada`'s dashboard, signed in to every deployment this machine has a connection to that answers, which it reads
+ *  beside its own: their URLs and bearers ride in the fragment. A connection left by a deployment since destroyed, or
+ *  one file naming the same deployment as another, adds nothing. */
+export async function everyDashboardUrl(armada: Armada): Promise<string> {
+  const files = readdirSync(CONFIG_DIR).filter((file) => file.endsWith('.json') && !file.endsWith('.destroy.json'));
+
+  const kept = files.flatMap((file) => {
+    const parsed = v.safeParse(ConnectionSchema, jsonOf(readFileSync(join(CONFIG_DIR, file), 'utf8')));
+
+    return parsed.success ? [parsed.output] : [];
+  });
+
+  const urls = new Map([armada.connection, ...kept].map((each) => [each.url.replace(/\/$/u, ''), each]));
+
+  const answers = await Promise.allSettled([...urls].map(async ([url, { token }]: [string, Connection]) => {
+    const answer = await fetch(`${url}/health`, { headers: { authorization: `Bearer ${token}`, [PROTOCOL_HEADER]: String(PROTOCOL) }, signal: AbortSignal.timeout(ASKED_MS) });
+
+    return answer.ok ? [{ name: new URL(url).hostname.split('.')[0] ?? url, url, token }] : [];
+  }));
+
+  const deployments = answers.flatMap((answer) => answer.status === 'fulfilled' ? answer.value : []);
+
+  return `${armada.connection.url.replace(/\/$/u, '')}/ui/#deployments=${Buffer.from(JSON.stringify(deployments)).toString('base64url')}`;
+}
 
 /** Opens `url` in this machine's browser; false when there is none to open it with. */
 export function openInBrowser(url: string): boolean {
