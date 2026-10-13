@@ -1,6 +1,6 @@
 /** CI: each project's stored verdicts, newest first, and one verdict's rows, its red ones first with what they printed. */
 import * as v from 'valibot';
-import { rowName, VerdictFileSchema, type VerdictRow } from '../../src/grade';
+import { greenOf, rowName, VerdictFileSchema, type VerdictRow } from '../../src/grade';
 import { ProjectsSchema, VerdictsSchema } from '../../src/protocol';
 import type { Client } from './api';
 import { ago, count, duration, h, icon, pill, replace, when } from './dom';
@@ -53,11 +53,19 @@ type File = v.InferOutput<typeof VerdictFileSchema>;
 
 function verdict(file: File): HTMLElement {
   const reds = file.rows.filter((row) => row.exitCode !== 0);
-  const ordered = [...reds, ...file.rows.filter((row) => row.exitCode === 0)];
+  const alone = file.rows.filter((row) => row.exitCode === 0 && row.aloneAfter !== undefined);
+  const ordered = [...reds, ...alone, ...file.rows.filter((row) => row.exitCode === 0 && row.aloneAfter === undefined)];
 
   return h('div', {},
-    h('div', { class: 'card-head' }, h('h2', {}, `${count(file.rows.length - reds.length)} of ${count(file.rows.length)} rows green`), reds.length === 0 ? pill('ok', 'pass') : pill('bad', 'fail')),
+    h('div', { class: 'card-head' }, h('h2', {}, greenOf(file.rows)), reds.length === 0 ? pill('ok', 'pass') : pill('bad', 'fail')),
     h('div', { class: 'card-body flush' }, ordered.map(rowOf)));
+}
+
+/** What a row says beside its name: the proof it reused, or that it was green only alone. */
+function noteOf({ cached, aloneAfter }: VerdictRow): string {
+  if (cached !== undefined) return `reused from ${cached.slice(0, 10)}`;
+
+  return aloneAfter === undefined ? '' : `green alone, after it failed beside other tasks (${aloneAfter})`;
 }
 
 function rowOf(row: VerdictRow): HTMLElement {
@@ -66,7 +74,7 @@ function rowOf(row: VerdictRow): HTMLElement {
 
   const details = h('details', { class: 'verdict-row' },
     h('summary', {}, h('span', { class: `dot ${red ? 'bad' : 'ok'}` }), h('span', { class: 'mono' }, rowName(row)),
-      h('span', { class: 'faint' }, row.cached === undefined ? '' : `reused from ${row.cached.slice(0, 10)}`),
+      h('span', { class: 'faint' }, noteOf(row)),
       h('span', { class: 'num muted' }, `${red ? `exit ${String(row.exitCode)} · ` : ''}${duration(row.seconds * 1000)}`)),
     row.output === '' ? h('p', { class: 'faint card-body' }, 'It printed nothing that was kept.') : output);
 
