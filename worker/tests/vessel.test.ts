@@ -131,7 +131,7 @@ async function run(lost: number, {
   return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, claims: task.given.claims, retired, stored: artifacts.objects, execs, envs, piped, started };
 }
 
-describe('a vessel on borrowed vCPUs', () => {
+describe('a vessel\'s place in its fleet', () => {
   test('takes no new task once the fleet recalls them: it finishes the one it runs, then retires', async () => {
     let renewals = 0;
 
@@ -140,6 +140,12 @@ describe('a vessel on borrowed vCPUs', () => {
     });
 
     expect({ exits, claims, failed, retired }).toEqual({ exits: [0], claims: 1, failed: [], retired: true });
+  });
+
+  test('starts nothing while a fleet still on earlier code, as one is for minutes after a deploy, answers it is full', async () => {
+    const { exits, claims, execs } = await run(0, { fleet: { acquire: async () => false, release: async () => undefined } });
+
+    expect({ exits, claims, execs: execs.length }).toEqual({ exits: [], claims: 0, execs: 0 });
   });
 });
 

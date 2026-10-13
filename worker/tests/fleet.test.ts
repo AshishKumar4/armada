@@ -89,8 +89,8 @@ describe('a fleet that lends what the account leaves idle', () => {
     return others;
   }
 
-  /** A fleet of 8 vCPUs, deployed as `x` in that account with `token`. */
-  const lender = (token: string) => new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '8', ARMADA_NAME: 'x', ARMADA_ACCOUNT: 'acct', ACCOUNT_TOKEN: token }));
+  /** A fleet of 8 vCPUs, deployed as `x` in that account with `token`, keeping what it keeps in `stored`. */
+  const lender = (token: string, stored = state()) => new ArmadaFleet(stored.ctx, world({ FLEET_VCPUS: '8', ARMADA_NAME: 'x', ARMADA_ACCOUNT: 'acct', ACCOUNT_TOKEN: token }));
 
   /** Each of `holders` asks in turn for 4 vCPUs it may borrow. */
   const borrowing = async (fleet: ArmadaFleet, holders: readonly string[]) => {
@@ -121,35 +121,60 @@ describe('a fleet that lends what the account leaves idle', () => {
     });
   });
 
-  test('lends nothing without a token, or with one the account refuses', async () => {
+  test('lends nothing without a token, with one the account refuses, or once its token is taken away', async () => {
     account();
 
     const lent = await Promise.all(['', 'a token the account refuses'].map(async (token) => {
       const fleet = lender(token);
 
-      await borrowing(fleet, ['j/v1', 'j/v2']);
+      // The third asks past the cap, and has the account read, where a token lets it.
+      await borrowing(fleet, ['j/v1', 'j/v2', 'j/v3']);
       await fleet.alarm();
 
       return await borrowing(fleet, ['j/v3']);
     }));
 
-    expect(lent).toEqual([[null], [null]]);
+    // A deploy with an empty token, while the last read is still fresh.
+    const stored = state();
+
+    await borrowing(lender('token', stored), ['j/v1', 'j/v2', 'j/v3']);
+    await lender('token', stored).alarm();
+
+    expect({ lent, taken: await borrowing(lender('', stored), ['j/v3']) }).toEqual({ lent: [[null], [null]], taken: [null] });
   });
 
   test('recalls its loans while a holder that may not borrow waits for room under its cap, and lends none meanwhile', async () => {
     account();
     const fleet = lender('token');
 
-    await borrowing(fleet, ['j/v1', 'j/v2']);
+    // The third asks past the cap, and has the account read.
+    await borrowing(fleet, ['j/v1', 'j/v2', 'j/v3']);
     await fleet.alarm();
-    await borrowing(fleet, ['j/v3', 'j/v4']);
+    const lent = await borrowing(fleet, ['j/v3', 'j/v4']);
+
+    // A container within the cap ends: the preparation would fit there, but for the loans.
+    await fleet.release('j/v2');
     const preparing = await fleet.acquire('preparing/k/1', 4, { deadlineAt });
     const recalled = await Promise.all(['j/v4', 'j/v3'].map(async (holder) => await fleet.renews(holder)));
     const meanwhile = await borrowing(fleet, ['j/v5']);
 
-    for (const holder of ['j/v2', 'j/v3', 'j/v4']) await fleet.release(holder);
+    for (const holder of ['j/v3', 'j/v4']) await fleet.release(holder);
 
-    expect({ preparing, recalled, meanwhile, after: await fleet.acquire('preparing/k/1', 4, { deadlineAt }) }).toEqual({ preparing: null, recalled: [false, false], meanwhile: [null], after: 'held' });
+    expect({ lent, preparing, recalled, meanwhile, after: await fleet.acquire('preparing/k/1', 4, { deadlineAt }) }).toEqual({
+      lent: ['borrowed', 'borrowed'], preparing: null, recalled: [false, false], meanwhile: [null], after: 'held',
+    });
+  });
+
+  test('keeps its loans while a holder that may not borrow waits on holds within its cap, which no recall would free', async () => {
+    account();
+    const fleet = lender('token');
+
+    await borrowing(fleet, ['j/v1', 'j/v2', 'j/v3']);
+    await fleet.alarm();
+    const lent = await borrowing(fleet, ['j/v3']);
+    const rank = await fleet.acquire('g/v1', 4, { reserve: 8, deadlineAt });
+
+    expect({ lent, rank, renewed: await fleet.renews('j/v3'), more: await borrowing(fleet, ['j/v4']) }).toEqual({ lent: ['borrowed'], rank: null, renewed: true, more: ['borrowed'] });
   });
 });
 

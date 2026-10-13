@@ -432,7 +432,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
       if (preparation.phase === 'base' && preparation.started === undefined) {
         const granted = await this.env.FLEET.getByName(SINGLE).acquire(holderOf(preparation), SIZES[preparation.recipe.size].vcpus, { deadlineAt: preparation.since + preparationMs(preparation.recipe.size) });
 
-        if (granted === null) return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
+        // A fleet still on earlier code for a while after a deploy answers true or false.
+        if (granted !== 'held' && granted !== 'borrowed') return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
       }
 
       const step = await this.step(preparation);

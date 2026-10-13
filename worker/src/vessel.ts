@@ -184,7 +184,8 @@ export class ArmadaVessel extends DurableObject<Env> {
           reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000,
         });
 
-        if (grant === null) {
+        // A fleet still on earlier code for a while after a deploy answers true or false.
+        if (grant !== 'held' && grant !== 'borrowed') {
           await job.moved(spec.name, 'waiting');
           await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
 

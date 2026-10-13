@@ -113,7 +113,7 @@ export class ArmadaFleet extends ArmadaSingle {
     const charge = chargeOf({ ...others, [holder]: { vcpus, until: now, reserve } });
 
     if (charge > (borrows ? await this.limit(now) : cap)) {
-      await this.want(borrows, holds, now);
+      await this.want(borrows, others, charge, now);
 
       return null;
     }
@@ -150,12 +150,13 @@ export class ArmadaFleet extends ArmadaSingle {
 
     try {
       const account = await readAccount(reader);
-      // Read after the account, as other calls may have changed them while it answered.
-      const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
+      // Read after the account, and live as of then, as other calls and time may have changed them while it answered.
+      const answered = Date.now();
+      const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), answered);
       const charge = chargeOf(holds);
 
       await this.ctx.storage.put('lending', { limit: Math.floor(charge + (account.vcpus * (1 - HEADROOM) - account.others - charge) / 2), at: now } satisfies Lending);
-      await this.recall(holds, await this.limit(now));
+      await this.recall(holds, await this.limit(answered));
     } catch (cause) {
       console.error(JSON.stringify({ fleet: 'reading the account', error: said({ cause }) }));
     }
@@ -170,12 +171,12 @@ export class ArmadaFleet extends ArmadaSingle {
     const lending = await this.ctx.storage.get<Lending>('lending');
     const pressed = ((await this.ctx.storage.get<number>('pressed')) ?? 0) > now - WANT_MS;
 
-    return lending === undefined || pressed || now - lending.at > SAMPLE_LIFE_MS ? cap : Math.max(cap, lending.limit);
+    return this.reader() === null || lending === undefined || pressed || now - lending.at > SAMPLE_LIFE_MS ? cap : Math.max(cap, lending.limit);
   }
 
-  /** A holder refused: one that borrows has the account read, where the fleet may lend; one that may not, refused
-   *  while loans fill the cap, has them recalled. */
-  private async want(borrows: boolean, holds: Record<string, Hold>, now: number): Promise<void> {
+  /** A holder refused beside `others`, which with it would keep `charge`: one that borrows has the account read, where
+   *  the fleet may lend; one that may not, which would fit the cap once the loans end, has them recalled. */
+  private async want(borrows: boolean, others: Record<string, Hold>, charge: number, now: number): Promise<void> {
     if (borrows) {
       if (this.reader() === null) return;
       await this.ctx.storage.put('wanted', now);
@@ -185,9 +186,13 @@ export class ArmadaFleet extends ArmadaSingle {
       return;
     }
 
-    if (!Object.values(holds).some((hold) => hold.borrowed === true)) return;
+    const cap = Number(this.env.FLEET_VCPUS);
+    const lent = chargeOf(others) - chargeOf(Object.fromEntries(Object.entries(others).filter(([, hold]) => hold.borrowed !== true)));
+
+    // Loans that are not what keeps it out stay: recalling them would free nothing it could take.
+    if (lent === 0 || charge - lent > cap) return;
     await this.ctx.storage.put('pressed', now);
-    await this.recall(holds, Number(this.env.FLEET_VCPUS));
+    await this.recall(others, cap - (charge - chargeOf(others)));
   }
 
   /** Who reads the account for this deployment: none without the token `armada deploy` gives, which it gives empty
