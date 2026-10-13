@@ -351,7 +351,7 @@ class Link:
         self.sent = self.acked = self.taken = self.received = 0
         self.kept, self.incoming = collections.deque(), collections.deque()
         self.ended = self.peer_ended = None
-        self.over = self.delivered = False
+        self.over = self.delivered = self.cancelled = False
         if held is not None:
             held(self)
         self.attach(carrier)
@@ -370,11 +370,15 @@ class Link:
             pass
 
     def attach(self, carrier):
-        """carrier takes the link: what the far end has not counted goes first, then where each stream stands."""
+        """carrier takes the link: what the far end has not counted goes first, then where each stream stands. A link
+        this end cancelled says only that, until the far end says it back."""
         with carrier.lock:
             with self.changed:
-                self.carrier, kept = carrier, list(self.kept)
+                self.carrier, kept, cancelled = carrier, list(self.kept), self.cancelled
             try:
+                if cancelled:
+                    carrier.put(True, b"g")
+                    return
                 for offset, data in kept:
                     carrier.put(False, struct.pack("!Q", offset) + data)
                 if self.ended is not None:
@@ -436,6 +440,9 @@ class Link:
                         self.taken = offset + len(data) - 8
                 elif data == b"g":
                     self.log("the far end holds no such link")
+                    # Said back, unless this end said it first: the far end's cancellation then knows it arrived.
+                    if not self.cancelled:
+                        self.send(carrier, True, b"g")
                     self.over = True
                 else:
                     count = int(data[1:])
@@ -459,9 +466,9 @@ class Link:
                 if not data:
                     break
                 with self.changed:
-                    while self.sent - self.acked > WINDOW and not self.over:
+                    while self.sent - self.acked > WINDOW and not self.over and not self.cancelled:
                         self.changed.wait()
-                    if self.over:
+                    if self.over or self.cancelled:
                         return
                     offset, carrier = self.sent, self.carrier
                     self.kept.append((offset, data))
@@ -506,11 +513,19 @@ class Link:
                 self.send(self.carrier, True, b"a%d" % self.received)
 
     def cancel(self, why):
-        """The program can take nothing more: the far end is told this end holds the link no more ('g'), so it ends
-        too, and so does this end, both ways."""
+        """The program can take nothing more: its connection closes, and the far end is told this end holds the link
+        no more ('g'), so it ends too. The link ends here once the far end says it back: a 'g' lost with its carrier
+        is said again on the next (attach)."""
         self.log(why)
-        self.send(self.carrier, True, b"g")
-        self.finish()
+        with self.changed:
+            self.cancelled, carrier = True, self.carrier
+            self.changed.notify_all()
+        try:
+            self.local.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.local.close()
+        self.send(carrier, True, b"g")
 
     def settle(self):
         with self.changed:

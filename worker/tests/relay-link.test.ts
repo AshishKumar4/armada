@@ -76,8 +76,10 @@ print(size, got.hexdigest() == hashlib.sha256(block * (total // len(block))).hex
 
 /** A vessel's relay route over Bun's WebSockets and a TCP connection into the inbound end, each WebSocket piped
  *  (`Piped`) as a vessel pipes it. Each time `dropAfter` more of a link's outbound bytes arrive, its WebSocket drops
- *  without a Close frame, and every other time its connection in is cut too, as a vessel reset cuts it. */
-async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' | 'reset' = 'all') {
+ *  without a Close frame, and every other time its connection in is cut too, as a vessel reset cuts it. `lost` resets
+ *  the program's connection as `reset` does, and drops the WebSocket that carries the link's cancellation before the
+ *  vessel passes it on. */
+async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' | 'reset' | 'lost' = 'all') {
   const reached = new Map<string, number>();
   const opened: string[] = [];
   let drops = 0;
@@ -112,6 +114,13 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
         }));
       },
       async message(ws, message) {
+        if (sending === 'lost' && message === 'g' && drops === 0) {
+          drops += 1;
+          ws.terminate();
+
+          return;
+        }
+
         const before = reached.get(ws.data.id) ?? 0;
         const bytes = message instanceof Uint8Array ? message : null;
         const end = bytes === null ? before : Number(new DataView(bytes.buffer, bytes.byteOffset).getBigUint64(0)) + bytes.byteLength - 8;
@@ -132,7 +141,7 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
     },
   });
 
-  const relays = Bun.spawn(['python3', '-c', RELAYS, String(total), port, `http://127.0.0.1:${String(server.port)}`, sending],
+  const relays = Bun.spawn(['python3', '-c', RELAYS, String(total), port, `http://127.0.0.1:${String(server.port)}`, sending === 'lost' ? 'reset' : sending],
     { stdin: new TextEncoder().encode(RELAY_PY), stdout: 'pipe', stderr: 'pipe' });
 
   const [out, err] = await Promise.all([(async () => {
@@ -176,6 +185,12 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
     const result = await run(0, 'feed', Number.POSITIVE_INFINITY, 'reset');
 
     expect(result.out).toBe('feed ended True');
+  }, 60_000);
+
+  test('ends both sides even if its carrier drops while cancellation is in flight', async () => {
+    const result = await run(0, 'feed', Number.POSITIVE_INFINITY, 'lost');
+
+    expect({ out: result.out, drops: result.drops }).toEqual({ out: 'feed ended True', drops: 1 });
   }, 60_000);
 
   test('closes it at once while the program still holds its side open, waiting for a greeting', async () => {
