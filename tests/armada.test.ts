@@ -326,7 +326,7 @@ describe('a deployment\'s wrangler config', () => {
     const [laid, other] = [read(template), read(reordered)];
 
     expect({ same: laid, name: laid.name, account: laid.account_id, main: laid.main, assets: laid.assets.directory, vars: laid.vars, buckets: laid.r2_buckets.map((each) => each.bucket_name), schema: '$schema' in laid })
-      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64) }, buckets: ['armada-x-artifacts'], schema: false });
+      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
   });
 });
 

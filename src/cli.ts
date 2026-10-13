@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wat
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
+import { readAccount } from './account';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { contractOf } from './contract';
@@ -349,6 +350,10 @@ async function healthOf(name: string, deployed: Armada): Promise<Health | null> 
   }
 }
 
+/** A deployment's connection file as `armada deploy` keeps it: the connection, and the token its fleet reads the
+ *  account with, which every other reader of the file leaves out. */
+const KeptSchema = v.object({ ...ConnectionSchema.entries, accountToken: v.optional(v.string()) });
+
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, its registry credentials, and
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
@@ -358,10 +363,26 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
   const file = connectionFile(name);
   // One read of the deployment as this machine knows it, for both its preflight and its bearer: a connection of another
   // account would drain that deployment and lend its bearer to this one.
-  const known = existsSync(file) ? v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))) : null;
+  const known = existsSync(file) ? v.parse(KeptSchema, JSON.parse(readFileSync(file, 'utf8'))) : null;
 
   if (known !== null && known.account !== '' && known.account !== account) {
     throw new Error(`${file} is ${name} in account ${known.account}, not ${account}; deploy this one under another --name`);
+  }
+
+  // The token its fleet reads the account with to lend past its cap: ARMADA_ACCOUNT_TOKEN, else the one the last deploy
+  // kept; none once it is set empty.
+  const given = process.env['ARMADA_ACCOUNT_TOKEN'];
+  let accountToken = known?.accountToken;
+
+  if (given !== undefined) accountToken = given === '' ? undefined : given;
+
+  // Checked before anything changes, as the registry's credentials are minted.
+  if (accountToken !== undefined) {
+    try {
+      await readAccount({ token: accountToken, account, name });
+    } catch (cause) {
+      throw new Error(`the account token cannot read account ${account}'s containers (${errorOf({ cause }).message}); it needs Account > Containers: Read`, { cause });
+    }
   }
 
   // Minted before anything changes, so a login that cannot mint them fails the deploy with the deployment as it was.
@@ -396,10 +417,13 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     const health = deployed === null ? null : await healthOf(name, deployed);
 
     if (deployed !== null && mustDrain(health, forceDrain, contractOf(ROOT))) await drain(deployed, () => { drained = true; });
-    await install(account, name, file, { vcpus, token: known?.token, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    await install(account, name, file, { vcpus, token: known?.token, accountToken, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
+    console.log(accountToken === undefined
+      ? `${name} stays under its cap: ARMADA_ACCOUNT_TOKEN, a token that reads the account's containers, lets it borrow what the account leaves idle`
+      : `${name} borrows past its cap what the account leaves idle, and gives it back within a task once other apps need it`);
     await firstLook(name, file, sourceSha());
   } finally {
     process.off('SIGINT', interrupted).off('SIGTERM', interrupted).off('SIGHUP', interrupted);
@@ -497,10 +521,12 @@ const DASHBOARD = join(ROOT, 'dist', 'dashboard');
 interface Given {
   readonly vcpus: number | undefined;
   readonly token: string | undefined;
+  /** The token its fleet reads the account with, which the connection file keeps for the next deploy. */
+  readonly accountToken: string | undefined;
   readonly secrets: Readonly<Record<string, string>>;
 }
 
-async function install(account: string, name: string, file: string, { vcpus, token: kept, secrets }: Given): Promise<void> {
+async function install(account: string, name: string, file: string, { vcpus, token: kept, accountToken, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -529,7 +555,8 @@ async function install(account: string, name: string, file: string, { vcpus, tok
 
   // Uploaded with the version, so every object that starts on it has them: a secret put after the deploy reached no
   // Durable Object already running it (armada-probe, 2026-10-09).
-  writeFileSync(secretsFile, JSON.stringify({ ...secrets, ARMADA_TOKEN: token }), { mode: 0o600 });
+  // An empty account token replaces the last one: a deploy inherits every secret it does not upload.
+  writeFileSync(secretsFile, JSON.stringify({ ...secrets, ARMADA_TOKEN: token, ACCOUNT_TOKEN: accountToken ?? '' }), { mode: 0o600 });
 
   try {
     const deployed = wrangler(['deploy', '-c', config, '--secrets-file', secretsFile], account);
@@ -540,7 +567,7 @@ async function install(account: string, name: string, file: string, { vcpus, tok
 
     // Private before it holds the bearer.
     if (existsSync(file)) chmodSync(file, 0o600);
-    writeFileSync(file, JSON.stringify({ url, token, account }, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(file, JSON.stringify({ url, token, account, accountToken } satisfies v.InferInput<typeof KeptSchema>, null, 2) + '\n', { mode: 0o600 });
     console.log(`${name} is deployed at ${url}\ntry it: armada map${name === 'armada' ? '' : ` --connection=${file}`} --times=3 --json -- echo hello {item}`);
   } finally {
     rmSync(config, { force: true });

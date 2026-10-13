@@ -1,6 +1,7 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
+import { fakeFetch } from '../../tests/fakes';
 import { INACTIVITY_MS } from '../src/container';
-import { ArmadaFleet } from '../src/fleet';
+import { ArmadaFleet, SAMPLE_MS } from '../src/fleet';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { container, namespace, state, world } from './harness';
 
@@ -20,7 +21,7 @@ describe('the fleet', () => {
     await fleet.release('a/v1');
     await fleet.release('a/v2');
 
-    expect({ granted, after: [await fleet.acquire('b/v1', 1, { reserve: 2, deadlineAt }), await fleet.acquire('b/v2', 1, { reserve: 2, deadlineAt })] }).toEqual({ granted: [true, false, true, false], after: [true, true] });
+    expect({ granted, after: [await fleet.acquire('b/v1', 1, { reserve: 2, deadlineAt }), await fleet.acquire('b/v2', 1, { reserve: 2, deadlineAt })] }).toEqual({ granted: ['held', null, 'held', null], after: ['held', 'held'] });
   });
 
   test('keeps a container\'s vCPUs held until it is gone: until a stop that failed has had its container end', async () => {
@@ -31,7 +32,7 @@ describe('the fleet', () => {
     const whileRunning = await fleet.acquire('b/v1', 4, { deadlineAt });
     const later = await fleet.acquire('b/v1', 4, { deadlineAt, now: Date.now() + 61_000 });
 
-    expect({ whileRunning, later }).toEqual({ whileRunning: false, later: true });
+    expect({ whileRunning, later }).toEqual({ whileRunning: null, later: 'held' });
   });
 
   test('frees an ended gang\'s reserve while one container that would not stop still holds its own vCPUs', async () => {
@@ -44,7 +45,7 @@ describe('the fleet', () => {
     await fleet.closed('a');
 
     expect({ used: await fleet.used(), granted: await fleet.acquire('b/v1', 1.5, { deadlineAt }), more: await fleet.acquire('b/v2', 0.5, { deadlineAt }) })
-      .toEqual({ used: 0.5, granted: true, more: false });
+      .toEqual({ used: 0.5, granted: 'held', more: null });
   });
 
   test('lets a holder\'s vCPUs lapse only after its job\'s deadline and a container\'s idle timeout', async () => {
@@ -55,14 +56,107 @@ describe('the fleet', () => {
     const beforeEnd = await fleet.acquire('b/v1', 4, { deadlineAt, now: ends - 1 });
     const afterLease = await fleet.acquire('b/v1', 4, { deadlineAt, now: ends + INACTIVITY_MS + 1 });
 
-    expect({ beforeEnd, afterLease }).toEqual({ beforeEnd: false, afterLease: true });
+    expect({ beforeEnd, afterLease }).toEqual({ beforeEnd: null, afterLease: 'held' });
+  });
+});
+
+describe('a fleet that lends what the account leaves idle', () => {
+  const original = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = original;
+    setSystemTime();
+  });
+
+  /** An account of 100 vCPUs, 4 at most a container, as its Containers API tells the token `token`: this deployment's
+   *  own apps, and another's `others.containers`. */
+  function account() {
+    const others = { containers: 10 };
+
+    globalThis.fetch = fakeFetch((request) => {
+      if (request.headers.get('authorization') !== 'Bearer token') return Response.json({ success: false }, { status: 403 });
+
+      if (new URL(request.url).pathname === '/client/v4/accounts/acct/containers/me') return Response.json({ result: { limits: { total_vcpu: 100, vcpu_per_deployment: 4 } } });
+
+      return Response.json({
+        result: [
+          { name: 'x-armadavessel', health: { instances: { active: 25, starting: 1 } } },
+          { name: 'other-armadavessel', health: { instances: { active: others.containers, starting: 0 } } },
+        ],
+      });
+    });
+
+    return others;
+  }
+
+  /** A fleet of 8 vCPUs, deployed as `x` in that account with `token`. */
+  const lender = (token: string) => new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '8', ARMADA_NAME: 'x', ARMADA_ACCOUNT: 'acct', ACCOUNT_TOKEN: token }));
+
+  /** Each of `holders` asks in turn for 4 vCPUs it may borrow. */
+  const borrowing = async (fleet: ArmadaFleet, holders: readonly string[]) => {
+    const grants = [];
+
+    for (const holder of holders) grants.push(await fleet.acquire(holder, 4, { deadlineAt, borrows: true }));
+
+    return grants;
+  };
+
+  test('lends past its cap half of what the account leaves idle, recalls its newest loans once others fill it, and lends none past a stale read', async () => {
+    const others = account();
+    const fleet = lender('token');
+    const unread = await borrowing(fleet, ['j/v1', 'j/v2', 'j/v3']);
+
+    // Idle: 90 of 100 vCPUs (10 left for other apps to start in), less the other app's 40 and the 8 held: 42, half lent.
+    await fleet.alarm();
+    const lent = await borrowing(fleet, ['j/v3', 'j/v4', 'j/v5', 'j/v6', 'j/v7', 'j/v8']);
+
+    others.containers = 20;
+    await fleet.alarm();
+    const renewed = await Promise.all(['j/v7', 'j/v6', 'j/v5', 'j/v4', 'j/v3'].map(async (holder) => await fleet.renews(holder)));
+
+    setSystemTime(new Date(Date.now() + 5 * SAMPLE_MS));
+
+    expect({ unread, lent, renewed, stale: await fleet.renews('j/v4'), limit: (await fleet.shares()).limit }).toEqual({
+      unread: ['held', 'held', null], lent: ['borrowed', 'borrowed', 'borrowed', 'borrowed', 'borrowed', null], renewed: [false, false, false, true, true], stale: false, limit: 8,
+    });
+  });
+
+  test('lends nothing without a token, or with one the account refuses', async () => {
+    account();
+
+    const lent = await Promise.all(['', 'a token the account refuses'].map(async (token) => {
+      const fleet = lender(token);
+
+      await borrowing(fleet, ['j/v1', 'j/v2']);
+      await fleet.alarm();
+
+      return await borrowing(fleet, ['j/v3']);
+    }));
+
+    expect(lent).toEqual([[null], [null]]);
+  });
+
+  test('recalls its loans while a holder that may not borrow waits for room under its cap, and lends none meanwhile', async () => {
+    account();
+    const fleet = lender('token');
+
+    await borrowing(fleet, ['j/v1', 'j/v2']);
+    await fleet.alarm();
+    await borrowing(fleet, ['j/v3', 'j/v4']);
+    const preparing = await fleet.acquire('preparing/k/1', 4, { deadlineAt });
+    const recalled = await Promise.all(['j/v4', 'j/v3'].map(async (holder) => await fleet.renews(holder)));
+    const meanwhile = await borrowing(fleet, ['j/v5']);
+
+    for (const holder of ['j/v2', 'j/v3', 'j/v4']) await fleet.release(holder);
+
+    expect({ preparing, recalled, meanwhile, after: await fleet.acquire('preparing/k/1', 4, { deadlineAt }) }).toEqual({ preparing: null, recalled: [false, false], meanwhile: [null], after: 'held' });
   });
 });
 
 describe('a vessel stopped while the fleet answers', () => {
   test('gives back what it was granted and starts nothing', async () => {
     const fleet = fleetOf(4);
-    const answered = Promise.withResolvers<boolean>();
+    const answered = Promise.withResolvers<void>();
     let started = false;
     const box = Object.assign(container(() => ({ exitCode: 0, stdout: 'ready\n' })), { start: () => { started = true; } });
     const stored = state(box);
@@ -86,9 +180,9 @@ describe('a vessel stopped while the fleet answers', () => {
     const alarm = vessel.alarm();
 
     await vessel.stop();
-    answered.resolve(true);
+    answered.resolve();
     await alarm;
 
-    expect({ started, free: await fleet.acquire('other/v1', 4, { deadlineAt }) }).toEqual({ started: false, free: true });
+    expect({ started, free: await fleet.acquire('other/v1', 4, { deadlineAt }) }).toEqual({ started: false, free: 'held' });
   });
 });

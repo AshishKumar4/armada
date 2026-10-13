@@ -371,6 +371,13 @@ output, log and artifacts. It also lists the environments and each project's CI 
 `armada deploy --name=<name>` deploys a second armada on the same account and prints the file that
 `--connection=<file>` takes, to point any command at it. `--vcpus=N` caps that deployment's fleet.
 
+Every container app in an account shares its vCPUs (1,500 by default). A fleet can borrow what the rest of the account
+leaves idle past its cap. To allow it, give the deploy a token that reads the account's containers (Account >
+Containers: Read) as `ARMADA_ACCOUNT_TOKEN`. The connection file keeps it for later deploys, and an empty
+`ARMADA_ACCOUNT_TOKEN` stops the borrowing. While it borrows, the fleet reads the account every 30 s and lends half of
+what is idle, keeping a tenth of the account free for other apps to start in. A container on borrowed vCPUs asks
+before each new task. Once other apps need the room, the newest loans finish their tasks and end.
+
 A deploy over a running armada keeps its jobs running. It waits for them first with `--drain`, or when the new
 version cannot take them over: when it would refuse a client the deployed one serves, or when its Durable Objects call
 each other differently or store other shapes, since the deployed objects keep running their code for minutes after the

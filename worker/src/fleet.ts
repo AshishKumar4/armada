@@ -3,6 +3,11 @@
  * container over the cap waits for capacity rather than being refused by the platform mid-job. A hold names its
  * holder and lapses at its lease, so a holder that died returns it.
  *
+ * Past the cap, it lends a job's containers what the rest of the account leaves idle, read from Cloudflare's API
+ * (`readAccount`) under the token `armada deploy` gives it, while it lends. A borrowed hold asks before each new task (`renews`), and one recalled finishes what it
+ * runs and ends: the fleet recalls its newest loans once the account fills, its read goes stale, or a holder that may
+ * not borrow (a preparation, a gang's rank) waits for room under the cap.
+ *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
  * the version deployed after it admits jobs from its first request, once the deployment-wide objects run its
@@ -10,8 +15,9 @@
  */
 import * as v from 'valibot';
 import type { Fleet } from '../../src/protocol';
+import { readAccount, type Reader } from '../../src/account';
 import { INACTIVITY_MS } from './container';
-import { ArmadaSingle, SINGLE, type Env } from './env';
+import { ArmadaSingle, said, SINGLE, type Env } from './env';
 
 /** The jobs made last that the fleet keeps the ids of. */
 export const RECENT = 500;
@@ -21,6 +27,27 @@ const LEASE_MS = INACTIVITY_MS;
 
 /** How soon a container the fleet had no room for asks again. */
 export const CAPACITY_RETRY_MS = 5_000;
+
+/** How often the fleet reads the account while it lends, or a holder wants a loan. */
+export const SAMPLE_MS = 30_000;
+
+/** How old a read of the account may be and still be lent from. */
+const SAMPLE_LIFE_MS = 4 * SAMPLE_MS;
+
+/** How long a want counts once its holder stops asking, which it does every CAPACITY_RETRY_MS while it waits. */
+const WANT_MS = 60_000;
+
+/** The account's share left idle for other apps to start containers in, which then show in the next read. */
+const HEADROOM = 0.1;
+
+/** A read of the account: the most the fleet holds until the next. */
+export interface Lending {
+  readonly limit: number;
+  readonly at: number;
+}
+
+/** A grant: within the fleet's cap, or lent past it. */
+export type Grant = 'held' | 'borrowed';
 
 /** An object's container goes, and `holder`'s vCPUs, where it holds any, return to the fleet once it is gone: one that
  *  will not stop ends at the inactivity timeout it was started with, `inactivityMs`, and holds them until then. Whether
@@ -39,7 +66,16 @@ export interface Hold {
   readonly until: number;
   /** The vCPUs its job must hold at once (`VesselSpec.reserve`), which no other job is granted while the job holds any. */
   readonly reserve?: number;
+  /** Its first grant's place among the fleet's grants: the newest loan is recalled first. */
+  readonly granted?: number;
+  /** Granted past the cap, and asked about before each new task. */
+  readonly borrowed?: boolean;
+  /** Its container takes no new task: it finishes what it runs, then ends. */
+  readonly recalled?: boolean;
 }
+
+/** What `holds` keep together, as `acquire` grants them. */
+const chargeOf = (holds: Record<string, Hold>): number => [...needs(holds).values()].reduce((sum, need) => sum + need, 0);
 
 /** What each job of `holds` keeps from the others: what it holds, or what it reserves, whichever is more. */
 function needs(holds: Record<string, Hold>): Map<string, number> {
@@ -68,16 +104,117 @@ export class ArmadaFleet extends ArmadaSingle {
   /** Whether `holder` holds `vcpus` now; it keeps them until `release`, or its lease ends past its job's `deadlineAt`.
    *  Its job keeps `reserve` from the other jobs while it holds any: a holder is granted only once its job's whole
    *  reserve fits beside theirs, so the ranks of two jobs' gangs never split the fleet between them and wait on each
-   *  other forever. */
-  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, now = Date.now() }: { readonly reserve?: number; readonly deadlineAt: number; readonly now?: number }): Promise<boolean> {
+   *  other forever. A holder that `borrows`, which asks before each new task, may be lent what the account leaves idle
+   *  past the cap; one that does not, waiting while loans fill the cap, has them recalled. */
+  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, now = Date.now() }: { readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly now?: number }): Promise<Grant | null> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
-    const { [holder]: _replaced, ...others } = holds;
-    const wanted = { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve } };
-    const granted = [...needs(wanted).values()].reduce((sum, need) => sum + need, 0) <= Number(this.env.FLEET_VCPUS);
+    const { [holder]: replaced, ...others } = holds;
+    const cap = Number(this.env.FLEET_VCPUS);
+    const charge = chargeOf({ ...others, [holder]: { vcpus, until: now, reserve } });
 
-    await this.ctx.storage.put('holds', granted ? wanted : holds);
+    if (charge > (borrows ? await this.limit(now) : cap)) {
+      await this.want(borrows, holds, now);
 
-    return granted;
+      return null;
+    }
+
+    const grants = (await this.ctx.storage.get<number>('grants')) ?? 0;
+    const granted = replaced?.granted ?? grants + 1;
+
+    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap } }, grants: Math.max(grants, granted) });
+
+    return charge > cap ? 'borrowed' : 'held';
+  }
+
+  /** Whether `holder`, which holds borrowed vCPUs, takes another task. Not once it is recalled, which is for good;
+   *  and the fleet recalls its newest loans first whenever it holds more than it may now. */
+  async renews(holder: string): Promise<boolean> {
+    const now = Date.now();
+    const held = (await this.recall(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now), await this.limit(now)))[holder];
+
+    return held !== undefined && held.recalled !== true;
+  }
+
+  /** Reads the account while it lends, or a holder wants a loan: the most it holds until the next read is what it held,
+   *  and half the account's idle vCPUs past that, so two fleets that lend see each other grow and settle rather than
+   *  trade the same vCPUs back and forth. A read that fails leaves the last one to go stale. */
+  override async alarm(): Promise<void> {
+    const now = Date.now();
+    const lent = Object.values(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now)).some((hold) => hold.borrowed === true && hold.recalled !== true);
+
+    if (!lent && ((await this.ctx.storage.get<number>('wanted')) ?? 0) <= now - WANT_MS) return;
+
+    const reader = this.reader();
+
+    if (reader === null) return;
+
+    try {
+      const account = await readAccount(reader);
+      // Read after the account, as other calls may have changed them while it answered.
+      const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
+      const charge = chargeOf(holds);
+
+      await this.ctx.storage.put('lending', { limit: Math.floor(charge + (account.vcpus * (1 - HEADROOM) - account.others - charge) / 2), at: now } satisfies Lending);
+      await this.recall(holds, await this.limit(now));
+    } catch (cause) {
+      console.error(JSON.stringify({ fleet: 'reading the account', error: said({ cause }) }));
+    }
+
+    await this.ctx.storage.setAlarm(now + SAMPLE_MS);
+  }
+
+  /** The most the fleet holds now: its cap, or what its last read of the account lends up to, while that read is fresh
+   *  and no holder that may not borrow waits. */
+  private async limit(now: number): Promise<number> {
+    const cap = Number(this.env.FLEET_VCPUS);
+    const lending = await this.ctx.storage.get<Lending>('lending');
+    const pressed = ((await this.ctx.storage.get<number>('pressed')) ?? 0) > now - WANT_MS;
+
+    return lending === undefined || pressed || now - lending.at > SAMPLE_LIFE_MS ? cap : Math.max(cap, lending.limit);
+  }
+
+  /** A holder refused: one that borrows has the account read, where the fleet may lend; one that may not, refused
+   *  while loans fill the cap, has them recalled. */
+  private async want(borrows: boolean, holds: Record<string, Hold>, now: number): Promise<void> {
+    if (borrows) {
+      if (this.reader() === null) return;
+      await this.ctx.storage.put('wanted', now);
+
+      if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(now);
+
+      return;
+    }
+
+    if (!Object.values(holds).some((hold) => hold.borrowed === true)) return;
+    await this.ctx.storage.put('pressed', now);
+    await this.recall(holds, Number(this.env.FLEET_VCPUS));
+  }
+
+  /** Who reads the account for this deployment: none without the token `armada deploy` gives, which it gives empty
+   *  once there is none. */
+  private reader(): Reader | null {
+    const { ACCOUNT_TOKEN: token = '', ARMADA_ACCOUNT: account, ARMADA_NAME: name } = this.env;
+
+    return token === '' || account === undefined || name === undefined ? null : { token, account, name };
+  }
+
+  /** `holds` with their newest loans recalled until what the rest will keep fits `limit`: a recalled loan still runs
+   *  its tasks, so it counts as gone already. A loan is recalled whole, so the fleet may end a little under `limit`. */
+  private async recall(holds: Record<string, Hold>, limit: number): Promise<Record<string, Hold>> {
+    const loans = Object.entries(holds).filter(([, hold]) => hold.borrowed === true && hold.recalled !== true).sort(([, left], [, right]) => (right.granted ?? 0) - (left.granted ?? 0));
+    const recalled = { ...holds };
+    const kept = (): number => chargeOf(Object.fromEntries(Object.entries(recalled).filter(([, hold]) => hold.recalled !== true)));
+    let changed = false;
+
+    for (const [holder, hold] of loans) {
+      if (kept() <= limit) break;
+      recalled[holder] = { ...hold, recalled: true };
+      changed = true;
+    }
+
+    if (changed) await this.ctx.storage.put('holds', recalled);
+
+    return recalled;
   }
 
   /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. A
@@ -107,7 +244,7 @@ export class ArmadaFleet extends ArmadaSingle {
       jobs.set(id, { vcpus: share.vcpus + hold.vcpus, containers: share.containers + 1 });
     }
 
-    return { cap: Number(this.env.FLEET_VCPUS), jobs: [...jobs].map(([id, share]) => ({ id, ...share })).sort((left, right) => right.vcpus - left.vcpus) };
+    return { cap: Number(this.env.FLEET_VCPUS), limit: await this.limit(Date.now()), jobs: [...jobs].map(([id, share]) => ({ id, ...share })).sort((left, right) => right.vcpus - left.vcpus) };
   }
 
   private live(holds: Record<string, Hold> | undefined, now: number): Record<string, Hold> {

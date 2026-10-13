@@ -973,6 +973,8 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A vessel finished: the queue had nothing left for it. A run it lost track of ends once its container is `gone`. */
   async retired(name: string, gone = false): Promise<void> {
     if (gone) this.runs.gone(name);
+    // One the fleet recalled may have stood by for a straggler: another stands by instead.
+    this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     this.beat(name, 'done');
     await this.settle();
   }

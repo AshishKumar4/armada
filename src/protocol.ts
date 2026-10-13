@@ -494,11 +494,13 @@ export const EnvironmentEntrySchema = v.variant('state', [
 
 export const EnvironmentsSchema = v.array(v.object({ key: v.string(), entry: EnvironmentEntrySchema }));
 
-/** What a deployment's fleet holds: the most vCPUs it may run at once, and each job's share of them now. */
 /** The fleet now: its cap, the vCPUs and containers each job holds, and the tasks running and queued across every open
  *  job, however old. */
 export const FleetSchema = v.object({
   cap: v.number(), jobs: v.array(v.object({ id: v.string(), vcpus: v.number(), containers: v.number() })),
+  /** The most it holds now: its cap, or more while it borrows what the account leaves idle. Absent from an earlier
+   *  Worker. */
+  limit: v.optional(v.number()),
   tasks: v.optional(v.object({ running: v.number(), queued: v.number() })),
 });
 

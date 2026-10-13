@@ -179,7 +179,12 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (state === 'waiting') {
         const fleet = this.env.FLEET.getByName(SINGLE);
 
-        if (!(await fleet.acquire(this.holder(spec), spec.vcpus, { reserve: spec.reserve, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000 }))) {
+        // One whose job runs no gang wider than it may borrow past the fleet's cap: it asks before each new task.
+        const grant = await fleet.acquire(this.holder(spec), spec.vcpus, {
+          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000,
+        });
+
+        if (grant === null) {
           await job.moved(spec.name, 'waiting');
           await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
 
@@ -188,7 +193,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // The fleet's answer let other calls in: a vessel stopped meanwhile gives back what it was just granted.
         if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return await fleet.release(this.holder(spec));
-        await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now() });
+        await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now(), borrowed: grant === 'borrowed' });
         await job.moved(spec.name, 'booting');
       }
 
@@ -349,6 +354,9 @@ export class ArmadaVessel extends DurableObject<Env> {
         const stopping = (await must(container, 'the stop check', ['/bin/sh', '-c', STOPPED], { ms: EXEC_MS })).stdout.trim();
 
         if (stopping !== '') throw new Error(`the platform asked the container to stop at ${stopping}`);
+
+        // Borrowed vCPUs the fleet recalled take no new task: the slot retires, and the vessel once all of them have.
+        if ((await this.ctx.storage.get<boolean>('borrowed')) === true && !(await this.env.FLEET.getByName(SINGLE).renews(this.holder(spec)))) return 'retired';
         const claim = await job.claim(spec.name, slot);
 
         if (claim === null) return 'retired';

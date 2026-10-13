@@ -161,7 +161,7 @@ describe('the fleet', () => {
 
     expect({ paged: firstPage.includes(oldest), fleet: await json('/fleet', FleetSchema) }).toEqual({
       paged: false,
-      fleet: { cap: 64, jobs: [{ id: '20261008120000-aaaaaaaa', vcpus: 8, containers: 2 }, { id: '20261008120001-bbbbbbbb', vcpus: 2, containers: 1 }], tasks: { running: 1, queued: 4 } },
+      fleet: { cap: 64, limit: 64, jobs: [{ id: '20261008120000-aaaaaaaa', vcpus: 8, containers: 2 }, { id: '20261008120001-bbbbbbbb', vcpus: 2, containers: 1 }], tasks: { running: 1, queued: 4 } },
     });
   });
 });

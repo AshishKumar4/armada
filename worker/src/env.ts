@@ -32,6 +32,12 @@ export interface Env {
   readonly ARMADA_SHA?: string;
   /** The interface its Durable Objects call each other by (`contractOf`), written into the deployed vars. */
   readonly ARMADA_CONTRACT?: string;
+  /** The deployment's name and its account, written into the deployed vars: its own container apps are named for it. */
+  readonly ARMADA_NAME?: string;
+  readonly ARMADA_ACCOUNT?: string;
+  /** A read-only token for the account's Containers API, which `armada deploy` gives from ARMADA_ACCOUNT_TOKEN, empty
+   *  without one; the fleet lends past its cap only with it (`readAccount`). */
+  readonly ACCOUNT_TOKEN?: string;
   /** The deployed version, which a drain names. */
   readonly VERSION: WorkerVersionMetadata;
   /** How many of the most recently used environments keep their snapshots beyond those open jobs use

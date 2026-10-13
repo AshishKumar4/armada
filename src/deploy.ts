@@ -33,7 +33,8 @@ export function deploymentConfig(template: string, { name, account, main, dashbo
   return JSON.stringify({
     ...parsed, name, account_id: account, main,
     assets: { ...parsed.assets, directory: dashboard },
-    vars: { ...parsed.vars, FLEET_VCPUS: vcpus === undefined ? parsed.vars.FLEET_VCPUS : String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract },
+    // Its name and account also name its own container apps among the account's (`readAccount`).
+    vars: { ...parsed.vars, FLEET_VCPUS: vcpus === undefined ? parsed.vars.FLEET_VCPUS : String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account },
     r2_buckets: parsed.r2_buckets.map((each) => each.binding === 'ARTIFACTS' ? { ...each, bucket_name: bucket } : each),
   }, null, 2);
 }

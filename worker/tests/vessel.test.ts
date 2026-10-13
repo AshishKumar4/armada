@@ -19,17 +19,18 @@ const spec: VesselSpec = {
   tmpfs: [], files: {}, bundle: null, output: false, timeout: 600,
 };
 
-/** A job with one task to hand out: the first claim gets `claim`, and each after gets none. */
-function once(claim: Claim) {
-  const given = { done: false };
+/** A job with `count` tasks to hand out, each `claim` under its own index: each claim after them gets none. */
+function once(claim: Claim, count = 1) {
+  const given = { done: false, claims: 0 };
 
   return {
     given,
     next: async () => {
       if (given.done) return null;
-      given.done = true;
+      given.claims += 1;
+      given.done = given.claims >= count;
 
-      return claim;
+      return { ...claim, index: given.claims - 1 };
     },
   };
 }
@@ -49,17 +50,24 @@ interface Run {
   readonly startAllowed?: boolean;
   /** For a pushed task: what reading its runner's answer marker gives. */
   readonly marker?: { readonly exitCode: number; readonly stdout: string } | Error;
+  /** How many tasks its job has, and the fleet its vessel holds its vCPUs from. */
+  readonly tasks?: number;
+  readonly fleet?: object;
 }
 
-/** One task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
-async function run(lost: number, { argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker }: Run = {}) {
+/** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
+async function run(lost: number, {
+  argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
+  fleet = { acquire: async () => 'held', release: async () => undefined },
+}: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
   const execs: (readonly string[])[] = [];
   const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
   const started: { name: string; index: number; attempt: number; afterLaunch: boolean; stored: boolean }[] = [];
-  const task = once({ index: 0, attempt: 1, argv: [...words], env: { ...env }, secrets: [], duplicate: false, gang });
+  const task = once({ index: 0, attempt: 1, argv: [...words], env: { ...env }, secrets: [], duplicate: false, gang }, tasks);
+  let retired = false;
   let waits = 0;
 
   const stored = state(container((argv, options) => {
@@ -101,13 +109,13 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
     still: async () => true,
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
-    retired: async () => undefined,
+    retired: async () => { retired = true; },
     vesselFailed: async (_name: string, error: string) => { failed.push(error); },
   };
 
   // A pushed task's bundle, which its container takes in at boot.
   const artifacts = bucket(new Map(marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};']]));
-  const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts }));
+  const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts, FLEET: namespace(() => fleet) }));
 
   await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64) });
 
@@ -120,8 +128,20 @@ async function run(lost: number, { argv: words = ['true'], env = {}, usage = { e
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, stored: artifacts.objects, execs, envs, piped, started };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, completed, claimed: task.given.done, claims: task.given.claims, retired, stored: artifacts.objects, execs, envs, piped, started };
 }
+
+describe('a vessel on borrowed vCPUs', () => {
+  test('takes no new task once the fleet recalls them: it finishes the one it runs, then retires', async () => {
+    let renewals = 0;
+
+    const { exits, claims, failed, retired } = await run(0, {
+      tasks: 2, fleet: { acquire: async () => 'borrowed', renews: async () => (renewals += 1) === 1, release: async () => undefined },
+    });
+
+    expect({ exits, claims, failed, retired }).toEqual({ exits: [0], claims: 1, failed: [], retired: true });
+  });
+});
 
 describe('a task\'s argv and environment', () => {
   test('reach its launch in a file, not in the exec, which the runtime fails past 128 KiB a string, and keep every byte', async () => {
@@ -523,7 +543,7 @@ describe('a vessel\'s boot', () => {
 
       const vessel = new ArmadaVessel(stored.ctx, world({
         // The fleet has no room at the first ask, and has 10 s later.
-        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1, release: async () => undefined })),
+        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined })),
         JOB: namespace(() => ({
           moved: async (_name: string, to: string) => { moved.push(to); },
           booted: async (_name: string, bootMs: number, boot: Boot) => { booted.push({ bootMs, boot }); },
@@ -566,7 +586,7 @@ describe('a vessel\'s boot', () => {
     const stored = state(box);
 
     const vessel = new ArmadaVessel(stored.ctx, world({
-      FLEET: namespace(() => ({ acquire: async () => true, release })),
+      FLEET: namespace(() => ({ acquire: async () => 'held', release })),
       JOB: namespace(() => ({
         moved: async (_name: string, to: string) => { moved.push(to); }, booted: async () => undefined, claim: async () => null, retired: async () => undefined,
         vesselFailed: async (_name: string, error: string) => { failed.push(error); },

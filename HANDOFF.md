@@ -3,7 +3,7 @@
 ## Repository
 - https://github.com/AshishKumar4/armada, public, MIT.
 - `main` is wire 9. It holds the work below, and the fixes for every issue filed so far (#1 to #37).
-- Worktrees are under `/mnt/local/armada-wt/`; `core` is the integration branch. `/mnt/local/armada` is a shared
+- Worktrees are under `/mnt/local/armada-wt/`; `core` is the integration worktree. `/mnt/local/armada` is a shared
   checkout other agents use; don't edit it. Other agents' clones may add worktrees here too (`fix-long-commands` is
   Dew's).
 - The README video's sources (scenes, renderer, the captured runs) are in `/mnt/local/armada-wt/media/`, outside the
@@ -77,7 +77,9 @@
   (`GET /accounts/<id>/containers/me`). A start past them fails: "Account resource limit exceeded".
 - A deployment's fleet cap (`--vcpus`, default 1,500) counts only its own containers. On 2026-10-12, `armada-dew3`
   (cap 5,000) ran 375 `medium` containers, all 1,500 vCPUs, and `armada-v2`'s starts failed with that error.
-  Caps that sum past 1,500 let one deployment starve the others.
+  Caps that sum past 1,500 let one deployment starve the others. A fleet deployed with ARMADA_ACCOUNT_TOKEN borrows
+  past its cap what the account leaves idle, and gives it back within a task (`ArmadaFleet`): only a cap below the
+  account's lets one deployment yield to another.
 - The snapshot limit is not documented. New snapshots were refused at 66 GiB on 2026-10-10 and at about 70 GiB on
   2026-10-12. After the cleanup below, the account held 60.8 GiB: `armada-v2` 19.2, `nimbus-armada-v2` 16.3,
   `armada-dew3` 16.2, Dew's live preview 8.6, Kinu's devbox staging 0.6.
