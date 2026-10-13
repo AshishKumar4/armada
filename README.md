@@ -364,7 +364,12 @@ settings to add by hand. `armada webhook list` and `armada webhook remove <proje
 browser. `armada dashboard --serve=<port>` serves it from your machine instead, which signs each request itself.
 
 It shows the fleet and its recent jobs, each job's tasks and a timeline of its containers, and each task's item,
-output, log and artifacts. It also lists the environments and each project's CI verdicts.
+output, log and artifacts. It also lists the environments and each project's CI verdicts. A search, and a pick of a
+repository job's project, narrow the jobs.
+
+`armada dashboard --all` also signs the page in to every other deployment you have a connection to and that answers.
+Its fleet page then shows each deployment's containers in a row and all their recent jobs in one list, and a pick in
+the top bar opens one deployment's own pages. Each bearer stays in that one browser.
 
 ## Deploying
 
@@ -401,7 +406,7 @@ armada verdict <commit|worktree> [--json]
 armada push
 armada dev
 armada status <job-id>
-armada dashboard [--serve=<port>]
+armada dashboard [--serve=<port>] [--all]
 armada secret set <NAME> | list | delete <NAME>
 armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]
 armada webhook list

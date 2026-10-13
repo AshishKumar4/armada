@@ -622,35 +622,52 @@ export default {
     // The dashboard is static assets under /ui/, served before the Worker runs; a browser at the root is sent there.
     if (first === undefined && (request.method === 'GET' || request.method === 'HEAD')) return Response.redirect(new URL('/ui/', request.url).href, 302);
 
-    if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
-    // A request with no version is from a client older than the version was. The drain and the health are the same in
-    // every version, so a deploy drains the version it replaces whatever version it speaks.
-    const spoken = Number(request.headers.get(PROTOCOL_HEADER) ?? '1');
-    const head = new URL(request.url).pathname.split('/')[1];
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+    // Set on the answer itself: one made again would lose how its body is encoded, and gzip a stored log twice.
+    const answer = await api(request, env);
 
-    if ((spoken < OLDEST_CLIENT || spoken > PROTOCOL) && head !== 'drain' && head !== 'health') {
-      return Response.json({
-        error: spoken > PROTOCOL ? 'the deployed Worker is older than this armada client: run `armada deploy` to update it'
-          : 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin',
-      }, { status: 426 });
-    }
+    for (const [name, value] of Object.entries(CORS)) answer.headers.set(name, value);
 
-    try {
-      return await route(request, env);
-    } catch (cause) {
-      if (cause instanceof v.ValiError) return Response.json({ error: cause.message }, { status: 400 });
-      const error = said({ cause });
-
-      // Said in the answer and the log alike: a bare "Worker threw exception" names nothing to fix (#17).
-      console.error(JSON.stringify({ route: `${request.method} ${new URL(request.url).pathname}`, error }));
-
-      // An object keeps the code a deploy replaced for minutes, and lacks what the new code calls (armada-ci2 on
-      // 2026-10-13: its fleet, for five).
-      if (error.includes('The RPC receiver does not implement the method')) {
-        return Response.json({ error: `armada is being redeployed and its objects still run the earlier code; run again in a few minutes (${error})` }, { status: 503 });
-      }
-
-      return Response.json({ error }, { status: 500 });
-    }
+    return answer;
   },
 } satisfies ExportedHandler<Env>;
+
+/** Another deployment's dashboard reads this one's API from its own origin, under this one's bearer (`armada dashboard
+ *  --all`), and a browser asks first. A bearer is no cookie, so any origin may: one without the bearer reads nothing. */
+const CORS = {
+  'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, HEAD', 'access-control-allow-headers': `authorization, ${PROTOCOL_HEADER}`, 'access-control-max-age': '86400',
+};
+
+/** The API under the bearer, in the versions of the wire this Worker serves. */
+async function api(request: Request, env: Env): Promise<Response> {
+  if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
+  // A request with no version is from a client older than the version was. The drain and the health are the same in
+  // every version, so a deploy drains the version it replaces whatever version it speaks.
+  const spoken = Number(request.headers.get(PROTOCOL_HEADER) ?? '1');
+  const head = new URL(request.url).pathname.split('/')[1];
+
+  if ((spoken < OLDEST_CLIENT || spoken > PROTOCOL) && head !== 'drain' && head !== 'health') {
+    return Response.json({
+      error: spoken > PROTOCOL ? 'the deployed Worker is older than this armada client: run `armada deploy` to update it'
+        : 'this armada client is older than the deployed Worker. Update it to the deployed version: an install from install.sh with `curl -fsSL https://raw.githubusercontent.com/AshishKumar4/armada/main/install.sh | sh`, a checkout with `git pull`, and a project that pins armada by moving its pin',
+    }, { status: 426 });
+  }
+
+  try {
+    return await route(request, env);
+  } catch (cause) {
+    if (cause instanceof v.ValiError) return Response.json({ error: cause.message }, { status: 400 });
+    const error = said({ cause });
+
+    // Said in the answer and the log alike: a bare "Worker threw exception" names nothing to fix (#17).
+    console.error(JSON.stringify({ route: `${request.method} ${new URL(request.url).pathname}`, error }));
+
+    // An object keeps the code a deploy replaced for minutes, and lacks what the new code calls (armada-ci2 on
+    // 2026-10-13: its fleet, for five).
+    if (error.includes('The RPC receiver does not implement the method')) {
+      return Response.json({ error: `armada is being redeployed and its objects still run the earlier code; run again in a few minutes (${error})` }, { status: 503 });
+    }
+
+    return Response.json({ error }, { status: 500 });
+  }
+}

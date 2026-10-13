@@ -1304,9 +1304,10 @@ export class ArmadaJob extends DurableObject<Env> {
     ).toArray();
 
     const red = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM events WHERE json_extract(outcome, '$.kind') = 'exited' AND json_extract(outcome, '$.exitCode') != 0`).one()['n']);
+    const spec = await this.spec();
 
     return {
-      id, label: (await this.spec())?.label ?? '',
+      id, label: spec?.label ?? '', project: spec?.recipe.repo?.project ?? null,
       phase: (await this.ctx.storage.get<Phase>('phase')) ?? 'done',
       key: (await this.ctx.storage.get<string>('key')) ?? '',
       createdAt: (await this.ctx.storage.get<number>('createdAt')) ?? 0,

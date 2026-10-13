@@ -3,38 +3,55 @@
  * verdicts. The Worker serves it as static files under /ui/; `armada dashboard` opens it signed in.
  */
 import { detach, errorOf, type Health } from '../../src/protocol';
-import { deployment, signIn, signOut, SignedOut, takeToken, token } from './api';
+import { deployments as read, labelOf, signIn, signOut, SignedOut, takeToken, token, type Client } from './api';
 import { ci } from './ci';
 import { environments } from './environments';
-import { h, icon, replace } from './dom';
+import { count, h, icon, replace } from './dom';
 import { jobView } from './job';
 import { overview } from './overview';
 import { describe, whenSignedOut, type View } from './view';
 
-type Route =
+type Page =
   | { readonly page: 'overview' }
   | { readonly page: 'job'; readonly id: string; readonly task: number | null }
   | { readonly page: 'environments' }
   | { readonly page: 'ci'; readonly project: string | null; readonly sha: string | null };
 
+/** A page, and the deployment it is of: the one on the host `#/@<host>/…` names, else this page's own, whose fleet
+ *  page shows every deployment the browser reads. */
+type Route = Page & { readonly at: string | null };
+
 function routeOf(hash: string): Route {
-  const [page = '', first, second] = hash.replace(/^#\/?/u, '').split('/');
+  const path = hash.replace(/^#\/?/u, '').split('/');
+  const at = path[0]?.startsWith('@') === true ? path.shift()?.slice(1) ?? null : null;
+  const [page = '', first, second] = path;
 
-  if (page === 'jobs' && first !== undefined && first !== '') return { page: 'job', id: first, task: second !== undefined && /^\d+$/u.test(second) ? Number(second) : null };
+  if (page === 'jobs' && first !== undefined && first !== '') return { at, page: 'job', id: first, task: second !== undefined && /^\d+$/u.test(second) ? Number(second) : null };
 
-  if (page === 'environments') return { page: 'environments' };
+  if (page === 'environments') return { at, page: 'environments' };
 
-  if (page === 'ci') return { page: 'ci', project: first === undefined || first === '' ? null : first, sha: second ?? null };
+  if (page === 'ci') return { at, page: 'ci', project: first === undefined || first === '' ? null : first, sha: second ?? null };
 
-  return { page: 'overview' };
+  return { at, page: 'overview' };
 }
 
-function viewOf(route: Route): View {
+/** The deployments this page reads: its own first. */
+interface Deployments {
+  readonly own: Client;
+  readonly others: readonly Client[];
+}
+
+/** The deployment `route` is of: one named and read here, else this page's own. */
+const clientOf = (route: Route, { own, others }: Deployments): Client => [own, ...others].find((each) => each.host === route.at) ?? own;
+
+function viewOf(route: Route, deployments: Deployments): View {
+  const api = clientOf(route, deployments);
+
   switch (route.page) {
-    case 'overview': return overview();
-    case 'job': return jobView(route.id, route.task);
-    case 'environments': return environments();
-    case 'ci': return ci(route.project, route.sha);
+    case 'overview': return route.at === null ? overview(api, deployments.others) : overview(api, [], deployments.others.length > 0);
+    case 'job': return jobView(api, route.id, route.task);
+    case 'environments': return environments(api);
+    case 'ci': return ci(api, route.project, route.sha);
   }
 }
 
@@ -81,15 +98,22 @@ function signInPage(): void {
   field.focus();
 }
 
-/** The page's frame: its navigation, and the main element each view fills. */
+/** The page's frame: its navigation, the deployment it shows, and the main element each view fills. */
 interface Frame {
   readonly main: HTMLElement;
   readonly nav: HTMLElement;
+  readonly host: HTMLAnchorElement;
 }
 
-function shell(health: Health, host: string): Frame {
-  const nav = h('nav', { class: 'nav', label: 'Pages' },
-    h('a', { href: '#/', data: { page: 'overview' } }, 'Fleet'), h('a', { href: '#/environments', data: { page: 'environments' } }, 'Environments'), h('a', { href: '#/ci', data: { page: 'ci' } }, 'CI'));
+/** Each page of the navigation, by the address of its first page on a deployment. */
+const PAGES = [['overview', '', 'Fleet'], ['environments', 'environments', 'Environments'], ['ci', 'ci', 'CI']] as const;
+
+function shell(health: Health, { own, others }: Deployments): Frame {
+  const nav = h('nav', { class: 'nav', label: 'Pages' }, PAGES.map(([page, path, name]) => h('a', { data: { page, path } }, name)));
+  // The deployment shown, which leads back to every one's fleet when the page reads others.
+  const host = h('a', { class: 'host', href: '#/', title: `${own.name}: runner layer ${String(health.driver)}, wire ${String(health.protocol)}` });
+
+  if (others.length === 0) host.removeAttribute('href');
 
   const themeButton = h('button', { class: 'icon-button', type: 'button', label: 'Switch between light and dark' });
   const drawTheme = (): void => { replace(themeButton, icon(theme() === 'dark' ? 'sun' : 'moon')); };
@@ -107,48 +131,78 @@ function shell(health: Health, host: string): Frame {
       brand(),
       nav,
       h('div', { class: 'topbar-end' },
-        h('span', { class: 'host', title: `${host}: runner layer ${String(health.driver)}, wire ${String(health.protocol)}` }, h('span', { class: 'dot ok' }), host.split('.')[0] ?? host),
+        host,
         themeButton,
         // A dashboard served from this machine (`armada dashboard --serve`) signs its requests itself, and holds no token.
-        token() === null ? null : h('button', { class: 'icon-button', type: 'button', label: 'Sign out', title: 'Sign out', onclick: () => { signOut(); signInPage(); } }, icon('out'))))),
+        token() === null ? null : h('button', { class: 'icon-button', type: 'button', label: 'Sign out', title: 'Sign out', onclick: signedOut }, icon('out'))))),
     main);
 
-  return { main, nav };
+  return { main, nav, host };
 }
 
 let current: View | null = null;
 
-function show(main: HTMLElement, nav: HTMLElement): void {
+function show({ main, nav, host }: Frame, deployments: Deployments): void {
   const route = routeOf(location.hash);
+  const api = clientOf(route, deployments);
 
   current?.dispose();
-  current = viewOf(route);
+  current = viewOf(route, deployments);
   replace(main, current.element);
 
   for (const link of nav.querySelectorAll('a')) {
+    // The fleet page of every deployment stays there; any other page is of the deployment shown.
+    link.href = route.at === null && link.dataset['page'] === 'overview' ? '#/' : api.href(link.dataset['path'] ?? '');
+
     if (link.dataset['page'] === (route.page === 'job' ? 'overview' : route.page)) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+
+  const every = route.at === null && route.page === 'overview' && deployments.others.length > 0;
+
+  replace(host, h('span', { class: 'dot ok' }), every ? `${count(deployments.others.length + 1)} deployments` : labelOf(api, [deployments.own, ...deployments.others]));
 
   window.scrollTo(0, 0);
 }
 
 let routed: (() => void) | null = null;
 
-async function start(): Promise<void> {
+/** Each start of the page, so one stopped while it reads the deployments shows nothing once they answer. */
+let started = 0;
+
+/** The page shows nothing and follows no address: its view and its routing hold the deployments' bearers, and so may
+ *  a start still reading them. */
+function stop(): void {
+  started += 1;
   current?.dispose();
   current = null;
 
   if (routed !== null) window.removeEventListener('hashchange', routed);
+  routed = null;
+}
+
+/** Signs this browser out of every deployment it reads. */
+function signedOut(): void {
+  stop();
+  signOut();
+  signInPage();
+}
+
+async function start(): Promise<void> {
+  stop();
+  const mine = started;
 
   try {
-    const { health, host } = await deployment();
-    const { main, nav } = shell(health, host);
+    const { own, others, health } = await read();
 
-    routed = () => { show(main, nav); };
+    if (mine !== started) return;
+    const deployments = { own, others };
+    const frame = shell(health, deployments);
+
+    routed = () => { show(frame, deployments); };
 
     window.addEventListener('hashchange', routed);
-    show(main, nav);
+    show(frame, deployments);
   } catch (cause) {
     if (cause instanceof SignedOut) return signInPage();
     unanswered(errorOf({ cause }));
@@ -165,12 +219,7 @@ function restart(): void {
   detach(start(), unanswered);
 }
 
-whenSignedOut(() => {
-  current?.dispose();
-  current = null;
-  signOut();
-  signInPage();
-});
+whenSignedOut(signedOut);
 
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', applyTheme);
 

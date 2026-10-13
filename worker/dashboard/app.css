@@ -140,6 +140,8 @@ button, input { font: inherit; color: inherit; }
 
 .host .dot { width: 7px; height: 7px; }
 
+a.host:hover { color: var(--text); border-color: var(--line-strong); }
+
 .icon-button {
   display: inline-grid;
   place-items: center;
@@ -161,7 +163,7 @@ button, input { font: inherit; color: inherit; }
 
 main { max-width: 1360px; margin: 0 auto; padding: 28px 28px 80px; }
 
-.page { display: grid; gap: 16px; }
+.page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 
 .page > :empty { display: none; }
 
@@ -193,7 +195,7 @@ main { max-width: 1360px; margin: 0 auto; padding: 28px 28px 80px; }
 
 .card-body { padding: 16px 20px 20px; }
 
-.card-body.flush { padding: 8px 0 6px; }
+.card-body.flush { padding: 8px 0 6px; overflow-x: auto; }
 
 /* Stats */
 
@@ -339,6 +341,31 @@ main { max-width: 1360px; margin: 0 auto; padding: 28px 28px 80px; }
 .progress-cell { display: grid; grid-template-columns: 120px auto; align-items: center; gap: 10px; }
 
 .more { display: flex; justify-content: center; padding: 12px; border-top: 1px solid var(--line); }
+
+/* Filters, and the deployments beside each other */
+
+.filters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+
+.filters .input { width: auto; padding: 6px 10px; font-family: inherit; }
+
+.filter-text { min-width: 12em; }
+
+.deployments { display: grid; gap: 14px; }
+
+.deployment { display: grid; grid-template-columns: minmax(8em, 12em) minmax(0, 1fr) auto auto; align-items: center; gap: 16px; font-size: 13px; }
+
+.deployment .cells { grid-template-columns: repeat(auto-fill, 8px); gap: 4px; }
+
+.deployment .cells i { width: 8px; height: 8px; border-radius: 2px; }
+
+.deployment .cells i.free { width: 4px; height: 4px; margin: 2px; }
+
+.deployment .error { grid-column: 2 / -1; margin: 0; color: var(--bad); }
+
+.deployment-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.deployment-name:hover { color: var(--accent-text); }
+
 
 /* Buttons */
 
@@ -617,6 +644,12 @@ dialog[open] { display: flex; }
   .card-body { padding: 14px 16px 16px; }
   .facts { grid-template-columns: minmax(0, 1fr); }
   .modal { inset: 0; border-radius: 0; }
+  .card-head:has(.filters) { flex-wrap: wrap; }
+  .filters { justify-content: flex-start; }
+  .deployment { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
+  .deployment .cells, .deployment .error { grid-column: 1 / -1; grid-row: 2; }
+  .deployment-use { grid-row: 1; grid-column: 2; }
+  .deployment-open { grid-row: 3; grid-column: 1 / -1; }
 }
 
 @media (max-width: 460px) {
