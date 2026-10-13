@@ -650,6 +650,10 @@ dialog[open] { display: flex; }
   .deployment .cells, .deployment .error { grid-column: 1 / -1; grid-row: 2; }
   .deployment-use { grid-row: 1; grid-column: 2; }
   .deployment-open { grid-row: 3; grid-column: 1 / -1; }
+  .verdict-row summary { grid-template-columns: 12px minmax(0, 1fr) auto; gap: 4px 12px; }
+  .verdict-row summary .mono { overflow-wrap: anywhere; }
+  .verdict-row summary .faint { grid-row: 2; grid-column: 2 / -1; }
+  .verdict-row summary .faint:empty { display: none; }
 }
 
 @media (max-width: 460px) {
