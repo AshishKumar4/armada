@@ -30,17 +30,18 @@ interface Listed {
   readonly job: JobBrief;
 }
 
-/** Whether `read` has an older page to show: one that does not answer has none. */
-const pages = (read: Read): boolean => !read.exhausted && !(read.now instanceof Error);
-
 /** A deployment as last read: every job read so far by id (each poll's first page and each older page merged in, so a
- *  job that a newer one pushes off the first page stays where it was), whether an older page is left, and its fleet or
- *  why it did not answer. */
+ *  job that a newer one pushes off the first page stays where it was), whether an older page was read and whether one
+ *  is left, and its fleet or why it did not answer. */
 interface Read {
   readonly listed: Map<string, JobBrief>;
+  older: boolean;
   exhausted: boolean;
   now: { readonly health: Health; readonly fleet: Fleet } | Error | null;
 }
+
+/** Whether `read` has an older page to show: one not read yet, or that did not answer, has none. */
+const pages = (read: Read): boolean => !read.exhausted && read.now !== null && !(read.now instanceof Error);
 
 /** The fleet of `first`, beside `rest`'s; `beside` when the page reads other deployments, so one's own fleet page leads
  *  back to every one's. */
@@ -55,8 +56,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
   const jobsBody = h('div', { class: 'card-body flush' });
   const secretsBody = h('div', { class: 'card-body' });
   const lead = h('p', {}, 'Reading the fleet…');
-  const reads = new Map<Client, Read>(deployments.map((at) => [at, { listed: new Map(), exhausted: false, now: null }]));
-  let older = false;
+  const reads = new Map<Client, Read>(deployments.map((at) => [at, { listed: new Map(), older: false, exhausted: false, now: null }]));
   const filter = { text: '', project: '', deployment: '' };
 
   const search = h('input', { class: 'input filter-text', type: 'search', placeholder: 'Search jobs', label: 'Search jobs by label, id or project' });
@@ -144,6 +144,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
             const oldest = [...read.listed.keys()].sort().at(0) ?? '';
             const { jobs } = await at.get(`/jobs?limit=${String(PAGE)}&before=${encodeURIComponent(oldest)}`, JobsSchema);
 
+            read.older = true;
             read.exhausted = jobs.length < PAGE;
 
             for (const job of jobs) read.listed.set(job.id, job);
@@ -151,7 +152,7 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
             ownFailure(read, errorOf({ cause }));
           }
         })).then(() => {
-          older = true;
+          drawDeployments();
           drawJobs();
         }), (error) => {
           if (button instanceof HTMLButtonElement) button.disabled = false;
@@ -196,12 +197,20 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
 
       for (const job of [...jobs.jobs, ...again]) read.listed.set(job.id, job);
 
-      if (!older) read.exhausted = jobs.jobs.length < PAGE;
+      if (!read.older) read.exhausted = jobs.jobs.length < PAGE;
       read.now = { health, fleet };
     } catch (cause) {
       if (signal.aborted) throw errorOf({ cause });
       ownFailure(read, errorOf({ cause }));
     }
+  };
+
+  /** Beside other deployments, each one's row: its fleet, or why it did not answer. */
+  const drawDeployments = (): void => {
+    if (single) return;
+    const names = new Map(all().map(({ job }) => [job.id, nameOf(job)]));
+
+    replace(fleetBody, h('div', { class: 'deployments' }, [...reads].map(([at, read]) => deploymentRow(at, labelOf(at, deployments), read, names))));
   };
 
   const pollster = poll(4000, banner, async (signal) => {
@@ -231,10 +240,9 @@ export function overview(first: Client, rest: readonly Client[] = [], beside = f
       replace(secretsBody, set.length === 0
         ? h('p', { class: 'muted' }, 'None set. ', h('span', { class: 'mono' }, 'armada secret set NAME'), ' sets one; no page reads a value back.')
         : h('div', { class: 'button-row' }, set.map((name) => h('span', { class: 'pill mono' }, name))));
-    } else {
-      replace(fleetBody, h('div', { class: 'deployments' }, [...reads].map(([at, read]) => deploymentRow(at, labelOf(at, deployments), read, names))));
     }
 
+    drawDeployments();
     drawJobs();
     document.title = open === 0 ? 'armada' : `armada · ${count(open)} open`;
 

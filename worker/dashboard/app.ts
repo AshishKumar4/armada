@@ -167,8 +167,13 @@ function show({ main, nav, host }: Frame, deployments: Deployments): void {
 
 let routed: (() => void) | null = null;
 
-/** The page shows nothing and follows no address: its view and its routing hold the deployments' bearers. */
+/** Each start of the page, so one stopped while it reads the deployments shows nothing once they answer. */
+let started = 0;
+
+/** The page shows nothing and follows no address: its view and its routing hold the deployments' bearers, and so may
+ *  a start still reading them. */
 function stop(): void {
+  started += 1;
   current?.dispose();
   current = null;
 
@@ -185,9 +190,12 @@ function signedOut(): void {
 
 async function start(): Promise<void> {
   stop();
+  const mine = started;
 
   try {
     const { own, others, health } = await read();
+
+    if (mine !== started) return;
     const deployments = { own, others };
     const frame = shell(health, deployments);
 
