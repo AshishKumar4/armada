@@ -327,9 +327,10 @@ export interface Retention {
  *  not prepared again for each job, and it shrinks back to the count once that hour is quiet. */
 const RECENT_MS = 60 * 60_000;
 
-/** How long making room spares an environment after its last use: a client that resolved its pack base on it opens its
- *  job once its plan and its upload are done, and the open job then holds it (`makeRoom`). Well within `ROOM_WAIT_MS`,
- *  so an environment used just before a refusal can still make room before the preparation fails. */
+/** How long making room spares an environment after its last use: `armada run` resolves its pack base again once its
+ *  plan is done, and opens its job on it as soon as its uploads are, and the open job then holds it (`makeRoom`). Well
+ *  within `ROOM_WAIT_MS`, so an environment used just before a refusal can still make room before the preparation
+ *  fails. */
 const IN_USE_MS = 10 * 60_000;
 
 /** How often the registry looks for snapshots past those it keeps. */

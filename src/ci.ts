@@ -601,19 +601,19 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   // Its own secrets join the config's only for this run.
   const taskSecrets = [...new Set([...config.task.secrets, ...secrets])];
 
-  // Every named environment resolved and its pack uploaded before any task job starts: one that fails leaves none
-  // running.
-  const owns = new Map<string | undefined, { readonly environment: typeof environment; readonly spec: OnCommit }>([[undefined, { environment, spec }]]);
-
-  for (const name of named) {
+  // Every environment resolved again, and its pack uploaded where its base moved, right before the task jobs start: a
+  // base resolved before the plan may have been rebuilt or deleted since (#39), and resolving it counts as a use that
+  // keeps it until they open. Each before any task job starts: one that fails leaves none running.
+  const owns = new Map(await Promise.all(groups.map(async ({ name }) => {
     const own = await of(name);
 
-    note(`environment ${name} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
+    if (name !== undefined) note(`environment ${name} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
     const sent = await own.upload();
 
-    if (sent !== null) note(`uploaded its pack for ${name}, ${(sent / 1e6).toFixed(1)} MB`);
-    owns.set(name, own);
-  }
+    if (sent !== null) note(`uploaded its pack${name === undefined ? ' again' : ` for ${name}`}, ${(sent / 1e6).toFixed(1)} MB`);
+
+    return [name, own] as const;
+  })));
 
   const shares = sharesFor(config.pool, slots, groups.map((group) => ({ estimates: group.indexes.map((index) => estimates[index]), ranks: group.indexes.map((index) => ranks[index] ?? 1) })));
 

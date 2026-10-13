@@ -867,6 +867,9 @@ interface Runner {
   readonly exitOf?: (item: Json) => number;
   /** How a task job's task of this item ended beside others before it landed alone; undefined for one that did not. */
   readonly aloneOf?: (item: Json) => string | undefined;
+  /** The base the runner resolves the environment's pack against, by how many times it was asked before: the root
+   *  for each when absent. */
+  readonly baseOf?: (asked: number) => string;
   /** The task job, counted from 1, whose creation the runner refuses. */
   readonly refuse?: number;
   /** The task job, counted from 1, whose results the runner no longer has. */
@@ -879,7 +882,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, refuse, lose } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -920,7 +923,7 @@ describe('armada run', () => {
 
         if (pathname.endsWith('/cancel')) cancelled.push(pathname.split('/')[2] ?? '');
 
-        if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: 'root' });
+        if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: baseOf(seen.filter((each) => each === 'POST /environments/resolve').length - 1) });
 
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json(timings);
 
@@ -1059,6 +1062,15 @@ describe('armada run', () => {
       each: ['', 'py314', 'py312'],
       ids: ['tasks', 'tasks-2', 'tasks-3'],
     });
+  });
+
+  test('packs its task job against the environment as it is once the plan is done, not as it was before (#39)', async () => {
+    const plan: Json = { include: [{ name: 'a' }] };
+    // The environment holds the commit when the run starts, and is gone by the time its local plan is done.
+    const ran = await run([], plan, {}, { planConfig: { command: ['sh', '-c', `echo '${JSON.stringify(plan)}'`], local: true }, taskConfig: { verdict: false }, baseOf: (asked) => asked === 0 ? 'HEAD' : 'root' });
+    const bases = ran.bodies.map((body) => v.parse(v.object({ commit: v.object({ base: v.string() }) }), body).commit.base);
+
+    expect({ exit: ran.exit, bases }).toEqual({ exit: 0, bases: ['root'] });
   });
 
   test('passes a row its task reported green only alone, after failing beside others, and says so in every row it reported (#38)', async () => {
