@@ -177,23 +177,32 @@ describe('a fleet that lends what the account leaves idle', () => {
     expect({ lent, rank, renewed: await fleet.renews('j/v3'), more: await borrowing(fleet, ['j/v4']) }).toEqual({ lent: ['borrowed'], rank: null, renewed: true, more: ['borrowed'] });
   });
 
-  test('recalls the loans a gang\'s next rank waits on, its job\'s own among them, and keeps a holder that asks again', async () => {
+  test('recalls the loans a gang\'s next rank waits on, its job\'s own among them', async () => {
     account();
     const fleet = lender('token', state(), 12);
 
-    // Job j holds a container for its gang of two and job p another: 12, the cap. Each then borrows one more.
+    // Job j holds a container for its gang of two and job p another: 12, the cap. Then k and j each borrow one more.
     await fleet.acquire('j/v1', 4, { reserve: 8, deadlineAt });
     await fleet.acquire('p/v1', 4, { deadlineAt });
     await borrowing(fleet, ['k/v1']);
     await fleet.alarm();
     const lent = [...await borrowing(fleet, ['k/v1']), await fleet.acquire('j/v2', 4, { deadlineAt, borrows: true })];
-    // p's container asks again for what it holds, refused beside the loans, and j's gang's second rank asks.
-    const again = await fleet.acquire('p/v1', 4, { deadlineAt });
     const rank = await fleet.acquire('j/v3', 4, { reserve: 8, deadlineAt });
 
-    expect({ lent, again, rank, recalled: [await fleet.renews('j/v2'), await fleet.renews('k/v1')], used: await fleet.used() }).toEqual({
-      lent: ['borrowed', 'borrowed'], again: null, rank: null, recalled: [false, false], used: 16,
-    });
+    expect({ lent, rank, renewed: [await fleet.renews('j/v2'), await fleet.renews('k/v1')] }).toEqual({ lent: ['borrowed', 'borrowed'], rank: null, renewed: [false, false] });
+  });
+
+  test('keeps a holder\'s vCPUs while it asks again beside loans that keep it out', async () => {
+    account();
+    const fleet = lender('token');
+
+    await borrowing(fleet, ['j/v1', 'p/v1']);
+    await borrowing(fleet, ['k/v1']);
+    await fleet.alarm();
+    const lent = await borrowing(fleet, ['k/v1']);
+    const again = await fleet.acquire('p/v1', 4, { deadlineAt });
+
+    expect({ lent, again, recalled: await fleet.renews('k/v1'), used: await fleet.used() }).toEqual({ lent: ['borrowed'], again: null, recalled: false, used: 12 });
   });
 });
 
