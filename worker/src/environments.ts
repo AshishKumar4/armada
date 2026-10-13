@@ -14,7 +14,7 @@ import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Comm
 import { deleteSnapshotWith } from '../../src/registry';
 import { AccountFull, AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
-import { CAPACITY_RETRY_MS, letGo } from './fleet';
+import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
 
 export type Generation = v.InferOutput<typeof GenerationSchema>;
 
@@ -432,8 +432,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
       if (preparation.phase === 'base' && preparation.started === undefined) {
         const granted = await this.env.FLEET.getByName(SINGLE).acquire(holderOf(preparation), SIZES[preparation.recipe.size].vcpus, { deadlineAt: preparation.since + preparationMs(preparation.recipe.size) });
 
-        // A fleet still on earlier code for a while after a deploy answers true or false.
-        if (granted !== 'held' && granted !== 'borrowed') return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
+        if (grantOf(granted) === null) return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
       }
 
       const step = await this.step(preparation);

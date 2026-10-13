@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { fakeFetch } from '../../tests/fakes';
 import { INACTIVITY_MS } from '../src/container';
-import { ArmadaFleet, SAMPLE_MS } from '../src/fleet';
+import { ArmadaFleet, SAMPLE_MS, type Grant } from '../src/fleet';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { container, namespace, state, world } from './harness';
 
@@ -89,8 +89,8 @@ describe('a fleet that lends what the account leaves idle', () => {
     return others;
   }
 
-  /** A fleet of 8 vCPUs, deployed as `x` in that account with `token`, keeping what it keeps in `stored`. */
-  const lender = (token: string, stored = state()) => new ArmadaFleet(stored.ctx, world({ FLEET_VCPUS: '8', ARMADA_NAME: 'x', ARMADA_ACCOUNT: 'acct', ACCOUNT_TOKEN: token }));
+  /** A fleet of `cap` vCPUs, deployed as `x` in that account with `token`, keeping what it keeps in `stored`. */
+  const lender = (token: string, stored = state(), cap = 8) => new ArmadaFleet(stored.ctx, world({ FLEET_VCPUS: String(cap), ARMADA_NAME: 'x', ARMADA_ACCOUNT: 'acct', ACCOUNT_TOKEN: token }));
 
   /** Each of `holders` asks in turn for 4 vCPUs it may borrow. */
   const borrowing = async (fleet: ArmadaFleet, holders: readonly string[]) => {
@@ -176,10 +176,31 @@ describe('a fleet that lends what the account leaves idle', () => {
 
     expect({ lent, rank, renewed: await fleet.renews('j/v3'), more: await borrowing(fleet, ['j/v4']) }).toEqual({ lent: ['borrowed'], rank: null, renewed: true, more: ['borrowed'] });
   });
+
+  test('recalls the loans a gang\'s next rank waits on, its job\'s own among them, and keeps a holder that asks again', async () => {
+    account();
+    const fleet = lender('token', state(), 12);
+
+    // Job j holds a container for its gang of two and job p another: 12, the cap. Each then borrows one more.
+    await fleet.acquire('j/v1', 4, { reserve: 8, deadlineAt });
+    await fleet.acquire('p/v1', 4, { deadlineAt });
+    await borrowing(fleet, ['k/v1']);
+    await fleet.alarm();
+    const lent = [...await borrowing(fleet, ['k/v1']), await fleet.acquire('j/v2', 4, { deadlineAt, borrows: true })];
+    // p's container asks again for what it holds, refused beside the loans, and j's gang's second rank asks.
+    const again = await fleet.acquire('p/v1', 4, { deadlineAt });
+    const rank = await fleet.acquire('j/v3', 4, { reserve: 8, deadlineAt });
+
+    expect({ lent, again, rank, recalled: [await fleet.renews('j/v2'), await fleet.renews('k/v1')], used: await fleet.used() }).toEqual({
+      lent: ['borrowed', 'borrowed'], again: null, rank: null, recalled: [false, false], used: 16,
+    });
+  });
 });
 
 describe('a vessel stopped while the fleet answers', () => {
-  test('gives back what it was granted and starts nothing', async () => {
+  /** A vessel stopped while its fleet grants it 4 vCPUs, which the fleet answers as `answer` says: whether it started,
+   *  and whether the fleet has them free again. A fleet still on earlier code answers true. */
+  async function stoppedWhileGranted(answer: (grant: Grant | null) => Grant | boolean | null) {
     const fleet = fleetOf(4);
     const answered = Promise.withResolvers<void>();
     let started = false;
@@ -191,7 +212,7 @@ describe('a vessel stopped while the fleet answers', () => {
         acquire: async () => {
           await answered.promise;
 
-          return await fleet.acquire('j/v1', 4, { deadlineAt });
+          return answer(await fleet.acquire('j/v1', 4, { deadlineAt }));
         },
         release: fleet.release.bind(fleet),
       })),
@@ -208,6 +229,11 @@ describe('a vessel stopped while the fleet answers', () => {
     answered.resolve();
     await alarm;
 
-    expect({ started, free: await fleet.acquire('other/v1', 4, { deadlineAt }) }).toEqual({ started: false, free: 'held' });
+    return { started, free: await fleet.acquire('other/v1', 4, { deadlineAt }) };
+  }
+
+  test('gives back what it was granted and starts nothing, whatever code its fleet runs', async () => {
+    expect([await stoppedWhileGranted((grant) => grant), await stoppedWhileGranted((grant) => grant !== null)]).toEqual([{ started: false, free: 'held' }, { started: false, free: 'held' }]);
   });
 });
+

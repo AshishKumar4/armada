@@ -15,7 +15,7 @@ import {
   AccountFull, clearTask, ENTRYPOINT, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
-import { CAPACITY_RETRY_MS, letGo } from './fleet';
+import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
 import type { Claim, Gang } from './job';
 import { GANG_DOWN, GANG_UP, LINK_ID, Piped, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY } from './relay';
 
@@ -180,12 +180,11 @@ export class ArmadaVessel extends DurableObject<Env> {
         const fleet = this.env.FLEET.getByName(SINGLE);
 
         // One whose job runs no gang wider than it may borrow past the fleet's cap: it asks before each new task.
-        const grant = await fleet.acquire(this.holder(spec), spec.vcpus, {
+        const grant = grantOf(await fleet.acquire(this.holder(spec), spec.vcpus, {
           reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000,
-        });
+        }));
 
-        // A fleet still on earlier code for a while after a deploy answers true or false.
-        if (grant !== 'held' && grant !== 'borrowed') {
+        if (grant === null) {
           await job.moved(spec.name, 'waiting');
           await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
 

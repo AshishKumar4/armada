@@ -74,6 +74,13 @@ export interface Hold {
   readonly recalled?: boolean;
 }
 
+/** A grant as any fleet answers it: one still on earlier code for a while after a deploy answers true or false. */
+export function grantOf(answer: Grant | boolean | null): Grant | null {
+  if (answer === true) return 'held';
+
+  return answer === false ? null : answer;
+}
+
 /** What `holds` keep together, as `acquire` grants them. */
 const chargeOf = (holds: Record<string, Hold>): number => [...needs(holds).values()].reduce((sum, need) => sum + need, 0);
 
@@ -110,10 +117,11 @@ export class ArmadaFleet extends ArmadaSingle {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: replaced, ...others } = holds;
     const cap = Number(this.env.FLEET_VCPUS);
-    const charge = chargeOf({ ...others, [holder]: { vcpus, until: now, reserve } });
+    const asked = { [holder]: { vcpus, until: now, reserve } };
+    const charge = chargeOf({ ...others, ...asked });
 
     if (charge > (borrows ? await this.limit(now) : cap)) {
-      await this.want(borrows, others, charge, now);
+      await this.want(borrows, holds, asked, now);
 
       return null;
     }
@@ -174,9 +182,10 @@ export class ArmadaFleet extends ArmadaSingle {
     return this.reader() === null || lending === undefined || pressed || now - lending.at > SAMPLE_LIFE_MS ? cap : Math.max(cap, lending.limit);
   }
 
-  /** A holder refused beside `others`, which with it would keep `charge`: one that borrows has the account read, where
-   *  the fleet may lend; one that may not, which would fit the cap once the loans end, has them recalled. */
-  private async want(borrows: boolean, others: Record<string, Hold>, charge: number, now: number): Promise<void> {
+  /** The hold `asked` refused beside `holds`: one that borrows has the account read, where the fleet may lend; one that
+   *  may not, which would fit the cap once the loans end, has them recalled. Loans that are not what keeps it out stay:
+   *  recalling them would free nothing it could take. */
+  private async want(borrows: boolean, holds: Record<string, Hold>, asked: Record<string, Hold>, now: number): Promise<void> {
     if (borrows) {
       if (this.reader() === null) return;
       await this.ctx.storage.put('wanted', now);
@@ -187,12 +196,11 @@ export class ArmadaFleet extends ArmadaSingle {
     }
 
     const cap = Number(this.env.FLEET_VCPUS);
-    const lent = chargeOf(others) - chargeOf(Object.fromEntries(Object.entries(others).filter(([, hold]) => hold.borrowed !== true)));
+    const unlent = Object.fromEntries(Object.entries({ ...holds, ...asked }).filter(([, hold]) => hold.borrowed !== true));
 
-    // Loans that are not what keeps it out stay: recalling them would free nothing it could take.
-    if (lent === 0 || charge - lent > cap) return;
+    if (!Object.values(holds).some((hold) => hold.borrowed === true) || chargeOf(unlent) > cap) return;
     await this.ctx.storage.put('pressed', now);
-    await this.recall(others, cap - (charge - chargeOf(others)));
+    await this.recall(holds, cap, asked);
   }
 
   /** Who reads the account for this deployment: none without the token `armada deploy` gives, which it gives empty
@@ -203,12 +211,13 @@ export class ArmadaFleet extends ArmadaSingle {
     return token === '' || account === undefined || name === undefined ? null : { token, account, name };
   }
 
-  /** `holds` with their newest loans recalled until what the rest will keep fits `limit`: a recalled loan still runs
-   *  its tasks, so it counts as gone already. A loan is recalled whole, so the fleet may end a little under `limit`. */
-  private async recall(holds: Record<string, Hold>, limit: number): Promise<Record<string, Hold>> {
+  /** `holds` with their newest loans recalled until what the rest will keep fits `limit`, with `asked` in its
+   *  holder's place: a recalled loan still runs its tasks, so it counts as gone already. A loan is recalled whole, so
+   *  the fleet may end a little under `limit`. */
+  private async recall(holds: Record<string, Hold>, limit: number, asked: Record<string, Hold> = {}): Promise<Record<string, Hold>> {
     const loans = Object.entries(holds).filter(([, hold]) => hold.borrowed === true && hold.recalled !== true).sort(([, left], [, right]) => (right.granted ?? 0) - (left.granted ?? 0));
     const recalled = { ...holds };
-    const kept = (): number => chargeOf(Object.fromEntries(Object.entries(recalled).filter(([, hold]) => hold.recalled !== true)));
+    const kept = (): number => chargeOf(Object.fromEntries(Object.entries({ ...recalled, ...asked }).filter(([, hold]) => hold.recalled !== true)));
     let changed = false;
 
     for (const [holder, hold] of loans) {
