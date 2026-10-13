@@ -210,11 +210,14 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  fleet's. Its boot counts the wait from its request to its next grant (`Boot.waitMs`), so the start it gave up is
    *  no start of its own. */
   private async waitForRoom(spec: VesselSpec): Promise<void> {
-    await letGo(this.ctx, this.env, { holder: this.holder(spec), inactivityMs: INACTIVITY_MS });
     await this.ctx.storage.delete('restarts');
     await this.ctx.storage.put('state', 'waiting' satisfies State);
-    await this.env.JOB.getByName(spec.jobId).moved(spec.name, 'waiting');
+    await letGo(this.ctx, this.env, { holder: this.holder(spec), inactivityMs: INACTIVITY_MS });
+
+    // Letting go let other calls in: a vessel stopped meanwhile stays stopped.
+    if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return;
     await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
+    await this.env.JOB.getByName(spec.jobId).moved(spec.name, 'waiting');
   }
 
   /** The vessel ended as `state`: it takes up no task again, its container goes, and its capacity returns once the

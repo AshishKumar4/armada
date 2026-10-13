@@ -541,6 +541,8 @@ export async function startAndAnswer(container: Container, options: ContainerSta
     if (first.status === 'fulfilled') return;
 
     if (gone()) throw new MissingSnapshot(snapshot, ended, { cause: first.reason });
+
+    if (full()) throw new AccountFull(ended, { cause: first.reason });
     const refused = first.reason instanceof Error ? `${first.reason.message} ${String(first.reason.cause)}` : String(first.reason);
     // The runtime killed the container as it came up: a restored snapshot's first exec exits 137 (146 of a suite's 208
     // containers at once on 2026-10-10). It is started again, as one whose start ended is.

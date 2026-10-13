@@ -542,45 +542,81 @@ describe('a vessel\'s boot', () => {
     expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 2000 } }] });
   });
 
-  test('waits for room when the account is full, as for its fleet, spending no replacement, and boots once there is', async () => {
+  /** A vessel whose container's every start the platform ends while the account is full, and whose fleet gives a
+   *  hold back as `release` does. */
+  function crowded(release: (holder: string) => Promise<void>) {
     Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
     const moved: string[] = [];
-    const released: string[] = [];
     const failed: string[] = [];
-    let starts = 0;
-    let full = true;
+    const account = { full: true, starts: 0 };
 
     // The platform ends a start past the account's limit, and says why only through the container's monitor.
     const box = Object.assign(container((argv) => {
-      if ((argv[2] ?? '').includes('echo ready')) return full ? new Error('The container has not been started') : { exitCode: 0, stdout: 'ready\n' };
+      if ((argv[2] ?? '').includes('echo ready')) return account.full ? new Error('Network connection lost.') : { exitCode: 0, stdout: 'ready\n' };
 
       return { exitCode: 0, stdout: '' };
     }), {
-      start: () => { starts += 1; },
+      start: () => { account.starts += 1; },
       monitor: async () => {
-        if (full) throw new Error('Account resource limit exceeded');
+        if (account.full) throw new Error('Account resource limit exceeded');
         await new Promise<never>(() => undefined);
       },
     });
 
-    const vessel = new ArmadaVessel(state(box).ctx, world({
-      FLEET: namespace(() => ({ acquire: async () => true, release: async (holder: string) => { released.push(holder); } })),
+    const stored = state(box);
+
+    const vessel = new ArmadaVessel(stored.ctx, world({
+      FLEET: namespace(() => ({ acquire: async () => true, release })),
       JOB: namespace(() => ({
         moved: async (_name: string, to: string) => { moved.push(to); }, booted: async () => undefined, claim: async () => null, retired: async () => undefined,
         vesselFailed: async (_name: string, error: string) => { failed.push(error); },
       })),
     }));
 
+    return { vessel, stored, moved, failed, account };
+  }
+
+  test('waits for room when the account is full, as for its fleet, spending no replacement, and boots once there is', async () => {
+    const released: string[] = [];
+    const { vessel, moved, failed, account } = crowded(async (holder) => { released.push(holder); });
+
     await vessel.begin(spec);
     await vessel.alarm();
-    const refused = { starts, moved: [...moved], released: [...released] };
+    const refused = { starts: account.starts, moved: [...moved], released: [...released] };
 
-    full = false;
+    account.full = false;
     await vessel.alarm();
 
     expect({ refused, failed, moved }).toEqual({
       refused: { starts: 1, moved: ['booting', 'waiting'], released: ['job/v1'] }, failed: [], moved: ['booting', 'waiting', 'booting'],
     });
+  });
+
+  test('stays stopped when its job stops it while it gives back its hold for a full account', async () => {
+    const releasing = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    let releases = 0;
+
+    const { vessel, stored, moved, account } = crowded(async () => {
+      releases += 1;
+
+      if (releases === 1) {
+        releasing.resolve();
+        await released.promise;
+      }
+    });
+
+    await vessel.begin(spec);
+    const booting = vessel.alarm();
+
+    await releasing.promise;
+    await vessel.stop();
+    released.resolve();
+    await booting;
+    account.full = false;
+    await vessel.alarm();
+
+    expect({ starts: account.starts, moved, alarm: await stored.ctx.storage.getAlarm() }).toEqual({ starts: 1, moved: ['booting'], alarm: null });
   });
 
   test('taken up again after its object restarted mid-start, tells the starts made before and its own', async () => {
