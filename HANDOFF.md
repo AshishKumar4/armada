@@ -69,9 +69,11 @@
     (`ArmadaFleet.admitJob`). Each type an object stores is exported, so its shape is in the fingerprint. Either way a
     redeploy needs the owner's go-ahead. On 2026-10-12 a takeover of armada-dew3 across an interface change, before
     this check, let objects on the old code misread the new calls for minutes: its fleet dropped every hold.
-  - Their next deploy from `main` drains (their Workers report no contract), then refuses new jobs for about 5 min
-    while the deployment-wide objects still run the old code (measured on armada-ci2: 296 s). Borrowing past the cap
-    needs `ARMADA_ACCOUNT_TOKEN` at that deploy.
+  - armada-v2 and nimbus-armada-v2 run wire 10, redeployed on 2026-10-14 with the user's go-ahead, and report a
+    contract: a deploy whose contract matches theirs takes over without a drain. armada-dew3 still runs `1879a66`, which
+    reports no contract, so its next deploy drains, then refuses new jobs for about 5 min while the deployment-wide
+    objects still run the old code (measured on armada-ci2: 296 s). Borrowing past the cap needs
+    `ARMADA_ACCOUNT_TOKEN` at a deploy.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every
