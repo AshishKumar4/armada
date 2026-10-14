@@ -313,7 +313,8 @@ describe('a deploy', () => {
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }
-  });
+    // Four Bun processes, each a TypeScript program over the objects: 1 s on a desktop, past 5 s on an AMD 25/1 host.
+  }, 30_000);
 });
 
 describe('a deployment\'s wrangler config', () => {
