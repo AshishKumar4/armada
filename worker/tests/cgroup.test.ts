@@ -114,12 +114,18 @@ describe.skipIf(!host)('packed tasks', () => {
       const exits = [0, 1].map((slot) => sh(waitOn(slotTask(slot)), '20').stdout.toString().trim());
       const usage = [0, 1].map((slot) => usageFrom(sh(usageOf(taskGroup(slot), slotRoot(slot))).stdout.toString()));
       const parent = readFileSync(`${taskGroup(0)}/../memory.max`, 'utf8').trim();
+      // How often the slot reached its own cap.
+      const ownOom = (slot: number) => /^oom (\d+)$/mu.exec(readFileSync(`${taskGroup(slot)}/memory.events`, 'utf8'))?.[1];
 
-      // Whichever the kernel chose: one task killed, its own usage saying so, and both measured on disk.
-      const ended = [0, 1].map((slot) => [exits[slot], usage[slot]?.oomKilled ?? false, (usage[slot]?.diskBytes ?? -1) >= 0]);
+      // Whichever the kernel chose: each task killed or ended at its timeout, its own usage saying which, both measured
+      // on disk, and only the cap over them all reached. The kernel may kill both: it can choose again before the first
+      // one's memory is uncharged (1 run in 6 to 10 under load, 2026-10-14).
+      const ended = [0, 1].map((slot) => [exits[slot], usage[slot]?.oomKilled ?? false, (usage[slot]?.diskBytes ?? -1) >= 0, ownOom(slot)]);
+      const killed = ['137', true, true, '0'];
+      const timedOut = ['124', false, true, '0'];
 
-      expect({ parent, ended: ended.toSorted((left, right) => String(left[0]).localeCompare(String(right[0]))) })
-        .toEqual({ parent: String(cap), ended: [['124', false, true], ['137', true, true]] });
+      expect(parent).toBe(String(cap));
+      expect(ended.toSorted((left, right) => String(left[0]).localeCompare(String(right[0])))).toBeOneOf([[timedOut, killed], [killed, killed]]);
     } finally {
       for (const slot of [0, 1]) sh(killOf(slotTask(slot), taskGroup(slot)));
       sh(`echo max > ${taskGroup(0)}/../memory.max; [ ! -e ${taskGroup(0)}/../memory.swap.max ] || echo max > ${taskGroup(0)}/../memory.swap.max`);
