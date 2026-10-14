@@ -35,8 +35,9 @@ armada is a Worker, a few Durable Objects and an R2 bucket in your account, so y
    with a higher `weight` start first.
 4. Results stream back as they land. A small output rides in the result; a large one, and every log, goes to R2.
 
-Each task runs as the user `ci` in its own cgroup, and armada stops anything it leaves running. A task the platform
-loses runs again, up to three attempts, so a task should be safe to run twice.
+Each task runs as the user `ci` in its own cgroup. `ARMADA_CGROUP` names it, and the task may make groups under it;
+its path depends on how the job packs. armada stops anything a task leaves running. A task the platform loses runs
+again, up to three attempts, so a task should be safe to run twice.
 
 ## Measured
 

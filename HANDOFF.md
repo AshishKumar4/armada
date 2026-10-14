@@ -75,8 +75,8 @@
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every
-    task that made a case group failed with ENOENT. When Nimbus moves its client to `main`, it sets `task.mode` to
-    `fast` or finds its group in `/proc/self/cgroup`.
+    task that made a case group failed with ENOENT. When Nimbus moves its client to `main`, it reads its group from
+    `ARMADA_CGROUP`, which every task gets, or sets `task.mode` to `fast`.
 - `connection.json`, `armada-kinu.json`, `armada-kinu-v1.json` and `armada-dew.json` belong to deployments that are
   gone. Leave them alone; an agent may still read one. Dew's `armada-dew2.destroy.json` is its own unfinished destroy.
 
