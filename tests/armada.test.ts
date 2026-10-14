@@ -877,6 +877,8 @@ interface Runner {
   readonly lose?: number;
   /** Run from a bare clone, with no checkout, as the webhook driver fetches a commit. */
   readonly bare?: boolean;
+  /** The timings upload is refused, as #43's 500 SQLITE_TOOBIG was. */
+  readonly timingsRefused?: boolean;
 }
 
 /** The host most containers ran on (2026-10-13). */
@@ -886,7 +888,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -930,6 +932,10 @@ describe('armada run', () => {
         if (pathname === '/environments/resolve') return Response.json({ key: 'k'.repeat(64), base: baseOf(seen.filter((each) => each === 'POST /environments/resolve').length - 1) });
 
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json(timings);
+
+        if (pathname === '/timings/proj' && request.method === 'POST' && timingsRefused === true) {
+          return Response.json({ error: 'string or blob too big: SQLITE_TOOBIG' }, { status: 500 });
+        }
 
         if (pathname === '/jobs') {
           const body: unknown = await request.json();
@@ -1182,6 +1188,15 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), narrowed: told(ran), full: told(full) })
       .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true } });
+  });
+
+  // #43: the upload was refused after a green verdict, the run exited non-zero with no report line, and a release read it red.
+  test('a green run whose timings are refused stays green, says so, and names its report', async () => {
+    const ran = await run([], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, { timingsRefused: true });
+    const said = ran.stdout + ran.stderr;
+
+    expect({ exit: ran.exit, uploaded: ran.seen.includes('POST /timings/proj'), noted: said.includes('timings were not recorded'), pass: said.includes('PASS'), report: /report: \S+/u.test(said) })
+      .toEqual({ exit: 0, uploaded: true, noted: true, pass: true, report: true });
   });
 
   test('a CI deadline passed before the task jobs could start leaves the run ungraded, with its report and its --json object (#37)', async () => {
