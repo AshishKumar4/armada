@@ -66,11 +66,28 @@ export function state(held?: Container): Stored {
   let alarm: number | null = null;
   const db = new Database(':memory:');
 
+  // The platform's own bounds on the key-value API: one call names at most 128 keys, and a value is at most 2 MB, past
+  // which SQLite refuses it as too big (armada#43, a project's timings in one value).
+  const bounded = (keys: number) => {
+    if (keys > 128) throw new Error(`a storage call takes at most 128 keys, not ${String(keys)}`);
+  };
+
   const storage = {
-    get: async (key: string | readonly string[]) => many(key) ? new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : []))
-      : structuredClone(entries.get(key)),
+    get: async (key: string | readonly string[]) => {
+      if (many(key)) bounded(key.length);
+
+      return many(key) ? new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : []))
+        : structuredClone(entries.get(key));
+    },
     put: async <T>(key: string | Readonly<Record<string, T>>, value?: T) => {
-      for (const [name, each] of v.is(v.string(), key) ? [[key, value] as const] : Object.entries(key)) entries.set(name, structuredClone(each));
+      const written = v.is(v.string(), key) ? [[key, value] as const] : Object.entries(key);
+
+      bounded(written.length);
+
+      for (const [name, each] of written) {
+        if (new TextEncoder().encode(JSON.stringify(each)).length > 2_000_000) throw new Error('string or blob too big: SQLITE_TOOBIG');
+        entries.set(name, structuredClone(each));
+      }
     },
     delete: async (keys: string | readonly string[]) => many(keys) ? keys.filter((key) => entries.delete(key)).length : entries.delete(keys),
     // As the platform lists: in key order, `end` exclusive, `limit` keys from the end `reverse` names.
