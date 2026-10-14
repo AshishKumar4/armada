@@ -177,7 +177,7 @@ describe('a drained version', () => {
     expect({ refused, open: await fleet.jobs() }).toEqual({ refused: 'RequestError: POST /jobs: 400 a job that is not open needs an item', open: 0 });
   });
 
-  test('counts closed a job its own record says is done, and one never made long after it was admitted', async () => {
+  test('counts closed a job its own record says is done, and one never made long after it was admitted, in its health as in a drain', async () => {
     const { armada, fleet } = deployment();
     const done = await armada.create(spec);
 
@@ -186,14 +186,15 @@ describe('a drained version', () => {
     await fleet.opened(done);
     await fleet.admitJob('a', undefined, 'never-made');
     const making = await armada.create({ ...spec, open: true });
-    const before = await armada.drain();
+    // Its health counts first: a deploy's watcher or the dashboard reads it with no drain before.
+    const before = [(await armada.health()).jobs, await armada.drain()];
 
     setSystemTime(new Date(Date.now() + 11 * 60_000));
 
     try {
-      const after = await armada.drain();
+      const after = [(await armada.health()).jobs, await armada.drain()];
 
-      expect({ before, after, open: await fleet.open() }).toEqual({ before: 2, after: 1, open: [making] });
+      expect({ before, after, open: await fleet.open() }).toEqual({ before: [2, 2], after: [1, 1], open: [making] });
     } finally {
       setSystemTime();
     }
