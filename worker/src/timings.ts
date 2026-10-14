@@ -14,20 +14,12 @@ import type { Env } from './env';
 /** The most keys one storage call takes. */
 const KEYS_A_CALL = 128;
 
-/** The one value every sample was kept in before #43, split into keys of their own the first time it is read. */
-interface History {
-  readonly rows: Record<string, number[]>;
-  readonly files: Record<string, number[]>;
-  readonly usage?: Record<string, number[]>;
-}
-
 function chunks<T>(items: readonly T[]): T[][] {
   return Array.from({ length: Math.ceil(items.length / KEYS_A_CALL) }, (_, at) => items.slice(at * KEYS_A_CALL, (at + 1) * KEYS_A_CALL));
 }
 
 export class ArmadaTimings extends DurableObject<Env> {
   async record(timings: Timings): Promise<void> {
-    await this.#split();
     const keyed = { ...prefixed('row:', timings.rows), ...prefixed('file:', timings.files) };
     const held = new Map<string, number[]>();
 
@@ -45,7 +37,6 @@ export class ArmadaTimings extends DurableObject<Env> {
   }
 
   async estimates(): Promise<Timings> {
-    await this.#split();
     const { memory = [], cores = [] } = await this.ctx.storage.get<Record<string, number[]>>('usage') ?? {};
 
     return {
@@ -58,18 +49,6 @@ export class ArmadaTimings extends DurableObject<Env> {
     const listed = await this.ctx.storage.list<number[]>({ prefix });
 
     return Object.fromEntries([...listed].map(([key, samples]) => [key.slice(prefix.length), samples]));
-  }
-
-  async #split(): Promise<void> {
-    const history = await this.ctx.storage.get<History>('history');
-
-    if (history === undefined) return;
-    const keyed = { ...prefixed('row:', history.rows), ...prefixed('file:', history.files) };
-
-    for (const keys of chunks(Object.keys(keyed))) await this.ctx.storage.put(Object.fromEntries(keys.map((key) => [key, keyed[key]])));
-
-    if (history.usage !== undefined) await this.ctx.storage.put('usage', history.usage);
-    await this.ctx.storage.delete('history');
   }
 }
 

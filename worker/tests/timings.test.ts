@@ -32,16 +32,4 @@ describe('a project\'s timings', () => {
     expect({ rows: Object.keys(rows).length, row: rows[`bun test ${name('row', 7)}`], files: Object.keys(files).length, file: files[name('file', 19_999)] })
       .toEqual({ rows: 103, row: 3, files: 20_000, file: 3000.369 });
   });
-
-  test('keep what one value held before #43, each row and file under its own key', async () => {
-    const stored = state();
-
-    await stored.ctx.storage.put('history', { rows: { a: [1, 2, 3] }, files: { 'f.ts': [10] }, usage: { memory: [4], cores: [2] } });
-    const timings = new ArmadaTimings(stored.ctx, world({}));
-
-    await timings.record({ rows: { a: 5 }, files: {} });
-
-    expect({ estimates: await timings.estimates(), history: await stored.ctx.storage.get('history') })
-      .toEqual({ estimates: { rows: { a: 2.5 }, files: { 'f.ts': 10 }, usage: { memory: 4, cores: 2 } }, history: undefined });
-  });
 });
