@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, TimingsSchema, type HookConfig, type Json,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -134,12 +134,22 @@ const bundles: Handler = async (request, env, [digest]) => {
 
 const Items = v.object({ items: v.pipe(v.array(TaskSchema), v.minLength(1)) });
 
+/** The wire `request`'s client speaks. A request with no version is from a client older than the version was. */
+const spokenBy = (request: Request): number => Number(request.headers.get(PROTOCOL_HEADER) ?? '1');
+
+/** The first wire every client of which knows a job's `mode`. Packing came within wire 8: a client before it was written
+ *  for one task a container, and may count on it (a task's cgroup at `TASK_GROUP`). */
+const MODES = 9;
+
 /** `POST /jobs`: the job `created`, which the fleet has already admitted and counts open, made from the request's spec,
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
   const body: unknown = await request.json();
   const spec = v.parse(JobSpecSchema, body);
-  const requested = v.parse(v.object({ timeout: v.optional(v.number()) }), body);
+  const requested = v.parse(v.object({ timeout: v.optional(v.number()), mode: v.optional(ModeSchema) }), body);
+
+  // A client that may not know modes packs only when it asks to.
+  if (requested.mode === undefined && spokenBy(request) < MODES) spec.mode = 'fast';
   const refused = deadlineRefusal(requested.timeout, spec.deadline) ?? refusal(spec.run, spec.items, spec.pool, spec.slots) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
@@ -641,9 +651,9 @@ const CORS = {
 /** The API under the bearer, in the versions of the wire this Worker serves. */
 async function api(request: Request, env: Env): Promise<Response> {
   if (!authorized(request, env)) return Response.json({ error: 'forbidden' }, { status: 403 });
-  // A request with no version is from a client older than the version was. The drain and the health are the same in
-  // every version, so a deploy drains the version it replaces whatever version it speaks.
-  const spoken = Number(request.headers.get(PROTOCOL_HEADER) ?? '1');
+  // The drain and the health are the same in every version, so a deploy drains the version it replaces whatever version
+  // it speaks.
+  const spoken = spokenBy(request);
   const head = new URL(request.url).pathname.split('/')[1];
 
   if ((spoken < OLDEST_CLIENT || spoken > PROTOCOL) && head !== 'drain' && head !== 'health') {

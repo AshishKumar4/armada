@@ -276,7 +276,7 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 | Job option | Meaning |
 |---|---|
 | `pool` | The most containers the job runs on. |
-| `mode` | `efficient`, the default, packs tasks into containers by their recorded use. `fast` runs one a container. Packed tasks share the network, so tasks that bind a fixed port need `fast`. |
+| `mode` | `efficient`, the default, packs tasks into containers by their recorded use. `fast` runs one a container. Packed tasks share the network, so tasks that bind a fixed port need `fast`. A client older than wire 9 can't name a mode, so its jobs run `fast`. |
 | `slots` | More than one runs exactly that many tasks at once in each container, each in its own slot with an even share of memory, and turns packing off. A gang can't run in slots. |
 | `cpu` | The CPU every container's host has, as `/proc/cpuinfo` names it: `{ vendor: 'AuthenticAMD', family: 25, model: 17 }` (`--cpu=AuthenticAMD/25/17`). A container on another host is replaced before it takes a task. |
 | `label`, `env`, `files`, `tmpfs` | The job's name in the dashboard, its environment, its small files (`{files}`), and the paths that get a fresh tmpfs. |

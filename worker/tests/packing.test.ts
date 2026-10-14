@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { environmentKey, JobSpecSchema, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
+import { environmentKey, JobSpecSchema, PROTOCOL, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEstimates, itemKey, MIN_SAMPLES, type Usage } from '../src/estimates';
 import { ArmadaJob, type Claim } from '../src/job';
+import worker from '../src/worker';
 import { namespace, READY, runOf, state, world } from './harness';
 
 const GIB = 2 ** 30;
@@ -56,16 +57,24 @@ async function learned(sample: Usage, answers?: () => boolean): Promise<Stores> 
   return made;
 }
 
-/** A job of `items` on a ready medium environment, its classes' stores `estimates`: the job, and the vessels it began. */
-async function packing(items: readonly Json[], estimates: Stores, more: Partial<v.InferInput<typeof JobSpecSchema>> = {}) {
+/** What a job reaches on a ready medium environment, its classes' stores `estimates`, and the vessels it began. */
+function reached(estimates: Stores) {
   const begun: string[] = [];
-  const stored = state();
 
-  const created = new ArmadaJob(stored.ctx, world({
-    VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name.slice('j1/'.length)); }, stop: async () => true })),
+  const env = world({
+    VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name.split('/').at(-1) ?? name); }, stop: async () => true })),
     ENVIRONMENTS: namespace(() => ({ used: async () => undefined, ensure: async () => ({ kind: 'ready', generation: READY }) })),
     ESTIMATES: estimates.space,
-  }));
+  });
+
+  return { env, begun };
+}
+
+/** A job of `items` on a ready medium environment, its classes' stores `estimates`: the job, and the vessels it began. */
+async function packing(items: readonly Json[], estimates: Stores, more: Partial<v.InferInput<typeof JobSpecSchema>> = {}) {
+  const { env, begun } = reached(estimates);
+  const stored = state();
+  const created = new ArmadaJob(stored.ctx, env);
 
   await created.create('j1', v.parse(JobSpecSchema, { recipe: { size: 'medium' }, items: items.map((item) => ({ item, argv: argvOf(item) })), run: { kind: 'command' }, pool: 4, ...more }));
   await created.alarm();
@@ -155,6 +164,27 @@ describe('an efficient job', () => {
     await job.alarm();
 
     expect({ begun, meanwhile, after: await slotsOf(job, 'v1', 2, 2) }).toEqual({ begun: ['v1', 'v2', 'v3'], meanwhile: [0, null], after: [1, 2] });
+  });
+
+  test('is only what a client that knows modes asks for: an older client\'s job runs one task a container, as it was written for', async () => {
+    // As each client sends it: a client that knows modes names one only when its user does.
+    const sent = async (protocol: number, mode?: 'efficient') => {
+      const { env, begun } = reached(await learned(SMALL));
+      const body = { recipe: { size: 'medium' }, items: ['a', 'b', 'c'].map((item) => ({ item, argv: argvOf(item) })), run: { kind: 'command' }, pool: 4, mode };
+      let created: ArmadaJob | undefined;
+
+      const answer = await worker.fetch(new Request('https://armada.test/jobs', {
+        method: 'POST', body: JSON.stringify(body), headers: { authorization: `Bearer ${env.ARMADA_TOKEN}`, 'armada-protocol': String(protocol), 'content-type': 'application/json' },
+      }), world({ JOB: namespace(() => created ??= new ArmadaJob(state().ctx, env)) }));
+
+      await created?.alarm();
+
+      return [answer.status, begun];
+    };
+
+    expect({ wire7: await sent(7), wire8: await sent(8), wire8Efficient: await sent(8, 'efficient'), current: await sent(PROTOCOL) }).toEqual({
+      wire7: [200, ['v1', 'v2', 'v3']], wire8: [200, ['v1', 'v2', 'v3']], wire8Efficient: [200, ['v1']], current: [200, ['v1']],
+    });
   });
 
   test('delivers each run\'s use once, though two sends carry it at once', async () => {
