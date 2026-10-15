@@ -362,6 +362,35 @@ describe('tasks whose containers the platform loses one after another', () => {
   });
 });
 
+describe('a task whose copy\'s vessel was lost with another task', () => {
+  test('counts that loss as its own, so its later losses alone fail it', async () => {
+    const items = [{ item: { name: 'a', weight: 9 }, argv: ['true'] }, { item: { name: 'b', weight: 1 }, argv: ['true'] }];
+    const { job: hedged } = await job({ recipe: {}, items, run: { kind: 'command' }, hedge: 1, slots: 2 });
+    const claimed = [];
+
+    // a runs on v1 beside b, and its copy on v2; v1 is lost with both, a goes on on v2, and v2, v3 and v4 are lost
+    // under a alone.
+    for (const [vessel, slot] of [['v1', 0], ['v1', 1], ['v2', 0]] as const) {
+      const claim = await hedged.claim(vessel, slot);
+
+      claimed.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
+    }
+
+    await hedged.vesselFailed('v1', 'the container ended: Network connection lost.');
+    await hedged.vesselFailed('v2', 'the container ended: Network connection lost.');
+
+    for (const vessel of ['v3', 'v4']) {
+      const claim = await hedged.claim(vessel);
+
+      claimed.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
+      await hedged.vesselFailed(vessel, 'the container ended: Network connection lost.');
+    }
+
+    expect({ claimed, events: (await hedged.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.reason]) })
+      .toEqual({ claimed: [[0, false], [1, false], [0, true], [0, false], [0, false]], events: [[0, 'failed', 'lost']] });
+  });
+});
+
 describe('a vessel lost before it took a task', () => {
   test('is replaced apart from the losses under a task, as many as the job\'s pool, and past them each costs a place in it', async () => {
     const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });

@@ -142,7 +142,7 @@ const INFRA_ATTEMPTS = 3;
  *  its tasks was lost three times and reported failed. */
 const LOSS_WINDOW_MS = 10 * 60_000;
 
-/** A loss of a vessel under tasks: when, and the tasks it lost (`LOSS_WINDOW_MS`). */
+/** A loss of a vessel under tasks: when, and every task it ran then (`LOSS_WINDOW_MS`). */
 interface Loss {
   readonly at: number;
   readonly tasks: readonly number[];
@@ -1062,15 +1062,18 @@ export class ArmadaJob extends DurableObject<Env> {
       else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
+    // Every task it ran, a copy or a gang's rank included, whichever goes on elsewhere: any of them may have ended it.
+    const ran = this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE (vessel = ? OR dup = ?) AND state IN ('running', 'landing')
+      UNION SELECT m.idx FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`,
+    name, name, name).toArray().map(({ idx }) => idx);
+
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
     // Each task lost with it counts the loss as its own unless another vessel was lost under other tasks just before.
     const now = Date.now();
     const recent = ((await this.ctx.storage.get<Loss[]>('losses')) ?? []).filter((loss) => now - loss.at < LOSS_WINDOW_MS);
-    const lostHere: number[] = [];
 
     const lose = (index: number, infra: number): void => {
-      lostHere.push(index);
       this.lost(index, infra, { vessel: name, error, stormed: recent.some((loss) => !loss.tasks.includes(index)) });
     };
 
@@ -1090,7 +1093,7 @@ export class ArmadaJob extends DurableObject<Env> {
       }
     }
 
-    if (lostHere.length > 0) await this.ctx.storage.put('losses', [...recent, { at: now, tasks: lostHere } satisfies Loss]);
+    if (ran.length > 0) await this.ctx.storage.put('losses', [...recent, { at: now, tasks: ran } satisfies Loss]);
 
     const generation = await this.ctx.storage.get<Generation>('environment');
 
