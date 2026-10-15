@@ -409,7 +409,11 @@ describe('an open job given a gang wider than its vessels reserved', () => {
     await open.alarm();
     await open.add([{ item: { gang: 2 }, argv: ['true'] }, { item: 'b', argv: ['true'] }]);
     // v1 reserved one container's vCPUs: it takes the task it covers, and leaves once none is left.
-    const taken = [await open.claim('v1'), await open.claim('v1')].map((claim) => claim === null || 'waitMs' in claim ? claim : claim.index);
+    const first = await open.claim('v1');
+
+    await open.accept('v1', 0, 0, { slot: 0, attempt: 1 });
+    await open.complete('v1', exited(0, 'v1'), 1000);
+    const taken = [first, await open.claim('v1')].map((claim) => claim === null || 'waitMs' in claim ? claim : claim.index);
     const ranks = await formed(open, ['v2', 'v3']);
 
     expect({ taken, reserves: Object.fromEntries(reserves), ranks: ['v2', 'v3'].map((name) => ranks[name]?.gang?.rank) })
@@ -617,6 +621,8 @@ describe('a slotted job', () => {
     await open.add([task, task]);
     await open.claim('v1', 0);
     await open.claim('v1', 1);
+    await open.accept('v1', 0, 0, { slot: 0, attempt: 1 });
+    await open.complete('v1', { ...exited(0, 'v1'), slot: 0 }, 1000);
     const idle = await open.claim('v1', 0);
     await open.add([task]);
 
@@ -1179,7 +1185,11 @@ describe('a job deadline', () => {
       setSystemTime(began + 20_000);
       await open.alarm();
 
-      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: { kind: 'failed', reason: 'lost', tail: 'JobDeadlineExceeded: the job did not finish within 20 s' } }] });
+      // The outcome names the vessel that still held the task and its attempt.
+      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: {
+        kind: 'failed', reason: 'lost', vessel: 'v1', attempt: 1,
+        tail: 'JobDeadlineExceeded: the job did not finish within 20 s: task 0 attempt 1 still ran on v1',
+      } }] });
       expect(stopped).toEqual(['j1/v1']);
     } finally {
       setSystemTime();

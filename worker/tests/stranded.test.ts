@@ -32,6 +32,7 @@ async function running({
   const vessels = new Map<string, { vessel: ArmadaVessel; readonly stored: Stored }>();
   const launches: string[] = [];
   const stored = state();
+
   const env = world({
     ENVIRONMENTS: readyRegistry(),
     FLEET: namespace(() => fleet),
@@ -64,11 +65,13 @@ async function running({
       if (held === undefined) {
         const name = holder.slice(holder.lastIndexOf('/') + 1);
         const respond = answer?.(name) ?? answered;
+
         const machine = container((argv, options) => {
           if (argv[3] === 'launch') launches.push(name);
 
           return respond(argv, options);
         });
+
         const kept = state(machine);
 
         held = { vessel: new ArmadaVessel(kept.ctx, env), stored: kept };
@@ -78,6 +81,7 @@ async function running({
       return held.vessel;
     }),
   });
+
   const fleet = new ArmadaFleet(state().ctx, env);
   const open = new ArmadaJob(stored.ctx, env);
 
@@ -172,6 +176,7 @@ describe('a task whose vessel loses its claim reply (#45)', () => {
   test('also recovers a reset after launch but before Current was persisted, without replaying the ambiguous launch', async () => {
     const launched = Promise.withResolvers<void>();
     let dropped = false;
+
     const run = await running({
       answer: (name) => async (argv) => {
         if (name === 'v1' && argv[3] === 'launch' && !dropped) {
@@ -237,6 +242,7 @@ describe('a task whose vessel is actually lost or silent (#45 controls)', () => 
     const booting = Promise.withResolvers<void>();
 
     setSystemTime(start);
+
     const run = await running({
       count: 2,
       answer: (name) => async (argv) => {
@@ -256,6 +262,7 @@ describe('a task whose vessel is actually lost or silent (#45 controls)', () => 
         return answered(argv);
       },
     });
+
     const losing = run.vessel('v1').vessel.alarm();
 
     await Promise.race([losing, waiting.promise]);
@@ -290,6 +297,7 @@ describe('a task whose vessel is actually lost or silent (#45 controls)', () => 
     const finish = Promise.withResolvers<void>();
 
     setSystemTime(start);
+
     const run = await running({
       count: 2, retries: { attempts: 2, backoffSeconds: 300, exitCodes: [75], errors: [] },
       answer: (name) => async (argv) => {
@@ -303,6 +311,7 @@ describe('a task whose vessel is actually lost or silent (#45 controls)', () => 
         return answered(argv);
       },
     });
+
     const failing = run.vessel('v1').vessel.alarm();
 
     await Promise.race([failing, waiting.promise]);
