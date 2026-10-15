@@ -97,7 +97,7 @@ describe('a task\'s status token', () => {
 });
 
 describe('a run its vessel lost track of', () => {
-  test('stays in its task\'s status, beside the next run in that slot, until the vessel\'s container is gone', async () => {
+  test('stays in its task\'s status until its container is gone; the ambiguous slot cannot silently take another task', async () => {
     const id = '20261010120000-4567abcd';
 
     const env = world({
@@ -117,16 +117,18 @@ describe('a run its vessel lost track of', () => {
     const token = first.env['ARMADA_STATUS_TOKEN'] ?? '';
     const ask = async (index: number) => v.parse(TaskStatusSchema, await (await worker.fetch(new Request(`https://armada.test/status/${id}/${String(index)}`, { headers: { authorization: `Bearer ${token}` } }), env)).json());
 
-    // Restarted with its slot's record lost, v1 asks for its slot's next task while the first may still run; a word
-    // that names no run, as an earlier vessel's, ends none.
-    await restarted.claim('v1');
-    await restarted.accept('v1', 1, 0);
-    const both = await Promise.all([ask(0), ask(1)]);
+    // A reset with no Current cannot safely repeat a launch or overwrite it with another. The job refuses the
+    // claim; the vessel's alarm then reports a loss. A stop not confirmed keeps the first run in status.
+    await expect(restarted.claim('v1')).rejects.toThrow('before task 0 attempt 1 ended');
+    await restarted.vesselFailed('v1', 'the slot lost its claim', { gone: false });
+    await restarted.claim('v2');
+    const both = await ask(0);
 
     await restarted.retired('v1', true);
-    const gone = await Promise.all([ask(0), ask(1)]);
+    const gone = await ask(0);
 
-    expect([both, gone].map((each) => each.map((status) => status.running.map((run) => run.vessel)))).toEqual([[['v1'], ['v1']], [[], []]]);
+    expect([both, gone].map((status) => status.running.map((run) => [run.vessel, run.attempt])))
+      .toEqual([[['v1', 1], ['v2', 2]], [['v2', 2]]]);
   });
 });
 

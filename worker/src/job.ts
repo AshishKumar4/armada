@@ -558,6 +558,13 @@ export class ArmadaJob extends DurableObject<Env> {
     const vessel = this.sql.exec<{ state: VesselRow['state'] }>('SELECT state FROM vessels WHERE name = ?', name).toArray()[0];
 
     if (vessel?.state === 'failed' || vessel?.state === 'done') return null;
+    // A caller asks only when its slot has no Current. If the job still owns a run there, the caller lost its
+    // claim reply, or restarted between launch and storing Current. Reusing the slot would orphan that task (and
+    // may overwrite a process already launched). Fail the vessel through its alarm's catch, which stops the whole
+    // container before requeuing its tasks; never replay an ambiguous launch in the same container.
+    const abandoned = this.unfinished(name, slot)[0];
+
+    if (abandoned !== undefined) throw new Error(`slot ${String(slot)} asked for another task before task ${String(abandoned.idx)} attempt ${String(abandoned.attempts)} ended`);
     this.beat(name, 'working');
     // A vessel that claimed is no longer standing by for a straggler.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
@@ -979,11 +986,27 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** A vessel finished: the queue had nothing left for it. A run it lost track of ends once its container is `gone`. */
   async retired(name: string, gone = false): Promise<void> {
+    // An earlier worker could reuse a slot after losing its claim, then retire with its first task still assigned.
+    // A normal retirement has no unfinished assignment; an abnormal one must take the loss/requeue path.
+    if (this.unfinished(name).length > 0) return await this.vesselFailed(name, 'the vessel retired with an unfinished claim', { gone });
+
     if (gone) this.runs.gone(name);
     // One the fleet recalled may have stood by for a straggler: another stands by instead.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     this.beat(name, 'done');
     await this.settle();
+  }
+
+  /** Plain tasks still owned by this vessel (or slot), whose run never landed. A gang rank may legitimately retire
+   *  while the other ranks run, and a green held for its copy has already been answered, so neither is abandoned. */
+  private unfinished(name: string, slot?: number): { idx: number; attempts: number }[] {
+    return this.sql.exec<{ idx: number; attempts: number }>(`SELECT idx, attempts FROM tasks t
+      WHERE state IN ('running', 'landing') AND idx NOT IN (SELECT idx FROM members)
+      AND ((vessel = ? AND (? IS NULL OR COALESCE(slot, 0) = ?)
+        AND NOT EXISTS (SELECT 1 FROM answered WHERE run = t.idx || '/' || t.attempts || '/' || t.vessel || '/' || COALESCE(t.slot, 0)))
+      OR (dup = ? AND (? IS NULL OR COALESCE(dup_slot, 0) = ?)
+        AND NOT EXISTS (SELECT 1 FROM answered WHERE run = t.idx || '/' || t.attempts || '/' || t.dup || '/' || COALESCE(t.dup_slot, 0))))`,
+    name, slot ?? null, slot ?? null, name, slot ?? null, slot ?? null).toArray();
   }
 
   /** A vessel was lost: its task goes back on the queue (or is failed after its second loss), and a vessel replaces it
@@ -1218,8 +1241,13 @@ export class ArmadaJob extends DurableObject<Env> {
     if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return;
     await this.ctx.storage.put({ problems: [...(await this.ctx.storage.get<string[]>('problems')) ?? [], reason], open: false });
 
-    for (const task of this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state IN ('queued', 'checking', 'forming', 'running', 'landing')`).toArray()) {
-      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds: 0, vessel: '', attempt: 0, tail: reason, output: false };
+    // Each names where it stood: the vessel holding it and its attempt, or none for a task still queued.
+    for (const task of this.sql.exec<{ idx: number; state: string; vessel: string | null; attempts: number }>(
+      `SELECT idx, state, vessel, attempts FROM tasks WHERE state IN ('queued', 'checking', 'forming', 'running', 'landing')`,
+    ).toArray()) {
+      const held = task.state === 'running' || task.state === 'landing';
+      const tail = held ? `${reason}: task ${String(task.idx)} attempt ${String(task.attempts)} still ran on ${task.vessel ?? '?'}` : reason;
+      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds: 0, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false };
 
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
       this.append(outcome);
@@ -1243,6 +1271,13 @@ export class ArmadaJob extends DurableObject<Env> {
   private async watch(): Promise<void> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     const now = Date.now();
+
+    // Repair claims orphaned by an earlier worker's retirement: dead vessels never enter the silent sweep below,
+    // and grow cannot turn a task still marked running back into a queued task, however many idle vessels it boots.
+    for (const { name } of this.sql.exec<{ name: string }>(`SELECT DISTINCT v.name FROM tasks t JOIN vessels v ON v.name = t.vessel OR v.name = t.dup
+      WHERE t.state IN ('running', 'landing') AND v.state IN ('done', 'failed')`).toArray()) {
+      if (this.unfinished(name).length > 0) await this.vesselFailed(name, 'the vessel ended with an unfinished claim');
+    }
 
     for (const vessel of this.sql.exec<{ name: string; state: 'waiting' | 'booting' | 'working'; beat: number }>(`SELECT name, state, beat FROM vessels WHERE state IN ${ALIVE}`).toArray()) {
       if (now - vessel.beat <= SILENT_MS[vessel.state]) continue;
