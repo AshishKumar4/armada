@@ -391,6 +391,36 @@ describe('a task whose copy\'s vessel was lost with another task', () => {
   });
 });
 
+describe('a vessel lost after its task answered', () => {
+  test('is no evidence of the platform\'s for another task\'s losses', async () => {
+    const items = [{ item: { name: 'a', weight: 9 }, argv: ['true'] }, { item: { name: 'b', weight: 1 }, argv: ['true'] }];
+    const { job: hedged } = await job({ recipe: {}, items, run: { kind: 'command' }, hedge: 1 });
+    const claimed = [];
+
+    for (const vessel of ['v1', 'v2', 'v3']) {
+      const claim = await hedged.claim(vessel);
+
+      claimed.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
+    }
+
+    // a answers green on v1, held for its copy on v2, and v1 is lost after; b is then lost three times alone.
+    await hedged.accept('v1', 0, 0);
+    await hedged.complete('v1', exited(0, 'v1'), 1000);
+    await hedged.vesselFailed('v1', 'the stop check failed to run: Network connection lost.');
+    await hedged.vesselFailed('v3', 'the container ended: Network connection lost.');
+
+    for (const vessel of ['v4', 'v5']) {
+      const claim = await hedged.claim(vessel);
+
+      claimed.push(claim === null || 'waitMs' in claim ? null : [claim.index, claim.duplicate]);
+      await hedged.vesselFailed(vessel, 'the container ended: Network connection lost.');
+    }
+
+    expect({ claimed, events: (await hedged.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.reason ?? null]) })
+      .toEqual({ claimed: [[0, false], [0, true], [1, false], [1, false], [1, false]], events: [[1, 'failed', 'lost']] });
+  });
+});
+
 describe('a vessel lost before it took a task', () => {
   test('is replaced apart from the losses under a task, as many as the job\'s pool, and past them each costs a place in it', async () => {
     const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });

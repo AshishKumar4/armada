@@ -1062,10 +1062,12 @@ export class ArmadaJob extends DurableObject<Env> {
       else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
-    // Every task it ran, a copy or a gang's rank included, whichever goes on elsewhere: any of them may have ended it.
-    const ran = this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE (vessel = ? OR dup = ?) AND state IN ('running', 'landing')
-      UNION SELECT m.idx FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`,
-    name, name, name).toArray().map(({ idx }) => idx);
+    // Every task it ran still, a copy or a gang's rank included, whichever goes on elsewhere: any of them may have
+    // ended it. One whose run there answered had ended.
+    const ran = [
+      ...this.unfinished(name).map(({ idx }) => idx),
+      ...this.sql.exec<{ idx: number }>(`SELECT m.idx FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name).toArray().map(({ idx }) => idx),
+    ];
 
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
