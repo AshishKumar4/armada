@@ -1,0 +1,126 @@
+diff --git a/worker/src/job.ts b/worker/src/job.ts
+index 5266f85..da8686d 100644
+--- a/worker/src/job.ts
++++ b/worker/src/job.ts
+@@ -558,6 +558,13 @@ export class ArmadaJob extends DurableObject<Env> {
+     const vessel = this.sql.exec<{ state: VesselRow['state'] }>('SELECT state FROM vessels WHERE name = ?', name).toArray()[0];
+ 
+     if (vessel?.state === 'failed' || vessel?.state === 'done') return null;
++    // A caller asks only when its slot has no Current. If the job still owns a run there, the caller lost its
++    // claim reply, or restarted between launch and storing Current. Reusing the slot would orphan that task (and
++    // may overwrite a process already launched). Fail the vessel through its alarm's catch, which stops the whole
++    // container before requeuing its tasks; never replay an ambiguous launch in the same container.
++    const abandoned = this.unfinished(name, slot)[0];
++
++    if (abandoned !== undefined) throw new Error(`slot ${String(slot)} asked for another task before task ${String(abandoned.idx)} attempt ${String(abandoned.attempts)} ended`);
+     this.beat(name, 'working');
+     // A vessel that claimed is no longer standing by for a straggler.
+     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
+@@ -979,6 +986,9 @@ export class ArmadaJob extends DurableObject<Env> {
+ 
+   /** A vessel finished: the queue had nothing left for it. A run it lost track of ends once its container is `gone`. */
+   async retired(name: string, gone = false): Promise<void> {
++    // An earlier worker could reuse a slot after losing its claim, then retire with its first task still assigned.
++    // A normal retirement has no unfinished assignment; an abnormal one must take the loss/requeue path.
++    if (this.unfinished(name).length > 0) return await this.vesselFailed(name, 'the vessel retired with an unfinished claim', { gone });
+     if (gone) this.runs.gone(name);
+     // One the fleet recalled may have stood by for a straggler: another stands by instead.
+     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
+@@ -986,6 +996,18 @@ export class ArmadaJob extends DurableObject<Env> {
+     await this.settle();
+   }
+ 
++  /** Plain tasks still owned by this vessel (or slot), whose run never landed. A gang rank may legitimately retire
++   *  while the other ranks run, and a green held for its copy has already been answered, so neither is abandoned. */
++  private unfinished(name: string, slot?: number): { idx: number; attempts: number }[] {
++    return this.sql.exec<{ idx: number; attempts: number }>(`SELECT idx, attempts FROM tasks t
++      WHERE state IN ('running', 'landing') AND idx NOT IN (SELECT idx FROM members)
++      AND ((vessel = ? AND (? IS NULL OR COALESCE(slot, 0) = ?)
++        AND NOT EXISTS (SELECT 1 FROM answered WHERE run = t.idx || '/' || t.attempts || '/' || t.vessel || '/' || COALESCE(t.slot, 0)))
++      OR (dup = ? AND (? IS NULL OR COALESCE(dup_slot, 0) = ?)
++        AND NOT EXISTS (SELECT 1 FROM answered WHERE run = t.idx || '/' || t.attempts || '/' || t.dup || '/' || COALESCE(t.dup_slot, 0))))`,
++    name, slot ?? null, slot ?? null, name, slot ?? null, slot ?? null).toArray();
++  }
++
+   /** A vessel was lost: its task goes back on the queue (or is failed after its second loss), and a vessel replaces it
+    *  while there is work it could take. A vessel whose start found its snapshot `missing` is not replaced from it:
+    *  every start from it would fail alike, so the pool refills from the job's environment, prepared again. Its runs
+@@ -1244,6 +1266,13 @@ export class ArmadaJob extends DurableObject<Env> {
+     const id = (await this.ctx.storage.get<string>('id')) ?? '';
+     const now = Date.now();
+ 
++    // Repair claims orphaned by an earlier worker's retirement: dead vessels never enter the silent sweep below,
++    // and grow cannot turn a task still marked running back into a queued task, however many idle vessels it boots.
++    for (const { name } of this.sql.exec<{ name: string }>(`SELECT DISTINCT v.name FROM tasks t JOIN vessels v ON v.name = t.vessel OR v.name = t.dup
++      WHERE t.state IN ('running', 'landing') AND v.state IN ('done', 'failed')`).toArray()) {
++      if (this.unfinished(name).length > 0) await this.vesselFailed(name, 'the vessel ended with an unfinished claim');
++    }
++
+     for (const vessel of this.sql.exec<{ name: string; state: 'waiting' | 'booting' | 'working'; beat: number }>(`SELECT name, state, beat FROM vessels WHERE state IN ${ALIVE}`).toArray()) {
+       if (now - vessel.beat <= SILENT_MS[vessel.state]) continue;
+       const [stopped] = await Promise.allSettled([this.env.VESSEL.getByName(`${id}/${vessel.name}`).stop()]);
+diff --git a/worker/tests/job.test.ts b/worker/tests/job.test.ts
+index 9a602a6..8eb75a9 100644
+--- a/worker/tests/job.test.ts
++++ b/worker/tests/job.test.ts
+@@ -409,7 +409,11 @@ describe('an open job given a gang wider than its vessels reserved', () => {
+     await open.alarm();
+     await open.add([{ item: { gang: 2 }, argv: ['true'] }, { item: 'b', argv: ['true'] }]);
+     // v1 reserved one container's vCPUs: it takes the task it covers, and leaves once none is left.
+-    const taken = [await open.claim('v1'), await open.claim('v1')].map((claim) => claim === null || 'waitMs' in claim ? claim : claim.index);
++    const first = await open.claim('v1');
++
++    await open.accept('v1', 0, 0, { slot: 0, attempt: 1 });
++    await open.complete('v1', exited(0, 'v1'), 1000);
++    const taken = [first, await open.claim('v1')].map((claim) => claim === null || 'waitMs' in claim ? claim : claim.index);
+     const ranks = await formed(open, ['v2', 'v3']);
+ 
+     expect({ taken, reserves: Object.fromEntries(reserves), ranks: ['v2', 'v3'].map((name) => ranks[name]?.gang?.rank) })
+@@ -617,6 +621,8 @@ describe('a slotted job', () => {
+     await open.add([task, task]);
+     await open.claim('v1', 0);
+     await open.claim('v1', 1);
++    await open.accept('v1', 0, 0, { slot: 0, attempt: 1 });
++    await open.complete('v1', { ...exited(0, 'v1'), slot: 0 }, 1000);
+     const idle = await open.claim('v1', 0);
+     await open.add([task]);
+ 
+diff --git a/worker/tests/routes.test.ts b/worker/tests/routes.test.ts
+index aca359f..508a4f3 100644
+--- a/worker/tests/routes.test.ts
++++ b/worker/tests/routes.test.ts
+@@ -97,7 +97,7 @@ describe('a task\'s status token', () => {
+ });
+ 
+ describe('a run its vessel lost track of', () => {
+-  test('stays in its task\'s status, beside the next run in that slot, until the vessel\'s container is gone', async () => {
++  test('stays in its task\'s status until its container is gone; the ambiguous slot cannot silently take another task', async () => {
+     const id = '20261010120000-4567abcd';
+ 
+     const env = world({
+@@ -117,16 +117,18 @@ describe('a run its vessel lost track of', () => {
+     const token = first.env['ARMADA_STATUS_TOKEN'] ?? '';
+     const ask = async (index: number) => v.parse(TaskStatusSchema, await (await worker.fetch(new Request(`https://armada.test/status/${id}/${String(index)}`, { headers: { authorization: `Bearer ${token}` } }), env)).json());
+ 
+-    // Restarted with its slot's record lost, v1 asks for its slot's next task while the first may still run; a word
+-    // that names no run, as an earlier vessel's, ends none.
+-    await restarted.claim('v1');
+-    await restarted.accept('v1', 1, 0);
+-    const both = await Promise.all([ask(0), ask(1)]);
++    // A reset with no Current cannot safely repeat a launch or overwrite it with another. The job refuses the
++    // claim; the vessel's alarm then reports a loss. A stop not confirmed keeps the first run in status.
++    await expect(restarted.claim('v1')).rejects.toThrow('before task 0 attempt 1 ended');
++    await restarted.vesselFailed('v1', 'the slot lost its claim', { gone: false });
++    await restarted.claim('v2');
++    const both = await ask(0);
+ 
+     await restarted.retired('v1', true);
+-    const gone = await Promise.all([ask(0), ask(1)]);
++    const gone = await ask(0);
+ 
+-    expect([both, gone].map((each) => each.map((status) => status.running.map((run) => run.vessel)))).toEqual([[['v1'], ['v1']], [[], []]]);
++    expect([both, gone].map((status) => status.running.map((run) => [run.vessel, run.attempt])))
++      .toEqual([[['v1', 1], ['v2', 2]], [['v2', 2]]]);
+   });
+ });
+ 
