@@ -131,8 +131,22 @@ const REPLACEMENTS = 8;
 const MISPLACED_LIMIT = 20;
 
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
- *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. */
+ *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. Only a loss of its own
+ *  counts (`LOSS_WINDOW_MS`). */
 const INFRA_ATTEMPTS = 3;
+
+/** A task's container lost within this long after another vessel of the job was lost under other tasks was lost with
+ *  the platform's, not its own: it is queued again at no cost to its INFRA_ATTEMPTS, and the job's deadline bounds it.
+ *  On 2026-10-15 a Dew CI run lost 30 of its 97 containers under their tasks in 25 minutes ("Network connection lost",
+ *  on both CPU models, three at the same millisecond), at most 196 s apart, while the run before it lost none; one of
+ *  its tasks was lost three times and reported failed. */
+const LOSS_WINDOW_MS = 10 * 60_000;
+
+/** A loss of a vessel under tasks: when, and every task it ran then (`LOSS_WINDOW_MS`). */
+interface Loss {
+  readonly at: number;
+  readonly tasks: readonly number[];
+}
 
 /** A running task older than this, and than STRAGGLER_WEIGHTS times its weight, is a straggler an idle vessel may
  *  repeat. In Dew's CI a task ran up to 3.2 times its weight, at random rather than by container. */
@@ -1048,9 +1062,24 @@ export class ArmadaJob extends DurableObject<Env> {
       else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
+    // Every task it ran still, a copy or a gang's rank included, whichever goes on elsewhere: any of them may have
+    // ended it. One whose run there answered had ended.
+    const ran = [
+      ...this.unfinished(name).map(({ idx }) => idx),
+      ...this.sql.exec<{ idx: number }>(`SELECT m.idx FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name).toArray().map(({ idx }) => idx),
+    ];
+
     // A lost copy cannot end red: the other copy's held green is reported.
     for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
-    this.lostRank(name, error);
+    // Each task lost with it counts the loss as its own unless another vessel was lost under other tasks just before.
+    const now = Date.now();
+    const recent = ((await this.ctx.storage.get<Loss[]>('losses')) ?? []).filter((loss) => now - loss.at < LOSS_WINDOW_MS);
+
+    const lose = (index: number, infra: number): void => {
+      this.lost(index, infra, { vessel: name, error, stormed: recent.some((loss) => !loss.tasks.includes(index)) });
+    };
+
+    this.lostRank(name, lose);
 
     for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null; state: string }>(`SELECT idx, infra, dup, state FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
       if (task.state === 'landing' && (await this.ctx.storage.get(heldKey(task.idx))) !== undefined) {
@@ -1062,9 +1091,11 @@ export class ArmadaJob extends DurableObject<Env> {
         // The other copy runs on, if it has not stopped yet, as the only one, keeping the slot it ran in.
         this.sql.exec(`UPDATE tasks SET state = 'running', vessel = dup, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?`, task.idx);
       } else {
-        this.lost(task.idx, task.infra, name, error);
+        lose(task.idx, task.infra);
       }
     }
+
+    if (ran.length > 0) await this.ctx.storage.put('losses', [...recent, { at: now, tasks: ran } satisfies Loss]);
 
     const generation = await this.ctx.storage.get<Generation>('environment');
 
@@ -1088,28 +1119,30 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** A lost vessel's gangs, each lost whole as the platform's loss of one of its ranks, forming, launching or
-   *  launched: queued again as one task to form anew, or failed after INFRA_ATTEMPTS losses. Its other ranks' runs end
-   *  at their next `still`, and a late launch or answer of theirs is of an attempt no longer the task's. */
-  private lostRank(name: string, error: string): void {
+   *  launched: queued again as one task to form anew, or failed after INFRA_ATTEMPTS losses (`lose`). Its other ranks'
+   *  runs end at their next `still`, and a late launch or answer of theirs is of an attempt no longer the task's. */
+  private lostRank(name: string, lose: (index: number, infra: number) => void): void {
     for (const { idx, infra } of this.sql.exec<{ idx: number; infra: number }>(
       `SELECT t.idx, t.infra FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name,
     ).toArray()) {
       this.sql.exec('DELETE FROM members WHERE idx = ?', idx);
-      this.lost(idx, infra, name, error);
+      lose(idx, infra);
     }
   }
 
-  /** Task `index`, which the infrastructure lost on `name` `infra` times before, queued again, or failed once that makes
-   *  INFRA_ATTEMPTS. */
-  private lost(index: number, infra: number, name: string, error: string): void {
-    if (infra + 1 < INFRA_ATTEMPTS) {
-      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, dup = NULL, dup_slot = NULL, infra = infra + 1 WHERE idx = ?`, index);
+  /** Task `index`, which the infrastructure lost `infra` times before as its own, lost on `vessel`: queued again, or
+   *  failed once that makes INFRA_ATTEMPTS. One lost with the platform's (`stormed`, `LOSS_WINDOW_MS`) is queued again and
+   *  counts nothing. */
+  private lost(index: number, infra: number, { vessel, error, stormed }: { readonly vessel: string; readonly error: string; readonly stormed: boolean }): void {
+    if (stormed || infra + 1 < INFRA_ATTEMPTS) {
+      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, dup = NULL, dup_slot = NULL, infra = infra + ? WHERE idx = ?`, stormed ? 0 : 1, index);
 
       return;
     }
 
-    this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, index);
-    this.append({ index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel: name, attempt: INFRA_ATTEMPTS, tail: error.slice(-4000), output: false });
+    const [failed] = this.sql.exec<{ attempts: number }>(`UPDATE tasks SET state = 'failed' WHERE idx = ? RETURNING attempts`, index).toArray();
+
+    this.append({ index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel, attempt: failed?.attempts ?? INFRA_ATTEMPTS, tail: error.slice(-4000), output: false });
   }
 
   /** A formed gang whose ranks did not all launch within its start bound fails: its launch is bounded by wall time, not
