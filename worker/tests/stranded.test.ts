@@ -9,10 +9,15 @@ import { container, namespace, readyRegistry, state, world, type Answer, type St
 
 afterEach(() => { setSystemTime(); });
 
-const answered = (argv: readonly string[]) => ({
-  exitCode: argv[0] === 'stat' || argv[0] === 'head' ? 1 : 0,
-  stdout: argv[3] === 'wait' ? '0\n' : (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '',
-});
+/** What a live container's exec says: a wait exits 0, the readiness probe is ready, and a `stat` or `head` finds
+ *  nothing. */
+function answered(argv: readonly string[]) {
+  const exitCode = argv[0] === 'stat' || argv[0] === 'head' ? 1 : 0;
+
+  if (argv[3] === 'wait') return { exitCode, stdout: '0\n' };
+
+  return { exitCode, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
+}
 
 /** Real jobs, vessels, and fleet; only the container and the RPC transport are fake. A transport can lose the
  *  reply after a claim was committed, just as a Durable Object reset can cut the caller off at that boundary. */
@@ -133,7 +138,7 @@ describe('a task whose vessel loses its claim reply (#45)', () => {
       setSystemTime(start + tick * 15_000);
       await run.open.alarm();
 
-      for (const held of [...run.vessels.values()]) await held.vessel.alarm();
+      for (const held of run.vessels.values()) await held.vessel.alarm();
     }
 
     expect({
@@ -331,5 +336,36 @@ describe('a task whose vessel is actually lost or silent (#45 controls)', () => 
     expect(await run.open.events(0)).toMatchObject({
       done: true, events: [{ outcome: { index: 1, kind: 'exited' } }, { outcome: { index: 0, kind: 'exited', attempt: 2 } }],
     });
+  });
+});
+
+describe('a task whose container ended before its launch', () => {
+  test('is queued again and runs to its answer on another vessel', async () => {
+    const start = Date.now();
+
+    setSystemTime(start);
+
+    // v1's container passes its stop check and is gone by the task's launch, as the platform's loss of a container
+    // between two execs leaves it.
+    const run = await running({
+      count: 2,
+      answer: (name) => (argv) => name === 'v1' && argv[3] === 'launch' ? new Error('exec() cannot be called on a container that is not running.') : answered(argv),
+    });
+
+    await run.vessel('v1').vessel.alarm();
+    expect((await run.open.status())?.vessels.find(({ name }) => name === 'v1')?.state).toBe('failed');
+    expect(await run.open.taskStatus(0)).toMatchObject({ status: { state: 'queued', attempt: 1 } });
+
+    for (let tick = 1; tick <= 40 && !(await run.open.events(0)).done; tick += 1) {
+      setSystemTime(start + tick * 15_000);
+      await run.open.alarm();
+
+      for (const held of run.vessels.values()) await held.vessel.alarm();
+    }
+
+    expect({
+      launches: run.launches.filter((name) => name === 'v1'),
+      events: (await run.open.events(0)).events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.attempt]).sort((a, b) => Number(a[0]) - Number(b[0])),
+    }).toEqual({ launches: ['v1'], events: [[0, 'exited', 2], [1, 'exited', 1]] });
   });
 });

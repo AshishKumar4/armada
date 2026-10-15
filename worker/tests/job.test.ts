@@ -326,6 +326,42 @@ describe('a task whose container stopped under it', () => {
   });
 });
 
+describe('tasks whose containers the platform loses one after another', () => {
+  test('are queued again at no cost to their attempts, and run to their answer', async () => {
+    const { job: stormy } = await job({ recipe: {}, items: [{ item: { name: 'a', weight: 2 }, argv: ['true'] }, { item: { name: 'b', weight: 1 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+    const start = Date.now();
+    const lost: (number | null)[] = [];
+
+    try {
+      // Four rounds a minute apart, each running both tasks and losing both containers: past the first loss, each
+      // follows the other task's within LOSS_WINDOW_MS.
+      for (let round = 0; round < 4; round += 1) {
+        const vessels = [`v${String(2 * round + 1)}`, `v${String(2 * round + 2)}`];
+
+        setSystemTime(start + round * 60_000);
+
+        for (const vessel of vessels) {
+          const claim = await stormy.claim(vessel);
+
+          lost.push(claim === null || 'waitMs' in claim ? null : claim.index);
+        }
+
+        for (const vessel of vessels) await stormy.vesselFailed(vessel, 'the wait failed to run (the container ended: Network connection lost.)');
+      }
+
+      await finish(stormy, 'v9');
+      await finish(stormy, 'v10');
+    } finally {
+      setSystemTime();
+    }
+
+    const { events, done } = await stormy.events(0);
+
+    expect({ lost, done, events: events.map(({ outcome }) => [outcome.index, outcome.kind, outcome.attempt]) })
+      .toEqual({ lost: [0, 1, 0, 1, 0, 1, 0, 1], done: true, events: [[0, 'exited', 5], [1, 'exited', 5]] });
+  });
+});
+
 describe('a vessel lost before it took a task', () => {
   test('is replaced apart from the losses under a task, as many as the job\'s pool, and past them each costs a place in it', async () => {
     const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });
@@ -1119,14 +1155,21 @@ describe('a gang task', () => {
     const plain = ['a', 'b', 'c', 'd'].map((name) => ({ item: { name, weight: 1 }, argv: ['true'] }));
     const { job: lossy, begun } = await job({ recipe: {}, items: [...plain, { item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
     const alive = ['v1', 'v2'];
+    const start = Date.now();
 
-    // Eight vessels lost under tasks spend the job's replacements.
-    for (let lost = 1; lost <= 8; lost += 1) {
-      const vessel = alive.shift() ?? '';
+    try {
+      // Eight vessels lost under tasks spend the job's replacements, each loss alone, eleven minutes after the last:
+      // each counts against its task's attempts.
+      for (let lost = 1; lost <= 8; lost += 1) {
+        const vessel = alive.shift() ?? '';
 
-      await lossy.claim(vessel);
-      await lossy.vesselFailed(vessel, 'container lost', { gone: true });
-      alive.push((begun.at(-1) ?? '').slice('j1/'.length));
+        setSystemTime(start + lost * 11 * 60_000);
+        await lossy.claim(vessel);
+        await lossy.vesselFailed(vessel, 'container lost', { gone: true });
+        alive.push((begun.at(-1) ?? '').slice('j1/'.length));
+      }
+    } finally {
+      setSystemTime();
     }
 
     const [first = '', second = ''] = alive;
