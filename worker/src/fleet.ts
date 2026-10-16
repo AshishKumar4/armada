@@ -35,7 +35,7 @@ export const SAMPLE_MS = 30_000;
 const SAMPLE_LIFE_MS = 4 * SAMPLE_MS;
 
 /** How long a want counts once its holder stops asking, which it does every CAPACITY_RETRY_MS while it waits. */
-const WANT_MS = 60_000;
+export const WANT_MS = 60_000;
 
 /** The account's share left idle for other apps to start containers in, which then show in the next read. */
 const HEADROOM = 0.1;
@@ -74,6 +74,15 @@ export interface Hold {
   readonly recalled?: boolean;
 }
 
+/** A holder the fleet had no room for: what it asked, its place among the holders refused, from the first time it was,
+ *  and when it last asked. */
+export interface Waiting {
+  readonly vcpus: number;
+  readonly reserve: number;
+  readonly place: number;
+  readonly asked: number;
+}
+
 /** A grant as any fleet answers it: one still on earlier code for a while after a deploy answers true or false. */
 export function grantOf(answer: Grant | boolean | null): Grant | null {
   if (answer === true) return 'held';
@@ -84,12 +93,15 @@ export function grantOf(answer: Grant | boolean | null): Grant | null {
 /** What `holds` keep together, as `acquire` grants them. */
 const chargeOf = (holds: Record<string, Hold>): number => [...needs(holds).values()].reduce((sum, need) => sum + need, 0);
 
+/** The job of `holder`, which is `<job>/<vessel>`. */
+const jobOf = (holder: string): string => holder.slice(0, holder.lastIndexOf('/'));
+
 /** What each job of `holds` keeps from the others: what it holds, or what it reserves, whichever is more. */
 function needs(holds: Record<string, Hold>): Map<string, number> {
   const held = new Map<string, { vcpus: number; reserve: number }>();
 
   for (const [holder, hold] of Object.entries(holds)) {
-    const job = holder.slice(0, holder.lastIndexOf('/'));
+    const job = jobOf(holder);
     const sum = held.get(job) ?? { vcpus: 0, reserve: 0 };
 
     held.set(job, { vcpus: sum.vcpus + hold.vcpus, reserve: Math.max(sum.reserve, hold.reserve ?? 0) });
@@ -112,15 +124,31 @@ export class ArmadaFleet extends ArmadaSingle {
    *  Its job keeps `reserve` from the other jobs while it holds any: a holder is granted only once its job's whole
    *  reserve fits beside theirs, so the ranks of two jobs' gangs never split the fleet between them and wait on each
    *  other forever. A holder that `borrows`, which asks before each new task, may be lent what the account leaves idle
-   *  past the cap; one that does not, waiting while loans fill the cap, has them recalled. */
+   *  past the cap; one that does not, waiting while loans fill the cap, has them recalled.
+   *
+   *  Holders it has no room for wait in the order they first asked (#49). A newer one is not granted what an older
+   *  holder of another job still waits for: it is granted only if it fits beside what they asked, or its job already
+   *  keeps what it asks. Otherwise each vCPU freed would go to whichever single container asked next, and a gang's
+   *  reserve would never come free at once. A holder that stops asking stops waiting after WANT_MS. */
   async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, now = Date.now() }: { readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly now?: number }): Promise<Grant | null> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: replaced, ...others } = holds;
     const cap = Number(this.env.FLEET_VCPUS);
     const asked = { [holder]: { vcpus, until: now, reserve } };
     const charge = chargeOf({ ...others, ...asked });
+    const limit = borrows ? await this.limit(now) : cap;
+    const { [holder]: waited, ...waiting } = Object.fromEntries(Object.entries(await this.ctx.storage.get<Record<string, Waiting>>('waiting') ?? {}).filter(([, wait]) => wait.asked > now - WANT_MS));
+    const places = (await this.ctx.storage.get<number>('places')) ?? 0;
+    const place = waited?.place ?? places + 1;
 
-    if (charge > (borrows ? await this.limit(now) : cap)) {
+    const before = Object.fromEntries(Object.entries(waiting).filter(([other, wait]) => jobOf(other) !== jobOf(holder) && wait.place < place)
+      .map(([other, wait]) => [other, { vcpus: wait.vcpus, until: now, reserve: wait.reserve }]));
+
+    const ahead = { ...others, ...before };
+    const passes = replaced === undefined && chargeOf({ ...ahead, ...asked }) > Math.max(limit, chargeOf(ahead));
+
+    if (charge > limit || passes) {
+      await this.ctx.storage.put({ waiting: { ...waiting, [holder]: { vcpus, reserve, place, asked: now } }, places: Math.max(places, place) });
       await this.want(borrows, holds, asked, now);
 
       return null;
@@ -129,7 +157,7 @@ export class ArmadaFleet extends ArmadaSingle {
     const grants = (await this.ctx.storage.get<number>('grants')) ?? 0;
     const granted = replaced?.granted ?? grants + 1;
 
-    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap } }, grants: Math.max(grants, granted) });
+    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap } }, grants: Math.max(grants, granted), waiting });
 
     return charge > cap ? 'borrowed' : 'held';
   }
@@ -237,10 +265,12 @@ export class ArmadaFleet extends ArmadaSingle {
   async release(holder: string, afterMs = 0): Promise<void> {
     const holds = { ...await this.ctx.storage.get<Record<string, Hold>>('holds') };
     const held = holds[holder];
+    // A holder that ends waits for nothing.
+    const { [holder]: _gone, ...waiting } = await this.ctx.storage.get<Record<string, Waiting>>('waiting') ?? {};
 
     if (held !== undefined && afterMs > 0) holds[holder] = { vcpus: held.vcpus, until: Math.min(held.until, Date.now() + afterMs) };
     else delete holds[holder];
-    await this.ctx.storage.put('holds', holds);
+    await this.ctx.storage.put({ holds, waiting });
   }
 
   async used(): Promise<number> {
@@ -252,7 +282,7 @@ export class ArmadaFleet extends ArmadaSingle {
     const jobs = new Map<string, { vcpus: number; containers: number }>();
 
     for (const [holder, hold] of Object.entries(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), Date.now()))) {
-      const id = holder.slice(0, holder.lastIndexOf('/'));
+      const id = jobOf(holder);
       const share = jobs.get(id) ?? { vcpus: 0, containers: 0 };
 
       jobs.set(id, { vcpus: share.vcpus + hold.vcpus, containers: share.containers + 1 });

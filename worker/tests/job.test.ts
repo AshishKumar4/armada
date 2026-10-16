@@ -1298,6 +1298,15 @@ describe('a job deadline', () => {
         tail: 'JobDeadlineExceeded: the job did not finish within 20 s: task 0 attempt 1 still ran on v1',
       } }] });
       expect(stopped).toEqual(['j1/v1']);
+
+      // A gang whose containers never got the fleet's capacity says so, not a bare deadline (#49).
+      const { job: starved } = await job({ recipe: {}, items: [{ item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, deadline: 20 });
+
+      setSystemTime(began + 40_000);
+      await starved.alarm();
+      expect((await starved.events(0)).events.map(({ outcome }) => outcome.tail)).toEqual([
+        'JobDeadlineExceeded: the job did not finish within 20 s, with 2 containers still waiting for capacity: 8 vCPUs at once for a gang of 2, under the fleet\'s cap of 1500',
+      ]);
     } finally {
       setSystemTime();
     }

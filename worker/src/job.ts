@@ -312,7 +312,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const deadline = spec.deadline ?? JOB_DEADLINE_SECONDS;
 
-    if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s`, 'lost');
+    if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${this.waitingFor(spec)}`, 'lost');
 
     if (phase === 'running') {
       await this.watchGangs(spec);
@@ -663,6 +663,18 @@ export class ArmadaJob extends DurableObject<Env> {
     if (!this.busy(name)) this.beat(name, 'done');
 
     return null;
+  }
+
+  /** The containers still waiting for capacity, said after a deadline: how many, what they need at once, and the fleet's
+   *  cap. A gang's waits for every rank's vCPUs together; empty when none waits. */
+  private waitingFor(spec: Kept): string {
+    const { n, ranks } = this.sql.exec<{ n: number; ranks: number | null }>(`SELECT COUNT(*) AS n, MAX(ranks) AS ranks FROM vessels WHERE state = 'waiting'`).one();
+
+    if (n === 0) return '';
+    const { vcpus } = SIZES[spec.recipe.size];
+    const need = (ranks ?? 1) > 1 ? `${String((ranks ?? 1) * vcpus)} vCPUs at once for a gang of ${String(ranks)}` : `${String(vcpus)} vCPUs each`;
+
+    return `, with ${String(n)} container${n === 1 ? '' : 's'} still waiting for capacity: ${need}, under the fleet's cap of ${this.env.FLEET_VCPUS}`;
   }
 
   /** The runs the job holds at once, which a packing job's pool bounds: each run a live vessel was handed and has not

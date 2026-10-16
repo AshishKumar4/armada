@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { fakeFetch } from '../../tests/fakes';
 import { INACTIVITY_MS } from '../src/container';
-import { ArmadaFleet, SAMPLE_MS, type Grant } from '../src/fleet';
+import { ArmadaFleet, SAMPLE_MS, WANT_MS, type Grant } from '../src/fleet';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { container, namespace, state, world } from './harness';
 
@@ -22,6 +22,30 @@ describe('the fleet', () => {
     await fleet.release('a/v2');
 
     expect({ granted, after: [await fleet.acquire('b/v1', 1, { reserve: 2, deadlineAt }), await fleet.acquire('b/v2', 1, { reserve: 2, deadlineAt })] }).toEqual({ granted: ['held', null, 'held', null], after: ['held', 'held'] });
+  });
+
+  // #49: on a full fleet, other jobs' single containers took each vCPU freed, and two gangs waited out their deadlines.
+  test('grants a waiting holder before newer ones it would no longer fit beside, until it stops asking', async () => {
+    const full = async () => {
+      const fleet = fleetOf(8);
+
+      for (const holder of ['a/v1', 'a/v2', 'a/v3']) await fleet.acquire(holder, 2, { deadlineAt });
+
+      // A gang of two 2-vCPU ranks needs 4 at once, and 2 are free: it waits, and a newer 2-vCPU holder waits behind it.
+      return { fleet, asked: [await fleet.acquire('g/v1', 2, { reserve: 4, deadlineAt }), await fleet.acquire('n/v1', 2, { deadlineAt })] };
+    };
+
+    const waited = await full();
+
+    await waited.fleet.release('a/v1');
+    const freed = [await waited.fleet.acquire('n/v1', 2, { deadlineAt })];
+
+    for (const rank of ['g/v1', 'g/v2']) freed.push(await waited.fleet.acquire(rank, 2, { reserve: 4, deadlineAt }));
+    // The gang's job was cancelled, and its ranks stopped asking.
+    const left = await full();
+    const after = await left.fleet.acquire('n/v1', 2, { deadlineAt, now: Date.now() + WANT_MS + 1 });
+
+    expect({ asked: waited.asked, freed, after }).toEqual({ asked: [null, null], freed: [null, 'held', 'held'], after: 'held' });
   });
 
   test('keeps a container\'s vCPUs held until it is gone: until a stop that failed has had its container end', async () => {
