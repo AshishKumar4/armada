@@ -795,6 +795,24 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
 
   for (const problem of problems) note(`problem: ${problem}`);
 
+  const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
+
+  const usage = usageOf([...planRun, ...results].map((result) => result.meta));
+
+  // The usage of a narrowed run is not the commit's either: it would size the next full run down to a part's needs.
+  // A run that cannot grade still records what its green rows took: one out of time is planned anew from them (#46).
+  // Timings only weigh the next plan, so one that is not recorded is said and the run's answer stands: a refused upload
+  // (500 SQLITE_TOOBIG, #43) ended a green run non-zero, with no report line, and a release read it as red.
+  if (planArgs.length === 0) {
+    try {
+      await armada.post(`/timings/${config.name}`, {
+        rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: graded.files, usage,
+      });
+    } catch (cause) {
+      note(`this run's timings were not recorded, so the next plan weighs its rows without them: ${errorOf({ cause }).message}`);
+    }
+  }
+
   if (graded.problems.length > 0) {
     note(`\nNOT GRADED:\n${graded.problems.map((problem) => `  ${problem}`).join('\n')}`);
     printRows(graded.rows, evidence, note);
@@ -803,23 +821,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     return { ...ran, problems: [...problems, ...graded.problems], rows: graded.rows };
   }
 
-  const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
-
-  const usage = usageOf([...planRun, ...results].map((result) => result.meta));
-
   if (planArgs.length === 0) {
     await armada.call(`/verdicts/${config.name}/${sha}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(file) });
-
-    // The usage of a narrowed run is not the commit's either: it would size the next full run down to a part's needs.
-    // Timings only weigh the next plan, so one that is not recorded is said and the verdict stands: a refused upload
-    // (500 SQLITE_TOOBIG, #43) ended a green run non-zero, with no report line, and a release read it as red.
-    try {
-      await armada.post(`/timings/${config.name}`, {
-        rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: graded.files, usage,
-      });
-    } catch (cause) {
-      note(`this run's timings were not recorded, so the next plan weighs its rows without them: ${errorOf({ cause }).message}`);
-    }
   } else {
     note(`the plan was narrowed (${planArgs.join(' ')}), so this verdict is not stored as ${sha.slice(0, 12)}'s`);
   }

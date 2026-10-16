@@ -125,11 +125,11 @@ const UNGRADED_EXIT = 2;
 type Flag = (problem: string, row?: VerdictRow) => void;
 
 /** Each file's seconds in a run: the sum of the timings its rows report for it, so a file a plan splits over several
- *  rows is timed whole. A file of a red row, or of a row whose proof was reused, is left out, whether the row timed it
- *  or only its plan entry declared it: its other rows hold only part of its time. */
-function fileTimings(rows: readonly { readonly row: VerdictRow; readonly declared: readonly string[] }[]): Record<string, number> {
+ *  rows is timed whole. A file of a red row, of a row whose proof was reused, or of a row no task reported (`missing`)
+ *  is left out, whether the row timed it or only its plan entry declared it: its other rows hold only part of its time. */
+function fileTimings(rows: readonly { readonly row: VerdictRow; readonly declared: readonly string[] }[], missing: readonly string[]): Record<string, number> {
   const files: Record<string, number> = {};
-  const partial = new Set<string>();
+  const partial = new Set(missing);
 
   for (const { row, declared } of rows) {
     const timed = Object.entries(row.timings ?? {});
@@ -188,7 +188,14 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
 
   const rows = graded.map(({ row }) => row);
 
-  return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0), files: fileTimings(graded) };
+  // The files of each row a plan entry names that its task did not report: a run that cannot grade still times the rest.
+  const missing = answers.flatMap((answer) => {
+    const names = new Set((answer.rows ?? []).map(rowName));
+
+    return (answer.entry.rows ?? []).map(expectedOf).filter(({ name }) => !names.has(name)).flatMap(({ files }) => files ?? []);
+  });
+
+  return { problems, rows, reds: rows.filter((row) => row.exitCode !== 0), files: fileTimings(graded, missing) };
 }
 
 /** A task whose plan entry names its rows reported exactly those, and each green one exactly its declared files'

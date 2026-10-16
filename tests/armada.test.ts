@@ -893,6 +893,8 @@ describe('armada run', () => {
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
     const bodies: unknown[] = [];
+    // Each timings upload's body.
+    const timed: unknown[] = [];
     const seen: string[] = [];
     const cancelled: string[] = [];
     // Each task job's items, by its id: the first is `tasks`, the next `tasks-2` and on.
@@ -933,8 +935,10 @@ describe('armada run', () => {
 
         if (pathname === '/timings/proj' && request.method === 'GET') return Response.json(timings);
 
-        if (pathname === '/timings/proj' && request.method === 'POST' && timingsRefused === true) {
-          return Response.json({ error: 'string or blob too big: SQLITE_TOOBIG' }, { status: 500 });
+        if (pathname === '/timings/proj' && request.method === 'POST') {
+          timed.push(await request.json());
+
+          if (timingsRefused === true) return Response.json({ error: 'string or blob too big: SQLITE_TOOBIG' }, { status: 500 });
         }
 
         if (pathname === '/jobs') {
@@ -1023,7 +1027,7 @@ describe('armada run', () => {
       const directories = report === '' ? {} : v.parse(v.looseObject({ artifacts: v.optional(v.record(v.string(), v.string()), {}) }), JSON.parse(report)).artifacts;
       const evidence = Object.fromEntries(Object.entries(directories).map(([index, dir]) => [index, { dir, files: Object.fromEntries(readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), 'utf8')])) }]));
 
-      return { exit, stdout, stderr, commands, bodies, seen, cancelled, report, evidence };
+      return { exit, stdout, stderr, commands, bodies, timed, seen, cancelled, report, evidence };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -1197,6 +1201,15 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, uploaded: ran.seen.includes('POST /timings/proj'), noted: said.includes('timings were not recorded'), pass: said.includes('PASS'), report: /report: \S+/u.test(said) })
       .toEqual({ exit: 0, uploaded: true, noted: true, pass: true, report: true });
+  });
+
+  // #46: two runs out of time posted nothing, and the next plan weighed its files as the runs before had.
+  test('an ungraded run stores no verdict but records its green rows\' timings, without a file a missing row shares', async () => {
+    const plan = { include: [{ name: 'a', rows: [{ name: 'x', files: ['x.py', 'shared.py'] }, { name: 'y', files: ['shared.py'] }] }] };
+    const ran = await run([], plan, { rows: [{ name: 'x', exitCode: 0, seconds: 4, timings: { 'x.py': 3, 'shared.py': 1 } }] });
+
+    expect({ exit: ran.exit, graded: ran.stdout.includes('NOT GRADED'), verdicts: ran.seen.filter((one) => one.startsWith('PUT /verdicts')), timed: ran.timed })
+      .toEqual({ exit: 2, graded: true, verdicts: [], timed: [expect.objectContaining({ rows: { x: 4 }, files: { 'x.py': 3 } })] });
   });
 
   test('a CI deadline passed before the task jobs could start leaves the run ungraded, with its report and its --json object (#37)', async () => {
