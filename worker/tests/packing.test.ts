@@ -297,17 +297,22 @@ describe('an efficient job', () => {
     expect({ begun, packed, copy, after: (await claimed(job, 'v2')).index }).toEqual({ begun: ['v1', 'v2'], packed: [0, 1, null], copy: { waitMs: 1000 }, after: 0 });
   });
 
-  test('keeps the red of a copied task\'s packed run, though its copy alone was green first', async () => {
-    const { job } = await packing([{ weight: 9 }, { weight: 1 }], await learned(SMALL), { hedge: 1 });
+  test('keeps the red of a copied task\'s packed run, though its copy alone was green first, and learns it ran beside others', async () => {
+    const made = await learned(SMALL);
+    const { job } = await packing([{ weight: 9 }, { weight: 1 }], made, { hedge: 1 });
 
     await slotsOf(job, 'v1', 2);
     const copy = await claimed(job, 'v2');
 
-    await land(job, 'v2', ran(0, 'v2', 0, { attempt: copy.attempt }));
+    // The copy alone on v2 used two cores; the packed run beside task 1 on v1 got half of one, which is not its need.
+    await land(job, 'v2', ran(0, 'v2', 0, { attempt: copy.attempt, cpuSeconds: 20 }));
     await land(job, 'v1', ran(0, 'v1', 1));
     await land(job, 'v1', ran(1, 'v1', 0));
+    await job.alarm();
+    const key = await itemKey({ item: { weight: 9 }, argv: argvOf({ weight: 9 }) });
 
-    expect((await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter ?? null])).toEqual([[0, 1, null], [1, 0, null]]);
+    expect({ landed: (await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter ?? null]), cores: (await made.store(CLASS)?.read([key]))?.items[key]?.cores })
+      .toEqual({ landed: [[0, 1, null], [1, 0, null]], cores: 2 });
   });
 
   test('a run whose process exited before another joined its container ran beside nothing, so its red is its own', async () => {

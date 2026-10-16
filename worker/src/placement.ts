@@ -91,7 +91,10 @@ export class Placement {
 
     if (!sql.exec<{ name: string }>('PRAGMA table_info(outbox)').toArray().some((column) => column.name === 'beside')) sql.exec('ALTER TABLE outbox ADD COLUMN beside INTEGER NOT NULL DEFAULT 0');
     sql.exec('CREATE TABLE IF NOT EXISTS isolate (class TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (class, item))');
-    sql.exec('CREATE TABLE IF NOT EXISTS beside (vessel TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, PRIMARY KEY (vessel, idx, attempt))');
+    // Each run handed out beside others, and whether it got a copy since (`copied`).
+    sql.exec('CREATE TABLE IF NOT EXISTS beside (vessel TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, copied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (vessel, idx, attempt))');
+
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(beside)').toArray().some((column) => column.name === 'copied')) sql.exec('ALTER TABLE beside ADD COLUMN copied INTEGER NOT NULL DEFAULT 0');
   }
 
   /** New tasks, each with its class and item, to be looked up. */
@@ -191,16 +194,16 @@ export class Placement {
   }
 
   /** Run `attempt` of task `index` got a copy: its copies decide it (`ArmadaJob.accept`), so neither runs again alone for
-   *  a red, and nothing runs beside it from now on (`whole`). */
+   *  a red, and nothing runs beside it from now on (`whole`). It still ran beside others until then (`learn`). */
   copied(index: number, attempt: number): void {
-    this.sql.exec('DELETE FROM beside WHERE idx = ? AND attempt = ?', index, attempt);
+    this.sql.exec('UPDATE beside SET copied = 1 WHERE idx = ? AND attempt = ?', index, attempt);
   }
 
   /** How `outcome`, `name`'s run of its task, ended, when that run ran beside other tasks and ended red, past its timeout
    *  or killed for memory, and its task has not run alone since: it is then to run again alone (`alone`). Null for any
    *  other run: a run alone, a copied one, or one cancelled or lost, which the platform's retries took already. */
   packedFailure(name: string, outcome: Outcome): string | null {
-    const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ?', name, outcome.index, outcome.attempt).toArray().length > 0;
+    const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ? AND copied = 0', name, outcome.index, outcome.attempt).toArray().length > 0;
     const failure = this.sql.exec<{ failure: string | null }>('SELECT failure FROM placed WHERE idx = ?', outcome.index).toArray()[0]?.failure ?? null;
 
     if (!marked || failure !== null || outcome.reason === 'cancelled' || outcome.reason === 'lost') return null;
