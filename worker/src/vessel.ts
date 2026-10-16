@@ -179,6 +179,13 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     try {
       if (state === 'waiting') {
+        // One its job no longer wants, as one whose stop was lost when the job ended, leaves the fleet's line and ends.
+        if (!(await job.moved(spec.name, 'waiting'))) {
+          await this.stop();
+
+          return;
+        }
+
         const fleet = this.env.FLEET.getByName(SINGLE);
 
         // One whose job runs no gang wider than it may borrow past the fleet's cap: it asks before each new task.
@@ -187,7 +194,6 @@ export class ArmadaVessel extends DurableObject<Env> {
         }));
 
         if (grant === null) {
-          await job.moved(spec.name, 'waiting');
           await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
 
           return;
@@ -196,7 +202,12 @@ export class ArmadaVessel extends DurableObject<Env> {
         // The fleet's answer let other calls in: a vessel stopped meanwhile gives back what it was just granted.
         if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return await fleet.release(this.holder(spec));
         await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now(), borrowed: grant === 'borrowed' });
-        await job.moved(spec.name, 'booting');
+
+        if (!(await job.moved(spec.name, 'booting'))) {
+          await this.stop();
+
+          return;
+        }
       }
 
       if (state !== 'working') await this.boot(spec);

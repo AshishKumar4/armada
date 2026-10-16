@@ -104,7 +104,7 @@ async function run(lost: number, {
 
   const job = {
     booted: async () => undefined,
-    moved: async () => undefined,
+    moved: async () => true,
     claim: task.next,
     started: async (name: string, index: number, attempt: number) => {
       started.push({ name, index, attempt, afterLaunch: execs.some((argv) => argv[3] === 'launch'), stored: (await stored.ctx.storage.get('slot:0')) !== undefined });
@@ -255,7 +255,7 @@ describe('a vessel restarted while it finishes a task', () => {
     });
 
     const job = {
-      booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
       stopped: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
       accept: async (_name: string, index: number) => {
         accepted.push(index);
@@ -328,7 +328,7 @@ describe('a vessel restarted while it stops a task its job no longer wants', () 
     }));
 
     const job = {
-      booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false,
+      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false,
       retired: async () => undefined, accept: async () => true, complete: async () => undefined,
       vesselFailed: async (_name: string, error: string) => { throw new Error(error); },
       stopped: async (_name: string, index: number) => {
@@ -404,7 +404,7 @@ describe('a task that names secrets', () => {
 
     const job = {
       booted: async () => undefined,
-      moved: async () => undefined,
+      moved: async () => true,
       claim: once({ index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-launched' }, secrets: ['API_KEY'], duplicate: false }).next,
       still: async () => true,
       accept: async () => true,
@@ -462,7 +462,7 @@ describe('a gang rank', () => {
     }));
 
     const job = {
-      booted: async () => undefined, moved: async () => undefined, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
       accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
     };
 
@@ -501,7 +501,7 @@ describe('a gang rank', () => {
       }));
 
       const job = {
-        booted: async () => undefined, moved: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
+        booted: async () => undefined, moved: async () => true, retired: async () => undefined, vesselFailed: async () => undefined,
         claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }).next,
         started: async () => true,
         still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
@@ -588,7 +588,11 @@ describe('a vessel\'s boot', () => {
         // The fleet has no room at the first ask, and has 10 s later.
         FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined })),
         JOB: namespace(() => ({
-          moved: async (_name: string, to: string) => { moved.push(to); },
+          moved: async (_name: string, to: string) => {
+            moved.push(to);
+
+            return true;
+          },
           booted: async (_name: string, bootMs: number, boot: Boot) => { booted.push({ bootMs, boot }); },
           claim: async () => null, retired: async () => undefined,
         })),
@@ -602,7 +606,8 @@ describe('a vessel\'s boot', () => {
       Date.now = clock;
     }
 
-    expect({ moved, booted }).toEqual({ moved: ['waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 3000, host: { vendor: '', family: -1, model: -1, name: '', level: 0 } } }] });
+    // Each ask for capacity first tells its job it waits, and learns the job still wants it.
+    expect({ moved, booted }).toEqual({ moved: ['waiting', 'waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 3000, host: { vendor: '', family: -1, model: -1, name: '', level: 0 } } }] });
   });
 
   /** A vessel whose container's every start the platform ends while the account is full, and whose fleet gives a
@@ -631,7 +636,12 @@ describe('a vessel\'s boot', () => {
     const vessel = new ArmadaVessel(stored.ctx, world({
       FLEET: namespace(() => ({ acquire: async () => 'held', release })),
       JOB: namespace(() => ({
-        moved: async (_name: string, to: string) => { moved.push(to); }, booted: async () => undefined, claim: async () => null, retired: async () => undefined,
+        moved: async (_name: string, to: string) => {
+          moved.push(to);
+
+          return true;
+        },
+        booted: async () => undefined, claim: async () => null, retired: async () => undefined,
         vesselFailed: async (_name: string, error: string) => { failed.push(error); },
       })),
     }));
@@ -651,7 +661,7 @@ describe('a vessel\'s boot', () => {
     await vessel.alarm();
 
     expect({ refused, failed, moved }).toEqual({
-      refused: { starts: 1, moved: ['booting', 'waiting'], released: ['job/v1'] }, failed: [], moved: ['booting', 'waiting', 'booting'],
+      refused: { starts: 1, moved: ['waiting', 'booting', 'waiting'], released: ['job/v1'] }, failed: [], moved: ['waiting', 'booting', 'waiting', 'waiting', 'booting'],
     });
   });
 
@@ -679,7 +689,7 @@ describe('a vessel\'s boot', () => {
     account.full = false;
     await vessel.alarm();
 
-    expect({ starts: account.starts, moved, alarm: await stored.ctx.storage.getAlarm() }).toEqual({ starts: 1, moved: ['booting'], alarm: null });
+    expect({ starts: account.starts, moved, alarm: await stored.ctx.storage.getAlarm() }).toEqual({ starts: 1, moved: ['waiting', 'booting'], alarm: null });
   });
 
   test('taken up again after its object restarted mid-start, tells the starts made before and its own', async () => {

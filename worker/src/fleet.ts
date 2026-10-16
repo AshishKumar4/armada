@@ -74,15 +74,6 @@ export interface Hold {
   readonly recalled?: boolean;
 }
 
-/** A holder the fleet had no room for: what it asked, its place among the holders refused, from the first time it was,
- *  and when it last asked. */
-export interface Waiting {
-  readonly vcpus: number;
-  readonly reserve: number;
-  readonly place: number;
-  readonly asked: number;
-}
-
 /** A grant as any fleet answers it: one still on earlier code for a while after a deploy answers true or false. */
 export function grantOf(answer: Grant | boolean | null): Grant | null {
   if (answer === true) return 'held';
@@ -120,16 +111,25 @@ export interface Drained {
 }
 
 export class ArmadaFleet extends ArmadaSingle {
+  private readonly sql = this.ctx.storage.sql;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // Each holder the fleet had no room for: what it asks, its place in line from its first refusal, and when it last
+    // asked, which it does every CAPACITY_RETRY_MS while it waits.
+    this.sql.exec('CREATE TABLE IF NOT EXISTS waiting (holder TEXT PRIMARY KEY, vcpus REAL NOT NULL, reserve REAL NOT NULL, place INTEGER NOT NULL, asked INTEGER NOT NULL)');
+  }
+
   /** Whether `holder` holds `vcpus` now; it keeps them until `release`, or its lease ends past its job's `deadlineAt`.
    *  Its job keeps `reserve` from the other jobs while it holds any: a holder is granted only once its job's whole
    *  reserve fits beside theirs, so the ranks of two jobs' gangs never split the fleet between them and wait on each
    *  other forever. A holder that `borrows`, which asks before each new task, may be lent what the account leaves idle
    *  past the cap; one that does not, waiting while loans fill the cap, has them recalled.
    *
-   *  Holders it has no room for wait in the order they first asked (#49). A newer one is not granted what an older
-   *  holder of another job still waits for: it is granted only if it fits beside what they asked, or its job already
-   *  keeps what it asks. Otherwise each vCPU freed would go to whichever single container asked next, and a gang's
-   *  reserve would never come free at once. A holder that stops asking stops waiting after WANT_MS. */
+   *  Holders it has no room for wait in line, in the order it first refused them (#49). A newer one is not granted what
+   *  an older one still waits for: it is granted only if it fits beside what they asked, or its job already keeps what
+   *  it asks, as a gang's next rank does. Otherwise each vCPU freed would go to whichever single container asked next,
+   *  and a gang's reserve would never come free at once. A holder that stops asking leaves the line after WANT_MS. */
   async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, now = Date.now() }: { readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly now?: number }): Promise<Grant | null> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: replaced, ...others } = holds;
@@ -137,18 +137,20 @@ export class ArmadaFleet extends ArmadaSingle {
     const asked = { [holder]: { vcpus, until: now, reserve } };
     const charge = chargeOf({ ...others, ...asked });
     const limit = borrows ? await this.limit(now) : cap;
-    const { [holder]: waited, ...waiting } = Object.fromEntries(Object.entries(await this.ctx.storage.get<Record<string, Waiting>>('waiting') ?? {}).filter(([, wait]) => wait.asked > now - WANT_MS));
-    const places = (await this.ctx.storage.get<number>('places')) ?? 0;
-    const place = waited?.place ?? places + 1;
 
-    const before = Object.fromEntries(Object.entries(waiting).filter(([other, wait]) => jobOf(other) !== jobOf(holder) && wait.place < place)
-      .map(([other, wait]) => [other, { vcpus: wait.vcpus, until: now, reserve: wait.reserve }]));
+    this.sql.exec('DELETE FROM waiting WHERE asked <= ?', now - WANT_MS);
+    const place = this.sql.exec<{ place: number }>('SELECT place FROM waiting WHERE holder = ?', holder).toArray()[0]?.place ?? null;
+
+    // Those ahead in line, as if they held what they ask: a new holder is behind every one.
+    const before = Object.fromEntries(this.sql.exec<{ holder: string; vcpus: number; reserve: number }>('SELECT holder, vcpus, reserve FROM waiting WHERE holder != ? AND (? IS NULL OR place < ?)', holder, place, place)
+      .toArray().map((wait) => [wait.holder, { vcpus: wait.vcpus, until: now, reserve: wait.reserve }]));
 
     const ahead = { ...others, ...before };
     const passes = replaced === undefined && chargeOf({ ...ahead, ...asked }) > Math.max(limit, chargeOf(ahead));
 
     if (charge > limit || passes) {
-      await this.ctx.storage.put({ waiting: { ...waiting, [holder]: { vcpus, reserve, place, asked: now } }, places: Math.max(places, place) });
+      this.sql.exec(`INSERT INTO waiting (holder, vcpus, reserve, place, asked) VALUES (?, ?, ?, (SELECT COALESCE(MAX(place), 0) + 1 FROM waiting), ?)
+        ON CONFLICT (holder) DO UPDATE SET vcpus = excluded.vcpus, reserve = excluded.reserve, asked = excluded.asked`, holder, vcpus, reserve, now);
       await this.want(borrows, holds, asked, now);
 
       return null;
@@ -157,7 +159,8 @@ export class ArmadaFleet extends ArmadaSingle {
     const grants = (await this.ctx.storage.get<number>('grants')) ?? 0;
     const granted = replaced?.granted ?? grants + 1;
 
-    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap } }, grants: Math.max(grants, granted), waiting });
+    this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
+    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap } }, grants: Math.max(grants, granted) });
 
     return charge > cap ? 'borrowed' : 'held';
   }
@@ -265,12 +268,13 @@ export class ArmadaFleet extends ArmadaSingle {
   async release(holder: string, afterMs = 0): Promise<void> {
     const holds = { ...await this.ctx.storage.get<Record<string, Hold>>('holds') };
     const held = holds[holder];
+
     // A holder that ends waits for nothing.
-    const { [holder]: _gone, ...waiting } = await this.ctx.storage.get<Record<string, Waiting>>('waiting') ?? {};
+    this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
 
     if (held !== undefined && afterMs > 0) holds[holder] = { vcpus: held.vcpus, until: Math.min(held.until, Date.now() + afterMs) };
     else delete holds[holder];
-    await this.ctx.storage.put({ holds, waiting });
+    await this.ctx.storage.put('holds', holds);
   }
 
   async used(): Promise<number> {

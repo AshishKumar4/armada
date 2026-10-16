@@ -534,9 +534,12 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** Vessel `name` waits for the fleet's capacity, or was granted it and boots: its watchdog bounds its silence by that
-   *  (`SILENT_MS`). A word from a vessel that ended changes nothing. */
-  async moved(name: string, state: 'waiting' | 'booting'): Promise<void> {
-    this.sql.exec(`UPDATE vessels SET state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, state, Date.now(), name);
+   *  (`SILENT_MS`). A word from a vessel that ended changes nothing. Whether the job still wants the vessel: not once
+   *  either has ended, which a vessel whose stop was lost learns here. */
+  async moved(name: string, state: 'waiting' | 'booting'): Promise<boolean> {
+    if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return false;
+
+    return this.sql.exec(`UPDATE vessels SET state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, state, Date.now(), name).toArray().length > 0;
   }
 
   /** Whether `name` still has a task assigned: a slotted vessel claims its next while the others run, so an empty

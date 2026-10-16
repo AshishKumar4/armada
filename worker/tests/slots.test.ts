@@ -59,7 +59,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
 
   const job = {
     booted: async () => undefined,
-    moved: async () => undefined,
+    moved: async () => true,
     claim: async (_name: string, slot?: number) => {
       const next = queue.shift();
 
@@ -149,7 +149,7 @@ describe('a slotted vessel', () => {
     let failed = 0;
 
     const job = {
-      booted: async () => undefined, moved: async () => undefined,
+      booted: async () => undefined, moved: async () => true,
       claim: async () => ({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }),
       still: async () => true, stopped: async () => undefined, accept: async () => true, complete: async () => undefined, retired: async () => undefined,
       vesselFailed: async () => { failed += 1; },

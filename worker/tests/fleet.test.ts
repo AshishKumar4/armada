@@ -48,6 +48,20 @@ describe('the fleet', () => {
     expect({ asked: waited.asked, freed, after }).toEqual({ asked: [null, null], freed: [null, 'held', 'held'], after: 'held' });
   });
 
+  test('keeps one line across jobs: a job\'s newer holder waits behind another job\'s older one, however old its own', async () => {
+    const fleet = fleetOf(4);
+
+    await fleet.acquire('x/v1', 4, { deadlineAt });
+    const asked = [await fleet.acquire('a/v1', 2, { deadlineAt }), await fleet.acquire('b/v1', 2, { deadlineAt })];
+
+    await fleet.release('x/v1');
+    const freed = [];
+
+    for (const holder of ['a/v2', 'a/v1', 'b/v1']) freed.push(await fleet.acquire(holder, 2, { deadlineAt }));
+
+    expect({ asked, freed }).toEqual({ asked: [null, null], freed: [null, 'held', 'held'] });
+  });
+
   test('keeps a container\'s vCPUs held until it is gone: until a stop that failed has had its container end', async () => {
     const fleet = fleetOf(4);
 
@@ -249,7 +263,7 @@ describe('a vessel stopped while the fleet answers', () => {
         },
         release: fleet.release.bind(fleet),
       })),
-      JOB: namespace(() => ({ moved: async () => undefined })),
+      JOB: namespace(() => ({ moved: async () => true })),
     });
 
     const vessel = new ArmadaVessel(stored.ctx, env);
@@ -270,3 +284,23 @@ describe('a vessel stopped while the fleet answers', () => {
   });
 });
 
+
+describe('a vessel its job no longer wants', () => {
+  test('leaves the fleet\'s line and ends, as one whose stop was lost when its job ended does', async () => {
+    const fleet = fleetOf(4);
+    let wanted = true;
+
+    await fleet.acquire('x/v1', 4, { deadlineAt });
+    const stored = state();
+    const vessel = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ moved: async () => wanted })) }));
+
+    await vessel.begin({ jobId: 'j', name: 'v1', snapshot: 's', instance: 'standard-4', vcpus: 4, workdir: '/w', commit: null, tmpfs: [], files: {}, bundle: null, output: false, timeout: 60 });
+    // Refused, it waits in line; then its job ends, and the stop it sent is lost.
+    await vessel.alarm();
+    wanted = false;
+    await vessel.alarm();
+    await fleet.release('x/v1');
+
+    expect({ newer: await fleet.acquire('n/v1', 4, { deadlineAt }), alarm: await stored.ctx.storage.getAlarm() }).toEqual({ newer: 'held', alarm: null });
+  });
+});
