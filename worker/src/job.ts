@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_DEADLINE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_DEADLINE_SECONDS, JOB_LEASE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -236,6 +236,16 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now());
   }
 
+  /** Its following client renews its lease (`JobSpec.lease`): whether the job still runs to hold one. */
+  async renew(): Promise<boolean> {
+    const phase = await this.ctx.storage.get<Phase>('phase');
+
+    if (phase === undefined || phase === 'done') return false;
+    await this.ctx.storage.put('renewed', Date.now());
+
+    return true;
+  }
+
   /** A task's one outcome, onto the stream with when it landed. */
   private append(outcome: Outcome): void {
     this.sql.exec('INSERT INTO events (outcome, at) VALUES (?, ?)', JSON.stringify(outcome), Date.now());
@@ -313,6 +323,11 @@ export class ArmadaJob extends DurableObject<Env> {
     const deadline = spec.deadline ?? JOB_DEADLINE_SECONDS;
 
     if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${this.waitingFor(spec)}`, 'lost');
+
+    // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from then.
+    if (spec.lease && Date.now() - ((await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_LEASE_SECONDS * 1000) {
+      return await this.cancel(`its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`, 'cancelled');
+    }
 
     if (phase === 'running') {
       await this.watchGangs(spec);

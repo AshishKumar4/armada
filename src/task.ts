@@ -14,10 +14,10 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, JOB_LEASE_SECONDS, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
-import { connect, summaryOf, type Armada, type Summary } from './sdk';
+import { connect, RequestError, summaryOf, type Armada, type Summary } from './sdk';
 import { execute, OutFile, quote, ShellError, ShellSchema, type Shell } from './sh';
 import type { StandardSchemaV1 } from './standard-schema';
 
@@ -113,6 +113,9 @@ export interface MapOptions {
   readonly cpu?: Cpu | readonly Cpu[];
   /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
   readonly deadline?: number;
+  /** The job ends once this process stops following it: the job is renewed while the process lives, and cancelled
+   *  JOB_LEASE_SECONDS after it dies, however it dies (`JobSpec.lease`). Default false: the job runs on alone. */
+  readonly lease?: boolean;
   /** The limit for a formed gang to launch all its ranks, once every one has a container, in seconds. Default 300. */
   readonly gangStartTimeout?: number;
   readonly label?: string;
@@ -379,7 +382,7 @@ abstract class Base<I extends Json, O> {
     const armada = options.armada ?? connect();
     const submission = new Submission<I>(armada, async (submitting) => await this.submit(armada, items, submitting, options));
 
-    return new Job(armada, this.answering, submission, async (_id, index) => await Promise.resolve(submission.item(index)));
+    return new Job(armada, this.answering, submission, { itemOf: async (_id, index) => await Promise.resolve(submission.item(index)), lease: options.lease });
   }
 
   async run(item: I, options?: MapOptions): Promise<O> {
@@ -397,14 +400,14 @@ abstract class Base<I extends Json, O> {
     let reading: Promise<readonly Json[]> | undefined;
 
     // The job's items as it holds them, read again when it grew past what was read.
-    return new Job(armada, this.answering, new Submission<Json>(armada, async () => await Promise.resolve(id)), async (known, index) => {
+    return new Job(armada, this.answering, new Submission<Json>(armada, async () => await Promise.resolve(id)), { itemOf: async (known, index) => {
       if (index >= held.length) {
         reading ??= armada.items(known).finally(() => { reading = undefined; });
         held = await reading;
       }
 
       return held[index] ?? null;
-    });
+    } });
   }
 
   /** Creates the job, all at once for an array and open for an iterable, whose items then follow in batches. */
@@ -417,7 +420,7 @@ abstract class Base<I extends Json, O> {
 
     const spec = {
       recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, cpu: options.cpu === undefined ? undefined : [options.cpu].flat(), label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
-      deadline: options.deadline, gangStartTimeout: options.gangStartTimeout,
+      deadline: options.deadline, gangStartTimeout: options.gangStartTimeout, lease: options.lease,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };
@@ -701,10 +704,34 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
 
   readonly id: Promise<string>;
 
-  /** `itemOf` gives an outcome's item: one this client sent, or one read from the job, which held it before it ran. */
+  /** What renews its lease while this process lives, for a job made with one. */
+  private readonly renewal: ReturnType<typeof setInterval> | undefined;
+
+  private readonly itemOf: (id: string, index: number) => Promise<I>;
+
+  /** `itemOf` gives an outcome's item: one this client sent, or one read from the job, which held it before it ran. A job
+   *  made with a `lease` has it renewed six times a lease until it ends or is cancelled, on a timer that keeps no process
+   *  alive. A failed creation is said through `id`. */
   constructor(private readonly armada: Armada, private readonly answering: Answering<O>, private readonly submission: Submission<I>,
-    private readonly itemOf: (id: string, index: number) => Promise<I>) {
+    { itemOf, lease = false }: { readonly itemOf: (id: string, index: number) => Promise<I>; readonly lease?: boolean | undefined }) {
     this.id = submission.id;
+    this.itemOf = itemOf;
+
+    this.renewal = lease ? setInterval(() => { detach(this.renew(), (failure) => { this.renewFailed(failure); }); }, JOB_LEASE_SECONDS * 1000 / 6) : undefined;
+    this.renewal?.unref();
+  }
+
+  /** Renews the job's lease, and stops renewing it once the job has ended, or if it was never made, which `id` says. */
+  private async renew(): Promise<void> {
+    const [made] = await Promise.allSettled([this.id]);
+
+    if (made?.status !== 'fulfilled' || !(await this.armada.renew(made.value))) clearInterval(this.renewal);
+  }
+
+  /** A renewal the Worker refused cannot succeed again, and ends the renewals; a lost request is tried again at the next,
+   *  as the lease outlasts six. */
+  private renewFailed(failure: Error): void {
+    if (failure instanceof RequestError && failure.status < 500) clearInterval(this.renewal);
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<Result<I, O>> {
@@ -729,6 +756,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
       if (batch.done) {
         // An ended job takes no more items: a source still to yield is not waited on, but a failure is said.
         this.submission.stop();
+        clearInterval(this.renewal);
 
         if (this.submission.failure !== null) throw this.submission.failure;
 
@@ -779,6 +807,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
   /** Cancels the job and stops sending its items. */
   async cancel(): Promise<void> {
     this.submission.stop();
+    clearInterval(this.renewal);
     await this.armada.cancel(await this.id);
   }
 

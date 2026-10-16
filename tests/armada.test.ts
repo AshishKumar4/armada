@@ -715,8 +715,9 @@ describe('the CLI\'s arguments', () => {
       const genoa = { vendor: 'AuthenticAMD', family: 25, model: 17 };
 
       expect({ exits, jobs }).toMatchObject({ exits: [0, 0], jobs: [job, job] });
-      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode, cpu }) => [deadline, mode, cpu]))
-        .toEqual([[21600, 'efficient', undefined], [21600, 'fast', [genoa, { ...genoa, family: 26 }]]]);
+      // Each job's lease ends it once map has gone (#50).
+      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode, cpu, lease }) => [deadline, mode, cpu, lease]))
+        .toEqual([[21600, 'efficient', undefined, true], [21600, 'fast', [genoa, { ...genoa, family: 26 }], true]]);
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -1192,8 +1193,8 @@ describe('armada run', () => {
     const ran = await run(['--', '--tier', 'fast'], { include: [{ name: 'a', rows: ['x'] }] }, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] });
     const told = (each: typeof ran) => ({ verdicts: each.seen.filter((one) => one.startsWith('PUT /verdicts')), timings: each.seen.includes('POST /timings/proj') });
 
-    expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), narrowed: told(ran), full: told(full) })
-      .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true } });
+    expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), narrowed: told(ran), full: told(full), leased: ran.bodies.map((body) => v.parse(JobSpecSchema, body).lease) })
+      .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true }, leased: [true, true] });
   });
 
   // #43: the upload was refused after a green verdict, the run exited non-zero with no report line, and a release read it red.

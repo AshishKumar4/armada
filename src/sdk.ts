@@ -260,6 +260,11 @@ export class Armada {
     await this.call(`/jobs/${id}/cancel`, { method: 'POST' });
   }
 
+  /** Renews job `id`'s lease (`JobSpec.lease`): whether it still runs to hold one. */
+  async renew(id: string): Promise<boolean> {
+    return v.parse(v.object({ held: v.boolean() }), await (await this.call(`/jobs/${id}/lease`, { method: 'POST' })).json()).held;
+  }
+
   async status(id: string): Promise<JobStatus> {
     const answer = await this.call(`/jobs/${id}`);
 

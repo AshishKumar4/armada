@@ -231,6 +231,8 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
     return Response.json({ cancelled: id });
   }
 
+  if (tail === 'lease' && request.method === 'POST') return Response.json({ held: await job.renew() });
+
   if (tail === 'items' && request.method === 'GET') return new Response(await job.items(), { headers: { 'content-type': 'application/json' } });
 
   if (tail === 'items' && request.method === 'POST') {

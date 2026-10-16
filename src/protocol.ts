@@ -260,6 +260,10 @@ export const SECRET_BYTES = 32 * 1024;
 /** General map jobs retain their six-hour limit: wheel builds and preflight runs can legitimately take hours. */
 export const JOB_DEADLINE_SECONDS = 6 * 60 * 60;
 
+/** How long a job whose client follows it (`JobSpec.lease`) runs on once that client stops renewing its lease: a
+ *  client that died, or lost its network, holds the fleet no longer than this (#50). */
+export const JOB_LEASE_SECONDS = 3 * 60;
+
 /** CI reports its own deadline below a typical runner's 40-minute timeout, leaving time to report and clean up. */
 export const CI_DEADLINE_SECONDS = 30 * 60;
 
@@ -350,6 +354,9 @@ export const JobSpecSchema = v.object({
   timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
   /** The whole job's bound, including environment preparation and container starts, in seconds. */
   deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), JOB_DEADLINE_SECONDS),
+  /** A client follows the job and renews its lease (`POST /jobs/<id>/lease`) while it does: the job is cancelled once
+   *  JOB_LEASE_SECONDS pass without a renewal. A job made to run on without its client, such as a webhook's, has none. */
+  lease: v.optional(v.boolean(), false),
   /** A formed gang's bound to launch every rank, in seconds, independent of its task timeout. */
   gangStartTimeout: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), GANG_START_SECONDS),
   retries: v.optional(RetriesSchema),

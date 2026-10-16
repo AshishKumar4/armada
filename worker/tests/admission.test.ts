@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { Armada } from '../../src/sdk';
-import { PROTOCOL } from '../../src/protocol';
+import { JOB_LEASE_SECONDS, PROTOCOL } from '../../src/protocol';
 import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
 import { fakeFetch, settled } from '../../tests/fakes';
-import { namespace, state, world } from './harness';
+import { idleVessels, namespace, readyRegistry, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
 
@@ -16,7 +16,7 @@ const original = globalThis.fetch;
 afterEach(() => { globalThis.fetch = original; });
 
 /** A deployment of `version` whose fleet and jobs live in memory, with `bindings`, and a client whose requests reach
- *  it. */
+ *  it; and its jobs, by id. */
 function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' })), version = 'a', bindings: Parameters<typeof world>[0] = {}) {
   const jobs = new Map<string, ArmadaJob>();
 
@@ -28,7 +28,7 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
 
   globalThis.fetch = fakeFetch(async (request) => await worker.fetch(request, env));
 
-  return { armada: new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' }), fleet, env };
+  return { armada: new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' }), fleet, env, jobs };
 }
 
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
@@ -267,5 +267,32 @@ describe('a drained version', () => {
     await armada.admit();
 
     expect(await settled(armada.create(spec), 'admitted')).toBe('admitted');
+  });
+});
+
+// #50: a CI run cancelled in GitHub left its suite on 85 containers to its deadline, beside the next run's.
+describe('a job its client follows', () => {
+  test('ends once its client stops renewing its lease, runs on while it renews, and a job no client follows runs on', async () => {
+    const { armada, jobs } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const [gone, kept, unfollowed] = [await armada.create({ ...spec, lease: true }), await armada.create({ ...spec, lease: true }), await armada.create(spec)];
+
+      setSystemTime(began + JOB_LEASE_SECONDS * 1000 / 2);
+      const renewed = await armada.renew(kept);
+
+      setSystemTime(began + JOB_LEASE_SECONDS * 1000 + 1);
+
+      for (const id of [gone, kept, unfollowed]) await jobs.get(id)?.alarm();
+      const ended = await Promise.all([gone, kept, unfollowed].map(async (id) => (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail])));
+
+      expect({ renewed, ended, after: await armada.renew(gone) }).toEqual({
+        renewed: true, ended: [[['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]], [], []], after: false,
+      });
+    } finally {
+      setSystemTime();
+    }
   });
 });
