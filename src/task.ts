@@ -107,9 +107,10 @@ export interface MapOptions {
   readonly slots?: number;
   /** How the job places its tasks (`ModeSchema`). Default `efficient`. */
   readonly mode?: Mode;
-  /** The CPU every container's host has (`Cpu`, as a result's `meta.host` says it): a container on another host is
-   *  replaced before it takes a task. For float results that must not differ between hosts. */
-  readonly cpu?: Cpu;
+  /** The CPU every container's host has (`Cpu`, as a result's `meta.host` says it), or several, any one of them: a
+   *  container on another host is replaced before it takes a task. One, for float results that must not differ between
+   *  hosts; several, to keep out a slow host. */
+  readonly cpu?: Cpu | readonly Cpu[];
   /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
   readonly deadline?: number;
   /** The limit for a formed gang to launch all its ranks, once every one has a container, in seconds. Default 300. */
@@ -415,7 +416,7 @@ abstract class Base<I extends Json, O> {
     const { commit, ...environment } = this.recipe;
 
     const spec = {
-      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, cpu: options.cpu, label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, cpu: options.cpu === undefined ? undefined : [options.cpu].flat(), label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       deadline: options.deadline, gangStartTimeout: options.gangStartTimeout,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,

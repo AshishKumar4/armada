@@ -506,10 +506,10 @@ export class AccountFull extends Error {
   }
 }
 
-/** A container on a host of another CPU than its job requires (`JobSpec.cpu`): its job replaces it (#40). */
+/** A container on a host of a CPU its job does not name (`JobSpec.cpu`): its job replaces it (#40). */
 export class Misplaced extends Error {
-  constructor(readonly host: Host, cpu: Cpu) {
-    super(`its host, ${hostLabel(host)}, is not the ${cpuLabel(cpu)} its job requires`);
+  constructor(readonly host: Host, cpus: readonly Cpu[]) {
+    super(`its host, ${hostLabel(host)}, is not the ${cpuLabel(cpus)} its job requires`);
   }
 }
 

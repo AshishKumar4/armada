@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from armada import Context, Ok, Result, Task, task
 from armada.client import JobStatus, Summary
 from armada.sh import Shell, sh
-from armada.task import Cancelled, Errored, Job, Lost, MapError, TimedOut
+from armada.task import Cancelled, Cpu, Errored, Job, Lost, MapError, TimedOut
 from armada.wire import Json
 
 
@@ -131,7 +131,10 @@ def followed(job: Job[int, str]) -> None:
     assert_type(job.summary(), Summary)
 
 
-# A job's mode is "efficient" or "fast": mypy refuses any other word.
+# A job's mode is "efficient" or "fast": mypy refuses any other word. Its CPU is one model, or a list, any one of them.
 def placed(items: list[int]) -> None:
     assert_type(square.stream(items, mode="fast"), Job[int, int])
     square.map(items, mode="slow")  # type: ignore[arg-type]
+    genoa: Cpu = {"vendor": "AuthenticAMD", "family": 25, "model": 17}
+    assert_type(square.stream(items, cpu=[genoa, {"vendor": "AuthenticAMD", "family": 26, "model": 17}]), Job[int, int])
+    square.map(items, cpu="AuthenticAMD/25/17")  # type: ignore[arg-type]

@@ -279,7 +279,7 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 | `pool` | The most containers the job runs on. |
 | `mode` | `efficient`, the default, packs tasks into containers by their recorded use. `fast` runs one a container. Packed tasks share the network, so tasks that bind a fixed port need `fast`. A client older than wire 9 can't name a mode, so its jobs run `fast`. |
 | `slots` | More than one runs exactly that many tasks at once in each container, each in its own slot with an even share of memory, and turns packing off. A gang can't run in slots. |
-| `cpu` | The CPU every container's host has, as `/proc/cpuinfo` names it: `{ vendor: 'AuthenticAMD', family: 25, model: 17 }` (`--cpu=AuthenticAMD/25/17`). A container on another host is replaced before it takes a task. |
+| `cpu` | The CPU every container's host has, as `/proc/cpuinfo` names it: `{ vendor: 'AuthenticAMD', family: 25, model: 17 }` (`--cpu=AuthenticAMD/25/17`). A list takes any one of its CPUs (`--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17`), to keep out a slow host. A container on another host is replaced before it takes a task. |
 | `label`, `env`, `files`, `tmpfs` | The job's name in the dashboard, its environment, its small files (`{files}`), and the paths that get a fresh tmpfs. |
 
 These go to `.map` and `.stream` as `map(items, { pool, slots, mode, cpu, label, env, files, tmpfs })`.
@@ -407,7 +407,7 @@ for the other.
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.mode` | `efficient` | As the job option. |
 | `task.slots` | `1` | As the job option. |
-| `task.cpu` | | As the job option, such as `{"vendor": "AuthenticAMD", "family": 25, "model": 17}`. |
+| `task.cpu` | | As the job option, such as `{"vendor": "AuthenticAMD", "family": 25, "model": 17}`, or a list of them. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
@@ -475,7 +475,7 @@ what open jobs use. A client and a Worker too far apart in version refuse each o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

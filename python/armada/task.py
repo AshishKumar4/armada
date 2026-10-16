@@ -482,7 +482,7 @@ class Task(Generic[In, Out]):
         built = given.spec if isinstance(given, RecipeBuilder) else given
         return built if isinstance(built, dict) else default_recipe().spec
 
-    def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, cpu: Cpu | None, label: str,
+    def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, cpu: Cpu | list[Cpu] | None, label: str,
               env: dict[str, str] | None, files: dict[str, str] | None, tmpfs: list[str] | None,
               bundle: str | None) -> dict[str, object]:
         spec = {
@@ -496,13 +496,14 @@ class Task(Generic[In, Out]):
         return {key: value for key, value in spec.items() if value is not None}
 
     def stream(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-               cpu: Cpu | None = None, label: str = "", env: dict[str, str] | None = None,
+               cpu: Cpu | list[Cpu] | None = None, label: str = "", env: dict[str, str] | None = None,
                files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
                armada: Armada | None = None) -> Job[In, Out]:
         """The job, whose results arrive as they land. Items stream in when given as a generator. `mode` is how it places
         its tasks: "efficient", the default, packs them into containers by their measured use; "fast" runs one a
-        container. More than one slot turns packing off. `cpu` is the CPU every container's host has (`Cpu`); a container on
-        another host is replaced before it takes a task, so float results do not differ between hosts."""
+        container. More than one slot turns packing off. `cpu` is the CPU every container's host has (`Cpu`), or a list of
+        them, any one; a container on another host is replaced before it takes a task. One keeps float results alike
+        between hosts; several keep out a slow host."""
         client = armada or connect()
         from .push import pushed
 
@@ -527,7 +528,7 @@ class Task(Generic[In, Out]):
         return Job(client, self, submission)
 
     def map(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-            cpu: Cpu | None = None, label: str = "", env: dict[str, str] | None = None,
+            cpu: Cpu | list[Cpu] | None = None, label: str = "", env: dict[str, str] | None = None,
             files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
             armada: Armada | None = None) -> list[Out]:
         """Every item's value, in input order, or a MapError holding every result when one is not ok."""
@@ -536,7 +537,7 @@ class Task(Generic[In, Out]):
         return streamed.values()
 
     def run(self, item: In, *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
-            cpu: Cpu | None = None, label: str = "", env: dict[str, str] | None = None,
+            cpu: Cpu | list[Cpu] | None = None, label: str = "", env: dict[str, str] | None = None,
             files: dict[str, str] | None = None, tmpfs: list[str] | None = None, armada: Armada | None = None) -> Out:
         """One item's value, on one container."""
         streamed = self.stream([item], pool=pool, slots=slots, mode=mode, cpu=cpu, label=label, env=env, files=files,

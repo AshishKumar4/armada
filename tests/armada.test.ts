@@ -710,11 +710,13 @@ describe('the CLI\'s arguments', () => {
 
       const argv = ['tool', '--output', '--items=x'];
       // Nothing listens on port 9: the named connection's server is the only one that can answer.
-      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast'], 'http://127.0.0.1:9')];
+      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast', '--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17'], 'http://127.0.0.1:9')];
       const job = { items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false };
+      const genoa = { vendor: 'AuthenticAMD', family: 25, model: 17 };
 
       expect({ exits, jobs }).toMatchObject({ exits: [0, 0], jobs: [job, job] });
-      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode }) => [deadline, mode])).toEqual([[21600, 'efficient'], [21600, 'fast']]);
+      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode, cpu }) => [deadline, mode, cpu]))
+        .toEqual([[21600, 'efficient', undefined], [21600, 'fast', [genoa, { ...genoa, family: 26 }]]]);
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });

@@ -58,8 +58,9 @@ map options:
   --slots=N            the tasks one container runs at once, each in its own slot (default 1; more turns packing off)
   --mode=<mode>        efficient packs tasks into containers by their measured use; fast runs one a container
                        (default efficient)
-  --cpu=V/F/M          the CPU every container's host has, vendor/family/model as /proc/cpuinfo says
-                       (AuthenticAMD/25/17); a container on another host is replaced before it takes a task
+  --cpu=V/F/M[,...]    the CPU every container's host has, vendor/family/model as /proc/cpuinfo says
+                       (AuthenticAMD/25/17), or several, any one of them; a container on another host is replaced
+                       before it takes a task
   --timeout=S          a task's limit, in seconds (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
   --gang-start-timeout=S  once every rank has a container, all must launch within this many seconds (default 300)
@@ -159,16 +160,17 @@ function itemsFrom(source: string): Json[] {
   return text.split('\n').filter((line) => line.trim() !== '');
 }
 
-/** `--cpu`'s CPU: vendor/family/model, as `cpuLabel` writes it. */
-function cpuOf(given: string | undefined): Cpu | undefined {
-  if (given === undefined) return undefined;
-  const [vendor, family, model, ...extra] = given.split('/');
+/** `--cpu`'s CPUs: vendor/family/model, as `cpuLabel` writes it, a comma between two. */
+function cpuOf(given: string | undefined): Cpu[] | undefined {
+  return given?.split(',').map((each) => {
+    const [vendor, family, model, ...extra] = each.split('/');
 
-  if (vendor === undefined || vendor === '' || family === undefined || model === undefined || extra.length > 0 || !/^\d+$/u.test(family) || !/^\d+$/u.test(model)) {
-    throw new Error(`--cpu takes vendor/family/model as /proc/cpuinfo has them, such as AuthenticAMD/25/17, not ${given}`);
-  }
+    if (vendor === undefined || vendor === '' || family === undefined || model === undefined || extra.length > 0 || !/^\d+$/u.test(family) || !/^\d+$/u.test(model)) {
+      throw new Error(`--cpu takes vendor/family/model as /proc/cpuinfo has them, such as AuthenticAMD/25/17, or several with a comma between, not ${given}`);
+    }
 
-  return { vendor, family: Number(family), model: Number(model) };
+    return { vendor, family: Number(family), model: Number(model) };
+  });
 }
 
 async function map(): Promise<number> {

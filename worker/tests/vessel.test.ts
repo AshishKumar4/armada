@@ -54,7 +54,7 @@ interface Run {
   readonly tasks?: number;
   readonly fleet?: object;
   /** The CPU its job requires, and what its host's /proc/cpuinfo says. */
-  readonly cpu?: Cpu;
+  readonly cpu?: readonly Cpu[];
   readonly cpuinfo?: string;
 }
 
@@ -164,18 +164,24 @@ describe('a vessel\'s place in its fleet', () => {
   });
 });
 
-describe('a vessel whose job requires a CPU (#40)', () => {
-  test('takes no task on a host of another CPU, and says which host; on its own, each outcome names its host', async () => {
-    const cpu = { vendor: 'AuthenticAMD', family: 25, model: 17 };
-    const zen3 = await run(0, { cpu, cpuinfo: cpuinfoOf(25, 1, V3) });
-    const zen4 = await run(0, { cpu, cpuinfo: cpuinfoOf(25, 17, `${V3} avx512f avx512dq avx512cd avx512bw avx512vl avx512_bf16`) });
+describe('a vessel whose job requires a CPU (#40, #48)', () => {
+  test('takes no task on a host of a CPU its job does not name, and says which host; on its own, each outcome names its host', async () => {
+    const genoa = { vendor: 'AuthenticAMD', family: 25, model: 17 };
+    const turin = { ...genoa, family: 26 };
+    const v4 = `${V3} avx512f avx512dq avx512cd avx512bw avx512vl avx512_bf16`;
+    const zen3 = await run(0, { cpu: [genoa], cpuinfo: cpuinfoOf(25, 1, V3) });
+    const zen4 = await run(0, { cpu: [genoa], cpuinfo: cpuinfoOf(25, 17, v4) });
+    // "Not Milan": either of two models, so a fast host of the other model is kept rather than replaced.
+    const either = await Promise.all([cpuinfoOf(26, 17, v4), cpuinfoOf(25, 1, V3)].map(async (cpuinfo) => await run(0, { cpu: [genoa, turin], cpuinfo })));
 
     expect({
       zen3: { claims: zen3.claims, misplaced: zen3.misplaced, failed: zen3.failed },
       zen4: { exits: zen4.exits, hosts: zen4.completed.map((outcome) => outcome.host), failed: zen4.failed },
+      either: either.map(({ exits, failed }) => ({ exits, failed })),
     }).toEqual({
-      zen3: { claims: 0, misplaced: [{ ...cpu, model: 1, name: 'AMD EPYC', level: 3 }], failed: ['its host, AMD EPYC 25/1 (x86-64-v3), is not the AuthenticAMD/25/17 its job requires'] },
-      zen4: { exits: [0], hosts: [{ ...cpu, name: 'AMD EPYC', level: 4 }], failed: [] },
+      zen3: { claims: 0, misplaced: [{ ...genoa, model: 1, name: 'AMD EPYC', level: 3 }], failed: ['its host, AMD EPYC 25/1 (x86-64-v3), is not the AuthenticAMD/25/17 its job requires'] },
+      zen4: { exits: [0], hosts: [{ ...genoa, name: 'AMD EPYC', level: 4 }], failed: [] },
+      either: [{ exits: [0], failed: [] }, { exits: [], failed: ['its host, AMD EPYC 25/1 (x86-64-v3), is not the AuthenticAMD/25/17 or AuthenticAMD/26/17 its job requires'] }],
     });
   });
 });

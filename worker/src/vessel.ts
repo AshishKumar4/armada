@@ -53,8 +53,8 @@ export interface VesselSpec {
   /** When its job's deadline ends it, so the fleet holds its vCPUs no longer than it may run. Absent for an earlier
    *  Worker's spec, whose jobs ended at six hours. */
   readonly deadlineAt?: number;
-  /** The CPU its host must have (`JobSpec.cpu`); absent for any. */
-  readonly cpu?: Cpu;
+  /** The CPUs its host may have, any one of them (`JobSpec.cpu`); absent for any. */
+  readonly cpu?: readonly Cpu[];
 }
 
 /** A stored spec with its later fields filled: an earlier Worker's lacks `slots`, `slotMemoryBytes` and `runtime`. */

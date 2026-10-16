@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 10;
+export const PROTOCOL = 11;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -297,11 +297,14 @@ export type Host = v.InferOutput<typeof HostSchema>;
 /** A host as a person reads it: `AMD EPYC 25/17 (x86-64-v4)`. */
 export const hostLabel = ({ name, family, model, level }: Host): string => `${name} ${String(family)}/${String(model)}${level === 0 ? '' : ` (x86-64-v${String(level)})`}`;
 
-/** A CPU as `--cpu` takes it and a person reads it: `AuthenticAMD/25/17`. */
-export const cpuLabel = ({ vendor, family, model }: Cpu): string => `${vendor}/${String(family)}/${String(model)}`;
+/** The CPUs a job takes, any one of them (#48): one, as a client before wire 11 sends it, or a list. */
+export const CpusSchema = v.pipe(v.union([CpuSchema, v.pipe(v.array(CpuSchema), v.minLength(1, 'cpu names at least one CPU'))]), v.transform((cpu) => [cpu].flat()));
 
-/** Whether `host` has the CPU `cpu`. */
-export const hasCpu = (host: Host, cpu: Cpu): boolean => host.vendor === cpu.vendor && host.family === cpu.family && host.model === cpu.model;
+/** CPUs as `--cpu` takes them and a person reads them: `AuthenticAMD/25/17 or AuthenticAMD/26/17`. */
+export const cpuLabel = (cpus: readonly Cpu[]): string => cpus.map(({ vendor, family, model }) => `${vendor}/${String(family)}/${String(model)}`).join(' or ');
+
+/** Whether `host` has one of the CPUs `cpus`. */
+export const hasCpu = (host: Host, cpus: readonly Cpu[]): boolean => cpus.some((cpu) => host.vendor === cpu.vendor && host.family === cpu.family && host.model === cpu.model);
 
 /** For a repository recipe: the commit each container checks out, packed against `base`. `shallow` is the pack's
  *  boundary, the commits it holds whose parents it does not (`boundaryOf`): the commit itself for a `commit` history, a
@@ -336,8 +339,8 @@ export const JobSpecSchema = v.object({
    *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
   mode: v.optional(ModeSchema, 'efficient'),
-  /** The CPU every container's host has (`CpuSchema`). A container on another host is replaced before it takes a task. */
-  cpu: v.optional(CpuSchema),
+  /** The CPUs a container's host may have (`CpusSchema`). A container on another host is replaced before it takes a task. */
+  cpu: v.optional(CpusSchema),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow

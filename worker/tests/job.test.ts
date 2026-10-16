@@ -434,7 +434,7 @@ describe('a vessel lost before it took a task', () => {
   });
 });
 
-describe('a job whose containers start on hosts of another CPU than its own (#40)', () => {
+describe('a job whose containers start on hosts of another CPU than its own (#40, #48)', () => {
   test('replaces each at no cost to its budget while others boot, and ends once so many in a row say no host has it', async () => {
     const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
     const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const }, pool: 1, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } };
@@ -448,17 +448,22 @@ describe('a job whose containers start on hosts of another CPU than its own (#40
       if (misplaced % 10 === 0) await lucky.booted((luckyBegun.at(-1) ?? '').slice('j1/'.length), 1000);
     }
 
-    const { job: unlucky, begun } = await job(spec);
+    // One CPU as a client before wire 11 sends it, and two as a list (#48).
+    const unlucky = await Promise.all([spec, { ...spec, cpu: [spec.cpu, { ...spec.cpu, family: 26 }] }].map(async (each) => {
+      const { job: open, begun } = await job(each);
 
-    while ((await unlucky.events(0)).done !== true && begun.length < 100) await misplace(unlucky, begun);
-    const [ended] = (await unlucky.events(0)).events;
+      while ((await open.events(0)).done !== true && begun.length < 100) await misplace(open, begun);
+      const [ended] = (await open.events(0)).events;
 
-    expect({
-      lucky: { done: (await lucky.events(0)).done, begun: luckyBegun.length },
-      unlucky: { begun: begun.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail },
-    }).toEqual({
+      return { begun: begun.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail };
+    }));
+
+    expect({ lucky: { done: (await lucky.events(0)).done, begun: luckyBegun.length }, unlucky }).toEqual({
       lucky: { done: false, begun: 31 },
-      unlucky: { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it' },
+      unlucky: [
+        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it' },
+        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17 or AuthenticAMD/26/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it' },
+      ],
     });
   });
 });
