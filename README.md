@@ -280,17 +280,19 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 | `mode` | `efficient`, the default, packs tasks into containers by their recorded use. `fast` runs one a container. Packed tasks share the network, so tasks that bind a fixed port need `fast`. A client older than wire 9 can't name a mode, so its jobs run `fast`. |
 | `slots` | More than one runs exactly that many tasks at once in each container, each in its own slot with an even share of memory, and turns packing off. A gang can't run in slots. |
 | `cpu` | The CPU every container's host has, as `/proc/cpuinfo` names it: `{ vendor: 'AuthenticAMD', family: 25, model: 17 }` (`--cpu=AuthenticAMD/25/17`). A list takes any one of its CPUs (`--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17`), to keep out a slow host. A container on another host is replaced before it takes a task. |
+| `lease` | `true` ends the job 3 minutes after this process stops following it, however the process ends: killed, its runner gone, or its network lost. `armada map` and `armada run` always set it. Default `false`: the job runs on alone. |
 | `label`, `env`, `files`, `tmpfs` | The job's name in the dashboard, its environment, its small files (`{files}`), and the paths that get a fresh tmpfs. |
 
-These go to `.map` and `.stream` as `map(items, { pool, slots, mode, cpu, label, env, files, tmpfs })`.
+These go to `.map` and `.stream` as `map(items, { pool, slots, mode, cpu, lease, label, env, files, tmpfs })`.
 
-armada records each task's CPU, peak memory and disk, by its task and environment and by its item. A packed container
-takes another task only while their recorded use fits its vCPUs, memory and disk, and a task it hasn't measured yet
-runs alone, as does a gang's rank. Packed tasks have their own files and `/tmp` and share one memory cap, so a task
-past its estimate is killed rather than the container. A task that fails beside others runs again alone before its own
-retries, and its result says how the packed run ended (`aloneAfter`); if it then passes, its item always runs alone.
-armada pins each task to as many CPUs as its container has vCPUs, at least one, so tools that size their threads by the
-CPUs they may use, such as `nproc` and OpenMP, count those.
+armada records each task's CPU, peak memory and disk, by its task and environment and by its item. Its CPU counts only
+from runs that had their container to themselves. A packed container takes another task only while their recorded use
+fits its vCPUs, memory and disk, and a task it hasn't measured yet runs alone, as does a gang's rank. Packed tasks have
+their own files and `/tmp` and share one memory cap, so a task past its estimate is killed rather than the container.
+A task that fails beside others runs again alone before its own retries, and its result says how the packed run ended
+(`aloneAfter`); if it then passes, its item always runs alone. armada pins each task to as many CPUs as its container
+has vCPUs, at least one, so tools that size their threads by the CPUs they may use, such as `nproc` and OpenMP, count
+those.
 
 ## From Python
 
@@ -349,7 +351,7 @@ armada run HEAD
 ```
 
 Words after `armada run HEAD --` go to the plan command, to run part of the matrix. `--secrets=A,B` gives one run's
-tasks those secrets. Ctrl-C cancels the job.
+tasks those secrets. Ctrl-C cancels the job; a run that ends any other way has its jobs end 3 minutes later.
 
 A run of the whole matrix stores its verdict under the commit. `armada verdict <commit>` prints it and exits 0 when
 every row is green, 1 when one is red, and 2 when the commit has none, so a hook or a deploy can reuse the proof. Every
