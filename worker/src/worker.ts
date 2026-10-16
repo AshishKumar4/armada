@@ -6,7 +6,7 @@
 import * as v from 'valibot';
 import {
   briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
-  HookConfigSchema, hex, TaskSchema, TimingsSchema, type HookConfig, type Json,
+  HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
@@ -344,7 +344,8 @@ async function verdictsOf(env: Env, project: string): Promise<{ sha: string; upl
   }));
 }
 
-/** `/timings/<project>`: GET the medians a plan weighs rows by; POST a graded run's green rows and files. */
+/** `/timings/<project>`: GET the medians a plan weighs rows by; POST a graded run's green rows and files, and what the
+ *  project keeps. */
 const timings: Handler = async (request, env, [project]) => {
   if (!v.is(Project, project)) return undefined;
   const store = env.TIMINGS.getByName(project);
@@ -352,7 +353,7 @@ const timings: Handler = async (request, env, [project]) => {
   if (request.method === 'GET') return Response.json(await store.estimates());
 
   if (request.method !== 'POST') return undefined;
-  await store.record(v.parse(TimingsSchema, await request.json()));
+  await store.record(v.parse(RecordedSchema, await request.json()));
 
   return Response.json({ recorded: true });
 };

@@ -55,7 +55,8 @@
 - Commit messages are `type: text`, at most 80 characters, with no first person.
 - Push `main` only as a fast-forward, after a green run on that exact commit.
 - Connection files live in `~/.config/armada/<name>.json`.
-- A Durable Object's SQL statement binds at most 100 parameters, and a string is at most 2 MB. Bun's SQLite allows
+- A Durable Object's SQL statement binds at most 100 parameters, and a string is at most 2 MB as documented (a stored value
+  measured more on 2026-10-16: 6.7 MB kept, 8.8 MB refused with SQLITE_TOOBIG; design for 2 MB). Bun's SQLite allows
   far more, so the tests' storage holds both bounds; a statement past them fails only in production otherwise.
 - A finish or a stop in a vessel keeps each step in its slot's record before the next (`Current`), so a restarted
   vessel takes it up where it was. Keep new steps in that record.
@@ -70,10 +71,11 @@
     redeploy needs the owner's go-ahead. On 2026-10-12 a takeover of armada-dew3 across an interface change, before
     this check, let objects on the old code misread the new calls for minutes: its fleet dropped every hold.
   - On 2026-10-16 all three ran wire 10: armada-v2 `651930f`, nimbus-armada-v2 `52e8e31`, armada-dew6 `d3ddca1`.
-    `main` is wire 11 (#48, #50) and changes the contract (#47's samples, #49's waiting holders, #50's lease), so each
-    one's next deploy drains, then refuses new jobs for about 5 min while the deployment-wide objects still run the
-    old code (measured on armada-ci2: 296 s). A wire-11 client gets 426 from a wire-10 Worker: redeploy the Worker
-    before a project moves its client pin to `main`. Borrowing past the cap needs `ARMADA_ACCOUNT_TOKEN` at a deploy.
+    `main` is wire 12 (#48, #50, and a full run naming what its timings keep) and changes the contract (#47's samples,
+    #49's waiting holders, #50's lease), so each one's next deploy drains, then refuses new jobs for about 5 min while
+    the deployment-wide objects still run the old code (measured on armada-ci2: 296 s). A newer client gets 426 from
+    an older Worker: redeploy the Worker before a project moves its client pin to `main`. Until it does, its records
+    name nothing kept, so its rows and files are added to and none go. Borrowing past the cap needs `ARMADA_ACCOUNT_TOKEN` at a deploy.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every

@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 11;
+export const PROTOCOL = 12;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -620,6 +620,12 @@ export const TimingsSchema = v.object({
 });
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;
+
+/** A full run's timings, with what its project keeps the timings of: the rows its plan named and its tasks reported,
+ *  and the files its commit holds. A client before wire 12 names none, and its rows and files join those kept. */
+export const RecordedSchema = v.object({ ...TimingsSchema.entries, keep: v.optional(v.object({ rows: v.array(v.string()), files: v.array(v.string()) })) });
+
+export type Recorded = v.InferOutput<typeof RecordedSchema>;
 
 const JsonArraySchema = v.array(JsonSchema);
 

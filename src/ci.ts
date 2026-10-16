@@ -675,6 +675,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   // that reports many rows exits 0 with red ones among them, so its exit alone would say green. Null for a file missing
   // or malformed.
   const verdicts = new Map<number, VerdictRow[] | null>();
+  // The tasks that reported rows of their own: an entry that names none owns those, whatever their names (`keep`).
+  const wrote = new Set<number>();
   // Each task's artifacts beside the report, under the task's plan index and name, since two tasks may share a name; a
   // row names one as its evidence.
   const kept = new Map<number, { readonly dir: string; readonly paths: ReadonlySet<string> }>();
@@ -692,6 +694,8 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
       // A task that failed before it wrote a verdict reported no row; one that exited 0 without a verdict is ungradable.
       const ungradable = result.meta.exitCode === 0 ? null : [];
       const reported = parsed?.success === true ? parsed.output.rows : ungradable;
+
+      if (reported !== null && reported.length > 0) wrote.add(index);
       const rows = reported === null ? null : underExit(reported, result.meta, nameOf(index), plan.include[index]?.rows);
 
       verdicts.set(index, rows);
@@ -804,10 +808,18 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
   // A run that cannot grade still records what its green rows took: one out of time is planned anew from them (#46).
   // Timings only weigh the next plan, so one that is not recorded is said and the run's answer stands: a refused upload
   // (500 SQLITE_TOOBIG, #43) ended a green run non-zero, with no report line, and a release read it as red.
+  // It names what the project keeps the timings of, as the next plan reads them all and its jobs carry them: the rows
+  // the plan named and the tasks reported, and the files the commit holds. Where an entry that names no rows had its
+  // task report none, the rows that task owns are not known, and every row kept so far stays.
   if (planArgs.length === 0) {
+    const planned = plan.include.flatMap((entry, index) => entry.rows?.map((row) => expectedOf(row).name) ?? [nameOf(index)]);
+    const unowned = config.task.verdict && plan.include.some((entry, index) => entry.rows === undefined && !wrote.has(index));
+    const files = git(repo, ['ls-tree', '-r', '-z', '--full-tree', '--name-only', sha]).toString().split('\0').filter((path) => path !== '');
+
     try {
       await armada.post(`/timings/${config.name}`, {
         rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: graded.files, usage,
+        keep: { rows: [...new Set([...planned, ...graded.rows.map(rowName), ...unowned ? Object.keys(timings.rows) : []])], files },
       });
     } catch (cause) {
       note(`this run's timings were not recorded, so the next plan weighs its rows without them: ${errorOf({ cause }).message}`);

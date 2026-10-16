@@ -880,6 +880,8 @@ interface Runner {
   readonly lose?: number;
   /** Run from a bare clone, with no checkout, as the webhook driver fetches a commit. */
   readonly bare?: boolean;
+  /** Run from this directory of the checkout. */
+  readonly within?: string;
   /** The timings upload is refused, as #43's 500 SQLITE_TOOBIG was. */
   readonly timingsRefused?: boolean;
 }
@@ -1017,7 +1019,7 @@ describe('armada run', () => {
       if (runner.bare === true) git(scratch, 'clone', '-q', '--bare', repo, 'repo.git');
 
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
-        cwd: runner.bare === true ? join(scratch, 'repo.git') : repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+        cwd: runner.bare === true ? join(scratch, 'repo.git') : join(repo, runner.within ?? ''), env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
       const exit = await cli.exited;
@@ -1195,6 +1197,24 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, plan: ran.commands[0]?.slice(-3), narrowed: told(ran), full: told(full), leased: ran.bodies.map((body) => v.parse(JobSpecSchema, body).lease) })
       .toEqual({ exit: 0, plan: ['plan', '--tier', 'fast'], narrowed: { verdicts: [], timings: false }, full: { verdicts: ['PUT /verdicts/proj'], timings: true }, leased: [true, true] });
+  });
+
+  // 2026-10-16: a project kept the timings of every row a run ever named, and the answer, which each job of a run
+  // carries in its stored spec, outgrew what the platform stores: every `armada run` was refused SQLITE_TOOBIG.
+  test('a full run names what its project keeps: the rows its plan named or its tasks reported, and its commit\'s files', async () => {
+    const plan = { include: [{ name: 'a', rows: [{ name: 'x', files: ['sub/x.py'] }, { name: 'y', files: ['y.py'] }] }] };
+    const kept = { rows: { z: 2, old: 3 }, files: {} };
+    // One task cut off before its second row, run from a directory of the checkout.
+    const cut = await run([], plan, { rows: [{ name: 'x', exitCode: 0, seconds: 4, timings: { 'sub/x.py': 3 } }] }, { files: { 'sub/x.py': '', 'y.py': '' }, within: 'sub' });
+    const unnamed = await run([], { include: [{ name: 'b' }] }, { rows: [{ name: 'z', exitCode: 0, seconds: 1 }] }, { timings: kept });
+    // The same task, failed before it reported a row: the rows it owns are not known, so every one kept stays.
+    const silent = await run([], { include: [{ name: 'b' }] }, null, { taskExit: 1, timings: kept });
+
+    expect([...cut.timed, ...unnamed.timed, ...silent.timed].map((body) => v.parse(v.looseObject({ keep: v.unknown() }), body).keep)).toEqual([
+      { rows: ['x', 'y'], files: ['.armada.json', 'sub/x.py', 'y.py'] },
+      { rows: ['b', 'z'], files: ['.armada.json'] },
+      { rows: ['b', 'z', 'old'], files: ['.armada.json'] },
+    ]);
   });
 
   // #43: the upload was refused after a green verdict, the run exited non-zero with no report line, and a release read it red.

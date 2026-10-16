@@ -402,7 +402,7 @@ for the other.
 | `size` | `medium` | The container size, from the table below, or `auto`. |
 | `pool` | `40` | The most containers the tasks run on. The plan's `weight`s or past timings can make it fewer. |
 | `target` | `300` | Seconds per task the plan aims for, passed as `{target}`. |
-| `plan.command` | | Prints `{"include": [...]}`. Gets `{target}`, and `{timings}`, a file of past timings. |
+| `plan.command` | | Prints `{"include": [...]}`. Gets `{target}`, and `{timings}`, a file of past timings: of the rows the last full run's plan named and its tasks reported, and the files its commit held. |
 | `plan.local` | `false` | Runs the plan here, on a clean checkout of the commit, instead of in a container whose start can take a minute. |
 | `task.command` | | Runs one matrix entry. The entry's keys fill its placeholders. |
 | `task.name` | `name` | The entry key that names a task. |

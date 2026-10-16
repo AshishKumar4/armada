@@ -6,9 +6,14 @@
  * Each row and each file keeps its samples under a key of its own (`row:`, `file:`): one value holding them all
  * outgrew the platform's 2 MB per value at Kinu's 103 rows and their files, and the run's timings were refused with
  * SQLITE_TOOBIG (#43).
+ *
+ * A full run names what its project keeps: the rows its plan named and the files its commit holds, and the others go.
+ * What a plan reads goes into each of its run's jobs, in the job's stored spec, so it is one plan's rows and one
+ * commit's files, never every name a project ran: on 2026-10-16 Kinu's hammer rows, each named by the files a change
+ * touched, made it 8.5 MB, and every `armada run` was refused with SQLITE_TOOBIG.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { medians, recordSamples, type Timings } from '../../src/protocol';
+import { medians, recordSamples, type Recorded, type Timings } from '../../src/protocol';
 import type { Env } from './env';
 
 /** The most keys one storage call takes. */
@@ -19,8 +24,17 @@ function chunks<T>(items: readonly T[]): T[][] {
 }
 
 export class ArmadaTimings extends DurableObject<Env> {
-  async record(timings: Timings): Promise<void> {
+  async record({ keep, ...timings }: Recorded): Promise<void> {
+    await this.#dropUnnamed();
     const keyed = { ...prefixed('row:', timings.rows), ...prefixed('file:', timings.files) };
+
+    if (keep !== undefined) {
+      const kept = new Set([...keep.rows.map((row) => `row:${row}`), ...keep.files.map((file) => `file:${file}`), ...Object.keys(keyed)]);
+      const stored = [...(await this.ctx.storage.list({ prefix: 'row:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'file:' })).keys()];
+
+      for (const keys of chunks(stored.filter((key) => !kept.has(key)))) await this.ctx.storage.delete(keys);
+    }
+
     const held = new Map<string, number[]>();
 
     for (const keys of chunks(Object.keys(keyed))) {
@@ -37,12 +51,27 @@ export class ArmadaTimings extends DurableObject<Env> {
   }
 
   async estimates(): Promise<Timings> {
+    await this.#dropUnnamed();
     const { memory = [], cores = [] } = await this.ctx.storage.get<Record<string, number[]>>('usage') ?? {};
 
     return {
       rows: medians(await this.#samples('row:')), files: medians(await this.#samples('file:')),
       usage: memory.length === 0 ? null : { memory: Math.max(...memory), cores: Math.max(...cores) },
     };
+  }
+
+  /** The rows and files an earlier Worker kept, every one a run ever recorded, which go once, before this store first
+   *  answers. Nothing else comes in meanwhile. */
+  async #dropUnnamed(): Promise<void> {
+    if ((await this.ctx.storage.get<boolean>('named')) === true) return;
+
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if ((await this.ctx.storage.get<boolean>('named')) === true) return;
+      const kept = [...(await this.ctx.storage.list({ prefix: 'row:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'file:' })).keys()];
+
+      for (const keys of chunks(kept)) await this.ctx.storage.delete(keys);
+      await this.ctx.storage.put('named', true);
+    });
   }
 
   async #samples(prefix: string): Promise<Record<string, number[]>> {

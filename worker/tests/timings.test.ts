@@ -32,4 +32,29 @@ describe('a project\'s timings', () => {
     expect({ rows: Object.keys(rows).length, row: rows[`bun test ${name('row', 7)}`], files: Object.keys(files).length, file: files[name('file', 19_999)] })
       .toEqual({ rows: 103, row: 3, files: 20_000, file: 3000.369 });
   });
+
+  // 2026-10-16: Kinu's hammer rows were named by the files each change touched, and the 888 a project kept made the
+  // answer 8.5 MB, which each job of a run carries in its stored spec: every `armada run` was refused SQLITE_TOOBIG.
+  test('keep the rows the last full run named and the files its commit holds, with what it recorded', async () => {
+    const timings = new ArmadaTimings(state().ctx, world({}));
+
+    await timings.record({ rows: { 'hammer a.ts': 1, unit: 1 }, files: { 'a.ts': 1, 'gone.ts': 1 }, keep: { rows: ['hammer a.ts', 'unit'], files: ['a.ts', 'gone.ts'] } });
+    await timings.record({ rows: { 'hammer b.ts': 2 }, files: { 'b.ts': 2, 'made.ts': 2 }, keep: { rows: ['hammer b.ts', 'unit', 'red'], files: ['a.ts', 'b.ts'] } });
+
+    const { rows, files } = await timings.estimates();
+
+    expect({ rows, files }).toEqual({ rows: { 'hammer b.ts': 2, unit: 1 }, files: { 'a.ts': 1, 'b.ts': 2, 'made.ts': 2 } });
+  });
+
+  test('drop once the rows and files an earlier Worker kept, every one a run ever recorded, and keep its usage', async () => {
+    const { ctx } = state();
+
+    await ctx.storage.put({ 'row:bun scripts/hammer.ts --run=1 a.ts': [1], 'row:unit': [2], 'file:a.ts': [3], usage: { memory: [4], cores: [1] } });
+    const first = await new ArmadaTimings(ctx, world({})).estimates();
+
+    await new ArmadaTimings(ctx, world({})).record({ rows: { unit: 5 }, files: {} });
+
+    expect({ first, after: (await new ArmadaTimings(ctx, world({})).estimates()).rows })
+      .toEqual({ first: { rows: {}, files: {}, usage: { memory: 4, cores: 1 } }, after: { unit: 5 } });
+  });
 });
