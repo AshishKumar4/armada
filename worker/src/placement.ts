@@ -24,7 +24,7 @@ const STORE_CALLS = 32;
  *  tasks. */
 const ESTIMATED = `SELECT t.idx, t.state, t.weight, t.not_before, t.vessel, t.dup,
     COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk, ${ranksOf('t.item')} AS ranks,
-    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
+    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR COALESCE(p.cores, c.cores) IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
   FROM tasks t LEFT JOIN placed p ON p.idx = t.idx LEFT JOIN classes c ON c.class = p.class`;
 
 /** The task states whose runs hold a container. */
@@ -86,7 +86,10 @@ export class Placement {
     sql.exec(`CREATE TABLE IF NOT EXISTS placed (idx INTEGER PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, looked INTEGER NOT NULL DEFAULT 0,
       cores REAL, memory REAL, disk REAL, alone INTEGER NOT NULL DEFAULT 0, failure TEXT)`);
     sql.exec('CREATE TABLE IF NOT EXISTS classes (class TEXT PRIMARY KEY, cores REAL, memory REAL, disk REAL, revision INTEGER NOT NULL)');
-    sql.exec('CREATE TABLE IF NOT EXISTS outbox (run TEXT PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL)');
+    sql.exec(`CREATE TABLE IF NOT EXISTS outbox (run TEXT PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL,
+      beside INTEGER NOT NULL DEFAULT 0)`);
+
+    if (!sql.exec<{ name: string }>('PRAGMA table_info(outbox)').toArray().some((column) => column.name === 'beside')) sql.exec('ALTER TABLE outbox ADD COLUMN beside INTEGER NOT NULL DEFAULT 0');
     sql.exec('CREATE TABLE IF NOT EXISTS isolate (class TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (class, item))');
     sql.exec('CREATE TABLE IF NOT EXISTS beside (vessel TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, PRIMARY KEY (vessel, idx, attempt))');
   }
@@ -231,24 +234,28 @@ export class Placement {
     return task.failure;
   }
 
-  /** What `run`, a run of task `index`, used, to deliver to its class: only a run measured whole, its disk included, which
-   *  a run in a slot of its own is. */
-  learn(run: string, index: number, { cpuSeconds, peakMemory, diskBytes, seconds }: Outcome): void {
+  /** What `run`, vessel `name`'s run of task `index`, used, to deliver to its class: only a run measured whole, its disk
+   *  included, which a run in a slot of its own is. It ran beside others when it was marked so (`beside`), or when its
+   *  job runs a fixed number of `slots` in each container. */
+  learn(run: string, name: string, { index, attempt, cpuSeconds, peakMemory, diskBytes, seconds }: Outcome, slots: number): void {
     if (cpuSeconds === undefined || peakMemory === undefined || diskBytes === undefined || seconds <= 0) return;
-    this.sql.exec('INSERT OR IGNORE INTO outbox (run, class, item, cores, memory, disk) SELECT ?, class, item, ?, ?, ? FROM placed WHERE idx = ?', run, cpuSeconds / seconds, peakMemory, diskBytes, index);
+    const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ?', name, index, attempt).toArray().length > 0;
+
+    this.sql.exec('INSERT OR IGNORE INTO outbox (run, class, item, cores, memory, disk, beside) SELECT ?, class, item, ?, ?, ?, ? FROM placed WHERE idx = ?',
+      run, cpuSeconds / seconds, peakMemory, diskBytes, marked || slots > 1 ? 1 : 0, index);
   }
 
   /** Delivers to each class's store what the job has for it and has not delivered, and takes its answer as the class's
    *  estimate. A delivery is idempotent (`ArmadaEstimates.record`), so what two sends at once both carry counts once; one
    *  a store does not take stays for the next send. */
   async flush(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
-    const samples = this.sql.exec<{ run: string; class: string; item: string; cores: number; memory: number; disk: number }>('SELECT run, class, item, cores, memory, disk FROM outbox').toArray();
+    const samples = this.sql.exec<{ run: string; class: string; item: string; cores: number; memory: number; disk: number; beside: number }>('SELECT run, class, item, cores, memory, disk, beside FROM outbox').toArray();
     const isolated = this.sql.exec<{ class: string; item: string }>('SELECT class, item FROM isolate').toArray();
     const samplesOf = Map.groupBy(samples, (row) => row.class);
     const aloneOf = Map.groupBy(isolated, (row) => row.class);
 
     const classes = new Map([...new Set([...samplesOf.keys(), ...aloneOf.keys()])].map((cls) => [cls, {
-      samples: (samplesOf.get(cls) ?? []).map(({ run, item, cores, memory, disk }): Sample => ({ run, item, cores, memory, disk })),
+      samples: (samplesOf.get(cls) ?? []).map(({ run, item, cores, memory, disk, beside }): Sample => ({ run, item, cores, memory, disk, beside: beside === 1 })),
       alone: (aloneOf.get(cls) ?? []).map((row) => row.item),
     }]));
 

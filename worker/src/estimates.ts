@@ -16,15 +16,19 @@ export interface Usage {
   readonly disk: number;
 }
 
-/** An item's record: its own use, and whether it runs alone (it failed beside other tasks, and passed alone). */
-export interface ItemUsage extends Usage {
+/** An item's record: its own use, its cores null until a run of it had its container to itself, and whether it runs
+ *  alone (it failed beside other tasks, and passed alone). */
+export interface ItemUsage extends Omit<Usage, 'cores'> {
+  readonly cores: number | null;
   readonly alone: boolean;
 }
 
-/** One run's use, by the run (its job, task, attempt and vessel) and its item: a run delivered twice is one sample. */
+/** One run's use, by the run (its job, task, attempt and vessel) and its item: a run delivered twice is one sample. A
+ *  run `beside` other tasks shared its container's CPUs, so its cores say only what it was given, not what it needs. */
 export interface Sample extends Usage {
   readonly run: string;
   readonly item: string;
+  readonly beside: boolean;
 }
 
 /** A class's estimate, null below `MIN_SAMPLES`, and its revision, the newest sample it is of: of two answers, the one
@@ -87,14 +91,14 @@ export function roomOf(size: Size): Usage {
 /** The `fraction` quantile of `values`, by rank. */
 const quantile = (values: readonly number[], fraction: number): number => values.toSorted((left, right) => left - right)[Math.min(values.length - 1, Math.floor(fraction * values.length))] ?? 0;
 
-/** What a task of a class is expected to use, from its samples: the 90th percentile of its cores, the 95th of its
- *  memory and the most disk it wrote; null below `MIN_SAMPLES`. A task past its class's memory is killed and runs again
- *  alone (`placement.ts`), and its own record then holds what it used. */
-export function classEstimate(samples: readonly Usage[]): Usage | null {
-  if (samples.length < MIN_SAMPLES) return null;
+/** What a task of a class is expected to use, from its samples: the 90th percentile of the cores of its runs `alone`, the
+ *  95th of its memory and the most disk it wrote; null below `MIN_SAMPLES` of either. A task past its class's memory is
+ *  killed and runs again alone (`placement.ts`), and its own record then holds what it used. */
+export function classEstimate(samples: readonly Usage[], alone: readonly number[]): Usage | null {
+  if (samples.length < MIN_SAMPLES || alone.length < MIN_SAMPLES) return null;
 
   return {
-    cores: quantile(samples.map((sample) => sample.cores), 0.9), memory: quantile(samples.map((sample) => sample.memory), 0.95),
+    cores: quantile(alone, 0.9), memory: quantile(samples.map((sample) => sample.memory), 0.95),
     disk: Math.max(...samples.map((sample) => sample.disk)),
   };
 }
@@ -104,8 +108,20 @@ export class ArmadaEstimates extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.sql.exec('CREATE TABLE IF NOT EXISTS samples (seq INTEGER PRIMARY KEY, run TEXT NOT NULL UNIQUE, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL)');
-    this.sql.exec('CREATE TABLE IF NOT EXISTS items (key TEXT PRIMARY KEY, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL, alone INTEGER NOT NULL, at INTEGER NOT NULL)');
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS samples (seq INTEGER PRIMARY KEY, run TEXT NOT NULL UNIQUE, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL,
+      beside INTEGER NOT NULL DEFAULT 0)`);
+    this.sql.exec('CREATE TABLE IF NOT EXISTS items (key TEXT PRIMARY KEY, cores REAL, memory REAL NOT NULL, disk REAL NOT NULL, alone INTEGER NOT NULL, at INTEGER NOT NULL)');
+    // An earlier Worker recorded every run as if alone, and kept every item's cores.
+    const samples = this.sql.exec<{ name: string }>('PRAGMA table_info(samples)').toArray().map((column) => column.name);
+
+    if (!samples.includes('beside')) this.sql.exec('ALTER TABLE samples ADD COLUMN beside INTEGER NOT NULL DEFAULT 0');
+
+    if (this.sql.exec<{ name: string; notnull: number }>('PRAGMA table_info(items)').toArray().some((column) => column.name === 'cores' && column.notnull === 1)) {
+      this.sql.exec('CREATE TABLE items_kept (key TEXT PRIMARY KEY, cores REAL, memory REAL NOT NULL, disk REAL NOT NULL, alone INTEGER NOT NULL, at INTEGER NOT NULL)');
+      this.sql.exec('INSERT INTO items_kept SELECT key, cores, memory, disk, alone, at FROM items');
+      this.sql.exec('DROP TABLE items');
+      this.sql.exec('ALTER TABLE items_kept RENAME TO items');
+    }
   }
 
   /** The class's estimate, and the records of `items` it holds. */
@@ -116,7 +132,7 @@ export class ArmadaEstimates extends DurableObject<Env> {
     for (let at = 0; at < items.length; at += MAX_BINDINGS) {
       const chunk = items.slice(at, at + MAX_BINDINGS);
 
-      for (const row of this.sql.exec<{ key: string; cores: number; memory: number; disk: number; alone: number }>(
+      for (const row of this.sql.exec<{ key: string; cores: number | null; memory: number; disk: number; alone: number }>(
         `SELECT key, cores, memory, disk, alone FROM items WHERE key IN (${chunk.map(() => '?').join(', ')})`, ...chunk,
       ).toArray()) held[row.key] = { cores: row.cores, memory: row.memory, disk: row.disk, alone: row.alone === 1 };
     }
@@ -126,18 +142,19 @@ export class ArmadaEstimates extends DurableObject<Env> {
 
   /** What runs of the class used, and the items found to run alone; then the class's estimate. A run already recorded is
    *  not recorded again, so a delivery made twice (two sends at once, or one whose answer was lost) counts once. An item
-   *  keeps its latest cores and the most memory and disk any run of it used, so a run that peaked once is packed for
-   *  that peak; once alone, it stays alone. */
+   *  keeps the cores of its latest run alone, never of one beside others, which would pack it tighter each job; and the
+   *  most memory and disk any run of it used, so a run that peaked once is packed for that peak. Once alone, it stays
+   *  alone. */
   async record(samples: readonly Sample[], alone: readonly string[] = []): Promise<Estimate> {
     const now = Date.now();
 
     for (const sample of samples) {
-      const fresh = this.sql.exec('INSERT OR IGNORE INTO samples (run, cores, memory, disk) VALUES (?, ?, ?, ?) RETURNING seq', sample.run, sample.cores, sample.memory, sample.disk).toArray();
+      const fresh = this.sql.exec('INSERT OR IGNORE INTO samples (run, cores, memory, disk, beside) VALUES (?, ?, ?, ?, ?) RETURNING seq', sample.run, sample.cores, sample.memory, sample.disk, sample.beside ? 1 : 0).toArray();
 
       if (fresh.length === 0) continue;
       this.sql.exec(`INSERT INTO items (key, cores, memory, disk, alone, at) VALUES (?, ?, ?, ?, 0, ?)
-        ON CONFLICT (key) DO UPDATE SET cores = excluded.cores, memory = MAX(memory, excluded.memory), disk = MAX(disk, excluded.disk), at = excluded.at`,
-      sample.item, sample.cores, sample.memory, sample.disk, now);
+        ON CONFLICT (key) DO UPDATE SET cores = COALESCE(excluded.cores, cores), memory = MAX(memory, excluded.memory), disk = MAX(disk, excluded.disk), at = excluded.at`,
+      sample.item, sample.beside ? null : sample.cores, sample.memory, sample.disk, now);
     }
 
     for (const item of alone) {
@@ -150,10 +167,12 @@ export class ArmadaEstimates extends DurableObject<Env> {
     return this.estimate();
   }
 
-  /** The class's estimate from its newest samples. A sample's `seq` only grows: the newest is never dropped. */
+  /** The class's estimate from its newest samples, and the cores of its newest runs alone. A sample's `seq` only grows:
+   *  the newest is never dropped. */
   private estimate(): Estimate {
     const newest = this.sql.exec<{ seq: number; cores: number; memory: number; disk: number }>('SELECT seq, cores, memory, disk FROM samples ORDER BY seq DESC LIMIT ?', SAMPLES).toArray();
+    const alone = this.sql.exec<{ cores: number }>('SELECT cores FROM samples WHERE beside = 0 ORDER BY seq DESC LIMIT ?', SAMPLES).toArray().map((row) => row.cores);
 
-    return { usage: classEstimate(newest), revision: newest[0]?.seq ?? 0 };
+    return { usage: classEstimate(newest, alone), revision: newest[0]?.seq ?? 0 };
   }
 }

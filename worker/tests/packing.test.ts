@@ -52,7 +52,7 @@ function stores(answers: () => boolean = () => true, held: (() => Promise<void>)
 async function learned(sample: Usage, answers?: () => boolean): Promise<Stores> {
   const made = stores(answers);
 
-  await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...sample, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}` })));
+  await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...sample, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}`, beside: false })));
 
   return made;
 }
@@ -187,11 +187,28 @@ describe('an efficient job', () => {
     });
   });
 
+  // #47: packed by records of runs beside others, Dew's next job ran up to six tasks a container, each 1.15 to 1.72x slower.
+  test('keeps a run beside others out of its item\'s cores, which say only what it was given, and keeps its memory', async () => {
+    const made = await learned({ cores: 1.5, memory: GIB, disk: 1e6 });
+    const first = await packing(['a', 'b'], made);
+    const packed = await slotsOf(first.job, 'v1', 3);
+
+    // Each got half a core beside the other.
+    for (const index of [0, 1]) await land(first.job, 'v1', ran(index, 'v1', 0));
+    await first.job.alarm();
+    const key = await itemKey({ item: 'a', argv: argvOf('a') });
+    const record = (await made.store(CLASS)?.read([key]))?.items[key];
+    const next = await packing(['a', 'b', 'c', 'd'], made);
+
+    expect({ packed, record: [record?.cores, record?.memory], next: [next.begun, await slotsOf(next.job, 'v1', 3)] })
+      .toEqual({ packed: [0, 1, null], record: [null, 2 * GIB], next: [['v1', 'v2'], [0, 1, null]] });
+  });
+
   test('delivers each run\'s use once, though two sends carry it at once', async () => {
     const made = stores();
 
     // Six samples of 1 GiB: one more makes seven, below MIN_SAMPLES; the same one twice would make eight.
-    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES - 2 }, (_, at) => ({ ...SMALL, memory: GIB, run: `earlier/${String(at)}/1/v1`, item: `e${String(at)}` })));
+    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES - 2 }, (_, at) => ({ ...SMALL, memory: GIB, run: `earlier/${String(at)}/1/v1`, item: `e${String(at)}`, beside: false })));
     const { job } = await packing(['a'], made);
 
     await claimed(job, 'v1');
@@ -347,13 +364,13 @@ describe('an efficient job', () => {
       await released.promise;
     }]);
 
-    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...SMALL, run: `earlier/${String(at)}/1/v1`, item: `e${String(at)}` })));
+    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...SMALL, run: `earlier/${String(at)}/1/v1`, item: `e${String(at)}`, beside: false })));
     const { job } = await packing([], made, { open: true });
     // Its read answered small, and held in flight while the class is measured bigger and the job reads that.
     const adding = job.add(['c', 'd'].map((item) => ({ item, argv: argvOf(item) })));
 
     await answered.promise;
-    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...big, run: `later/${String(at)}/1/v1`, item: `l${String(at)}` })));
+    await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...big, run: `later/${String(at)}/1/v1`, item: `l${String(at)}`, beside: false })));
     await job.alarm();
     released.resolve();
     await adding;

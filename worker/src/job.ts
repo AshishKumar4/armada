@@ -927,13 +927,14 @@ export class ArmadaJob extends DurableObject<Env> {
     const member = this.member(name, outcome.index);
     // A gang's outcome is kept once its ranks decide it (`ranked`).
     const kept = member === undefined ? outcome : this.ranked(name, member.rank, outcome);
-    const retries = (await this.spec())?.retries;
+    const spec = await this.spec();
+    const retries = spec?.retries;
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
     // A copy whose landing answer the other copy's red replaced (`accept`) keeps nothing.
     const task = kept === null ? undefined : this.landing(name, kept, member !== undefined);
 
     // What a run used is learnt from the run that lands: not from a copy the other replaced, nor one after the job ended.
-    if (task !== undefined && member === undefined) this.placement.learn(`${id}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, outcome.index, outcome);
+    if (task !== undefined && member === undefined) this.placement.learn(`${id}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, name, outcome, spec?.slots ?? 1);
     const packed = kept !== null && task !== undefined && member === undefined ? this.placement.packedFailure(name, kept) : null;
 
     const named = kept !== null && kept.exitCode !== 0
