@@ -61,7 +61,7 @@
   vessel takes it up where it was. Keep new steps in that record.
 
 ## Deployments (account f44999d1ddda7012e9a87729eba250f1)
-- `armada-v2` is Kinu's production CI. `armada-dew3` is Dew's, and `nimbus-armada-v2` is Nimbus's.
+- `armada-v2` is Kinu's production CI. `armada-dew6` is Dew's, and `nimbus-armada-v2` is Nimbus's.
   - Don't deploy to them, roll them back, prune them or change their secrets. Each owner redeploys from `main`.
   - A deploy whose Worker serves every client the deployed one does, and whose Durable Objects call each other and
     store their records as the deployed one's do (`contractOf`), takes over running jobs; otherwise it drains them
@@ -69,18 +69,19 @@
     (`ArmadaFleet.admitJob`). Each type an object stores is exported, so its shape is in the fingerprint. Either way a
     redeploy needs the owner's go-ahead. On 2026-10-12 a takeover of armada-dew3 across an interface change, before
     this check, let objects on the old code misread the new calls for minutes: its fleet dropped every hold.
-  - armada-v2 and nimbus-armada-v2 run wire 10, redeployed on 2026-10-14 with the user's go-ahead, and report a
-    contract: a deploy whose contract matches theirs takes over without a drain. armada-dew3 still runs `1879a66`, which
-    reports no contract, so its next deploy drains, then refuses new jobs for about 5 min while the deployment-wide
-    objects still run the old code (measured on armada-ci2: 296 s). Borrowing past the cap needs
-    `ARMADA_ACCOUNT_TOKEN` at a deploy.
+  - On 2026-10-16 all three ran wire 10: armada-v2 `651930f`, nimbus-armada-v2 `52e8e31`, armada-dew6 `d3ddca1`.
+    `main` is wire 11 (#48, #50) and changes the contract (#47's samples, #49's waiting holders, #50's lease), so each
+    one's next deploy drains, then refuses new jobs for about 5 min while the deployment-wide objects still run the
+    old code (measured on armada-ci2: 296 s). A wire-11 client gets 426 from a wire-10 Worker: redeploy the Worker
+    before a project moves its client pin to `main`. Borrowing past the cap needs `ARMADA_ACCOUNT_TOKEN` at a deploy.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every
     task that made a case group failed with ENOENT. When Nimbus moves its client to `main`, it reads its group from
     `ARMADA_CGROUP`, which every task gets, or sets `task.mode` to `fast`.
 - `connection.json`, `armada-kinu.json`, `armada-kinu-v1.json` and `armada-dew.json` belong to deployments that are
-  gone. Leave them alone; an agent may still read one. Dew's `armada-dew2.destroy.json` is its own unfinished destroy.
+  gone. Leave them alone; an agent may still read one. Dew's `armada-dew2` to `armada-dew5` `.destroy.json` files are
+  its own destroys.
 
 ## Account limits (measured 2026-10-12)
 - Every container app in the account shares 1,500 concurrent vCPUs, 6 TiB of memory and 30 TB of disk
