@@ -158,16 +158,26 @@ describe('a task of a job with no limits', () => {
     const calls: string[] = [];
 
     const fleet = {
-      acquire: async () => 'held', release: async (holder: string) => { calls.push(`release ${holder}`); },
+      acquire: async (holder: string, _vcpus: number, { renewed }: { readonly renewed?: boolean }) => {
+        calls.push(`acquire ${holder}${renewed === true ? ', renewed' : ''}`);
+
+        return 'held';
+      },
+      release: async (holder: string) => { calls.push(`release ${holder}`); },
       extend: async (holder: string) => { calls.push(`extend ${holder}`); },
     };
 
+    // Taken up an hour into its task, as a restarted object finds it.
     const limited = await run(0, { launched: 60 * 60_000, pending: 1, fleet });
-    const byLimited = calls.splice(0);
     const unlimited = await run(0, { launched: 60 * 60_000, pending: 1, timeout: null, deadlineAt: null, fleet });
 
-    expect({ limited: limited.exits, unlimited: unlimited.exits, byLimited, byUnlimited: { renewed: calls.slice(0, -1).every((call) => call === 'extend job/v1'), last: calls.at(-1) } })
-      .toEqual({ limited: [124], unlimited: [0], byLimited: ['release job/v1'], byUnlimited: { renewed: true, last: 'release job/v1' } });
+    calls.splice(0);
+    await run(0, { pending: 1, timeout: null, deadlineAt: null, fleet });
+
+    const slices = calls.slice(1, -1);
+
+    expect({ limited: limited.exits, unlimited: unlimited.exits, granted: calls[0], renewed: slices.length > 0 && slices.every((call) => call === 'extend job/v1'), last: calls.at(-1) })
+      .toEqual({ limited: [124], unlimited: [0], granted: 'acquire job/v1, renewed', renewed: true, last: 'release job/v1' });
   });
 
   test('stopped in a container that would not stop, keeps its hold a whole idle timeout from its stop, not its last slice', async () => {
@@ -182,8 +192,8 @@ describe('a task of a job with no limits', () => {
 
     try {
       setSystemTime(slice);
-      // Granted, and last renewed, at its last slice.
-      await fleet.acquire('job/v1', 4, { deadlineAt: slice, now: slice });
+      // Granted, as a vessel of a job with no deadline is, and last renewed, at its last slice.
+      await fleet.acquire('job/v1', 4, { deadlineAt: slice, renewed: true, now: slice });
       await vessel.begin({ ...spec, deadlineAt: null, timeout: null });
       setSystemTime(stopped);
       await vessel.stop();

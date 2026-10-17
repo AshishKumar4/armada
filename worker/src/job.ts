@@ -642,7 +642,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const load = packs(spec) ? this.placement.loadOf(name) : null;
     // A packing job's pool bounds its runs at once, however they are held (`Placement.held`): while it is full, no vessel
     // takes a new one.
-    const held = this.held();
+    // Counted only where a limit reads it: a packing job's pool, and a budget, the one reader of a task's cost.
+    const held = load !== null || spec.budget !== undefined ? this.held(spec.budget !== undefined) : { runs: 0, spent: 0 };
     const full = load !== null && held.runs >= spec.pool;
     // What the job's budget leaves for one more run (`JobSpec.budget`), or null for a job with none.
     const afford = spec.budget === undefined ? null : spec.budget - held.spent;
@@ -735,13 +736,16 @@ export class ArmadaJob extends DurableObject<Env> {
     return `, with ${String(n)} container${n === 1 ? '' : 's'} still waiting for capacity: ${need}, under the fleet's cap of ${this.env.FLEET_VCPUS}`;
   }
 
-  /** The runs the job holds at once, which a packing job's pool bounds, and what they spend of its budget, each its
-   *  task's cost: each run a live vessel was handed and has not ended (`Runs`), a copy told to stop included until it
-   *  says it did, and each rank of a gang from when it joins until it is handed its run. */
-  private held(): { readonly runs: number; readonly spent: number } {
+  /** The runs the job holds at once, which a packing job's pool bounds, and, `weighed` for a job with a budget, what
+   *  they spend of it, each its task's cost: each run a live vessel was handed and has not ended (`Runs`), a copy told to
+   *  stop included until it says it did, and each rank of a gang from when it joins until it is handed its run. A job
+   *  with no budget reads no cost, which only a budget's refusal holds to a safe integer. */
+  private held(weighed: boolean): { readonly runs: number; readonly spent: number } {
+    const cost = weighed ? COST : '0';
+
     return this.sql.exec<{ runs: number; spent: number }>(`SELECT COUNT(*) AS runs, COALESCE(SUM(cost), 0) AS spent FROM (
-        SELECT ${COST} AS cost FROM runs r JOIN vessels v ON v.name = r.vessel JOIN tasks t ON t.idx = r.idx WHERE v.state IN ${ALIVE}
-        UNION ALL SELECT ${COST} AS cost FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready'))`).one();
+        SELECT ${cost} AS cost FROM runs r JOIN vessels v ON v.name = r.vessel JOIN tasks t ON t.idx = r.idx WHERE v.state IN ${ALIVE}
+        UNION ALL SELECT ${cost} AS cost FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready'))`).one();
   }
 
   /** The queued task that fits beside what vessel `name` runs (`load`), and what the budget leaves (`afford`), handed out

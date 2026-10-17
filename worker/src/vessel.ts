@@ -200,7 +200,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // One whose job runs no gang wider than it may borrow past the fleet's cap: it asks before each new task.
         const grant = grantOf(await fleet.acquire(this.holder(spec), spec.vcpus, {
-          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: deadlineOf(spec),
+          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: deadlineOf(spec), renewed: spec.deadlineAt === null,
         }));
 
         if (grant === null) {
@@ -255,9 +255,6 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('state', state);
     await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
 
-    // A hold its work renews (a job with no deadline) is renewed once more here, so a container that will not stop keeps
-    // it for its whole inactivity timeout from now, not from the last slice (`ArmadaFleet.release`).
-    if (spec?.deadlineAt === null) await this.env.FLEET.getByName(SINGLE).extend(this.holder(spec));
 
     return await letGo(this.ctx, this.env, { holder: spec === undefined ? undefined : this.holder(spec), inactivityMs: INACTIVITY_MS });
   }

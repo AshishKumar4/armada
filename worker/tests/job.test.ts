@@ -188,6 +188,12 @@ describe('a budgeted job', () => {
     expect({ before, ranks: ['v3', 'v4'].map((name) => [ranks[name]?.index, ranks[name]?.gang?.rank]) }).toEqual({ before: [0, 1, 'wait', 'wait'], ranks: [[2, 0], [2, 1]] });
   });
 
+  test('without a budget, reads no cost: items of any cost run as a job with none would run them', async () => {
+    const { job: open } = await job({ recipe: {}, items: [priced(2 ** 62, 1), priced(2 ** 62, 1), priced(2 ** 62, 1)], run: { kind: 'command' }, pool: 3, mode: 'fast' });
+
+    expect([taken(await open.claim('v1')), taken(await open.claim('v2')), taken(await open.claim('v3'))]).toEqual([0, 1, 2]);
+  });
+
   test('refuses an item whose cost is no whole number, or whose runs past its budget, and reads no cost without one', () => {
     const run = { kind: 'command' } as const;
     const refused = (item: Json, budget?: number) => refusal(run, [{ item, argv: ['true'] }], { pool: 4, budget }) !== null;

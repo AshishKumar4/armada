@@ -72,6 +72,9 @@ export interface Hold {
   readonly borrowed?: boolean;
   /** Its container takes no new task: it finishes what it runs, then ends. */
   readonly recalled?: boolean;
+  /** Its job has no deadline: its vessel renews it each slice of its work (`extend`), and one that ends with a container
+   *  that would not stop keeps it for that container's whole inactivity timeout from then (`release`). */
+  readonly renewed?: boolean;
 }
 
 /** A grant as any fleet answers it: one still on earlier code for a while after a deploy answers true or false. */
@@ -130,7 +133,9 @@ export class ArmadaFleet extends ArmadaSingle {
    *  an older one still waits for: it is granted only if it fits beside what they asked, or its job already keeps what
    *  it asks, as a gang's next rank does. Otherwise each vCPU freed would go to whichever single container asked next,
    *  and a gang's reserve would never come free at once. A holder that stops asking leaves the line after WANT_MS. */
-  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, now = Date.now() }: { readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly now?: number }): Promise<Grant | null> {
+  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, renewed = false, now = Date.now() }: {
+    readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly renewed?: boolean; readonly now?: number;
+  }): Promise<Grant | null> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: replaced, ...others } = holds;
     const cap = Number(this.env.FLEET_VCPUS);
@@ -160,7 +165,7 @@ export class ArmadaFleet extends ArmadaSingle {
     const granted = replaced?.granted ?? grants + 1;
 
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
-    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap } }, grants: Math.max(grants, granted) });
+    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap, renewed } }, grants: Math.max(grants, granted) });
 
     return charge > cap ? 'borrowed' : 'held';
   }
@@ -283,7 +288,8 @@ export class ArmadaFleet extends ArmadaSingle {
     // A holder that ends waits for nothing.
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
 
-    if (held !== undefined && afterMs > 0) holds[holder] = { vcpus: held.vcpus, until: Math.min(held.until, Date.now() + afterMs) };
+    // A deadline's hold already ends once its container must have stopped; a renewed one ended only for want of renewal.
+    if (held !== undefined && afterMs > 0) holds[holder] = { vcpus: held.vcpus, until: held.renewed === true ? Date.now() + afterMs : Math.min(held.until, Date.now() + afterMs) };
     else delete holds[holder];
     await this.ctx.storage.put('holds', holds);
   }
