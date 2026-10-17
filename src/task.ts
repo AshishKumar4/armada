@@ -105,6 +105,9 @@ export interface MapOptions {
   readonly pool?: number;
   /** The tasks one container runs at once, each in its own slot. Default 1; more turns `mode`'s packing off. */
   readonly slots?: number;
+  /** The most the job's runs spend at once, each its item's `cost` (default 1): a vessel takes the heaviest queued item
+   *  that fits what is left. Default none: only `pool` bounds them. */
+  readonly budget?: number;
   /** How the job places its tasks (`ModeSchema`). Default `efficient`. */
   readonly mode?: Mode;
   /** The CPU every container's host has (`Cpu`, as a result's `meta.host` says it), or several, any one of them: a
@@ -419,7 +422,7 @@ abstract class Base<I extends Json, O> {
     const { commit, ...environment } = this.recipe;
 
     const spec = {
-      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, mode: options.mode, cpu: options.cpu === undefined ? undefined : [options.cpu].flat(), label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
+      recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, budget: options.budget, mode: options.mode, cpu: options.cpu === undefined ? undefined : [options.cpu].flat(), label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       deadline: options.deadline, gangStartTimeout: options.gangStartTimeout, lease: options.lease,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,

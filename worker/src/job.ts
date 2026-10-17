@@ -32,7 +32,7 @@ import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { classOf, itemKey, tasksMemoryOf } from './estimates';
-import { Placement, ranksOf, type Load } from './placement';
+import { costOf, Placement, ranksOf, type Load } from './placement';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
 import type { VesselSpec } from './vessel';
@@ -92,6 +92,12 @@ const OPEN = `state IN ('queued', 'forming', 'running', 'landing')`;
 
 /** The containers a task needs at once, as an SQL expression on its row. */
 const RANKS = ranksOf('item');
+
+/** What each run of a task `t` spends of its job's budget, as an SQL expression. */
+const COST = costOf('t.item');
+
+/** An SQL condition on a task's row: one run of it fits `afford`, what its job's budget leaves; any does with none. */
+const affords = (afford: number | null): string => afford === null ? 'TRUE' : `${costOf('item')} <= ${String(afford)}`;
 
 /** The containers the open tasks need at once. */
 const NEEDED = `SELECT COALESCE(SUM(${RANKS}), 0) AS n FROM tasks WHERE ${OPEN}`;
@@ -268,7 +274,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (spec === undefined || (await this.ctx.storage.get<boolean>('open')) !== true || (await this.ctx.storage.get<Phase>('phase')) === 'done') return 'the job takes no more items';
 
-    const refused = refusal(spec.run, items, spec.pool, spec.slots) ?? fleetRefusal(items, spec.recipe.size, Number(this.env.FLEET_VCPUS))
+    const refused = refusal(spec.run, items, spec) ?? fleetRefusal(items, spec.recipe.size, Number(this.env.FLEET_VCPUS))
       ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
 
     if (refused !== null) return refused;
@@ -487,12 +493,37 @@ export class ArmadaJob extends DurableObject<Env> {
     return spec.pool - ((await this.ctx.storage.get<number>('forfeited')) ?? 0);
   }
 
-  /** The containers the open tasks, and `hedged` copies of them, need at once, up to the pool: one each (a gang's each
-   *  rank) over the slots a fixed container carries; packing, as many as their estimates fill (`Placement.containers`). */
+  /** The containers the open tasks, and `hedged` copies of them, need at once, up to the pool and as many as the budget
+   *  runs (`admitted`): one each (a gang's each rank) over the slots a fixed container carries; packing, as many as their
+   *  estimates fill (`Placement.containers`). */
   private needed(spec: Kept, hedged = 0): number {
-    if (packs(spec)) return this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged });
+    const ranks = this.admitted(spec);
 
-    return Math.min(spec.pool, Math.ceil((Number(this.sql.exec(NEEDED).one()['n']) + hedged) / spec.slots));
+    if (packs(spec)) return this.placement.containers(spec.recipe.size, { pool: spec.budget === undefined ? spec.pool : Math.min(spec.pool, ranks + hedged), hedged });
+
+    return Math.min(spec.pool, Math.ceil((ranks + hedged) / spec.slots));
+  }
+
+  /** The ranks the open tasks run at once: every one's, or under a budget those started and the queued ones, heaviest
+   *  first, whose cost fits what they leave, as vessels take them (`next`). */
+  private admitted(spec: Kept): number {
+    if (spec.budget === undefined) return Number(this.sql.exec(NEEDED).one()['n']);
+
+    const open = this.sql.exec<{ state: string; ranks: number; cost: number }>(
+      `SELECT state, ${RANKS} AS ranks, ${costOf('item')} AS cost FROM tasks WHERE ${OPEN} ORDER BY state = 'queued', weight DESC, idx`,
+    ).toArray();
+
+    let left = spec.budget;
+    let ranks = 0;
+
+    for (const task of open) {
+      if (task.state === 'queued' && task.cost * task.ranks > left) continue;
+
+      left -= task.cost * task.ranks;
+      ranks += task.ranks;
+    }
+
+    return ranks;
   }
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
@@ -608,11 +639,13 @@ export class ArmadaJob extends DurableObject<Env> {
     // A packing job's pool bounds its runs at once, however they are held (`Placement.held`): while it is full, no vessel
     // takes a new one.
     const full = load !== null && this.held() >= spec.pool;
+    // What the job's budget leaves for one more run (`JobSpec.budget`), or null for a job with none.
+    const afford = spec.budget === undefined ? null : spec.budget - this.spent();
 
-    if (load !== null && load.runs > 0 && !load.joined) return full ? null : this.fitting(spec, env, { name, slot, now }, load);
+    if (load !== null && load.runs > 0 && !load.joined) return full ? null : this.fitting(spec, env, { name, slot, now, afford }, load);
     // No await between finding no forming gang and creating one: simultaneous first claims would all miss `rank`,
     // then only the first form it, with the others retiring against the now-empty queue instead of joining.
-    const ganged = this.rank(spec, env, name, full);
+    const ganged = this.rank(spec, env, name, { full, afford });
 
     if (ganged !== undefined) return await ganged;
 
@@ -625,7 +658,9 @@ export class ArmadaJob extends DurableObject<Env> {
       return null;
     }
 
-    const first = this.sql.exec<{ idx: number; item: string; weight: number }>(`SELECT idx, item, weight FROM tasks WHERE state = 'queued' AND not_before <= ? AND ${this.covered(name)} ORDER BY weight DESC, idx LIMIT 1`, now).toArray()[0];
+    const first = this.sql.exec<{ idx: number; item: string; weight: number }>(
+      `SELECT idx, item, weight FROM tasks WHERE state = 'queued' AND not_before <= ? AND ${this.covered(name)} AND ${affords(afford)} ORDER BY weight DESC, idx LIMIT 1`, now,
+    ).toArray()[0];
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
       // A gang forms from the vessels that ask next, this one rank 0.
@@ -635,7 +670,7 @@ export class ArmadaJob extends DurableObject<Env> {
       return { waitMs: WAIT_MS };
     }
 
-    const hedged = this.hedged(spec, name, slot, first?.weight ?? 0);
+    const hedged = this.hedged(spec, name, slot, { waiting: first?.weight ?? 0, afford });
 
     if (hedged !== undefined) return this.claimOf(spec, env, hedged.item, { index: hedged.idx, attempt: hedged.attempts, duplicate: true });
 
@@ -658,7 +693,7 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     // The queue is empty: repeat the oldest straggler nobody is repeating yet.
-    const lone = `state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members)`;
+    const lone = `state = 'running' AND dup IS NULL AND vessel != ? AND idx NOT IN (SELECT idx FROM members) AND ${affords(afford)}`;
     const due = `MAX(started + ${String(STRAGGLER_MS)}, started + weight * ${String(STRAGGLER_WEIGHTS * 1000)})`;
 
     const straggler = this.sql.exec<{ idx: number; item: string; attempts: number }>(
@@ -704,10 +739,17 @@ export class ArmadaJob extends DurableObject<Env> {
       + (SELECT COUNT(*) FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready')) AS n`).one()['n']);
   }
 
-  /** The queued task that fits beside what vessel `name` runs (`load`), handed out to `slot` beside them
-   *  (`Placement.fit`); or null when none does. */
-  private fitting(spec: Kept, env: Record<string, string>, { name, slot, now }: { readonly name: string; readonly slot: number; readonly now: number }, load: Load): Claim | null {
-    const index = this.placement.fit(load, spec.recipe.size, now);
+  /** What the job's runs spend of its budget now: the runs `held` counts, each its task's cost. */
+  private spent(): number {
+    return Number(this.sql.exec(`SELECT
+        (SELECT COALESCE(SUM(${COST}), 0) FROM runs r JOIN vessels v ON v.name = r.vessel JOIN tasks t ON t.idx = r.idx WHERE v.state IN ${ALIVE})
+      + (SELECT COALESCE(SUM(${COST}), 0) FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready')) AS n`).one()['n']);
+  }
+
+  /** The queued task that fits beside what vessel `name` runs (`load`), and what the budget leaves (`afford`), handed out
+   *  to `slot` beside them (`Placement.fit`); or null when none does. */
+  private fitting(spec: Kept, env: Record<string, string>, { name, slot, now, afford }: { readonly name: string; readonly slot: number; readonly now: number; readonly afford: number | null }, load: Load): Claim | null {
+    const index = this.placement.fit(load, spec.recipe.size, now, afford);
 
     if (index === null) return null;
 
@@ -723,12 +765,13 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** One of the job's `hedge` heaviest tasks, running on one vessel, that `name` runs a second copy of: the heaviest no
    *  lighter than the task `waiting` next, so each copy starts as soon as the queue reaches its weight. A gang is not
-   *  repeated. The first answer is kept (`accept`), and the other copy stops (`still`). */
-  private hedged(spec: Kept, name: string, slot: number, waiting: number): { idx: number; item: string; attempts: number } | undefined {
+   *  repeated, nor one that costs more than the budget leaves (`afford`). The first answer is kept (`accept`), and the
+   *  other copy stops (`still`). */
+  private hedged(spec: Kept, name: string, slot: number, { waiting, afford }: { readonly waiting: number; readonly afford: number | null }): { idx: number; item: string; attempts: number } | undefined {
     if (spec.hedge === 0) return undefined;
 
     return this.sql.exec<{ idx: number; item: string; attempts: number }>(
-      `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND weight >= ?
+      `UPDATE tasks SET dup = ?, dup_slot = ? WHERE idx = (SELECT idx FROM tasks WHERE state = 'running' AND dup IS NULL AND vessel != ? AND weight >= ? AND ${affords(afford)}
        AND idx IN (SELECT idx FROM tasks ORDER BY weight DESC, idx LIMIT ?) AND idx NOT IN (SELECT idx FROM members) ORDER BY weight DESC, idx LIMIT 1)
        RETURNING idx, item, attempts`, name, slot, name, waiting, spec.hedge,
     ).toArray()[0];
@@ -745,16 +788,21 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** `name`'s rank in a gang: its claim once the gang formed, a wait while it forms, joining the one forming if it is in
-   *  none and the job's pool is not `full`; undefined when no gang is forming or holds it. */
-  private rank(spec: Kept, env: Record<string, string>, name: string, full: boolean): Promise<Claim> | { readonly waitMs: number } | undefined {
+   *  none and the job's pool is not `full`; undefined when no gang is forming or holds it. A rank the budget cannot pay
+   *  for yet (`afford`) waits for it rather than take other work, so the gang's ranks join as runs end. */
+  private rank(spec: Kept, env: Record<string, string>, name: string, { full, afford }: { readonly full: boolean; readonly afford: number | null }): Promise<Claim> | { readonly waitMs: number } | undefined {
     let mine = this.sql.exec<{ idx: number; state: string }>(
       `SELECT m.idx, m.state FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND m.state IN ('joined', 'ready') AND t.state IN ('forming', 'running')`, name,
     ).toArray()[0];
 
     if (mine === undefined) {
-      const forming = this.sql.exec<{ idx: number }>(`SELECT idx FROM tasks WHERE state = 'forming' AND ${this.covered(name)} ORDER BY idx LIMIT 1`).toArray()[0];
+      const forming = this.sql.exec<{ idx: number; dear: number }>(
+        `SELECT idx, NOT (${affords(afford)}) AS dear FROM tasks WHERE state = 'forming' AND ${this.covered(name)} ORDER BY idx LIMIT 1`,
+      ).toArray()[0];
 
       if (forming === undefined || full) return undefined;
+
+      if (forming.dear === 1) return { waitMs: WAIT_MS };
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, (SELECT COUNT(*) FROM members WHERE idx = ?), ?, 'joined')`, forming.idx, forming.idx, name);
       mine = { idx: forming.idx, state: 'joined' };
     }

@@ -56,6 +56,8 @@ map options:
   --size=<size>        each container's size: micro, mini, small or medium (default medium)
   --pool=N             the most containers at once (default 50)
   --slots=N            the tasks one container runs at once, each in its own slot (default 1; more turns packing off)
+  --budget=N           the most the runs spend at once, each its item's "cost" (default 1); a container takes the
+                       heaviest queued item that fits what is left (default no budget)
   --mode=<mode>        efficient packs tasks into containers by their measured use; fast runs one a container
                        (default efficient)
   --cpu=V/F/M[,...]    the CPU every container's host has, vendor/family/model as /proc/cpuinfo says
@@ -98,7 +100,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'mode=', 'cpu=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
@@ -197,7 +199,7 @@ async function map(): Promise<number> {
   const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const mode = option('mode');
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), budget: whole('budget'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   // An interrupt while the job is made cancels it once it is.
   const id = await cancelOnInterrupt([job], async () => await job.id);

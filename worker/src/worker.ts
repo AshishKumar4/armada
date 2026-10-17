@@ -150,7 +150,7 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
 
   // A client that may not know modes packs only when it asks to.
   if (requested.mode === undefined && spokenBy(request) < MODES) spec.mode = 'fast';
-  const refused = deadlineRefusal(requested.timeout, spec.deadline) ?? refusal(spec.run, spec.items, spec.pool, spec.slots) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
+  const refused = deadlineRefusal(requested.timeout, spec.deadline) ?? refusal(spec.run, spec.items, spec) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 

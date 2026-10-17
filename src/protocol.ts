@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 12;
+export const PROTOCOL = 13;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -204,9 +204,10 @@ export function itemRefusal(item: Json): string | null {
 }
 
 /** Why a job of at most `pool` containers refuses these tasks: a command's task carries its argv, each argument short
- *  enough to start, a pushed task's carries none, every item fits its `ARMADA_ITEM`, and a gang is a whole number of
- *  containers the pool holds. */
-export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], pool: number, slots = 1): string | null {
+ *  enough to start, a pushed task's carries none, every item fits its `ARMADA_ITEM`, a gang is a whole number of
+ *  containers the pool holds, and under a `budget` every run of an item, each of its gang's ranks, spends a whole cost
+ *  the budget holds at once. */
+export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], { pool, slots = 1, budget }: { readonly pool: number; readonly slots?: number; readonly budget?: number | undefined }): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
   if (odd >= 0) return `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
@@ -228,7 +229,12 @@ export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: reado
 
   const ganged = tasks.findIndex((task) => !Number.isInteger(gangOf(task.item)) || gangOf(task.item) < 1 || gangOf(task.item) > Math.min(MAX_GANG, pool));
 
-  return ganged < 0 ? null : `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
+  if (ganged >= 0) return `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
+
+  if (budget === undefined) return null;
+  const dear = tasks.findIndex((task) => !Number.isInteger(costOf(task.item)) || costOf(task.item) < 1 || costOf(task.item) * gangOf(task.item) > budget);
+
+  return dear < 0 ? null : `item ${String(dear)}'s cost is a whole number from 1 whose runs, one a rank of its gang, fit the job's budget of ${String(budget)} at once`;
 }
 
 /** What a push records: a project's bundle, the ids of the tasks in it, and the runtime that runs them (`node` when
@@ -342,6 +348,10 @@ export const JobSpecSchema = v.object({
   /** The tasks one container runs at once, each isolated in its own slot: the job's lanes are pool × slots. More than
    *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),
+  /** The most the job's runs spend at once: each run of a task its item's `cost` (`costOf`), a gang's each rank, from
+   *  when it is handed out, a rank from when it joins, until it ends. A vessel takes the heaviest queued task that fits
+   *  what is left, so a task too dear for now waits while cheaper ones run. Absent, only `pool` bounds the runs. */
+  budget: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
   mode: v.optional(ModeSchema, 'efficient'),
   /** The CPUs a container's host may have (`CpusSchema`). A container on another host is replaced before it takes a task. */
   cpu: v.optional(CpusSchema),
@@ -706,6 +716,15 @@ export function gangOf(item: Json): number {
   const { gang } = item;
 
   return v.is(v.number(), gang) ? gang : Number.NaN;
+}
+
+/** What each run of an item spends of its job's `budget`: an object's `cost`, else 1; a `cost` that is no number is NaN,
+ *  which a job with a budget refuses by name. A job without one reads no `cost`. */
+export function costOf(item: Json): number {
+  if (!isJsonObject(item) || !Object.hasOwn(item, 'cost')) return 1;
+  const { cost } = item;
+
+  return v.is(v.number(), cost) ? cost : Number.NaN;
 }
 
 /** An item's weight for longest-first dispatch: an object's finite `weight`, else 0. */

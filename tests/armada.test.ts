@@ -399,9 +399,9 @@ describe('a CI run\'s pool', () => {
     const ok = (refused: string | null) => refused === null;
 
     expect([
-      ok(refusal({ kind: 'command' }, word('x'.repeat(MAX_ARGUMENT_BYTES)), 4)), ok(refusal({ kind: 'command' }, word('é'.repeat(65_536)), 4)),
-      ok(refusal({ kind: 'task' }, item('x'.repeat(MAX_ARGUMENT_BYTES)), 4)), ok(refusal({ kind: 'command' }, item('x'.repeat(MAX_ARGUMENT_BYTES)), 4)),
-      ok(refusal({ kind: 'command' }, gang, 4, 1)), ok(refusal({ kind: 'command' }, gang, 4, 2)),
+      ok(refusal({ kind: 'command' }, word('x'.repeat(MAX_ARGUMENT_BYTES)), { pool: 4 })), ok(refusal({ kind: 'command' }, word('é'.repeat(65_536)), { pool: 4 })),
+      ok(refusal({ kind: 'task' }, item('x'.repeat(MAX_ARGUMENT_BYTES)), { pool: 4 })), ok(refusal({ kind: 'command' }, item('x'.repeat(MAX_ARGUMENT_BYTES)), { pool: 4 })),
+      ok(refusal({ kind: 'command' }, gang, { pool: 4, slots: 1 })), ok(refusal({ kind: 'command' }, gang, { pool: 4, slots: 2 })),
     ]).toEqual([true, false, false, false, true, false]);
   });
 });
@@ -710,14 +710,14 @@ describe('the CLI\'s arguments', () => {
 
       const argv = ['tool', '--output', '--items=x'];
       // Nothing listens on port 9: the named connection's server is the only one that can answer.
-      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast', '--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17'], 'http://127.0.0.1:9')];
+      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast', '--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17', '--budget=20'], 'http://127.0.0.1:9')];
       const job = { items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false };
       const genoa = { vendor: 'AuthenticAMD', family: 25, model: 17 };
 
       expect({ exits, jobs }).toMatchObject({ exits: [0, 0], jobs: [job, job] });
       // Each job's lease ends it once map has gone (#50).
-      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode, cpu, lease }) => [deadline, mode, cpu, lease]))
-        .toEqual([[21600, 'efficient', undefined, true], [21600, 'fast', [genoa, { ...genoa, family: 26 }], true]]);
+      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode, cpu, lease, budget }) => [deadline, mode, cpu, lease, budget]))
+        .toEqual([[21600, 'efficient', undefined, true, undefined], [21600, 'fast', [genoa, { ...genoa, family: 26 }], true, 20]]);
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });

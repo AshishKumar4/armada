@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { environmentKey, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Outcome } from '../../src/protocol';
+import { environmentKey, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
@@ -121,6 +121,57 @@ describe('the claim order', () => {
 
     expect(lanes).toEqual(model.lanes.map((lane) => lane.map((position) => queue[position] ?? -1)));
     expect(await open.claim('v1')).toBeNull();
+  });
+});
+
+describe('a budgeted job', () => {
+  /** A command item that spends `cost` of its job's budget, queued by `weight`, run on `gang` containers. */
+  const priced = (cost: number, weight: number, gang = 1) => ({ item: { cost, weight, gang }, argv: ['true'] });
+
+  /** What `claim` handed out: the task's index, or that the vessel was told to wait. */
+  const taken = (claim: Claim | { readonly waitMs: number } | null): number | string => {
+    if (claim === null) return 'none';
+
+    return 'waitMs' in claim ? 'wait' : claim.index;
+  };
+
+  test('takes the heaviest queued task its budget has left room for, while a dearer one waits for runs to end', async () => {
+    const { job: open, begun } = await job({ recipe: {}, items: [priced(3, 3), priced(3, 3), priced(1, 1), priced(1, 1)], run: { kind: 'command' }, pool: 4, mode: 'fast', budget: 4 });
+    const order = [taken(await open.claim('v1')), taken(await open.claim('v2')), taken(await open.claim('v3'))];
+
+    await land(open, 'v1', 0, { exitCode: 0 });
+    order.push(taken(await open.claim('v1')), taken(await open.claim('v3')));
+    await land(open, 'v2', 2, { exitCode: 0 });
+    order.push(taken(await open.claim('v2')));
+
+    // Index order would run 0, 1, 2 and 3 at once, spending 8. Each run here starts only within the budget of 4.
+    expect({ order, begun }).toEqual({ order: [0, 2, 'wait', 1, 'wait', 3], begun: ['j1/v1', 'j1/v2'] });
+  });
+
+  test('starts only the vessels its budget runs at once, where a job without one starts a vessel a task', async () => {
+    const items = [priced(3, 1), priced(3, 1), priced(3, 1), priced(3, 1)];
+    const budgeted = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 10, mode: 'fast', budget: 6 });
+    const unbounded = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 10, mode: 'fast' });
+
+    expect({ budgeted: budgeted.begun.length, unbounded: unbounded.begun.length }).toEqual({ budgeted: 2, unbounded: 4 });
+  });
+
+  test('forms a gang a rank at a time as the budget frees, a vessel waiting for the next rank rather than take cheaper work', async () => {
+    const { job: open } = await job({ recipe: {}, items: [priced(1, 5), priced(1, 4), priced(1, 3, 2), priced(1, 1)], run: { kind: 'command' }, pool: 4, mode: 'fast', budget: 3 });
+    const before = [taken(await open.claim('v1')), taken(await open.claim('v2')), taken(await open.claim('v3')), taken(await open.claim('v4'))];
+
+    await land(open, 'v1', 0, { exitCode: 0 });
+    const ranks = await formed(open, ['v3', 'v4']);
+
+    expect({ before, ranks: ['v3', 'v4'].map((name) => [ranks[name]?.index, ranks[name]?.gang?.rank]) }).toEqual({ before: [0, 1, 'wait', 'wait'], ranks: [[2, 0], [2, 1]] });
+  });
+
+  test('refuses an item whose cost is no whole number, or whose runs past its budget, and reads no cost without one', () => {
+    const run = { kind: 'command' } as const;
+    const refused = (item: Json, budget?: number) => refusal(run, [{ item, argv: ['true'] }], { pool: 4, budget }) !== null;
+
+    expect([refused({ cost: 7 }, 6), refused({ cost: 1.5 }, 6), refused({ cost: 'two' }, 6), refused({ cost: 0 }, 6), refused({ cost: 4, gang: 2 }, 6), refused({ cost: 3, gang: 2 }, 6), refused({ cost: 'two' })])
+      .toEqual([true, true, true, true, true, false, false]);
   });
 });
 
@@ -1183,7 +1234,7 @@ describe('a gang task', () => {
   test('is refused unless it is a whole number of containers the pool holds', () => {
     const items = (size: number) => [{ item: { gang: size }, argv: ['true'] }];
 
-    expect([refusal({ kind: 'command' }, items(2), 2), refusal({ kind: 'command' }, items(3), 2), refusal({ kind: 'command' }, items(1.5), 4)])
+    expect([refusal({ kind: 'command' }, items(2), { pool: 2 }), refusal({ kind: 'command' }, items(3), { pool: 2 }), refusal({ kind: 'command' }, items(1.5), { pool: 4 })])
       .toEqual([null, 'item 0\'s gang is a whole number of containers from 1 to 2, the job\'s pool', 'item 0\'s gang is a whole number of containers from 1 to 4, the job\'s pool']);
   });
 

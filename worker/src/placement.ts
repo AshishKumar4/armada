@@ -17,13 +17,17 @@ export const KILLED_FOR_MEMORY = 'killed for memory';
 /** The containers a task needs at once, as an SQL expression on its `item` column: one, or a gang's each rank. */
 export const ranksOf = (item: string): string => `CASE WHEN json_type(${item}, '$.item.gang') IS 'integer' THEN json_extract(${item}, '$.item.gang') ELSE 1 END`;
 
+/** What each run of a task spends of its job's budget, as an SQL expression on its `item` column (`costOf`): a job
+ *  with a budget refuses any cost but a whole number. */
+export const costOf = (item: string): string => `CASE WHEN json_type(${item}, '$.item.cost') IS 'integer' THEN json_extract(${item}, '$.item.cost') ELSE 1 END`;
+
 /** The class stores a job asks at once. */
 const STORE_CALLS = 32;
 
 /** Each task with what it is expected to use and the containers it takes whole, as an SQL row source over the job's
  *  tasks. */
 const ESTIMATED = `SELECT t.idx, t.state, t.weight, t.not_before, t.vessel, t.dup,
-    COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk, ${ranksOf('t.item')} AS ranks,
+    COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk, ${ranksOf('t.item')} AS ranks, ${costOf('t.item')} AS cost,
     (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR COALESCE(p.cores, c.cores) IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
   FROM tasks t LEFT JOIN placed p ON p.idx = t.idx LEFT JOIN classes c ON c.class = p.class`;
 
@@ -140,16 +144,16 @@ export class Placement {
     };
   }
 
-  /** The heaviest queued task whose estimate fits beside `load` in a container of `size`; null when none does, or `load`
-   *  takes its container whole. Choosing changes nothing: the job hands the run out, then marks who it runs beside
-   *  (`beside`). */
-  fit(load: Load, size: Size, now: number): number | null {
+  /** The heaviest queued task whose estimate fits beside `load` in a container of `size`, and whose cost fits what the
+   *  job's budget has left (`afford`, null for a job with none); null when none does, or `load` takes its container whole.
+   *  Choosing changes nothing: the job hands the run out, then marks who it runs beside (`beside`). */
+  fit(load: Load, size: Size, now: number, afford: number | null): number | null {
     if (load.whole) return null;
     const left = roomOf(size);
 
     return this.sql.exec<{ idx: number }>(
       `SELECT idx FROM (${ESTIMATED}) WHERE state = 'queued' AND not_before <= ? AND whole = 0 AND cores <= ? AND memory <= ? AND disk <= ?
-        ORDER BY weight DESC, idx LIMIT 1`, now, left.cores - load.cores, left.memory - load.memory, left.disk - load.disk,
+        AND (? IS NULL OR cost <= ?) ORDER BY weight DESC, idx LIMIT 1`, now, left.cores - load.cores, left.memory - load.memory, left.disk - load.disk, afford, afford,
     ).toArray()[0]?.idx ?? null;
   }
 

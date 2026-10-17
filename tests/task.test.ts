@@ -92,7 +92,7 @@ function localFleet(lose: readonly number[] = []) {
 
       if (id === undefined) {
         const spec = v.parse(JobSpecSchema, await request.json());
-        const refused = refusal(spec.run, spec.items, spec.pool, spec.slots);
+        const refused = refusal(spec.run, spec.items, spec);
 
         if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 
@@ -118,7 +118,7 @@ function localFleet(lose: readonly number[] = []) {
 
       if (tail === 'items' && request.method === 'POST') {
         const { items } = v.parse(v.object({ items: JobSpecSchema.entries.items }), await request.json());
-        const refused = refusal(job.spec.run, items, job.spec.pool, job.spec.slots);
+        const refused = refusal(job.spec.run, items, job.spec);
 
         if (refused !== null) return Response.json({ error: refused }, { status: 400 });
         const first = job.spec.items.length;
