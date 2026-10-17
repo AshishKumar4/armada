@@ -232,7 +232,8 @@ export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: reado
   if (ganged >= 0) return `item ${String(ganged)}'s gang is a whole number of containers from 1 to ${String(Math.min(MAX_GANG, pool))}, the job's pool`;
 
   if (budget === undefined) return null;
-  const dear = tasks.findIndex((task) => !Number.isInteger(costOf(task.item)) || costOf(task.item) < 1 || costOf(task.item) * gangOf(task.item) > budget);
+  // A safe integer stays one through JSON: 1e21 is written 1e+21, which the job's SQL reads as a real, not a cost.
+  const dear = tasks.findIndex((task) => !Number.isSafeInteger(costOf(task.item)) || costOf(task.item) < 1 || costOf(task.item) * gangOf(task.item) > budget);
 
   return dear < 0 ? null : `item ${String(dear)}'s cost is a whole number from 1 whose runs, one a rank of its gang, fit the job's budget of ${String(budget)} at once`;
 }
@@ -353,7 +354,7 @@ export const JobSpecSchema = v.object({
   /** The most the job's runs spend at once: each run of a task its item's `cost` (`costOf`), a gang's each rank, from
    *  when it is handed out, a rank from when it joins, until it ends. A vessel takes the heaviest queued task that fits
    *  what is left, so a task too dear for now waits while cheaper ones run. Absent, only `pool` bounds the runs. */
-  budget: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1))),
+  budget: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(1))),
   mode: v.optional(ModeSchema, 'efficient'),
   /** The CPUs a container's host may have (`CpusSchema`). A container on another host is replaced before it takes a task. */
   cpu: v.optional(CpusSchema),

@@ -155,6 +155,21 @@ describe('an efficient job', () => {
       .toEqual({ begun: ['v1', 'v2'], packed: [0, 1, 2, 3], full: { waitMs: 1000 }, forming: { waitMs: 1000 }, ranks: [0, 1] });
   });
 
+  test('under a budget, starts a container for each task the budget runs, packed or whole, not for a dearer heavier one', async () => {
+    // a and b pack together and weigh most, but the budget runs only one of them, beside c, which runs alone.
+    const { env, begun } = reached(await learned(SMALL));
+    const budgeted = new ArmadaJob(state().ctx, env);
+    const items: Json[] = [{ cost: 2, weight: 9, n: 'a' }, { cost: 2, weight: 9, n: 'b' }, { cost: 1, weight: 1, n: 'c' }];
+
+    await budgeted.create('j1', v.parse(JobSpecSchema, {
+      recipe: { size: 'medium' }, run: { kind: 'command' }, pool: 3, budget: 3,
+      items: items.map((item, at) => ({ item, argv: at === 2 ? ['unmeasured', 'work'] : argvOf(item) })),
+    }));
+    await budgeted.alarm();
+
+    expect({ begun, handed: [(await claimed(budgeted, 'v1')).index, (await claimed(budgeted, 'v2')).index] }).toEqual({ begun: ['v1', 'v2'], handed: [0, 2] });
+  });
+
   test('runs its tasks whole while their class\'s store does not answer, and packs them once it does', async () => {
     let answering = false;
     const { job, begun } = await packing(['a', 'b', 'c'], await learned(SMALL, () => answering));

@@ -495,26 +495,27 @@ export class ArmadaJob extends DurableObject<Env> {
     return spec.pool - ((await this.ctx.storage.get<number>('forfeited')) ?? 0);
   }
 
-  /** The containers the open tasks, and `hedged` copies of them, need at once, up to the pool and as many as the budget
-   *  runs (`admitted`): one each (a gang's each rank) over the slots a fixed container carries; packing, as many as their
-   *  estimates fill (`Placement.containers`). */
+  /** The containers the open tasks the budget runs (`admitted`), and `hedged` copies of them, need at once, up to the
+   *  pool: one each (a gang's each rank) over the slots a fixed container carries; packing, as many as their estimates
+   *  fill (`Placement.containers`). */
   private needed(spec: Kept, hedged = 0): number {
-    const ranks = this.admitted(spec);
+    const admitted = this.admitted(spec);
 
-    if (packs(spec)) return this.placement.containers(spec.recipe.size, { pool: spec.budget === undefined ? spec.pool : Math.min(spec.pool, ranks + hedged), hedged });
+    if (packs(spec)) return this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged, only: admitted?.tasks ?? null });
 
-    return Math.min(spec.pool, Math.ceil((ranks + hedged) / spec.slots));
+    return Math.min(spec.pool, Math.ceil(((admitted?.ranks ?? Number(this.sql.exec(NEEDED).one()['n'])) + hedged) / spec.slots));
   }
 
-  /** The ranks the open tasks run at once: every one's, or under a budget those started and the queued ones, heaviest
-   *  first, whose cost fits what they leave, as vessels take them (`next`). */
-  private admitted(spec: Kept): number {
-    if (spec.budget === undefined) return Number(this.sql.exec(NEEDED).one()['n']);
+  /** The open tasks a budget runs at once, and their ranks: those started, and the queued ones, heaviest first, whose
+   *  cost fits what they leave, as vessels take them (`next`); null for a job with no budget, which runs every one. */
+  private admitted(spec: Kept): { readonly tasks: number[]; readonly ranks: number } | null {
+    if (spec.budget === undefined) return null;
 
-    const open = this.sql.exec<{ state: string; ranks: number; cost: number }>(
-      `SELECT state, ${RANKS} AS ranks, ${costOf('item')} AS cost FROM tasks WHERE ${OPEN} ORDER BY state = 'queued', weight DESC, idx`,
+    const open = this.sql.exec<{ idx: number; state: string; ranks: number; cost: number }>(
+      `SELECT idx, state, ${RANKS} AS ranks, ${costOf('item')} AS cost FROM tasks WHERE ${OPEN} ORDER BY state = 'queued', weight DESC, idx`,
     ).toArray();
 
+    const tasks: number[] = [];
     let left = spec.budget;
     let ranks = 0;
 
@@ -522,10 +523,11 @@ export class ArmadaJob extends DurableObject<Env> {
       if (task.state === 'queued' && task.cost * task.ranks > left) continue;
 
       left -= task.cost * task.ranks;
+      tasks.push(task.idx);
       ranks += task.ranks;
     }
 
-    return ranks;
+    return { tasks, ranks };
   }
 
   private async launch(spec: Kept, generation: Generation, name: string): Promise<void> {
@@ -640,9 +642,10 @@ export class ArmadaJob extends DurableObject<Env> {
     const load = packs(spec) ? this.placement.loadOf(name) : null;
     // A packing job's pool bounds its runs at once, however they are held (`Placement.held`): while it is full, no vessel
     // takes a new one.
-    const full = load !== null && this.held() >= spec.pool;
+    const held = this.held();
+    const full = load !== null && held.runs >= spec.pool;
     // What the job's budget leaves for one more run (`JobSpec.budget`), or null for a job with none.
-    const afford = spec.budget === undefined ? null : spec.budget - this.spent();
+    const afford = spec.budget === undefined ? null : spec.budget - held.spent;
 
     if (load !== null && load.runs > 0 && !load.joined) return full ? null : this.fitting(spec, env, { name, slot, now, afford }, load);
     // No await between finding no forming gang and creating one: simultaneous first claims would all miss `rank`,
@@ -732,20 +735,13 @@ export class ArmadaJob extends DurableObject<Env> {
     return `, with ${String(n)} container${n === 1 ? '' : 's'} still waiting for capacity: ${need}, under the fleet's cap of ${this.env.FLEET_VCPUS}`;
   }
 
-  /** The runs the job holds at once, which a packing job's pool bounds: each run a live vessel was handed and has not
-   *  ended (`Runs`), a copy told to stop included until it says it did, and each rank of a gang from when it joins until
-   *  it is handed its run. */
-  private held(): number {
-    return Number(this.sql.exec(`SELECT
-        (SELECT COUNT(*) FROM runs r JOIN vessels v ON v.name = r.vessel WHERE v.state IN ${ALIVE})
-      + (SELECT COUNT(*) FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready')) AS n`).one()['n']);
-  }
-
-  /** What the job's runs spend of its budget now: the runs `held` counts, each its task's cost. */
-  private spent(): number {
-    return Number(this.sql.exec(`SELECT
-        (SELECT COALESCE(SUM(${COST}), 0) FROM runs r JOIN vessels v ON v.name = r.vessel JOIN tasks t ON t.idx = r.idx WHERE v.state IN ${ALIVE})
-      + (SELECT COALESCE(SUM(${COST}), 0) FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready')) AS n`).one()['n']);
+  /** The runs the job holds at once, which a packing job's pool bounds, and what they spend of its budget, each its
+   *  task's cost: each run a live vessel was handed and has not ended (`Runs`), a copy told to stop included until it
+   *  says it did, and each rank of a gang from when it joins until it is handed its run. */
+  private held(): { readonly runs: number; readonly spent: number } {
+    return this.sql.exec<{ runs: number; spent: number }>(`SELECT COUNT(*) AS runs, COALESCE(SUM(cost), 0) AS spent FROM (
+        SELECT ${COST} AS cost FROM runs r JOIN vessels v ON v.name = r.vessel JOIN tasks t ON t.idx = r.idx WHERE v.state IN ${ALIVE}
+        UNION ALL SELECT ${COST} AS cost FROM members m JOIN tasks t ON t.idx = m.idx WHERE t.state IN ('forming', 'running') AND m.state IN ('joined', 'ready'))`).one();
   }
 
   /** The queued task that fits beside what vessel `name` runs (`load`), and what the budget leaves (`afford`), handed out

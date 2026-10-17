@@ -192,8 +192,10 @@ describe('a budgeted job', () => {
     const run = { kind: 'command' } as const;
     const refused = (item: Json, budget?: number) => refusal(run, [{ item, argv: ['true'] }], { pool: 4, budget }) !== null;
 
-    expect([refused({ cost: 7 }, 6), refused({ cost: 1.5 }, 6), refused({ cost: 'two' }, 6), refused({ cost: 0 }, 6), refused({ cost: 4, gang: 2 }, 6), refused({ cost: 3, gang: 2 }, 6), refused({ cost: 'two' })])
-      .toEqual([true, true, true, true, true, false, false]);
+    // 1e21 is a whole number JSON writes as 1e+21, which the job's SQL would read as no cost at all.
+    expect([refused({ cost: 7 }, 6), refused({ cost: 1.5 }, 6), refused({ cost: 'two' }, 6), refused({ cost: 0 }, 6), refused({ cost: 1e21 }, 2 ** 53 - 1), refused({ cost: 4, gang: 2 }, 6), refused({ cost: 3, gang: 2 }, 6), refused({ cost: 'two' })])
+      .toEqual([true, true, true, true, true, true, false, false]);
+    expect(v.safeParse(JobSpecSchema, { recipe: {}, items: [], run: { kind: 'command' }, budget: 1e21 }).success).toBe(false);
   });
 });
 

@@ -255,6 +255,10 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.put('state', state);
     await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
 
+    // A hold its work renews (a job with no deadline) is renewed once more here, so a container that will not stop keeps
+    // it for its whole inactivity timeout from now, not from the last slice (`ArmadaFleet.release`).
+    if (spec?.deadlineAt === null) await this.env.FLEET.getByName(SINGLE).extend(this.holder(spec));
+
     return await letGo(this.ctx, this.env, { holder: spec === undefined ? undefined : this.holder(spec), inactivityMs: INACTIVITY_MS });
   }
 

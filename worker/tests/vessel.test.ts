@@ -1,9 +1,10 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Boot, Cpu, Host, Outcome } from '../../src/protocol';
-import { argvOf, CPU_INFO, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
+import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
+import { ArmadaFleet } from '../src/fleet';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
 import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
@@ -154,14 +155,44 @@ const V3 = 'fpu sse2 pni ssse3 cx16 sse4_1 sse4_2 popcnt lahf_lm movbe xsave avx
 
 describe('a task of a job with no limits', () => {
   test('runs past an hour to its own exit, where a limit of ten minutes kills it, its vessel keeping its hold each slice', async () => {
-    const extended: string[] = [];
-    const fleet = { acquire: async () => 'held', release: async () => undefined, extend: async (holder: string) => { extended.push(holder); } };
+    const calls: string[] = [];
+
+    const fleet = {
+      acquire: async () => 'held', release: async (holder: string) => { calls.push(`release ${holder}`); },
+      extend: async (holder: string) => { calls.push(`extend ${holder}`); },
+    };
+
     const limited = await run(0, { launched: 60 * 60_000, pending: 1, fleet });
-    const byLimited = extended.length;
+    const byLimited = calls.splice(0);
     const unlimited = await run(0, { launched: 60 * 60_000, pending: 1, timeout: null, deadlineAt: null, fleet });
 
-    expect({ limited: limited.exits, unlimited: unlimited.exits, byLimited, byUnlimited: [...new Set(extended)] })
-      .toEqual({ limited: [124], unlimited: [0], byLimited: 0, byUnlimited: ['job/v1'] });
+    expect({ limited: limited.exits, unlimited: unlimited.exits, byLimited, byUnlimited: { renewed: calls.slice(0, -1).every((call) => call === 'extend job/v1'), last: calls.at(-1) } })
+      .toEqual({ limited: [124], unlimited: [0], byLimited: ['release job/v1'], byUnlimited: { renewed: true, last: 'release job/v1' } });
+  });
+
+  test('stopped in a container that would not stop, keeps its hold a whole idle timeout from its stop, not its last slice', async () => {
+    const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '4' }));
+    const machine = container(() => ({ exitCode: 0, stdout: '' }));
+    const slice = Date.now();
+    const stopped = slice + 40_000;
+
+    machine.destroy = async () => { throw new Error('the platform did not stop it'); };
+
+    const vessel = new ArmadaVessel(state(machine).ctx, world({ FLEET: namespace(() => fleet) }));
+
+    try {
+      setSystemTime(slice);
+      // Granted, and last renewed, at its last slice.
+      await fleet.acquire('job/v1', 4, { deadlineAt: slice, now: slice });
+      await vessel.begin({ ...spec, deadlineAt: null, timeout: null });
+      setSystemTime(stopped);
+      await vessel.stop();
+
+      expect([await fleet.acquire('later/v1', 4, { deadlineAt: stopped, now: stopped + INACTIVITY_MS - 1 }), await fleet.acquire('later/v1', 4, { deadlineAt: stopped, now: stopped + INACTIVITY_MS + 1 })])
+        .toEqual([null, 'held']);
+    } finally {
+      setSystemTime();
+    }
   });
 });
 

@@ -160,13 +160,15 @@ export class Placement {
   /** The containers a job's open tasks fill, at most `pool` runs at once, and `hedged` copies of them, each of which takes
    *  a container whole: those the tasks that take one whole need, their gang's every rank, and first-fit decreasing over
    *  the others' estimates, by memory, the dimension a container runs out of first. At least the widest open gang's,
-   *  which cannot start on fewer. The same `within` decides it as decides a claim (`fit`). */
-  containers(size: Size, { pool, hedged }: { readonly pool: number; readonly hedged: number }): number {
+   *  which cannot start on fewer. The same `within` decides it as decides a claim (`fit`). `only` names the open tasks
+   *  a budget runs at once (`ArmadaJob.admitted`), null for every one. */
+  containers(size: Size, { pool, hedged, only }: { readonly pool: number; readonly hedged: number; readonly only: readonly number[] | null }): number {
     const room = roomOf(size);
+    const among = only === null ? null : JSON.stringify(only);
 
     const open = this.sql.exec<{ cores: number | null; memory: number | null; disk: number | null; ranks: number; whole: number }>(
       `SELECT cores, memory, disk, ranks, whole FROM (${ESTIMATED}) WHERE state IN ('queued', 'forming', 'running', 'landing')
-        ORDER BY state IN ${HELD} DESC, weight DESC, idx LIMIT ?`, pool,
+        AND (? IS NULL OR idx IN (SELECT value FROM json_each(?))) ORDER BY state IN ${HELD} DESC, weight DESC, idx LIMIT ?`, among, among, pool,
     ).toArray();
 
     const whole = open.filter((task) => task.whole === 1).reduce((sum, task) => sum + task.ranks, 0);
@@ -179,7 +181,8 @@ export class Placement {
       else bins[bin] = plus(bins[bin] ?? NONE, task);
     }
 
-    const widest = Number(this.sql.exec(`SELECT COALESCE(MAX(ranks), 0) AS n FROM (${ESTIMATED}) WHERE whole = 1 AND state IN ('queued', 'forming')`).one()['n']);
+    const widest = Number(this.sql.exec(`SELECT COALESCE(MAX(ranks), 0) AS n FROM (${ESTIMATED}) WHERE whole = 1 AND state IN ('queued', 'forming')
+      AND (? IS NULL OR idx IN (SELECT value FROM json_each(?)))`, among, among).one()['n']);
 
     return Math.min(pool, Math.max(whole + bins.length + hedged, widest));
   }
