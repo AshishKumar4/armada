@@ -1,6 +1,6 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { environmentKey, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Json, type Outcome } from '../../src/protocol';
+import { environmentKey, JOB_LEASE_SECONDS, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEnvironments, type Generation } from '../src/environments';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
@@ -13,12 +13,13 @@ const generation = READY;
  *  a job's end says it used. */
 async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   const begun: string[] = [];
+  const specs: VesselSpec[] = [];
   const used: string[] = [];
   const stopped: string[] = [];
   const stored = state();
 
   const created = new ArmadaJob(stored.ctx, world({
-    VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); }, stop: async () => {
+    VESSEL: namespace((name: string) => ({ begin: async (began: VesselSpec) => { begun.push(name); specs.push(began); }, stop: async () => {
       stopped.push(name);
 
       return true;
@@ -29,7 +30,7 @@ async function job(spec: v.InferInput<typeof JobSpecSchema>) {
   await created.create('j1', v.parse(JobSpecSchema, spec));
   await created.alarm();
 
-  return { job: created, begun, used, stopped, stored };
+  return { job: created, begun, specs, used, stopped, stored };
 }
 
 const exited = (index: number, vessel: string, exitCode = 0, error?: string): Outcome => ({
@@ -121,6 +122,27 @@ describe('the claim order', () => {
 
     expect(lanes).toEqual(model.lanes.map((lane) => lane.map((position) => queue[position] ?? -1)));
     expect(await open.claim('v1')).toBeNull();
+  });
+});
+
+describe('a job with no deadline', () => {
+  test('runs on past six hours while its client renews its lease, its vessels told of no limit, and ends once the client is gone', async () => {
+    const task = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const }, lease: true };
+    const unbounded = await job({ ...task, deadline: null, timeout: null });
+    const bounded = await job(task);
+
+    for (const each of [unbounded, bounded]) {
+      await each.stored.ctx.storage.put({ createdAt: 0, renewed: Date.now() });
+      await each.job.alarm();
+    }
+
+    const running = (await unbounded.job.status())?.phase;
+
+    await unbounded.stored.ctx.storage.put('renewed', Date.now() - JOB_LEASE_SECONDS * 1000 - 1);
+    await unbounded.job.alarm();
+
+    expect({ running, gone: (await unbounded.job.status())?.phase, bounded: (await bounded.job.status())?.phase, limits: [unbounded.specs[0]?.deadlineAt, unbounded.specs[0]?.timeout] })
+      .toEqual({ running: 'running', gone: 'done', bounded: 'done', limits: [null, null] });
   });
 });
 

@@ -710,14 +710,14 @@ describe('the CLI\'s arguments', () => {
 
       const argv = ['tool', '--output', '--items=x'];
       // Nothing listens on port 9: the named connection's server is the only one that can answer.
-      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast', '--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17', '--budget=20'], 'http://127.0.0.1:9')];
+      const exits = [await map([], server.url.href), await map([`--connection=${named}`, '--mode=fast', '--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17', '--budget=20', '--deadline=none', '--timeout=none'], 'http://127.0.0.1:9')];
       const job = { items: [{ item: 1, argv }, { item: 2, argv }], run: { kind: 'command' }, output: false };
       const genoa = { vendor: 'AuthenticAMD', family: 25, model: 17 };
 
       expect({ exits, jobs }).toMatchObject({ exits: [0, 0], jobs: [job, job] });
       // Each job's lease ends it once map has gone (#50).
-      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, mode, cpu, lease, budget }) => [deadline, mode, cpu, lease, budget]))
-        .toEqual([[21600, 'efficient', undefined, true, undefined], [21600, 'fast', [genoa, { ...genoa, family: 26 }], true, 20]]);
+      expect(jobs.map((each) => v.parse(JobSpecSchema, each)).map(({ deadline, timeout, mode, cpu, lease, budget }) => [deadline, timeout, mode, cpu, lease, budget]))
+        .toEqual([[21600, 3600, 'efficient', undefined, true, undefined], [null, null, 'fast', [genoa, { ...genoa, family: 26 }], true, 20]]);
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });

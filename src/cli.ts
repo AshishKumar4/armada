@@ -63,8 +63,9 @@ map options:
   --cpu=V/F/M[,...]    the CPU every container's host has, vendor/family/model as /proc/cpuinfo says
                        (AuthenticAMD/25/17), or several, any one of them; a container on another host is replaced
                        before it takes a task
-  --timeout=S          a task's limit, in seconds (default 3600)
-  --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h)
+  --timeout=S          a task's limit, in seconds, or none (default 3600)
+  --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h), or none: the job
+                       then ends with its tasks, its cancel, or 3 minutes after this command stops following it
   --gang-start-timeout=S  once every rank has a container, all must launch within this many seconds (default 300)
   --output             keep each task's {out} file
   --artifacts=<dir>    extract each task's {artifacts} directory under <dir>/<index>
@@ -135,6 +136,11 @@ function whole(name: string, least = 1): number | undefined {
   return value;
 }
 
+/** `--name=S` as a limit in seconds, null for `none`, or undefined when it is not given. */
+function limit(name: string): number | null | undefined {
+  return option(name) === 'none' ? null : whole(name);
+}
+
 const RecipeFileSchema = v.object({
   base: v.optional(BaseSchema), setup: v.optional(v.string()), install: v.optional(v.string()), size: v.optional(SizeSchema),
 });
@@ -183,9 +189,9 @@ async function map(): Promise<number> {
     throw new Error('map needs one of --times=N and --items=<file|->, and a command after --, as in: armada map --times=3 -- echo {item}');
   }
 
-  const timeout = whole('timeout');
-  const deadline = whole('deadline');
-  const refused = deadlineRefusal(timeout, deadline);
+  const timeout = limit('timeout');
+  const deadline = limit('deadline');
+  const refused = deadlineRefusal(timeout, deadline, true);
 
   if (refused !== null) throw new Error(refused);
 

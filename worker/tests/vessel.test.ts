@@ -56,12 +56,16 @@ interface Run {
   /** The CPU its job requires, and what its host's /proc/cpuinfo says. */
   readonly cpu?: readonly Cpu[];
   readonly cpuinfo?: string;
+  /** The waits that find the task still running before it exits; its job's task limit and deadline. */
+  readonly pending?: number;
+  readonly timeout?: number | null;
+  readonly deadlineAt?: number | null;
 }
 
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
-  fleet = { acquire: async () => 'held', release: async () => undefined }, cpu, cpuinfo = '',
+  fleet = { acquire: async () => 'held', release: async () => undefined }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
 }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
@@ -99,7 +103,9 @@ async function run(lost: number, {
     if (argv[3] !== 'wait') return { exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' };
     waits += 1;
 
-    return waits <= lost ? new Error('Network connection lost.') : { exitCode: 0, stdout: '0\n' };
+    if (waits <= lost) return new Error('Network connection lost.');
+
+    return { exitCode: 0, stdout: waits <= lost + pending ? '' : '0\n' };
   }, (argv, body) => { if (argv[3] === 'pipe-in') piped.set(argv[4] ?? '', body); }));
 
   const job = {
@@ -126,7 +132,7 @@ async function run(lost: number, {
   const artifacts = bucket(new Map(marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};']]));
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts, FLEET: namespace(() => fleet) }));
 
-  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu });
+  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu, timeout, deadlineAt });
 
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
   // storage.
@@ -145,6 +151,19 @@ const cpuinfoOf = (family: number, model: number, flags: string): string =>
   `processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: ${String(family)}\nmodel\t\t: ${String(model)}\nmodel name\t: AMD EPYC\nflags\t\t: ${flags}\n\n`;
 
 const V3 = 'fpu sse2 pni ssse3 cx16 sse4_1 sse4_2 popcnt lahf_lm movbe xsave avx f16c fma abm bmi1 bmi2 avx2';
+
+describe('a task of a job with no limits', () => {
+  test('runs past an hour to its own exit, where a limit of ten minutes kills it, its vessel keeping its hold each slice', async () => {
+    const extended: string[] = [];
+    const fleet = { acquire: async () => 'held', release: async () => undefined, extend: async (holder: string) => { extended.push(holder); } };
+    const limited = await run(0, { launched: 60 * 60_000, pending: 1, fleet });
+    const byLimited = extended.length;
+    const unlimited = await run(0, { launched: 60 * 60_000, pending: 1, timeout: null, deadlineAt: null, fleet });
+
+    expect({ limited: limited.exits, unlimited: unlimited.exits, byLimited, byUnlimited: [...new Set(extended)] })
+      .toEqual({ limited: [124], unlimited: [0], byLimited: 0, byUnlimited: ['job/v1'] });
+  });
+});
 
 describe('a vessel\'s place in its fleet', () => {
   test('takes no new task once the fleet recalls them: it finishes the one it runs, then retires', async () => {

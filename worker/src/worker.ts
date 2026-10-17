@@ -146,11 +146,11 @@ const MODES = 9;
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
   const body: unknown = await request.json();
   const spec = v.parse(JobSpecSchema, body);
-  const requested = v.parse(v.object({ timeout: v.optional(v.number()), mode: v.optional(ModeSchema) }), body);
+  const requested = v.parse(v.object({ timeout: v.optional(v.nullable(v.number())), mode: v.optional(ModeSchema) }), body);
 
   // A client that may not know modes packs only when it asks to.
   if (requested.mode === undefined && spokenBy(request) < MODES) spec.mode = 'fast';
-  const refused = deadlineRefusal(requested.timeout, spec.deadline) ?? refusal(spec.run, spec.items, spec) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
+  const refused = deadlineRefusal(requested.timeout, spec.deadline, spec.lease) ?? refusal(spec.run, spec.items, spec) ?? fleetRefusal(spec.items, spec.recipe.size, Number(env.FLEET_VCPUS));
 
   if (refused !== null) return Response.json({ error: refused }, { status: 400 });
 

@@ -268,7 +268,7 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 |---|---|
 | `output` | A schema that checks and types each answer when it lands, or `'text'` or `'bytes'`. Without one, a body answers JSON and a command `null`. Up to 4.995 GiB, and `job.outputStream(i)` streams it. |
 | `input` | A schema that checks each item before it's sent. valibot, zod and arktype all work ([Standard Schema](https://standardschema.dev)). Items and answers are plain JSON, or bytes for an answer; a `Date`, a `Map`, `any` or `unknown` is a type error. |
-| `timeout` | A task's limit in seconds. |
+| `timeout` | A task's limit in seconds, 3600 unless set; `null` (`--timeout=none`) for none, so the task runs to its own end. |
 | `retries` | Runs an item again only for the failures you name. With `{ attempts: 3, backoffSeconds: 5, exitCodes: [75], errors: ['FetchError'] }`, an item that exits 75 or throws a `FetchError` runs up to three times, 5 s and then 10 s apart. Any other failure is final. |
 | `speculative` | Lets an idle container run a straggler again; the first answer is kept. |
 | `hedge` | Runs this many of the heaviest items twice from the start; the first answer is kept. |
@@ -283,9 +283,10 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 | `budget` | The most the job's runs spend at once. Each run spends its item's `cost`, 1 unless the item says, a gang's each rank, until it ends; a container takes the heaviest queued item that fits what is left, so a dear item waits while cheaper ones run. Twenty calls to one model provider, shared by items that make one to six at once: `{ budget: 20 }` with each item's `cost` its calls (`--budget=20`). |
 | `cpu` | The CPU every container's host has, as `/proc/cpuinfo` names it: `{ vendor: 'AuthenticAMD', family: 25, model: 17 }` (`--cpu=AuthenticAMD/25/17`). A list takes any one of its CPUs (`--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17`), to keep out a slow host. A container on another host is replaced before it takes a task. |
 | `lease` | `true` ends the job 3 minutes after this process stops following it, however the process ends: killed, its runner gone, or its network lost. `armada map` and `armada run` always set it. Default `false`: the job runs on alone. |
+| `deadline` | The whole job's limit in seconds, starts included: 21600 (6 hours) unless set. `null` (`--deadline=none`) for none, only with `lease`: the job then ends when its tasks do, when it is cancelled, or 3 minutes after its client stops following it. |
 | `label`, `env`, `files`, `tmpfs` | The job's name in the dashboard, its environment, its small files (`{files}`), and the paths that get a fresh tmpfs. |
 
-These go to `.map` and `.stream` as `map(items, { pool, slots, budget, mode, cpu, lease, label, env, files, tmpfs })`.
+These go to `.map` and `.stream` as `map(items, { pool, slots, budget, mode, cpu, lease, deadline, label, env, files, tmpfs })`.
 
 armada records each task's CPU, peak memory and disk, by its task and environment and by its item. Its CPU counts only
 from runs that had their container to themselves. A packed container takes another task only while their recorded use
@@ -479,7 +480,7 @@ what open jobs use. A client and a Worker too far apart in version refuse each o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--budget=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--timeout=S] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--budget=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--timeout=S|none] [--deadline=S|none] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

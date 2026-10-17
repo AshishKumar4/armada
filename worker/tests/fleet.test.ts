@@ -96,6 +96,19 @@ describe('the fleet', () => {
 
     expect({ beforeEnd, afterLease }).toEqual({ beforeEnd: null, afterLease: 'held' });
   });
+
+  test('keeps the hold of a holder whose job has no deadline while it says it runs, and lets it lapse an idle timeout after', async () => {
+    const fleet = fleetOf(4);
+    const start = Date.now();
+    const said = start + 10 * 60 * 60_000;
+
+    await fleet.acquire('open/v1', 4, { deadlineAt: start, now: start });
+    await fleet.extend('open/v1', said);
+    const running = await fleet.acquire('b/v1', 4, { deadlineAt, now: said + INACTIVITY_MS - 1 });
+    const lapsed = await fleet.acquire('b/v1', 4, { deadlineAt, now: said + INACTIVITY_MS + 1 });
+
+    expect({ running, lapsed }).toEqual({ running: null, lapsed: 'held' });
+  });
 });
 
 describe('a fleet that lends what the account leaves idle', () => {

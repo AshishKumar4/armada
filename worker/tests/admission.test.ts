@@ -49,6 +49,18 @@ describe('a client and a Worker', () => {
     expect(await settled(armada.create({ ...spec, deadline: 1799 }))).toBe('fulfilled');
   });
 
+  test('makes a job with no deadline only for a client that follows it, with or without a task limit', async () => {
+    const { armada, env, fleet } = deployment();
+    const unfollowed = { ...spec, deadline: null };
+    const refusal = 'JobDeadlineNone: a job with no deadline ends only through its client, so its client must follow it (lease)';
+    const request = new Request('https://armada.test/jobs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'armada-protocol': String(PROTOCOL) }, body: JSON.stringify(unfollowed) });
+    const answer = await worker.fetch(request, env);
+    const refused = { client: await settled(armada.create(unfollowed)), status: answer.status, error: v.parse(v.object({ error: v.string() }), await answer.json()).error, jobs: await fleet.jobs() };
+
+    expect({ refused, followed: await settled(armada.create({ ...spec, deadline: null, timeout: null, lease: true })) })
+      .toEqual({ refused: { client: `Error: ${refusal}`, status: 400, error: refusal, jobs: 0 }, followed: 'fulfilled' });
+  });
+
   test('that speak versions of the wire too far apart say which one to update, and an older client the wire still fits is served', async () => {
     const { env, armada } = deployment();
 

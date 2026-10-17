@@ -664,7 +664,7 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
       return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry;
     });
 
-    const taskOptions = { timeout: Math.min(config.task.timeout, left), speculative: config.task.speculative, hedge: config.task.hedge, secrets: taskSecrets };
+    const taskOptions = { timeout: Math.min(config.task.timeout ?? left, left), speculative: config.task.speculative, hedge: config.task.hedge, secrets: taskSecrets };
     const jobOptions = { ...options, deadline: left, pool, cpu: config.task.cpu };
     const job = config.task.verdict ? commandTask(own.spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(own.spec.recipe, argv, taskOptions).stream(entries, jobOptions);
 

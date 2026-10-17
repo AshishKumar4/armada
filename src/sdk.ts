@@ -241,7 +241,7 @@ export class Armada {
   }
 
   async create(spec: v.InferInput<typeof JobSpecSchema>): Promise<string> {
-    const refused = deadlineRefusal(spec.timeout, spec.deadline);
+    const refused = deadlineRefusal(spec.timeout, spec.deadline, spec.lease);
 
     if (refused !== null) throw new Error(refused);
 

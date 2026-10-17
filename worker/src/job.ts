@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_DEADLINE_SECONDS, JOB_LEASE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -326,9 +326,11 @@ export class ArmadaJob extends DurableObject<Env> {
     if (phase === 'done') return await this.settleUp();
     this.requeueUnread();
 
-    const deadline = spec.deadline ?? JOB_DEADLINE_SECONDS;
+    const { deadline } = spec;
 
-    if (Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${this.waitingFor(spec)}`, 'lost');
+    if (deadline !== null && Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) {
+      return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${this.waitingFor(spec)}`, 'lost');
+    }
 
     // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from then.
     if (spec.lease && Date.now() - ((await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_LEASE_SECONDS * 1000) {
@@ -359,7 +361,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const formed = this.sql.exec<{ since: number | null }>(`SELECT MIN(COALESCE(t.started, ?)) AS since FROM tasks t WHERE ${LAUNCHING}`, began).one().since;
 
-    const next = Math.min(now + WATCHDOG_MS, created + (spec.deadline ?? JOB_DEADLINE_SECONDS) * 1000,
+    const next = Math.min(now + WATCHDOG_MS, spec.deadline === null ? Infinity : created + spec.deadline * 1000,
       formed === null ? Infinity : formed + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000,
       sooner ? (await this.ctx.storage.getAlarm()) ?? Infinity : Infinity);
 
@@ -537,7 +539,7 @@ export class ArmadaJob extends DurableObject<Env> {
       slots: spec.slots, pack: packs(spec),
       slotMemoryBytes: packs(spec) ? tasksMemoryOf(spec.recipe.size) : Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
       reserve: Number(this.sql.exec('SELECT ranks FROM vessels WHERE name = ?', name).one()['ranks']) * SIZES[spec.recipe.size].vcpus,
-      deadlineAt: ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + (spec.deadline ?? JOB_DEADLINE_SECONDS) * 1000,
+      deadlineAt: spec.deadline === null ? null : ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + spec.deadline * 1000,
       cpu: spec.cpu,
     };
 

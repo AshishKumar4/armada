@@ -114,8 +114,9 @@ export interface MapOptions {
    *  container on another host is replaced before it takes a task. One, for float results that must not differ between
    *  hosts; several, to keep out a slow host. */
   readonly cpu?: Cpu | readonly Cpu[];
-  /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). */
-  readonly deadline?: number;
+  /** The whole job's limit, including preparation and starts, in seconds. Default 21600 (6 hours). Null for none, with
+   *  `lease`: the job then ends when its tasks do, when it is cancelled, or once this process stops following it. */
+  readonly deadline?: number | null;
   /** The job ends once this process stops following it: the job is renewed while the process lives, and cancelled
    *  JOB_LEASE_SECONDS after it dies, however it dies (`JobSpec.lease`). Default false: the job runs on alone. */
   readonly lease?: boolean;
@@ -243,8 +244,8 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string, S
    *  machine that makes it: the task's file also runs in each container, which has none of the files a recipe reads. */
   readonly recipe?: Recipe | RecipeBuilder | (() => Recipe | RecipeBuilder);
   readonly output?: Out;
-  /** A task's limit, in seconds. Default 3600. */
-  readonly timeout?: number;
+  /** A task's limit, in seconds, or null for none. Default 3600. */
+  readonly timeout?: number | null;
   /** Lets an idle container run a straggler again, the first answer kept. Only for tasks safe to repeat. */
   readonly speculative?: boolean;
   /** Runs this many of a job's heaviest tasks twice from the start, the first answer kept. Only for tasks safe to repeat. */
@@ -415,7 +416,7 @@ abstract class Base<I extends Json, O> {
 
   /** Creates the job, all at once for an array and open for an iterable, whose items then follow in batches. */
   private async submit(armada: Armada, items: Iterable<I> | AsyncIterable<I>, submission: Submission<I>, options: MapOptions): Promise<string> {
-    const refused = deadlineRefusal(this.options.timeout, options.deadline);
+    const refused = deadlineRefusal(this.options.timeout, options.deadline, options.lease);
 
     if (refused !== null) throw new Error(refused);
     const { run, output } = await this.runOf(armada);

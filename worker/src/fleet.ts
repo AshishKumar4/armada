@@ -265,6 +265,17 @@ export class ArmadaFleet extends ArmadaSingle {
   /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. A
    *  holder kept that way has ended: it keeps only its own vCPUs, not its job's reserve, which is for holders still
    *  to be granted. */
+  /** `holder` still runs: its hold, if it has one, lasts LEASE_MS past `now` at least. A vessel whose job has no deadline
+   *  says so each slice of its work (`VesselSpec.deadlineAt`), so a hold whose release was lost ends as a deadline's
+   *  does. */
+  async extend(holder: string, now = Date.now()): Promise<void> {
+    const holds = await this.ctx.storage.get<Record<string, Hold>>('holds');
+    const held = holds?.[holder];
+
+    if (held === undefined) return;
+    await this.ctx.storage.put('holds', { ...holds, [holder]: { ...held, until: Math.max(held.until, now + LEASE_MS) } });
+  }
+
   async release(holder: string, afterMs = 0): Promise<void> {
     const holds = { ...await this.ctx.storage.get<Record<string, Hold>>('holds') };
     const held = holds[holder];

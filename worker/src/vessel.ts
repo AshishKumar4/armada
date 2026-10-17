@@ -35,8 +35,8 @@ export interface VesselSpec {
   readonly runtime?: 'node' | 'python';
   /** Whether a task's `{out}` is kept. */
   readonly output: boolean;
-  /** A task's own bound, in seconds. */
-  readonly timeout: number;
+  /** A task's own bound, in seconds; null for none. */
+  readonly timeout: number | null;
   /** The tasks this container runs at once: 1 (absent for an earlier Worker's spec) shares today's layout; more
    *  gives each slot its own namespace, overlay and cgroup. */
   readonly slots?: number;
@@ -50,9 +50,10 @@ export interface VesselSpec {
    *  so two jobs' gangs never each hold part of what both need. Absent for an earlier Worker's spec, which reserves
    *  its own. */
   readonly reserve?: number;
-  /** When its job's deadline ends it, so the fleet holds its vCPUs no longer than it may run. Absent for an earlier
-   *  Worker's spec, whose jobs ended at six hours. */
-  readonly deadlineAt?: number;
+  /** When its job's deadline ends it, so the fleet holds its vCPUs no longer than it may run. Null for a job with none,
+   *  whose hold each slice of its work renews (`ArmadaFleet.extend`). Absent for an earlier Worker's spec, whose jobs
+   *  ended at six hours. */
+  readonly deadlineAt?: number | null;
   /** The CPUs its host may have, any one of them (`JobSpec.cpu`); absent for any. */
   readonly cpu?: readonly Cpu[];
 }
@@ -62,6 +63,15 @@ export interface SlotSpec extends VesselSpec {
   readonly runtime: 'node' | 'python';
   readonly slots: number;
   readonly slotMemoryBytes: number;
+}
+
+/** When the fleet may end this vessel's hold, before its grace (`ArmadaFleet.acquire`): its job's deadline; now for a
+ *  job with none, whose work renews the hold each slice (`ArmadaFleet.extend`); six hours on for an earlier Worker's
+ *  spec. */
+function deadlineOf(spec: VesselSpec): number {
+  if (spec.deadlineAt === null) return Date.now();
+
+  return spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000;
 }
 
 /** The spec `begin` stored, every later field defaulted, so a use site never re-derives them. */
@@ -190,7 +200,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // One whose job runs no gang wider than it may borrow past the fleet's cap: it asks before each new task.
         const grant = grantOf(await fleet.acquire(this.holder(spec), spec.vcpus, {
-          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: spec.deadlineAt ?? Date.now() + JOB_DEADLINE_SECONDS * 1000,
+          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: deadlineOf(spec),
         }));
 
         if (grant === null) {
@@ -414,7 +424,7 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
-      if (Date.now() - current.startedAt > spec.timeout * 1000) {
+      if (spec.timeout !== null && Date.now() - current.startedAt > spec.timeout * 1000) {
         await must(container, 'the kill', ['/bin/sh', '-c', killOf(dir, group)], { ms: EXEC_MS });
         await this.finish(spec, slot, current, { exitCode: 124, reason: 'timeout' });
         continue;
@@ -432,6 +442,8 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  loop the job has nothing fitting for ends, and the next task started opens another to ask again. */
   private async work(spec: SlotSpec): Promise<boolean> {
     this.watch(this.container());
+
+    if (spec.deadlineAt === null) await this.env.FLEET.getByName(SINGLE).extend(this.holder(spec));
     const until = Date.now() + SLICE_MS;
     const abort = { failed: false };
     // Every loop opened this slice, and the slots whose loops still run: a slot ended this slice is not opened again.

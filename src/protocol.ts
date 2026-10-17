@@ -278,11 +278,13 @@ export const CI_DEADLINE_SECONDS = 30 * 60;
 export const GANG_START_SECONDS = 5 * 60;
 
 /** A task timeout explicitly requested must fit the whole job's limit. An implicit task timeout does not prevent a
- *  client from choosing a shorter whole-job bound, as CI does. */
-export function deadlineRefusal(timeout: number | undefined, deadline: number | undefined): string | null {
+ *  client from choosing a shorter whole-job bound, as CI does. A job with no deadline (null) runs only while its client
+ *  follows it (`lease`). */
+export function deadlineRefusal(timeout: number | null | undefined, deadline: number | null | undefined, lease: boolean | undefined): string | null {
+  if (deadline === null) return lease === true ? null : 'JobDeadlineNone: a job with no deadline ends only through its client, so its client must follow it (lease)';
   const bound = deadline ?? JOB_DEADLINE_SECONDS;
 
-  return timeout !== undefined && bound < timeout ? `JobDeadlineTooShort: job deadline ${String(bound)} s is shorter than the task timeout ${String(timeout)} s` : null;
+  return timeout !== undefined && timeout !== null && bound < timeout ? `JobDeadlineTooShort: job deadline ${String(bound)} s is shorter than the task timeout ${String(timeout)} s` : null;
 }
 
 /** How a job places its tasks. `efficient` runs as many tasks in each container as their measured use fits, each in a
@@ -360,10 +362,11 @@ export const JobSpecSchema = v.object({
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
    *  container holds the job up no longer than the other copy takes. Only for tasks safe to repeat. */
   hedge: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
-  /** A task's own bound, in seconds. */
-  timeout: v.optional(v.pipe(v.number(), v.minValue(1)), 3600),
-  /** The whole job's bound, including environment preparation and container starts, in seconds. */
-  deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), JOB_DEADLINE_SECONDS),
+  /** A task's own bound, in seconds; null for none: the task runs until it ends, the job's deadline bounding it. */
+  timeout: v.optional(v.nullable(v.pipe(v.number(), v.minValue(1))), 3600),
+  /** The whole job's bound, including environment preparation and container starts, in seconds; null for none, for a
+   *  job whose client follows it (`lease`): it ends when its tasks do, when it is cancelled, or once its client is gone. */
+  deadline: v.optional(v.nullable(v.pipe(v.number(), v.integer(), v.minValue(1))), JOB_DEADLINE_SECONDS),
   /** A client follows the job and renews its lease (`POST /jobs/<id>/lease`) while it does: the job is cancelled once
    *  JOB_LEASE_SECONDS pass without a renewal. A job made to run on without its client, such as a webhook's, has none. */
   lease: v.optional(v.boolean(), false),
