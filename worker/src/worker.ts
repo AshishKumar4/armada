@@ -360,7 +360,7 @@ const timings: Handler = async (request, env, [project]) => {
 
 /** `/environments` lists them, `POST /environments/resolve` names a recipe's key and pack base, `POST
  *  /environments/prune` deletes now the snapshots past those the deployment keeps (`armada deploy`, `armada prune`),
- *  or past `keep` with no recent hour spared, and `DELETE /environments/<key>` forgets one. */
+ *  or past `keep` with no recent hour spared, and `DELETE /environments/<key>` forgets one, owing its snapshot. */
 const environments: Handler = async (request, env, [key]) => {
   const registry = env.ENVIRONMENTS.getByName(SINGLE);
 

@@ -140,7 +140,6 @@ export class ArmadaEnvironments extends ArmadaSingle {
 
     if (entry?.state !== 'ready' || entry.generation.snapshot.id !== snapshot) return;
     await this.forget(key);
-    await this.owe(snapshot, key);
   }
 
   /** A new environment is ready, one more than before: the registry prunes now, and then each hour. A generation it
@@ -243,7 +242,7 @@ export class ArmadaEnvironments extends ArmadaSingle {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     if (entry?.state !== 'ready' || entry.lastUsed !== lastUsed) return null;
-    await this.forget(key);
+    await this.ctx.storage.delete(`env:${key}`);
 
     return await this.delete(credentials, snapshot, key);
   }
@@ -352,9 +351,13 @@ export class ArmadaEnvironments extends ArmadaSingle {
     return [...new Set([...ready, ...debts])];
   }
 
-  /** After `armada prune` deleted its snapshot: the next job with this key prepares again. */
+  /** The next job with this key prepares again. The snapshot its environment was ready on is owed for deletion, since
+   *  nothing records it any more. */
   async forget(key: string): Promise<void> {
+    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+
     await this.ctx.storage.delete(`env:${key}`);
+    if (entry?.state === 'ready') await this.owe(entry.generation.snapshot.id, key);
   }
 }
 
