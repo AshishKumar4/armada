@@ -366,6 +366,23 @@ describe('a snapshot no environment records any more', () => {
       .toEqual({ whileOpen: ['k-first', 'k-second', 'made'], after: ['k-second', 'made'], owed: [] });
   });
 
+  test('a ready environment forgotten through the route owes its snapshot, and the next prune deletes it', async () => {
+    const { environments, fake, stored } = await deployment([]);
+    const token = 't'.repeat(32);
+    const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
+
+    await environments.prepared(under('k', 'k-first'));
+    const answer = await worker.fetch(new Request('https://armada.test/environments/k', {
+      method: 'DELETE', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7' },
+    }), env);
+    const owed = [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()];
+
+    await environments.prune({ keep: 5, recentMs: 0 });
+
+    expect({ answer: v.parse(v.object({ forgotten: v.string() }), await answer.json()), listed: await environments.list(), owed, left: fake.left() })
+      .toEqual({ answer: { forgotten: 'k' }, listed: [], owed: ['debt:snapshot-k-first'], left: ['k-second', 'made'] });
+  });
+
   test('a preparation\'s snapshot it could not publish is owed and deleted', async () => {
     const { environments, fake } = await deployment([]);
     await environments.orphaned('snapshot-made', 'other');
