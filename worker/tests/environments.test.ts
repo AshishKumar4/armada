@@ -385,6 +385,39 @@ describe('a snapshot no environment records any more', () => {
       .toEqual({ answer: { forgotten: 'k' }, listed: [], owed: ['debt:snapshot-k-first'], left: ['k-second', 'made'] });
   });
 
+  test('a debt owed while the open jobs are read waits for the next prune, as a job admitted meanwhile may hold its snapshot', async () => {
+    const stored = state();
+    const fake = await registry(['k-first', 'k-second', 'made']);
+    let forgetting = false;
+
+    globalThis.fetch = fakeFetch(fake.answer);
+
+    // The read of the open jobs misses one admitted while it was out, which took k's snapshot just before k was forgotten.
+    const environments: ArmadaEnvironments = new ArmadaEnvironments(stored.ctx, world({
+      KEEP_ENVIRONMENTS: '5', REGISTRY_CREDENTIALS: 'user:secret',
+      FLEET: namespace(() => ({
+        open: async () => {
+          if (forgetting) {
+            forgetting = false;
+            await environments.forget('k');
+          }
+
+          return [];
+        },
+      })),
+    }));
+
+    await environments.prepared(under('k', 'k-first'));
+    forgetting = true;
+    await environments.prune({ keep: 5, recentMs: 0 });
+
+    const kept = fake.left();
+
+    await environments.prune({ keep: 5, recentMs: 0 });
+
+    expect({ kept, after: fake.left() }).toEqual({ kept: ['k-first', 'k-second', 'made'], after: ['k-second', 'made'] });
+  });
+
   test('a preparation\'s snapshot it could not publish is owed and deleted', async () => {
     const { environments, fake } = await deployment([]);
     await environments.orphaned('snapshot-made', 'other');
