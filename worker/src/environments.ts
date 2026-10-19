@@ -53,6 +53,9 @@ class PlatformFailed extends Error {}
  *  its id, or the digest a delete left once the tags were gone. */
 export interface Debt {
   readonly key: string;
+  /** This owing of it, so a settle tells the debt it listed from one owed again since; absent in one an earlier version
+   *  owed. */
+  readonly id?: string;
 }
 
 /** The environment every command runs under: the runner's defaults, then the job's own. */
@@ -191,12 +194,14 @@ export class ArmadaEnvironments extends ArmadaSingle {
 
     if (credentials === undefined) throw new Error('this deployment has no registry credentials to delete snapshots with; armada deploy mints them');
     // Listed before the calls below let other requests in: a job admitted meanwhile is missing from `used`, but asking
-    // for its environment changes that entry, which the check before each delete sees.
+    // for its environment changes that entry, which the check before each delete sees, and a debt owed meanwhile is not
+    // among those settled.
     const listed = await this.list();
+    const owed = await this.debts();
     const used = await this.openKeys();
     const pruned: string[] = [];
 
-    await this.settle(credentials, used);
+    await this.settle(credentials, owed, used);
 
     for (const candidate of expired(listed, used, Date.now(), retention)) {
       if (await this.evict(credentials, candidate) !== null) pruned.push(candidate.key);
@@ -217,9 +222,10 @@ export class ArmadaEnvironments extends ArmadaSingle {
 
     if (credentials === undefined) return 'no credentials';
     const listed = await this.list();
+    const owed = await this.debts();
     const used = await this.openKeys();
 
-    if (await this.settle(credentials, used)) return 'freed';
+    if (await this.settle(credentials, owed, used)) return 'freed';
 
     for (const candidate of expired(listed, used, Date.now(), { keep: 0, recentMs: IN_USE_MS }).filter((each) => each.key !== key).toReversed()) {
       if (await this.evict(credentials, candidate) === true) return 'freed';
@@ -252,13 +258,22 @@ export class ArmadaEnvironments extends ArmadaSingle {
     await this.owe(snapshot, key);
   }
 
-  /** Deletes the owed snapshots, but those of a key an open job uses: a job holds its generation, so a vessel it starts
-   *  later may start from one its key has since replaced. Whether any was deleted. */
-  private async settle(credentials: string, used: ReadonlySet<string>): Promise<boolean> {
+  private async debts(): Promise<Map<string, Debt>> {
+    return await this.ctx.storage.list<Debt>({ prefix: 'debt:' });
+  }
+
+  /** Deletes the `owed` snapshots, listed before the open jobs were read as `used`, but those of a key an open job uses:
+   *  a job holds its generation, so a vessel it starts later may start from one its key has since replaced. A debt owed
+   *  again or settled since it was listed is left: a job admitted while the open jobs were read is not in `used`, and
+   *  may hold its snapshot. Whether any was deleted. */
+  private async settle(credentials: string, owed: ReadonlyMap<string, Debt>, used: ReadonlySet<string>): Promise<boolean> {
     let freed = false;
 
-    for (const [name, debt] of await this.ctx.storage.list<Debt>({ prefix: 'debt:' })) {
+    for (const [name, debt] of owed) {
       if (used.has(debt.key)) continue;
+      const current = await this.ctx.storage.get<Debt>(name);
+
+      if (current === undefined || current.id !== debt.id) continue;
       const ref = name.slice('debt:'.length);
       const entry = await this.ctx.storage.get<Entry>(`env:${debt.key}`);
 
@@ -302,7 +317,7 @@ export class ArmadaEnvironments extends ArmadaSingle {
 
   /** `ref`'s delete owed for `key`, and a look due for it, if none is: whatever path owed it, the debt is settled. */
   private async owe(ref: string, key: string): Promise<void> {
-    await this.ctx.storage.put(`debt:${ref}`, { key } satisfies Debt);
+    await this.ctx.storage.put(`debt:${ref}`, { key, id: crypto.randomUUID() } satisfies Debt);
 
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + LOOK_MS);
   }
