@@ -372,9 +372,11 @@ describe('a snapshot no environment records any more', () => {
     const env = world({ ARMADA_TOKEN: token, VERSION: { id: 'v', tag: '', timestamp: '' }, ENVIRONMENTS: namespace(() => environments) });
 
     await environments.prepared(under('k', 'k-first'));
+
     const answer = await worker.fetch(new Request('https://armada.test/environments/k', {
       method: 'DELETE', headers: { authorization: `Bearer ${token}`, 'armada-protocol': '7' },
     }), env);
+
     const owed = [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()];
 
     await environments.prune({ keep: 5, recentMs: 0 });

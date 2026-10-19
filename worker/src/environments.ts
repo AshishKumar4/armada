@@ -357,6 +357,7 @@ export class ArmadaEnvironments extends ArmadaSingle {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     await this.ctx.storage.delete(`env:${key}`);
+
     if (entry?.state === 'ready') await this.owe(entry.generation.snapshot.id, key);
   }
 }
