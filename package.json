@@ -21,7 +21,7 @@
     "python": "cd python && /opt/armada-python/bin/ruff check --config pyproject.toml . ../examples && python3 -m unittest discover -s tests -v && /opt/armada-python/bin/mypy --strict armada tests/typing_check.py"
   },
   "dependencies": {
-    "valibot": "1.4.1"
+    "valibot": "^1.5.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260930.2",
