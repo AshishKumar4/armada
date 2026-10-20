@@ -475,7 +475,9 @@ opens one deployment's own pages. Each bearer stays in that one browser.
 ## Deploying
 
 `armada deploy --name=<name>` deploys another armada on the same account and prints the file that `--connection=<file>`
-takes, to point any command at it. `--vcpus=N` caps its fleet.
+takes, to point any command at it. `--vcpus=N` caps its fleet. A project whose CI runs on one deployment names it in its
+`.armada.json`, `"deployment": "<name>"`, and every command run in its checkout reaches that deployment; a connection
+given to the command (`--connection`, `ARMADA_CONNECTION`, or `ARMADA_URL` with `ARMADA_TOKEN`) still comes first.
 
 Every container app in an account shares its vCPUs, 1,500 by default. A fleet can borrow what the rest of the account
 leaves idle past its cap: give the deploy a token that reads the account's containers (Account > Containers: Read) as

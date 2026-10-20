@@ -4,8 +4,9 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import * as v from 'valibot';
+import { CONFIG_FILE, deploymentNamed } from './config';
 import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
@@ -45,17 +46,40 @@ export function connectionFile(name: string): string {
   return join(CONFIG_DIR, name === 'armada' ? 'connection.json' : `${name}.json`);
 }
 
+/** The deployment the nearest `.armada.json` at or above `from` names (`deployment`), or none. */
+export function projectDeployment(from: string): string | undefined {
+  let dir = resolve(from);
+
+  while (!existsSync(join(dir, CONFIG_FILE))) {
+    if (dirname(dir) === dir) return undefined;
+    dir = dirname(dir);
+  }
+
+  return deploymentNamed(readFileSync(join(dir, CONFIG_FILE), 'utf8'));
+}
+
+/** Why there is no connection to read at `file`, and what makes one. */
+function noConnection(file: string, named: string | undefined, pinned: string | undefined): string {
+  if (named !== undefined) return `no connection file at ${file}`;
+
+  if (pinned !== undefined) return `this project's ${CONFIG_FILE} names the deployment ${pinned}, and this machine has no connection for it at ${file}: run \`armada deploy --name=${pinned}\``;
+
+  return 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN';
+}
+
 /** The runner `ARMADA_CONNECTION` (or `--connection`) names; else the one `ARMADA_URL` and `ARMADA_TOKEN` give; else the
- *  one this machine deployed (`armada deploy`). A named connection comes first: it is the one asked for. */
-export function connect(): Armada {
+ *  deployment the project at `from` names in its `.armada.json`; else the one this machine deployed (`armada deploy`). A
+ *  named connection comes first: it is the one asked for. */
+export function connect(from = process.cwd()): Armada {
   const named = process.env['ARMADA_CONNECTION'];
   const url = process.env['ARMADA_URL'];
   const token = process.env['ARMADA_TOKEN'];
 
   if (named === undefined && url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
-  const file = named ?? connectionFile('armada');
+  const pinned = named === undefined ? projectDeployment(from) : undefined;
+  const file = named ?? connectionFile(pinned ?? 'armada');
 
-  if (!existsSync(file)) throw new Error(named === undefined ? 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN' : `no connection file at ${file}`);
+  if (!existsSync(file)) throw new Error(noConnection(file, named, pinned));
 
   return new Armada(v.parse(ConnectionSchema, JSON.parse(readFileSync(file, 'utf8'))));
 }

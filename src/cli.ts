@@ -7,6 +7,7 @@ import * as v from 'valibot';
 import { readAccount } from './account';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
+import { DeploymentName } from './config';
 import { contractOf } from './contract';
 import { deploymentConfig } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
@@ -95,7 +96,8 @@ run options:
   --deadline=S         the whole CI run's limit, plan and tasks together, in seconds
                        (default .armada.json's deadline, or 1800)
 
-Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
+Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment; in a project whose
+.armada.json names a "deployment", that one is the default.
 The command's {item}, {index}, {out}, {files}, {inputs} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
@@ -888,7 +890,7 @@ async function main(): Promise<number> {
     case 'deploy': {
       const name = option('name') ?? 'armada';
 
-      if (!/^[a-z][a-z0-9-]{0,40}$/u.test(name)) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
+      if (!v.safeParse(DeploymentName, name).success) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
       return await deploy(name, whole('vcpus'), flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
     }

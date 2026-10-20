@@ -34,11 +34,17 @@ const EnvironmentSchema = v.object({
 
 export type Environment = v.InferOutput<typeof EnvironmentSchema>;
 
+/** A deployment's name, as `armada deploy --name=<name>` takes it: its Worker's own. */
+export const DeploymentName = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,40}$/u, "a Worker's name, lowercase letters, digits and dashes"));
+
 /** A plan entry's `environment`: a name of `environments`. */
 export const EnvironmentName = v.pipe(v.string(), v.regex(/^[A-Za-z0-9._-]{1,40}$/u, 'an environment name is letters, digits, dot, dash or underscore'));
 
 const ConfigSchema = v.object({
   name: Project,
+  /** The deployment the project's CI runs on: the connection `armada deploy --name=<deployment>` wrote on a machine. A
+   *  connection named to the run (`ARMADA_CONNECTION`, `ARMADA_URL`) still comes first; absent, the machine's default. */
+  deployment: v.optional(DeploymentName),
   /** The whole CI run's limit, plan and task jobs together, in seconds. */
   deadline: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), CI_DEADLINE_SECONDS),
   environment: EnvironmentSchema,
@@ -73,6 +79,11 @@ export const CONFIG_FILE = '.armada.json';
 
 export function parseConfig(text: string): Config {
   return v.parse(ConfigSchema, JSON.parse(text));
+}
+
+/** The deployment a project file names, read alone: a command that only connects needs no more of it. */
+export function deploymentNamed(text: string): string | undefined {
+  return v.parse(v.looseObject({ deployment: v.optional(DeploymentName) }), JSON.parse(text)).deployment;
 }
 
 /** The environment a plan entry runs in: the project's, or the one it names over the project's. */
