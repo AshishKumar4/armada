@@ -339,10 +339,12 @@ export class ArmadaJob extends DurableObject<Env> {
     // its watchdog's time.
     if (spec.lease) {
       const now = Date.now();
-      const watched = await this.ctx.storage.get<number>('watched');
+      const created = (await this.ctx.storage.get<number>('createdAt')) ?? 0;
+      // The first watchdog is due at the job's creation.
+      const watched = (await this.ctx.storage.get<number>('watched')) ?? created;
 
-      if (watched !== undefined && now - watched > WATCHDOG_MS + JOB_RENEWAL_SECONDS * 1000) await this.ctx.storage.put('recovered', now);
-      const renewed = (await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0;
+      if (now - watched > WATCHDOG_MS + JOB_RENEWAL_SECONDS * 1000) await this.ctx.storage.put('recovered', now);
+      const renewed = (await this.ctx.storage.get<number>('renewed')) ?? created;
 
       if (now - Math.max(renewed, (await this.ctx.storage.get<number>('recovered')) ?? 0) > JOB_LEASE_SECONDS * 1000) {
         return await this.cancel(`its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`, 'cancelled');

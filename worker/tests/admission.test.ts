@@ -309,17 +309,21 @@ describe('a job its client follows', () => {
   test('ends once its client stops renewing its lease, runs on while it renews, and a job no client follows runs on', async () => {
     const { armada, jobs } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
     const began = Date.now();
+    const [lease, watchdog] = [JOB_LEASE_SECONDS * 1000, 15_000];
 
     try {
       setSystemTime(began);
       const [gone, kept, unfollowed] = [await armada.create({ ...spec, lease: true }), await armada.create({ ...spec, lease: true }), await armada.create(spec)];
+      let renewed = false;
 
-      setSystemTime(began + JOB_LEASE_SECONDS * 1000 / 2);
-      const renewed = await armada.renew(kept);
+      // Each watchdog on time, the kept job's client renewing halfway through a lease.
+      for (let at = began; at <= began + lease + watchdog; at += watchdog) {
+        setSystemTime(at);
+        if (!renewed && at >= began + lease / 2) renewed = await armada.renew(kept);
 
-      setSystemTime(began + JOB_LEASE_SECONDS * 1000 + 1);
+        for (const id of [gone, kept, unfollowed]) await jobs.get(id)?.alarm();
+      }
 
-      for (const id of [gone, kept, unfollowed]) await jobs.get(id)?.alarm();
       const ended = await Promise.all([gone, kept, unfollowed].map(async (id) => await reasons(armada, id)));
 
       expect({ renewed, ended, after: await armada.renew(gone) }).toEqual({
@@ -355,6 +359,32 @@ describe('a job its client follows', () => {
       const kept = await reasons(armada, id);
 
       // A client gone for good still ends it, a lease after, its watchdog on time throughout.
+      for (let at = back + watchdog; at <= back + lease + watchdog; at += watchdog) {
+        setSystemTime(at);
+        await jobs.get(id)?.alarm();
+      }
+
+      expect({ kept, ended: await reasons(armada, id) }).toEqual({ kept: [], ended: [['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]] });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('counts its client silent only once its object runs, though storage fails before its first watchdog', async () => {
+    const { armada, jobs } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
+    const began = Date.now();
+    const [lease, watchdog] = [JOB_LEASE_SECONDS * 1000, 15_000];
+
+    try {
+      setSystemTime(began);
+      const id = await armada.create({ ...spec, lease: true });
+      // Its first watchdog comes after more than a lease, its client's renewals lost meanwhile.
+      const back = began + lease + 60_000;
+
+      setSystemTime(back);
+      await jobs.get(id)?.alarm();
+      const kept = await reasons(armada, id);
+
       for (let at = back + watchdog; at <= back + lease + watchdog; at += watchdog) {
         setSystemTime(at);
         await jobs.get(id)?.alarm();
