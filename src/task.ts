@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, JOB_RENEWAL_SECONDS, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, RequestError, summaryOf, type Armada, type Summary } from './sdk';

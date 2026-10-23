@@ -50,6 +50,11 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
 
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
 
+/** Job `id`'s outcomes so far, each its reason and tail. */
+async function reasons(armada: Armada, id: string) {
+  return (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]);
+}
+
 describe('a client and a Worker', () => {
   test('refuses an explicit task timeout beyond its job deadline before making or retaining the job', async () => {
     const { armada, env, fleet } = deployment();
@@ -315,7 +320,7 @@ describe('a job its client follows', () => {
       setSystemTime(began + JOB_LEASE_SECONDS * 1000 + 1);
 
       for (const id of [gone, kept, unfollowed]) await jobs.get(id)?.alarm();
-      const ended = await Promise.all([gone, kept, unfollowed].map(async (id) => (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail])));
+      const ended = await Promise.all([gone, kept, unfollowed].map(async (id) => await reasons(armada, id)));
 
       expect({ renewed, ended, after: await armada.renew(gone) }).toEqual({
         renewed: true, ended: [[['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]], [], []], after: false,
@@ -331,7 +336,6 @@ describe('a job its client follows', () => {
     const { armada, jobs, reset } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
     const began = Date.now();
     const [lease, watchdog] = [JOB_LEASE_SECONDS * 1000, 15_000];
-    const reasons = async (id: string) => (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]);
 
     try {
       setSystemTime(began);
@@ -348,7 +352,7 @@ describe('a job its client follows', () => {
       setSystemTime(back);
       reset(id);
       await jobs.get(id)?.alarm();
-      const kept = await reasons(id);
+      const kept = await reasons(armada, id);
 
       // A client gone for good still ends it, a lease after, its watchdog on time throughout.
       for (let at = back + watchdog; at <= back + lease + watchdog; at += watchdog) {
@@ -356,7 +360,7 @@ describe('a job its client follows', () => {
         await jobs.get(id)?.alarm();
       }
 
-      expect({ kept, ended: await reasons(id) }).toEqual({ kept: [], ended: [['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]] });
+      expect({ kept, ended: await reasons(armada, id) }).toEqual({ kept: [], ended: [['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]] });
     } finally {
       setSystemTime();
     }
@@ -378,8 +382,7 @@ describe('a job its client follows', () => {
         await jobs.get(id)?.alarm();
       }
 
-      expect((await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]))
-        .toEqual([['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]]);
+      expect(await reasons(armada, id)).toEqual([['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]]);
     } finally {
       setSystemTime();
     }
