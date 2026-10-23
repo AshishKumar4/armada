@@ -208,9 +208,9 @@ async function runsOf(env: Env, id: string, index: number): Promise<TaskRun[]> {
   for (let cursor: string | undefined; ;) {
     const listed = await env.ARTIFACTS.list({ prefix: `jobs/${id}/tasks/${String(index)}/`, cursor, include: ['customMetadata'] });
 
-    for (const object of listed.objects) {
-      const run = logRun(id, index, object.key);
-      const rank = object.customMetadata?.['rank'];
+    for (const stored of listed.objects) {
+      const run = logRun(id, index, stored.key);
+      const rank = stored.customMetadata?.['rank'];
 
       if (run !== null) runs.push({ ...run, rank: rank === undefined ? null : Number(rank) });
     }
