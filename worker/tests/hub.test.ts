@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { gangToken } from '../src/env';
-import { accepted, ArmadaHub, controlled, gone, opened, passed, type Part, type Sockets } from '../src/hub';
+import { ArmadaHub } from '../src/hub';
+import { accepted, controlled, gone, opened, passed, type Part, type Sockets } from '../src/pairing';
 import { RELAY_HEADER } from '../src/relay';
 import { state, world } from './harness';
 

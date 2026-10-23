@@ -1,15 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Writable } from 'node:stream';
-import * as v from 'valibot';
 import { STATE } from '../src/container';
-import { GANG_UP, Piped, RELAY_IN, RELAY_PY } from '../src/relay';
+import type { ServerWebSocket } from 'bun';
+import { accepted, controlled, gone, opened, passed, type Part, type Sockets } from '../src/pairing';
+import { GANG_UP, RELAY_HEADER, RELAY_PY } from '../src/relay';
 
-/** Both ends of a link in one relay.py process, as two ranks' relays: the inbound end's server on a free port (printed
- *  first), an echo server on rank 0's address, and a program whose connection to the echo goes out through `carry`.
+/** Both ends of a link in one relay.py process, as two ranks' relays: its control socket at its hub (`control`), an
+ *  echo server on rank 0's address, and a program whose connection to the echo goes out through `carry`.
  *  The program sends `total` bytes of a pattern, closes its side and reads back until the far side closes, then prints
  *  how much came back and whether it was the pattern. With `hold`, it sends one byte and keeps its side open, as a
  *  client waiting for a server's greeting does, reading for 20 s at most. */
@@ -17,12 +16,12 @@ const RELAYS = String.raw`
 import hashlib, socket, sys, threading
 total, port, origin, mode, source = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.stdin.read()
 hold = mode == "hold"
-sys.argv = ["relay.py", "0", origin, "20261008000000-00000000", "token", "v1"]
+sys.argv = ["relay.py", "0", origin, "20261008000000-00000000", "token", "0", "1"]
 relay = {"__name__": "relay"}
 exec(source, relay)
-carry, guarded, inbound, OWN = relay["carry"], relay["guarded"], relay["inbound"], relay["OWN"]
+carry, control, OWN = relay["carry"], relay["control"], relay["OWN"]
 if mode == "outage":
-    # The relay's clock twenty times fast, so an outage of its vessel past a minute of it takes seconds here.
+    # The relay's clock twenty times fast, so an outage of a hub past a minute of it takes seconds here.
     import time
     class Fast:
         def __getattr__(self, name):
@@ -32,10 +31,7 @@ if mode == "outage":
         def sleep(self, seconds):
             time.sleep(seconds / 20)
     relay["time"] = Fast()
-server = socket.create_server(("127.0.0.1", 0))
-print(server.getsockname()[1], flush=True)
-threading.Thread(target=lambda: [threading.Thread(target=guarded, args=(inbound, server.accept()[0]), daemon=True).start()
-                                 for _ in iter(int, 1)], daemon=True).start()
+threading.Thread(target=control, daemon=True).start()
 echo = socket.create_server((OWN, 0))
 answered = threading.Event()
 def answer(conn):
@@ -85,54 +81,95 @@ while data := program.recv(1 << 20):
 print(size, got.hexdigest() == hashlib.sha256(block * (total // len(block))).hexdigest(), flush=True)
 `;
 
-/** A vessel's relay route over Bun's WebSockets and a TCP connection into the inbound end, each WebSocket piped
- *  (`Piped`) as a vessel pipes it. Each time `dropAfter` more of a link's outbound bytes arrive, its WebSocket drops
- *  without a Close frame, and every other time its connection in is cut too, as a vessel reset cuts it. `lost` resets
- *  the program's connection as `reset` does, and drops the WebSocket that carries the link's cancellation before the
- *  vessel passes it on. `outage` refuses the link's opens for 4.5 s after its first drop, as a vessel whose object a
- *  storage failure reset refuses them, while the relay's clock runs twenty times fast: 90 s of the relay's. */
+/** What a hub's socket is in the harness: a control socket, or one end of a link. */
+interface Opened {
+  readonly kind: string;
+  readonly link: string;
+  readonly port: number;
+  readonly resume: boolean;
+  readonly accept: boolean;
+}
+
+/** The hub's sockets as Bun holds them: each one's part and tags beside it, as a hub's attachments keep them. */
+class BunSockets implements Sockets<ServerWebSocket<Opened>> {
+  private readonly held = new Map<ServerWebSocket<Opened>, { part: Part; readonly tags: readonly string[]; closed: boolean }>();
+
+  tagged(tag: string): ServerWebSocket<Opened>[] {
+    return [...this.held].filter(([, held]) => !held.closed && held.tags.includes(tag)).map(([socket]) => socket);
+  }
+
+  part(socket: ServerWebSocket<Opened>): Part {
+    const held = this.held.get(socket);
+
+    if (held === undefined) throw new Error('a socket the hub never took');
+
+    return held.part;
+  }
+
+  take(socket: ServerWebSocket<Opened>, part: Part, tags: readonly string[]): void {
+    this.held.set(socket, { part, tags, closed: false });
+  }
+
+  mark(socket: ServerWebSocket<Opened>, part: Part): void {
+    const held = this.held.get(socket);
+
+    if (held !== undefined) held.part = part;
+  }
+
+  send(socket: ServerWebSocket<Opened>, message: string | ArrayBuffer): void {
+    socket.send(message);
+  }
+
+  close(socket: ServerWebSocket<Opened>, code: number, reason: string): void {
+    this.gone(socket);
+    socket.close(code, reason);
+  }
+
+  gone(socket: ServerWebSocket<Opened>): void {
+    const held = this.held.get(socket);
+
+    if (held !== undefined) held.closed = true;
+  }
+}
+
+/** A rank's hub over Bun's WebSockets, pairing as `ArmadaHub` does (`hub.ts`). Each time `dropAfter` more of a link's
+ *  outbound bytes arrive, one end of its pair drops without a Close frame, the opening end's and then the other's in
+ *  turn, as the network or a restarted hub drops them. `lost` resets the program's connection as `reset` does, and
+ *  drops the socket that carries the link's cancellation before the hub passes it on. `outage` refuses the link's
+ *  opens for 4.5 s after its first drop, as a hub coming back does, while the relay's clock runs twenty times fast:
+ *  90 s of the relay's. */
 async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' | 'reset' | 'lost' | 'outage' = 'all') {
   const reached = new Map<string, number>();
-  const opened: string[] = [];
+  const asked: string[] = [];
+  const hub = new BunSockets();
   let drops = 0;
-  let inPort = 0;
   let outageUntil = 0;
 
-  const server = Bun.serve<{ readonly link: string; readonly id: string; piped?: Piped; cut?: () => void }>({
+  const server = Bun.serve<Opened>({
     port: 0,
     fetch(request, bun) {
       const url = new URL(request.url);
-      const resume = url.searchParams.has('resume');
+      const [kind = '', link = '', accept, resume] = [url.pathname.split('/')[6], url.searchParams.get('id') ?? '', url.searchParams.has('accept'), url.searchParams.has('resume')];
 
-      if (resume && Date.now() < outageUntil) {
-        opened.push('refused');
+      if (kind === 'link' && !accept) {
+        if (resume && Date.now() < outageUntil) {
+          asked.push('refused');
 
-        return new Response('the vessel is resetting', { status: 503 });
+          return new Response('the hub is coming back', { status: 503 });
+        }
+
+        asked.push(resume ? 'resume' : 'open');
       }
 
-      opened.push(resume ? 'resume' : 'open');
-
-      const id = url.searchParams.get('id') ?? '';
-      const link = `${id} ${url.searchParams.get('port') ?? ''} ${resume ? '1' : '0'}`;
-
-      return bun.upgrade(request, { data: { link, id } }) ? undefined : new Response('no', { status: 400 });
+      return bun.upgrade(request, { data: { kind, link, port: Number(url.searchParams.get('port')), resume, accept } }) ? undefined : new Response('no', { status: 400 });
     },
     websocket: {
       open(ws) {
-        const tcp = connect(inPort, '127.0.0.1');
-
-        ws.data.piped = new Piped(ws, Writable.toWeb(tcp).getWriter(), ws.data.link, () => undefined);
-        ws.data.cut = () => { tcp.destroy(); };
-
-        ws.data.piped.start(new ReadableStream<Uint8Array>({
-          start: (controller) => {
-            tcp.on('data', (chunk: Buffer) => { controller.enqueue(new Uint8Array(chunk)); });
-            tcp.on('end', () => { controller.close(); });
-            tcp.on('error', (error) => { controller.error(error); });
-          },
-        }));
+        if (ws.data.kind === 'control') controlled(hub, ws);
+        else if (ws.data.accept) accepted(hub, ws, ws.data.link);
+        else opened(hub, ws, ws.data.link, ws.data.port, ws.data.resume);
       },
-      async message(ws, message) {
+      message(ws, message) {
         if (sending === 'lost' && message === 'g' && drops === 0) {
           drops += 1;
           ws.terminate();
@@ -140,24 +177,31 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
           return;
         }
 
-        const before = reached.get(ws.data.id) ?? 0;
-        const bytes = message instanceof Uint8Array ? message : null;
-        const end = bytes === null ? before : Number(new DataView(bytes.buffer, bytes.byteOffset).getBigUint64(0)) + bytes.byteLength - 8;
+        const bytes = typeof message === 'string' ? null : message;
 
-        reached.set(ws.data.id, Math.max(before, end));
-        await ws.data.piped?.message(bytes === null ? String(message) : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+        if (bytes !== null && ws.data.kind === 'link' && !ws.data.accept) {
+          const before = reached.get(ws.data.link) ?? 0;
+          const end = Number(new DataView(bytes.buffer, bytes.byteOffset).getBigUint64(0)) + bytes.byteLength - 8;
 
-        if (Math.floor(Math.max(before, end) / dropAfter) > Math.floor(before / dropAfter)) {
-          drops += 1;
+          reached.set(ws.data.link, Math.max(before, end));
 
-          if (sending === 'outage' && drops === 1) outageUntil = Date.now() + 4500;
+          if (Math.floor(Math.max(before, end) / dropAfter) > Math.floor(before / dropAfter)) {
+            drops += 1;
 
-          if (drops % 2 === 0) ws.data.cut?.();
-          ws.terminate();
+            if (sending === 'outage' && drops === 1) outageUntil = Date.now() + 4500;
+            const dropped = drops % 2 === 0 ? hub.tagged(`in:${ws.data.link}`)[0] ?? ws : ws;
+
+            dropped.terminate();
+
+            return;
+          }
         }
+
+        passed(hub, ws, bytes === null ? String(message) : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
       },
-      async close(ws, code, reason) {
-        await ws.data.piped?.closed(code, reason);
+      close(ws) {
+        hub.gone(ws);
+        gone(hub, ws);
       },
     },
   });
@@ -165,23 +209,14 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
   const relays = Bun.spawn(['python3', '-c', RELAYS, String(total), port, `http://127.0.0.1:${String(server.port)}`, sending === 'lost' ? 'reset' : sending],
     { stdin: new TextEncoder().encode(RELAY_PY), stdout: 'pipe', stderr: 'pipe' });
 
-  const [out, err] = await Promise.all([(async () => {
-    let text = '';
-
-    for await (const chunk of relays.stdout.pipeThrough(new TextDecoderStream())) {
-      text += chunk;
-      inPort ||= Number(text.split('\n')[0]);
-    }
-
-    return text.split('\n').slice(1).join('\n');
-  })(), new Response(relays.stderr).text(), relays.exited]);
+  const [out, err] = await Promise.all([new Response(relays.stdout).text(), new Response(relays.stderr).text(), relays.exited]);
 
   await server.stop(true);
 
-  return { out: out.trim(), opened, drops, err };
+  return { out: out.trim(), opened: asked, drops, err };
 }
 
-describe('a relay link between two relay.py ends through a vessel\'s pipe', () => {
+describe('a relay link between two relay.py ends through a hub', () => {
   test('carries a program\'s bytes there and back whole, and ends when both sides closed', async () => {
     const result = await run(8 << 20, 'echo', Number.POSITIVE_INFINITY);
 
@@ -189,7 +224,7 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
     expect({ out: result.out, opened: result.opened, err: result.err }).toEqual({ out: `${String(8 << 20)} True`, opened: ['open'], err: '' });
   }, 60_000);
 
-  test('carries on over the next WebSocket each time one drops or the vessel\'s connection in is cut, unseen by the program', async () => {
+  test('carries on over the next pair of WebSockets each time either end of one drops, unseen by the program', async () => {
     const result = await run(16 << 20, 'echo', 3 << 20);
 
     expect({ out: result.out, first: result.opened[0], resumed: result.opened.slice(1), drops: result.drops > 3 })
@@ -249,60 +284,32 @@ sys.exit(0 if ready else 1)
   return await waiting.exited === 0;
 }
 
-/** Whether a relay's inbound port answers a link to `port` on rank 0's address, as a vessel's pipe opens one, with
- *  what is served there. */
-async function greeted(port: number): Promise<boolean> {
-  const { promise, resolve } = Promise.withResolvers<boolean>();
-  const socket = connect(RELAY_IN, '127.0.0.1');
-  let bytes = Buffer.alloc(0);
-
-  const finish = (value: boolean) => {
-    socket.destroy();
-    resolve(value);
-  };
-
-  socket.setTimeout(2000, () => { finish(false); });
-  socket.on('connect', () => { socket.write(`${'0'.repeat(16)} ${String(port)} 0\n`); });
-  socket.on('error', () => { finish(false); });
-  socket.on('end', () => { finish(false); });
-  // Records as `Piped` carries them: a kind, a length, a body; a data record's body is its offset, then its bytes.
-  socket.on('data', (data: Buffer) => {
-    bytes = Buffer.concat([bytes, data]);
-
-    while (bytes.length >= 5 && bytes.length >= bytes.readUInt32BE(1) + 5) {
-      const size = bytes.readUInt32BE(1);
-      const [kind] = bytes;
-      const body = bytes.subarray(5, 5 + size);
-
-      bytes = bytes.subarray(5 + size);
-
-      if (kind === 0x62) return finish(body.subarray(8).toString() === 'ready');
-    }
-  });
-
-  return await promise;
-}
-
 describe('a gang\'s relay replaced in its container', () => {
   test('is the one serving the next gang, even when the last relay has not let go of its ports yet', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-gang-up-'));
     const bin = join(scratch, 'bin');
     const pids: number[] = [];
-    const server = createServer((socket) => { socket.end('ready'); });
-    const listening = Promise.withResolvers<void>();
+    // The hub the relays dial: each control socket's gang token, as it presents it.
+    const tokens: string[] = [];
+
+    const hub = Bun.serve({
+      port: 0,
+      fetch(request, bun) {
+        tokens.push(request.headers.get(RELAY_HEADER) ?? '');
+
+        return bun.upgrade(request) ? undefined : new Response('no', { status: 400 });
+      },
+      websocket: { message() { /* a control socket's pings alone */ } },
+    });
 
     // The privileged network setup is the platform's: only it is stubbed; the scripts and the relay are real.
     mkdirSync(bin);
 
     for (const command of ['hostname', 'iptables', 'mount', 'umount']) writeFileSync(join(bin, command), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
     writeFileSync(join(scratch, 'relay.py'), RELAY_PY);
-    // Rank 0's address, where the relay connects a link's port.
-    server.listen(0, '127.0.1.1', listening.resolve);
-    await listening.promise;
-    const { port } = v.parse(v.object({ port: v.number() }), server.address());
 
     const up = async (token: string) => {
-      const setup = Bun.spawn(['/bin/sh', '-c', GANG_UP.replaceAll(STATE, scratch), 'gang', '0', '2', 'https://armada.test', 'job', token, 'v1', 'v2'], {
+      const setup = Bun.spawn(['/bin/sh', '-c', GANG_UP.replaceAll(STATE, scratch), 'gang', '0', '2', `http://127.0.0.1:${String(hub.port)}`, 'job', token, '0', '1'], {
         env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` }, stdout: 'ignore', stderr: 'pipe',
       });
 
@@ -322,11 +329,14 @@ describe('a gang\'s relay replaced in its container', () => {
       const second = await up('b'.repeat(48));
       const replaced = old !== undefined && await exited(old, false);
 
-      expect({ first, second, replaced, served: await greeted(port) }).toEqual({ first: 0, second: 0, replaced: true, served: true });
+      // The next gang's relay is the one at the hub: its control socket presents the next gang's token.
+      for (let waited = 0; !tokens.includes('b'.repeat(48)) && waited < 2000; waited += 50) await Bun.sleep(50);
+
+      expect({ first, second, replaced, served: tokens.includes('b'.repeat(48)) }).toEqual({ first: 0, second: 0, replaced: true, served: true });
     } finally {
       for (const pid of pids) if (!(await exited(pid, false))) process.kill(pid, 'SIGKILL');
 
-      server.close();
+      await hub.stop(true);
       rmSync(scratch, { recursive: true, force: true });
     }
   }, 20_000);
