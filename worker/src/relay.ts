@@ -16,6 +16,7 @@
 import { STATE } from './container';
 import { detach } from '../../src/protocol';
 import { said } from './env';
+import { SILENT_MS } from './job';
 
 /** Where a rank's peers' connections arrive (loopback, DNAT'd to) and where its vessel connects in (every address). */
 export const RELAY_OUT = 7911;
@@ -36,8 +37,10 @@ export const RELAY_WINDOW = 1 << 20;
 /** How often, in bytes taken, each end counts them back to the other. */
 export const RELAY_ACK = 1 << 18;
 
-/** How long, in seconds, an end waits for a link that dropped to come back. */
-export const RELAY_GRACE = 60;
+/** How long, in seconds, an end waits for a link that dropped to come back: as long as its job waits for a working
+ *  vessel's word (`SILENT_MS`), so a link outlives any outage of a vessel its job outlives. A storage failure that
+ *  resets a vessel's object cuts its container's links and keeps them from coming back for up to minutes. */
+export const RELAY_GRACE = SILENT_MS.working / 1000;
 
 /** A link's id: the relay names each connection it carries, and opens another WebSocket under it after a drop. */
 export const LINK_ID = /^[0-9a-f]{16}$/u;

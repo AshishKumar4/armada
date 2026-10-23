@@ -117,7 +117,7 @@ export function fleetRefusal(items: readonly Task[], size: Size, cap: number): s
 const WATCHDOG_MS = 15_000;
 
 /** A vessel that has not been heard from in this long, while booting or working, is lost. */
-const SILENT_MS = { waiting: 60 * 60_000, booting: 8 * 60_000, working: 4 * 60_000 } as const;
+export const SILENT_MS = { waiting: 60 * 60_000, booting: 8 * 60_000, working: 4 * 60_000 } as const;
 
 /** One run of a task: its index, which attempt it is, and whether it is a copy of a run already going. */
 interface Attempt {

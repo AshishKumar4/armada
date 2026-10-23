@@ -21,6 +21,17 @@ sys.argv = ["relay.py", "0", origin, "20261008000000-00000000", "token", "v1"]
 relay = {"__name__": "relay"}
 exec(source, relay)
 carry, guarded, inbound, OWN = relay["carry"], relay["guarded"], relay["inbound"], relay["OWN"]
+if mode == "outage":
+    # The relay's clock twenty times fast, so an outage of its vessel past a minute of it takes seconds here.
+    import time
+    class Fast:
+        def __getattr__(self, name):
+            return getattr(time, name)
+        def monotonic(self):
+            return time.monotonic() * 20
+        def sleep(self, seconds):
+            time.sleep(seconds / 20)
+    relay["time"] = Fast()
 server = socket.create_server(("127.0.0.1", 0))
 print(server.getsockname()[1], flush=True)
 threading.Thread(target=lambda: [threading.Thread(target=guarded, args=(inbound, server.accept()[0]), daemon=True).start()
@@ -78,18 +89,26 @@ print(size, got.hexdigest() == hashlib.sha256(block * (total // len(block))).hex
  *  (`Piped`) as a vessel pipes it. Each time `dropAfter` more of a link's outbound bytes arrive, its WebSocket drops
  *  without a Close frame, and every other time its connection in is cut too, as a vessel reset cuts it. `lost` resets
  *  the program's connection as `reset` does, and drops the WebSocket that carries the link's cancellation before the
- *  vessel passes it on. */
-async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' | 'reset' | 'lost' = 'all') {
+ *  vessel passes it on. `outage` refuses the link's opens for 4.5 s after its first drop, as a vessel whose object a
+ *  storage failure reset refuses them, while the relay's clock runs twenty times fast: 90 s of the relay's. */
+async function run(total: number, port: string, dropAfter: number, sending: 'all' | 'hold' | 'reset' | 'lost' | 'outage' = 'all') {
   const reached = new Map<string, number>();
   const opened: string[] = [];
   let drops = 0;
   let inPort = 0;
+  let outageUntil = 0;
 
   const server = Bun.serve<{ readonly link: string; readonly id: string; piped?: Piped; cut?: () => void }>({
     port: 0,
     fetch(request, bun) {
       const url = new URL(request.url);
       const resume = url.searchParams.has('resume');
+
+      if (resume && Date.now() < outageUntil) {
+        opened.push('refused');
+
+        return new Response('the vessel is resetting', { status: 503 });
+      }
 
       opened.push(resume ? 'resume' : 'open');
 
@@ -130,6 +149,7 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
 
         if (Math.floor(Math.max(before, end) / dropAfter) > Math.floor(before / dropAfter)) {
           drops += 1;
+          if (sending === 'outage' && drops === 1) outageUntil = Date.now() + 4500;
 
           if (drops % 2 === 0) ws.data.cut?.();
           ws.terminate();
@@ -173,6 +193,14 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
 
     expect({ out: result.out, first: result.opened[0], resumed: result.opened.slice(1), drops: result.drops > 3 })
       .toEqual({ out: `${String(16 << 20)} True`, first: 'open', resumed: Array.from({ length: result.opened.length - 1 }, () => 'resume'), drops: true });
+  }, 60_000);
+
+  // A vessel's object reset by a storage failure kept a CI gang's link from coming back for longer than a minute.
+  test('carries on over a WebSocket that comes back only after its vessel was out for longer than a minute', async () => {
+    const result = await run(6 << 20, 'echo', 4 << 20, 'outage');
+
+    expect({ out: result.out, refused: result.opened.includes('refused'), last: result.opened.at(-1) })
+      .toEqual({ out: `${String(6 << 20)} True`, refused: true, last: 'resume' });
   }, 60_000);
 
   test('closes a program\'s connection to a port nothing listens on, as a refused one', async () => {
