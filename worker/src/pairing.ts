@@ -3,15 +3,19 @@
  * hibernatable WebSockets or a test's, with no state but each socket's part and tags.
  */
 
+import * as v from 'valibot';
+
 /** A socket's part, kept in its attachment: the control socket, or one end of a link, its pair once paired. */
-export interface Part {
-  readonly role: 'control' | 'out' | 'in';
-  readonly link?: string;
-  readonly port?: number;
-  readonly resume?: boolean;
+export const PartSchema = v.object({
+  role: v.picklist(['control', 'out', 'in']),
+  link: v.optional(v.string()),
+  port: v.optional(v.number()),
+  resume: v.optional(v.boolean()),
   /** The pair it is in: one per pairing, so a replaced pair's close reaches none of its successor's. */
-  readonly pair?: string | null;
-}
+  pair: v.optional(v.nullable(v.string())),
+});
+
+export type Part = Readonly<v.InferOutput<typeof PartSchema>>;
 
 /** What the pairing needs of where its sockets live: the Durable Object's hibernatable WebSockets, or a test's. */
 export interface Sockets<S> {

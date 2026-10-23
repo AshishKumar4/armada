@@ -15,7 +15,8 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { equal, gangToken, type Env } from './env';
-import { accepted, controlled, gone, opened, passed, type Part, type Sockets } from './pairing';
+import * as v from 'valibot';
+import { accepted, controlled, gone, opened, PartSchema, passed, type Part, type Sockets } from './pairing';
 import { LINK_ID, RELAY_HEADER } from './relay';
 
 /** The hub's sockets as its Durable Object keeps them: hibernatable, their parts in their attachments. */
@@ -27,8 +28,7 @@ class Hibernating implements Sockets<WebSocket> {
   }
 
   part(socket: WebSocket): Part {
-    // SAFETY: every socket this object takes is given its part as it is taken (`take`), and only a Part is ever set.
-    return socket.deserializeAttachment() as Part;
+    return v.parse(PartSchema, socket.deserializeAttachment());
   }
 
   take(socket: WebSocket, part: Part, tags: readonly string[]): void {
@@ -40,20 +40,14 @@ class Hibernating implements Sockets<WebSocket> {
     socket.serializeAttachment(part);
   }
 
+  /** To an open socket only: one closing has its close event to come, which ends its pair (`gone`). An object takes
+   *  one event at a time, so its state holds from this check to the send. */
   send(socket: WebSocket, message: string | ArrayBuffer): void {
-    try {
-      socket.send(message);
-    } catch {
-      // A socket closing as it is sent to: its close event follows, which ends its pair.
-    }
+    if (socket.readyState === WebSocket.READY_STATE_OPEN) socket.send(message);
   }
 
   close(socket: WebSocket, code: number, reason: string): void {
-    try {
-      socket.close(code, reason);
-    } catch {
-      // Already closed: nothing more to end.
-    }
+    if (socket.readyState === WebSocket.READY_STATE_OPEN || socket.readyState === WebSocket.READY_STATE_CONNECTING) socket.close(code, reason);
   }
 }
 
