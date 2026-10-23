@@ -42,7 +42,8 @@ describe('a task\'s files', () => {
   test('list every run of a task that kept a log, each gang rank and attempt with its rank, and serve each run\'s log', async () => {
     const id = '20261011120000-0123abcd';
     const artifacts = bucket();
-    const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts });
+    // The runs are the bucket's: the job is never asked.
+    const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts, JOB: namespace(() => ({})) });
     const log = { httpMetadata: { contentType: 'text/plain; charset=utf-8' } };
 
     await artifacts.put(runKey(id, 0, { vessel: 'v2', attempt: 1 }, 'log'), 'rank one', { ...log, customMetadata: { rank: '1' } });
