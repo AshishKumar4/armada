@@ -16,19 +16,36 @@ const original = globalThis.fetch;
 afterEach(() => { globalThis.fetch = original; });
 
 /** A deployment of `version` whose fleet and jobs live in memory, with `bindings`, and a client whose requests reach
- *  it; and its jobs, by id. */
+ *  it; its jobs, by id; and `reset`, which gives a job a new object over its storage, as a reset does. */
 function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '100' })), version = 'a', bindings: Parameters<typeof world>[0] = {}) {
   const jobs = new Map<string, ArmadaJob>();
+  // Each job's storage, which outlives its object.
+  const stores = new Map<string, DurableObjectState>();
+
+  const made = (name: string) => {
+    const { ctx } = state();
+
+    stores.set(name, ctx);
+
+    return new ArmadaJob(ctx, env);
+  };
 
   const env: Env = world({
     ARMADA_TOKEN: TOKEN, VERSION: { id: version, tag: '', timestamp: '' }, FLEET: namespace(() => fleet),
-    JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, new ArmadaJob(state().ctx, env)).get(name)),
+    JOB: namespace((name: string) => jobs.get(name) ?? jobs.set(name, made(name)).get(name)),
     ...bindings,
   });
 
+  const reset = (id: string) => {
+    const ctx = stores.get(id);
+
+    if (ctx === undefined) throw new Error(`job ${id} has no object to reset`);
+    jobs.set(id, new ArmadaJob(ctx, env));
+  };
+
   globalThis.fetch = fakeFetch(async (request) => await worker.fetch(request, env));
 
-  return { armada: new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' }), fleet, env, jobs };
+  return { armada: new Armada({ url: 'https://armada.test', token: TOKEN, account: 'a' }), fleet, env, jobs, reset };
 }
 
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
@@ -303,6 +320,39 @@ describe('a job its client follows', () => {
       expect({ renewed, ended, after: await armada.renew(gone) }).toEqual({
         renewed: true, ended: [[['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]], [], []], after: false,
       });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  // Train 58: the job's storage failed and reset its object, whose next instance hung 165 s; the client's renewals, sent
+  // every 30 s throughout, failed with it, and the instance after cancelled the job for a client that had not gone.
+  test('counts its client silent only while its object could hear it: an object reset loses renewals, not its client', async () => {
+    const { armada, jobs, reset } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
+    const began = Date.now();
+    const lease = JOB_LEASE_SECONDS * 1000;
+
+    try {
+      setSystemTime(began);
+      const id = await armada.create({ ...spec, lease: true });
+
+      setSystemTime(began + lease / 6);
+      await armada.renew(id);
+
+      // Its object reset over the same storage, after an outage longer than the lease that its renewals fell into.
+      const back = began + lease / 6 + lease + 60_000;
+
+      setSystemTime(back);
+      reset(id);
+      await jobs.get(id)?.alarm();
+      const kept = (await armada.events(id, 0)).events.length;
+
+      // A client gone for good still ends it, a lease after the reset.
+      setSystemTime(back + lease + 1);
+      await jobs.get(id)?.alarm();
+      const ended = (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]);
+
+      expect({ kept, ended }).toEqual({ kept: 0, ended: [['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]] });
     } finally {
       setSystemTime();
     }

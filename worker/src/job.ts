@@ -194,6 +194,10 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
 
+  /** When this instance of the object began. One reset (a storage failure, a deploy) lost the renewals its client sent
+   *  while it could not hear them, so a lease's silence counts from no earlier than this. */
+  private readonly began = Date.now();
+
   /** The job's status token (`statusToken`), derived once an object: claims made at once all wait on the one. */
   private token: Promise<string> | undefined;
 
@@ -332,8 +336,11 @@ export class ArmadaJob extends DurableObject<Env> {
       return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${this.waitingFor(spec)}`, 'lost');
     }
 
-    // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from then.
-    if (spec.lease && Date.now() - ((await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0) > JOB_LEASE_SECONDS * 1000) {
+    // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from
+    // then, and none counts from before this instance began: a client is silent only while the object could hear it.
+    const heard = Math.max((await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0, this.began);
+
+    if (spec.lease && Date.now() - heard > JOB_LEASE_SECONDS * 1000) {
       return await this.cancel(`its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`, 'cancelled');
     }
 
