@@ -319,6 +319,7 @@ describe('a job its client follows', () => {
       // Each watchdog on time, the kept job's client renewing halfway through a lease.
       for (let at = began; at <= began + lease + watchdog; at += watchdog) {
         setSystemTime(at);
+
         if (!renewed && at >= began + lease / 2) renewed = await armada.renew(kept);
 
         for (const id of [gone, kept, unfollowed]) await jobs.get(id)?.alarm();
