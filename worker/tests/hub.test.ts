@@ -66,7 +66,7 @@ describe('a rank\'s hub', () => {
     const hub = new Registry();
     const [out, control, again] = [new Fake('out'), new Fake('control'), new Fake('control again')];
 
-    opened(hub, out, LINK, 9000, false);
+    opened(hub, out, { link: LINK, port: 9000, resume: false });
     controlled(hub, control);
     hub.close(control, 1006, 'the network dropped it');
     gone(hub, control);
@@ -82,7 +82,7 @@ describe('a rank\'s hub', () => {
     const [out, control, end] = [new Fake('out'), new Fake('control'), new Fake('in')];
 
     controlled(hub, control);
-    opened(hub, out, LINK, 9000, true);
+    opened(hub, out, { link: LINK, port: 9000, resume: true });
     accepted(hub, end, LINK);
     const woken = hub.woken();
 
@@ -98,7 +98,7 @@ describe('a rank\'s hub', () => {
     const [end, out] = [new Fake('in'), new Fake('out')];
 
     accepted(hub, end, LINK);
-    opened(hub, out, LINK, 9000, false);
+    opened(hub, out, { link: LINK, port: 9000, resume: false });
     passed(hub, out, 'a0');
 
     expect([end.closed, out.closed]).toEqual([[4404, 'no open of this link waits'], [4409, 'a message before its pair']]);
@@ -108,9 +108,9 @@ describe('a rank\'s hub', () => {
     const hub = new Registry();
     const [first, firstEnd, second, secondEnd] = [new Fake('out 1'), new Fake('in 1'), new Fake('out 2'), new Fake('in 2')];
 
-    opened(hub, first, LINK, 9000, false);
+    opened(hub, first, { link: LINK, port: 9000, resume: false });
     accepted(hub, firstEnd, LINK);
-    opened(hub, second, LINK, 9000, true);
+    opened(hub, second, { link: LINK, port: 9000, resume: true });
     gone(hub, first);
     gone(hub, firstEnd);
     accepted(hub, secondEnd, LINK);
@@ -125,7 +125,7 @@ describe('a rank\'s hub', () => {
     const hub = new Registry();
     const [out, end] = [new Fake('out'), new Fake('in')];
 
-    opened(hub, out, LINK, 9000, false);
+    opened(hub, out, { link: LINK, port: 9000, resume: false });
     accepted(hub, end, LINK);
     hub.close(out, 1006, 'gone');
     gone(hub, out);

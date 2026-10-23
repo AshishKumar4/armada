@@ -82,7 +82,7 @@ export class ArmadaHub extends DurableObject<Env> {
 
     if (kind === 'control') controlled(this.sockets, server);
     else if (url.searchParams.has('accept')) accepted(this.sockets, server, link);
-    else opened(this.sockets, server, link, port, url.searchParams.has('resume'));
+    else opened(this.sockets, server, { link, port, resume: url.searchParams.has('resume') });
 
     return new Response(null, { status: 101, webSocket: client });
   }

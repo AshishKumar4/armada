@@ -194,6 +194,7 @@ describe('a gang rank\'s hub', () => {
 
     const id = '20261011120000-0123abcd';
     const ask = async (path: string) => (await worker.fetch(new Request(`https://armada.test/hub/${id}/${path}`), env)).status;
+
     const statuses = [await ask('3/1/2/control'), await ask('3/1/0/link?id=0123456789abcdef&port=1'), await ask('3/1/2/other'),
       await ask('x/1/2/control'), await ask('3/1/control'), await ask('3/1/2/control/more')];
 

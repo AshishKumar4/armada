@@ -15,8 +15,6 @@
  * seeing nothing of it.
  */
 import { STATE } from './container';
-import { detach } from '../../src/protocol';
-import { said } from './env';
 import { SILENT_MS } from './job';
 
 /** Where a rank's peers' connections arrive (loopback, DNAT'd to). */

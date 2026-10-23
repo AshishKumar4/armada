@@ -40,9 +40,9 @@ export function controlled<S>(sockets: Sockets<S>, socket: S): void {
   }
 }
 
-/** A relay's open of `link` to this rank's `port`: an earlier open of it, and its pair, give way, and the control
- *  socket, if there is one now, is told. */
-export function opened<S>(sockets: Sockets<S>, socket: S, link: string, port: number, resume: boolean): void {
+/** A relay's open of `link` to this rank's `port`, a resume or not: an earlier open of it, and its pair, give way,
+ *  and the control socket, if there is one now, is told. */
+export function opened<S>(sockets: Sockets<S>, socket: S, { link, port, resume }: { readonly link: string; readonly port: number; readonly resume: boolean }): void {
   for (const earlier of [...sockets.tagged(`out:${link}`), ...sockets.tagged(`in:${link}`)]) sockets.close(earlier, 1000, 'a newer open of its link');
   const part: Part = { role: 'out', link, port, resume, pair: null };
 
