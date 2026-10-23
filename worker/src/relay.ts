@@ -572,16 +572,26 @@ def carry(local, rank, port):
     link, name = os.urandom(8).hex(), "rank %d port %d" % (rank, port)
 
     def reopen(resume=True):
-        deadline = time.monotonic() + GRACE
+        """A WebSocket for the link, asked for every half second up to GRACE. Each failed ask is said, its status once
+        until it changes and then every 10 s with how many failed, so a stall shows when it began and why."""
+        deadline, failed, said, last = time.monotonic() + GRACE, 0, None, 0.0
         while True:
             try:
                 carrier, status = opened(rank, port, link, resume)
             except OSError as error:
                 carrier, status = None, repr(error).encode()
-            if carrier is not None or time.monotonic() > deadline:
-                if carrier is None:
-                    sys.stderr.write("%s %s: no WebSocket: %s\n" % (time.strftime("%H:%M:%S"), name, status.decode(errors="replace")))
+            now = time.monotonic()
+            if carrier is not None:
+                if failed:
+                    sys.stderr.write("%s %s: a WebSocket again after %d failed\n" % (time.strftime("%H:%M:%S"), name, failed))
                 return carrier
+            failed += 1
+            if status != said or now - last >= 10:
+                sys.stderr.write("%s %s: open %d failed: %s\n" % (time.strftime("%H:%M:%S"), name, failed, status.decode(errors="replace")))
+                said, last = status, now
+            if now > deadline:
+                sys.stderr.write("%s %s: no WebSocket: %s\n" % (time.strftime("%H:%M:%S"), name, status.decode(errors="replace")))
+                return None
             time.sleep(0.5)
 
     carrier = reopen(resume=False)

@@ -200,8 +200,12 @@ describe('a relay link between two relay.py ends through a vessel\'s pipe', () =
   test('carries on over a WebSocket that comes back only after its vessel was out for longer than a minute', async () => {
     const result = await run(6 << 20, 'echo', 4 << 20, 'outage');
 
-    expect({ out: result.out, refused: result.opened.includes('refused'), last: result.opened.at(-1) })
-      .toEqual({ out: `${String(6 << 20)} True`, refused: true, last: 'resume' });
+    // Each failed open is said with its status, and the open that came back with how many failed before it.
+    const failed = result.err.split('\n').filter((line) => / open \d+ failed: HTTP\/1\.1 503/u.test(line));
+
+    expect({ out: result.out, refused: result.opened.includes('refused'), last: result.opened.at(-1), said: failed.length > 0,
+      back: / a WebSocket again after \d+ failed$/mu.test(result.err) })
+      .toEqual({ out: `${String(6 << 20)} True`, refused: true, last: 'resume', said: true, back: true });
   }, 60_000);
 
   test('closes a program\'s connection to a port nothing listens on, as a refused one', async () => {
