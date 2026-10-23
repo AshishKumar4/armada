@@ -177,25 +177,28 @@ describe('a job an earlier Worker made', () => {
   });
 });
 
-describe('a gang rank\'s relay', () => {
-  test('reaches any vessel its job names, however many the job started, an earlier Worker\'s replacements too, and nothing else', async () => {
+describe('a gang rank\'s hub', () => {
+  test('reaches the hub of the rank, task and attempt it names, its control socket or a link\'s, and nothing else', async () => {
     const reached: string[] = [];
 
     const env = world({
       ARMADA_TOKEN: TOKEN,
-      VESSEL: namespace((name: string) => ({
+      HUB: namespace((name: string) => ({
         fetch: async () => {
           reached.push(name);
 
-          return new Response('relayed');
+          return new Response('hubbed');
         },
       })),
     });
 
     const id = '20261011120000-0123abcd';
-    const ask = async (vessel: string) => (await worker.fetch(new Request(`https://armada.test/relay/${id}/${vessel}?port=1`), env)).status;
+    const ask = async (path: string) => (await worker.fetch(new Request(`https://armada.test/hub/${id}/${path}`), env)).status;
+    const statuses = [await ask('3/1/2/control'), await ask('3/1/0/link?id=0123456789abcdef&port=1'), await ask('3/1/2/other'),
+      await ask('x/1/2/control'), await ask('3/1/control'), await ask('3/1/2/control/more')];
 
-    expect({ statuses: [await ask('v1'), await ask('v10000'), await ask('r12'), await ask('x1'), await ask('v'), await ask('v01')], reached })
-      .toEqual({ statuses: [200, 200, 200, 404, 404, 404], reached: [`${id}/v1`, `${id}/v10000`, `${id}/r12`] });
+    expect({ statuses, reached }).toEqual({ statuses: [200, 200, 404, 404, 404, 404], reached: [`${id}/3/1/2`, `${id}/3/1/0`] });
+  });
+});
   });
 });

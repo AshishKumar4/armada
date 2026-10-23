@@ -1,34 +1,33 @@
 /**
- * A gang's network. Containers have outbound internet and no inbound address, and a Durable Object can open TCP into
- * its own container (`getTcpPort`). So each rank r of a gang is host `rank<r>` at 127.0.1.<r + 1> in every container,
- * and a connection to another rank's address goes: a DNAT to this relay's OUT port, a WebSocket to the Worker's
- * `/relay/<job>/<vessel>` (`relayed`), that rank's vessel, which opens the relay's IN port in its container (`Piped`),
- * and a connection there to the port on the rank's own address. Any TCP a program speaks runs over it unchanged:
- * jax.distributed's coordinator, gloo's collectives, a database.
+ * A gang's network. Containers have outbound internet and no inbound address. So each rank r of a gang is host
+ * `rank<r>` at 127.0.1.<r + 1> in every container, and a connection to another rank's address goes: a DNAT to this
+ * relay's OUT port, a WebSocket out to that rank's hub (`ArmadaHub`, `/hub/<job>/<index>/<attempt>/<rank>`), which
+ * tells the rank's relay over its control socket, whose relay dials the hub for the link in turn and connects to the
+ * port on its own address. Any TCP a program speaks runs over it unchanged: jax.distributed's coordinator, gloo's
+ * collectives, a database. The hub keeps nothing in storage, so no vessel's storage, which stalls and resets under the
+ * platform, is on any link's path.
  *
- * Each connection is a link between the two relays (`Link` in relay.py), and the vessel between them holds none of
- * it: each end numbers its bytes, counts back the other's, runs at most RELAY_WINDOW ahead of the count (a WebSocket
- * send never waits, so a fast sender would pile a collective's ring step into the vessel's memory) and keeps what is
- * not yet counted. When the network drops the WebSocket, or the vessel is reset, the outbound end opens another under
- * the link's id, the vessel opens another connection in under it, and each end sends what the other has not counted,
- * the program seeing nothing of it.
+ * Each connection is a link between the two relays (`Link` in relay.py), and the hub between them holds none of it:
+ * each end numbers its bytes, counts back the other's, runs at most RELAY_WINDOW ahead of the count (a WebSocket send
+ * never waits, so a fast sender would pile a collective's ring step into the hub's memory) and keeps what is not yet
+ * counted. When the network drops a WebSocket, or the hub restarts, the outbound end opens another under the link's
+ * id, the hub has the far relay dial another for it, and each end sends what the other has not counted, the program
+ * seeing nothing of it.
  */
 import { STATE } from './container';
 import { detach } from '../../src/protocol';
 import { said } from './env';
 import { SILENT_MS } from './job';
 
-/** Where a rank's peers' connections arrive (loopback, DNAT'd to) and where its vessel connects in (every address). */
+/** Where a rank's peers' connections arrive (loopback, DNAT'd to). */
 export const RELAY_OUT = 7911;
-
-export const RELAY_IN = 7912;
 
 /** The relay's script in a container, and its log: how each of its links dropped or ended. */
 export const RELAY = `${STATE}/relay.py`;
 
 export const RELAY_LOG = `${STATE}/relay.log`;
 
-/** The header a relay's WebSocket presents the gang's token in. */
+/** The header a relay's WebSocket presents the gang's token in (`gangToken`). */
 export const RELAY_HEADER = 'armada-relay';
 
 /** The bytes either end of a link may have sent and not yet had counted: at a 5 ms round trip, 200 MB/s a link. */
@@ -44,123 +43,6 @@ export const RELAY_GRACE = SILENT_MS.working / 1000;
 
 /** A link's id: the relay names each connection it carries, and opens another WebSocket under it after a drop. */
 export const LINK_ID = /^[0-9a-f]{16}$/u;
-
-const TEXT = 0x74;
-
-const BINARY = 0x62;
-
-/** What a pipe asks of its WebSocket: to send a record's text or bytes, and to close. */
-export interface RelaySocket {
-  send(message: string | Uint8Array): void;
-  close(code?: number, reason?: string): void;
-}
-
-/**
- * A relay WebSocket at its vessel, piped to a connection into the container's relay: first a line naming the link
- * (`<id> <port> <resume>`), then each message as a record (a kind byte, `t` or `b`, the length in 4 bytes, big
- * endian, and the bytes), and each record back as a message. A close either way ends both: the link's ends carry on
- * over the next pair. `log` says how a WebSocket closed that did not close cleanly.
- */
-export class Piped {
-  private queue: Promise<void>;
-
-  private over = false;
-
-  constructor(private readonly socket: RelaySocket, private readonly writer: Pick<WritableStreamDefaultWriter<Uint8Array>, 'write' | 'close'>,
-    link: string, private readonly log: (event: string, detail: Readonly<Record<string, string | number>>) => void) {
-    this.queue = this.write(Promise.resolve(), new TextEncoder().encode(`${link}\n`));
-  }
-
-  /** Starts pumping the container's records to the WebSocket, until either side ends. */
-  start(readable: ReadableStream<Uint8Array>): void {
-    detach(this.pump(readable), (error) => { this.log('relay pump failed', { reason: error.message }); });
-  }
-
-  /** A message to the container, as a record, written after those before it though the runtime hands over the next
-   *  message while a write waits. */
-  async message(message: string | ArrayBuffer): Promise<void> {
-    const binary = message instanceof ArrayBuffer;
-    const body = binary ? new Uint8Array(message) : new TextEncoder().encode(message);
-    const record = new Uint8Array(5 + body.byteLength);
-
-    record[0] = binary ? BINARY : TEXT;
-    new DataView(record.buffer).setUint32(1, body.byteLength);
-    record.set(body, 5);
-    this.queue = this.write(this.queue, record);
-    await this.queue;
-  }
-
-  /** The WebSocket closed: the container's connection closes after what was written to it. */
-  async closed(code: number, reason: string): Promise<void> {
-    if (!this.over && code !== 1000) this.log('relay WebSocket closed by its relay', { code, reason });
-    this.over = true;
-    this.queue = this.close(this.queue);
-    await this.queue;
-  }
-
-  /** The container's records to the WebSocket, as they complete, then the WebSocket's close. */
-  private async pump(readable: ReadableStream<Uint8Array>): Promise<void> {
-    const reader = readable.getReader();
-    let held = new Uint8Array(0);
-
-    try {
-      for (let read = await reader.read(); !read.done; read = await reader.read()) {
-        const joined = new Uint8Array(held.byteLength + read.value.byteLength);
-
-        joined.set(held);
-        joined.set(read.value, held.byteLength);
-        let at = 0;
-
-        while (joined.byteLength - at >= 5) {
-          const length = new DataView(joined.buffer, at + 1, 4).getUint32(0);
-
-          if (joined.byteLength - at < 5 + length) break;
-          const body = joined.slice(at + 5, at + 5 + length);
-
-          this.socket.send(joined[at] === TEXT ? new TextDecoder().decode(body) : body);
-          at += 5 + length;
-        }
-
-        held = joined.slice(at);
-      }
-
-      await this.end(1000, 'the container closed it');
-    } catch (cause) {
-      await this.end(1011, `the container's side failed: ${said({ cause })}`);
-    }
-  }
-
-  /** `record` to the container once `after` is written; a write that fails ends the pipe. */
-  private async write(after: Promise<void>, record: Uint8Array): Promise<void> {
-    await after;
-
-    try {
-      await this.writer.write(record);
-    } catch (cause) {
-      await this.end(1011, `the container's side failed: ${said({ cause })}`);
-    }
-  }
-
-  /** The container's side closed once `after` is written, said in the log when it will not close. */
-  private async close(after: Promise<void>): Promise<void> {
-    await after;
-
-    try {
-      await this.writer.close();
-    } catch (cause) {
-      this.log('relay connection to the container did not close', { reason: said({ cause }) });
-    }
-  }
-
-  private async end(code: number, reason: string): Promise<void> {
-    if (this.over) return;
-    this.over = true;
-
-    if (code !== 1000) this.log('relay WebSocket closed by its vessel', { code, reason });
-    this.socket.close(code, reason.slice(0, 120));
-    await this.close(Promise.resolve());
-  }
-}
 
 /** As root: the gang this container left, if any: its relay stopped, its DNAT rules gone, its hosts file and hostname
  *  the runner's own. The relay is waited out, killed after 2.5 s and given up on after 5: one still holding its ports
@@ -187,9 +69,9 @@ iptables -t nat -F ARMADA_GANG 2>/dev/null || true
 if [ -f ${STATE}/hosts.mounted ]; then umount /etc/hosts; rm -f ${STATE}/hosts.mounted; fi
 hostname localhost`;
 
-/** As root: this container as rank $1 of a gang of $2, the relay given the Worker's origin, the job, the gang's token
- *  and each rank's vessel ($3...): the ranks' names in the hosts file, a DNAT of each other rank's address to OUT, and
- *  the relay it started listening on both ports itself, or the setup fails with the relay's log. */
+/** As root: this container as rank $1 of a gang of $2, the relay given the Worker's origin, the job, the gang's token,
+ *  the task's index and its attempt ($3...): the ranks' names in the hosts file, a DNAT of each other rank's address to
+ *  OUT, and the relay it started listening on OUT itself, or the setup fails with the relay's log. */
 export const GANG_UP = String.raw`set -eu
 rank=$1 world=$2
 shift 2
@@ -212,23 +94,23 @@ echo "$relay_pid" > ${STATE}/relay.pid
 n=0
 while :; do
   relay_alive "$relay_pid" || { cat ${RELAY_LOG} >&2; exit 1; }
-  if ss -ltnp | grep ':${String(RELAY_OUT)} ' | grep -q "pid=$relay_pid," &&
-     ss -ltnp | grep ':${String(RELAY_IN)} ' | grep -q "pid=$relay_pid,"; then break; fi
+  if ss -ltnp | grep ':${String(RELAY_OUT)} ' | grep -q "pid=$relay_pid,"; then break; fi
   n=$((n + 1))
   [ "$n" -lt 200 ] || { cat ${RELAY_LOG} >&2; exit 1; }
   sleep 0.05
 done`;
 
-/** The relay: `relay.py <rank> <origin> <job> <token> <vessel of rank 0> <vessel of rank 1> ...`. Each connection is
- *  a `Link`: a thread taking the far end's messages and one each way to and from the program. A WebSocket frame carries
- *  at most 64 KiB and its offset, under the Workers runtime's message limit. A vessel that refuses (it has not taken up
- *  the gang yet) is asked again for up to RELAY_GRACE seconds, as is one whose WebSocket dropped. */
+/** The relay: `relay.py <rank> <origin> <job> <token> <index> <attempt>`. Each connection is a `Link`: a thread taking
+ *  the far end's messages and one each way to and from the program. A WebSocket frame carries at most 64 KiB and its
+ *  offset, under the Workers runtime's message limit. An open the far rank's hub does not pair (its relay has not
+ *  come up yet, or its control socket is coming back) is asked again for up to RELAY_GRACE seconds, as is one whose
+ *  WebSocket dropped. */
 export const RELAY_PY = String.raw`import base64, collections, hashlib, os, socket, ssl, struct, sys, threading, time
 from urllib.parse import urlsplit
 
-OUT, IN = ${String(RELAY_OUT)}, ${String(RELAY_IN)}
+OUT = ${String(RELAY_OUT)}
 WINDOW, ACK, GRACE, KEEPALIVE = ${String(RELAY_WINDOW)}, ${String(RELAY_ACK)}, ${String(RELAY_GRACE)}, 30
-RANK, ORIGIN, JOB, TOKEN, VESSELS = int(sys.argv[1]), urlsplit(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5:]
+RANK, ORIGIN, JOB, TOKEN, INDEX, ATTEMPT = int(sys.argv[1]), urlsplit(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 OWN = "127.0.1.%d" % (RANK + 1)
 LINKS, LINKED = {}, threading.Lock()
 
@@ -251,7 +133,8 @@ def close(sock):
 
 
 class Frames:
-    """A WebSocket to a rank's vessel, which an outbound link goes over: text and binary messages, pings answered."""
+    """A WebSocket to a rank's hub, which a link or a control socket goes over: text and binary messages, pings
+    answered."""
 
     def __init__(self, ws):
         self.ws, self.lock = ws, threading.Lock()
@@ -294,38 +177,15 @@ class Frames:
             pass
 
 
-class Records:
-    """A vessel's connection in, which an inbound link goes over: its WebSocket's messages as records."""
-
-    def __init__(self, conn):
-        self.conn, self.lock = conn, threading.Lock()
-
-    def put(self, text, data, opcode=None):
-        self.conn.sendall((b"t" if text else b"b") + struct.pack("!I", len(data)) + data)
-
-    def ping(self):
-        pass
-
-    def take(self):
-        kind, n = struct.unpack("!cI", exact(self.conn, 5))
-        return kind == b"t", exact(self.conn, n)
-
-    def close(self):
-        try:
-            self.conn.close()
-        except OSError:
-            pass
-
-
-def opened(rank, port, link, resume):
-    """A WebSocket to rank's vessel carrying link to its port, or the status line it was refused with."""
+def dialled(rank, kind, query):
+    """A WebSocket to rank's hub (/hub/<job>/<index>/<attempt>/<rank>/<kind>), or the status line it was refused with."""
     host, secure = ORIGIN.hostname, ORIGIN.scheme == "https"
     raw = socket.create_connection((host, ORIGIN.port or (443 if secure else 80)), timeout=30)
     ws = ssl.create_default_context().wrap_socket(raw, server_hostname=host) if secure else raw
     key = base64.b64encode(os.urandom(16)).decode()
-    ws.sendall(("GET /relay/%s/%s?port=%d&id=%s%s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+    ws.sendall(("GET /hub/%s/%s/%s/%d/%s?%s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                 "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n${RELAY_HEADER}: %s\r\n\r\n"
-                % (JOB, VESSELS[rank], port, link, "&resume=1" if resume else "", host, key, TOKEN)).encode())
+                % (JOB, INDEX, ATTEMPT, rank, kind, query, host, key, TOKEN)).encode())
     answer = b""
     while not answer.endswith(b"\r\n\r\n"):
         answer += exact(ws, 1)
@@ -337,6 +197,31 @@ def opened(rank, port, link, resume):
         return Frames(ws), status
     ws.close()
     return None, status
+
+
+def paired(carrier, seconds):
+    """carrier once the hub has paired it with the far relay's and said so ('r'), before which neither end sends the
+    link's messages; or None and why not, within seconds."""
+    carrier.ws.settimeout(seconds)
+    try:
+        text, data = carrier.take()
+    except (EOFError, OSError) as error:
+        carrier.close()
+        return None, repr(error).encode()
+    carrier.ws.settimeout(None)
+    if (text, data) != (True, b"r"):
+        carrier.close()
+        return None, b"the hub said %r before pairing" % data[:16]
+    return carrier, b"paired"
+
+
+def opened(rank, port, link, resume, deadline):
+    """link's WebSocket to rank's hub, carrying it to rank's port, paired with the far relay's by deadline; or None and
+    the status it was refused with."""
+    carrier, status = dialled(rank, "link", "id=%s&port=%d%s" % (link, port, "&resume=1" if resume else ""))
+    if carrier is None:
+        return None, status
+    return paired(carrier, max(1.0, deadline - time.monotonic()))
 
 
 class Link:
@@ -577,7 +462,7 @@ def carry(local, rank, port):
         deadline, failed, said, last = time.monotonic() + GRACE, 0, None, 0.0
         while True:
             try:
-                carrier, status = opened(rank, port, link, resume)
+                carrier, status = opened(rank, port, link, resume, deadline)
             except OSError as error:
                 carrier, status = None, repr(error).encode()
             now = time.monotonic()
@@ -606,23 +491,25 @@ def outbound(local):
     carry(local, int(socket.inet_ntoa(address).rsplit(".", 1)[1]) - 1, port)
 
 
-def inbound(conn):
-    """The vessel's connection in, under a link's id: the link's next carrier if this end holds it; else, for a new
-    link, a connection to its port on this rank's address, or 'g' when that or the link is gone."""
-    line = b""
-    while not line.endswith(b"\n"):
-        line += exact(conn, 1)
-    link, port, resume = line.decode().split()
-    carrier = Records(conn)
+def accept(link, port, resume):
+    """The far relay's open of link to this rank's port, which the hub said: this end's WebSocket for it, paired; then
+    the link's next carrier where this end holds it; else, for a new link, a connection to its port on this rank's
+    address, or 'g' when that or the link is gone."""
+    carrier, status = dialled(RANK, "link", "id=%s&accept=1" % link)
+    if carrier is not None:
+        carrier, status = paired(carrier, 30)
+    if carrier is None:
+        sys.stderr.write("%s port %d from link %s: no WebSocket for it: %s\n" % (time.strftime("%H:%M:%S"), port, link, status.decode(errors="replace")))
+        return
     with LINKED:
         held = LINKS.get(link)
     if held is not None:
         held.handover(carrier)
         return
     try:
-        if resume == "1":
+        if resume:
             raise ConnectionError("the link is gone")
-        local = socket.create_connection((OWN, int(port)))
+        local = socket.create_connection((OWN, port))
     except OSError:
         carrier.put(True, b"g")
         carrier.close()
@@ -634,12 +521,51 @@ def inbound(conn):
         with LINKED:
             LINKS[link] = held
 
-    held = Link(local, "port %s from link %s" % (port, link), carrier, held=register)
+    held = Link(local, "port %d from link %s" % (port, link), carrier, held=register)
     try:
         held.run()
     finally:
         with LINKED:
             LINKS.pop(link, None)
+
+
+def control():
+    """This rank's control socket at its hub, kept open: each open of a link to this rank it says
+    ('o <link> <port> <0|1>') is taken up (accept). One that goes is said and opened again; the hub keeps the opens
+    waiting meanwhile, so a far relay's open outlives it."""
+    said = None
+    while True:
+        try:
+            carrier, status = dialled(RANK, "control", "")
+        except OSError as error:
+            carrier, status = None, repr(error).encode()
+        if carrier is None:
+            if status != said:
+                sys.stderr.write("%s control: open failed: %s\n" % (time.strftime("%H:%M:%S"), status.decode(errors="replace")))
+                said = status
+            time.sleep(0.5)
+            continue
+        said = None
+        threading.Thread(target=pinged, args=(carrier,), daemon=True).start()
+        try:
+            while True:
+                text, data = carrier.take()
+                if text and data[:2] == b"o ":
+                    _, link, port, resume = data.decode().split()
+                    threading.Thread(target=guarded, args=(accept, link, int(port), resume == "1"), daemon=True).start()
+        except (EOFError, OSError) as error:
+            sys.stderr.write("%s control: %r; opening it again\n" % (time.strftime("%H:%M:%S"), error))
+            carrier.close()
+
+
+def pinged(carrier):
+    """Pings an idle control socket, which Cloudflare closes after 100 s without data, until it goes."""
+    while True:
+        time.sleep(KEEPALIVE)
+        try:
+            carrier.ping()
+        except OSError:
+            return
 
 
 def serve(address, handle):
@@ -653,15 +579,18 @@ def serve(address, handle):
         threading.Thread(target=guarded, args=(handle, conn), daemon=True).start()
 
 
-def guarded(handle, conn):
+def guarded(handle, *args):
+    """handle(*args) on its own thread: what it raises is said, and a connection it was given closed."""
     try:
-        handle(conn)
+        handle(*args)
     except Exception as error:
         sys.stderr.write("%s: %r\n" % (handle.__name__, error))
-        conn.close()
+        for each in args:
+            if isinstance(each, socket.socket):
+                each.close()
 
 
 if __name__ == "__main__":
-    threading.Thread(target=serve, args=(("0.0.0.0", IN), inbound), daemon=True).start()
+    threading.Thread(target=control, daemon=True).start()
     serve(("127.0.0.1", OUT), outbound)
 `;

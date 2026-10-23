@@ -9,6 +9,7 @@ import type { ArmadaTasks } from './tasks';
 import type { ArmadaJob } from './job';
 import type { ArmadaTimings } from './timings';
 import type { ArmadaVessel } from './vessel';
+import type { ArmadaHub } from './hub';
 
 export interface Env {
   readonly JOB: DurableObjectNamespace<ArmadaJob>;
@@ -22,6 +23,8 @@ export interface Env {
   readonly WEBHOOKS: DurableObjectNamespace<ArmadaWebhooks>;
   /** What each class of task used, by class (`estimates.ts`). */
   readonly ESTIMATES: DurableObjectNamespace<ArmadaEstimates>;
+  /** Each gang rank's end of its gang's network (`hub.ts`). */
+  readonly HUB: DurableObjectNamespace<ArmadaHub>;
   /** Packs, task outputs and logs, verdicts. */
   readonly ARTIFACTS: R2Bucket;
   /** The bearer the SDK presents (`~/.config/armada/connection.json`). */
@@ -136,3 +139,8 @@ export async function hmac(key: string, message: string): Promise<string> {
 /** What a job's tasks get as ARMADA_STATUS_TOKEN: it reads that job's tasks at `/status/<job>/<index>` and nothing else.
  *  Derived from the bearer, so no object stores it, and a fixture that keeps it keeps no deployment-wide secret. */
 export const statusToken = async (bearer: string, job: string): Promise<string> => await hmac(bearer, `status/${job}`);
+
+/** What a gang attempt's relays present to its ranks' hubs (`ArmadaHub`). Derived from the bearer, so the job hands it
+ *  out and a hub checks it without either storing it. */
+export const gangToken = async (bearer: string, job: string, index: number, attempt: number): Promise<string> =>
+  await hmac(bearer, `gang/${job}/${String(index)}/${String(attempt)}`);

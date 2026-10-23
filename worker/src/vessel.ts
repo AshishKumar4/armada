@@ -6,18 +6,18 @@
  * storage, so a restarted object takes the same task up again. A task it was told to drop (another vessel's answer
  * landed first, or the job ended) is killed with its whole session.
  *
- * A rank of a gang task waits for its gang to form, joins the gang's network (`relay.ts`) before it launches, and pipes
- * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
+ * A rank of a gang task waits for its gang to form and joins the gang's network (`relay.ts`) before it launches: its
+ * container's relay dials the gang's hubs (`ArmadaHub`), so no link passes through this object or waits on its storage.
  */
 import { DurableObject } from 'cloudflare:workers';
 import { boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
   AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
 } from './container';
-import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
+import { bundleKey, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
-import type { Claim, Gang } from './job';
-import { GANG_DOWN, GANG_UP, LINK_ID, Piped, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY } from './relay';
+import type { Claim } from './job';
+import { GANG_DOWN, GANG_UP, RELAY, RELAY_LOG, RELAY_PY } from './relay';
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -160,9 +160,6 @@ export class ArmadaVessel extends DurableObject<Env> {
 
   /** Whether this object watches its container's end (`watch`). */
   private watching = false;
-
-  /** Each relay WebSocket's pipe into the container, which holds nothing of its link (`Piped`). */
-  private readonly pipes = new Map<WebSocket, Piped>();
 
   async begin(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.put({ spec, state: 'waiting' satisfies State, requested: Date.now() });
@@ -514,7 +511,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     };
 
     if (!layout.isolated) await keep();
-    await this.network(container, claim.gang);
+    await this.network(container, claim);
     const argv = argvOf(slot);
     // A slot's task gets its slot's cgroup, so its group reads and caps reach the slot's, not the single task group.
     const env = { ...claim.env, ARMADA_CGROUP: layout.group };
@@ -537,8 +534,10 @@ export class ArmadaVessel extends DurableObject<Env> {
     }
   }
 
-  /** The container on `gang`'s network as its rank, or off any gang's for a task that is none's. */
-  private async network(container: Container, gang: Gang | undefined): Promise<void> {
+  /** The container on `claim`'s gang's network as its rank, its relay dialling the gang's hubs for the task's attempt
+   *  (`ArmadaHub`), or off any gang's for a task that is none's. */
+  private async network(container: Container, claim: Claim): Promise<void> {
+    const { gang } = claim;
     const ganged = await this.ctx.storage.get<boolean>('ganged');
 
     if (gang === undefined) {
@@ -550,56 +549,8 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     if (ganged === undefined) await pipeIn(container, RELAY_PY, RELAY);
     await must(container, 'joining the gang', ['/bin/sh', '-c', GANG_UP, 'gang', String(gang.rank), String(gang.vessels.length), gang.origin, gang.job, gang.token,
-      ...gang.vessels], { ms: EXEC_MS });
+      String(claim.index), String(claim.attempt)], { ms: EXEC_MS });
     await this.ctx.storage.put('ganged', true);
-  }
-
-  /** A relay's WebSocket from another rank of this vessel's gang, which presents the gang's token, piped to a new
-   *  connection into this container's relay under the link's id (`id`), which connects `port` on this rank's address
-   *  or, with `resume`, carries on the link it holds. */
-  override async fetch(request: Request): Promise<Response> {
-    const token = (await this.currents()).map((current) => current.claim.gang?.token).find((gang) => gang !== undefined);
-
-    if (token === undefined || !equal(token, request.headers.get(RELAY_HEADER) ?? '')) return new Response('forbidden', { status: 403 });
-    const url = new URL(request.url);
-    const port = Number(url.searchParams.get('port'));
-    const id = url.searchParams.get('id') ?? '';
-
-    if (!Number.isInteger(port) || port < 1 || port > 65_535 || !LINK_ID.test(id) || request.headers.get('upgrade') !== 'websocket') {
-      return new Response('a relay is a WebSocket to a port, under a link id', { status: 400 });
-    }
-
-    const [client, server] = Object.values(new WebSocketPair());
-
-    if (client === undefined || server === undefined) throw new Error('a WebSocketPair has two ends');
-    this.ctx.acceptWebSocket(server);
-    const socket = this.container().getTcpPort(RELAY_IN).connect(`localhost:${String(RELAY_IN)}`);
-
-    const piped = new Piped(server, socket.writable.getWriter(), `${id} ${String(port)} ${url.searchParams.has('resume') ? '1' : '0'}`,
-      (event, detail) => { console.log(JSON.stringify({ event, path: url.pathname, id, port, ...detail })); });
-
-    this.pipes.set(server, piped);
-    piped.start(socket.readable);
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  override async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const piped = this.pipes.get(socket);
-
-    // A WebSocket this object no longer pipes (it was reset): its relay opens another.
-    if (piped === undefined) return socket.close(1011, 'no pipe');
-    await piped.message(message);
-  }
-
-  override async webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void> {
-    await this.pipes.get(socket)?.closed(code, reason);
-    this.pipes.delete(socket);
-  }
-
-  override async webSocketError(...[socket, error]: Parameters<NonNullable<DurableObject['webSocketError']>>): Promise<void> {
-    await this.pipes.get(socket)?.closed(1006, `failed: ${said({ cause: error })}`);
-    this.pipes.delete(socket);
   }
 
   /** `current`'s task stopped, its job no longer wanting it: killed, its log kept for a gang's rank, its slot cleared, and

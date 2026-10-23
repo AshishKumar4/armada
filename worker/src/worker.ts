@@ -18,6 +18,8 @@ export { ArmadaJob } from './job';
 
 export { ArmadaVessel } from './vessel';
 
+export { ArmadaHub } from './hub';
+
 export { ArmadaEnvironments, ArmadaPreparer } from './environments';
 
 export { ArmadaTimings } from './timings';
@@ -627,12 +629,15 @@ async function drive(request: Request, env: Env, { project, config, payload }: {
   return Response.json({ started: created });
 }
 
-/** `/relay/<job>/<vessel>?port=n`: a gang rank's relay, reaching the rank `vessel` runs. No container holds the
- *  deployment's bearer, so the relay presents its gang's token instead, which the vessel checks. */
-async function relayed(request: Request, env: Env, [job, vessel]: readonly string[]): Promise<Response> {
-  if (job === undefined || vessel === undefined || !JOB_ID.test(job) || !VESSEL_NAME.test(vessel)) return notFound();
+/** `/hub/<job>/<index>/<attempt>/<rank>/{control,link}`: a gang rank's end of its gang's network (`ArmadaHub`), which
+ *  the gang's relays dial out to. No container holds the deployment's bearer, so a relay presents its gang's token
+ *  instead, which the hub checks. */
+async function hubbed(request: Request, env: Env, [job, index, attempt, rank, kind, ...extra]: readonly string[]): Promise<Response> {
+  const numbered = [index, attempt, rank].every((part) => part !== undefined && /^\d+$/u.test(part));
 
-  return await env.VESSEL.getByName(`${job}/${vessel}`).fetch(request);
+  if (job === undefined || !JOB_ID.test(job) || !numbered || (kind !== 'control' && kind !== 'link') || extra.length > 0) return notFound();
+
+  return await env.HUB.getByName(`${job}/${String(index)}/${String(attempt)}/${String(rank)}`).fetch(request);
 }
 
 /** `GET /status/<job>/<index>`: a task's status, outside the bearer, read with its job's status token alone, which each
@@ -653,7 +658,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const [first, ...rest] = new URL(request.url).pathname.split('/').filter((segment) => segment !== '');
 
-    if (first === 'relay') return await relayed(request, env, rest);
+    if (first === 'hub') return await hubbed(request, env, rest);
 
     if (first === 'status') return await statused(request, env, rest);
 

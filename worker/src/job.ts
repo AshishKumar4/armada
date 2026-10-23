@@ -25,11 +25,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
-import { runKey, said, SINGLE, statusToken, type Env } from './env';
+import { gangToken, runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
 import { classOf, itemKey, tasksMemoryOf } from './estimates';
 import { costOf, Placement, ranksOf, type Load } from './placement';
@@ -827,29 +827,26 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const task = this.sql.exec<{ item: string; attempts: number }>('SELECT item, attempts FROM tasks WHERE idx = ?', mine.idx).one();
     const world = gangOf(v.parse(TaskSchema, JSON.parse(task.item)).item);
-    let token: string | undefined;
+    let formed = false;
 
     if (mine.state === 'joined') {
       if (Number(this.sql.exec('SELECT COUNT(*) AS n FROM members WHERE idx = ?', mine.idx).one()['n']) < world) return { waitMs: WAIT_MS };
-      // Every rank has joined: hand out claims under one relay token, and the gang's launch starts now (`LAUNCHING`). A
+      // Every rank has joined: hand out the attempt's claims, and the gang's launch starts now (`LAUNCHING`). A
       // claim is not a launched task: each vessel acknowledges its launch (`started`), and the gang's start bound stays
       // armed until all do.
       this.sql.exec(`UPDATE tasks SET state = 'running', started = ?, attempts = attempts + 1, vessel = (SELECT vessel FROM members WHERE idx = ? AND rank = 0)
         WHERE idx = ?`, Date.now(), mine.idx, mine.idx);
       this.sql.exec(`UPDATE members SET state = 'ready' WHERE idx = ?`, mine.idx);
-      token = hex(crypto.getRandomValues(new Uint8Array(24)));
+      formed = true;
     }
 
-    return this.rankClaim(spec, env, name, { index: mine.idx, item: task.item, token });
+    return this.rankClaim(spec, env, name, { index: mine.idx, item: task.item, formed });
   }
 
-  /** A formed rank's claim: the only part of admission that needs to wait, for its relay token's storage. The claim
-   *  that formed the gang arms its launch bound (`LAUNCHING`). */
-  private async rankClaim(spec: Kept, env: Record<string, string>, name: string, { index, item, token }: { readonly index: number; readonly item: string; readonly token?: string }): Promise<Claim> {
-    if (token !== undefined) {
-      await this.ctx.storage.put(`gang:${String(index)}`, token);
-      await this.schedule(spec, true);
-    }
+  /** A formed rank's claim, under the attempt's relay token (`gangToken`). The claim that formed the gang arms its launch
+   *  bound (`LAUNCHING`). */
+  private async rankClaim(spec: Kept, env: Record<string, string>, name: string, { index, item, formed }: { readonly index: number; readonly item: string; readonly formed: boolean }): Promise<Claim> {
+    if (formed) await this.schedule(spec, true);
 
     const vessels = this.sql.exec<{ vessel: string }>('SELECT vessel FROM members WHERE idx = ? ORDER BY rank', index).toArray().map((row) => row.vessel);
     const rank = vessels.indexOf(name);
@@ -857,10 +854,8 @@ export class ArmadaJob extends DurableObject<Env> {
 
     this.sql.exec(`UPDATE members SET state = 'starting' WHERE idx = ? AND vessel = ?`, index, name);
 
-    const gang: Gang = {
-      rank, vessels, job: (await this.ctx.storage.get<string>('id')) ?? '', origin: (await this.ctx.storage.get<string>('origin')) ?? '',
-      token: (await this.ctx.storage.get<string>(`gang:${String(index)}`)) ?? '',
-    };
+    const job = (await this.ctx.storage.get<string>('id')) ?? '';
+    const gang: Gang = { rank, vessels, job, origin: (await this.ctx.storage.get<string>('origin')) ?? '', token: await gangToken(this.env.ARMADA_TOKEN, job, index, attempts) };
 
     const world = gangOf(v.parse(TaskSchema, JSON.parse(item)).item);
     const claim = this.claimOf(spec, env, item, { index, attempt: attempts, duplicate: false });
