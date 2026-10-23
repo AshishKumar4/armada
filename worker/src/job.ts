@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -194,10 +194,6 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
 
-  /** When this instance of the object began. One reset (a storage failure, a deploy) lost the renewals its client sent
-   *  while it could not hear them, so a lease's silence counts from no earlier than this. */
-  private readonly began = Date.now();
-
   /** The job's status token (`statusToken`), derived once an object: claims made at once all wait on the one. */
   private token: Promise<string> | undefined;
 
@@ -337,11 +333,20 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from
-    // then, and none counts from before this instance began: a client is silent only while the object could hear it.
-    const heard = Math.max((await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0, this.began);
+    // then. It is silent only while the object could hear it: a watchdog later than a renewal past its due found the
+    // object not running, as a storage failure that reset it and hung its next instance for minutes left it, and the
+    // renewals sent meanwhile were lost, not withheld, so its silence counts again from then. A hibernated object keeps
+    // its watchdog's time.
+    if (spec.lease) {
+      const now = Date.now();
+      const watched = await this.ctx.storage.get<number>('watched');
 
-    if (spec.lease && Date.now() - heard > JOB_LEASE_SECONDS * 1000) {
-      return await this.cancel(`its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`, 'cancelled');
+      if (watched !== undefined && now - watched > WATCHDOG_MS + JOB_RENEWAL_SECONDS * 1000) await this.ctx.storage.put('recovered', now);
+      const renewed = (await this.ctx.storage.get<number>('renewed')) ?? (await this.ctx.storage.get<number>('createdAt')) ?? 0;
+
+      if (now - Math.max(renewed, (await this.ctx.storage.get<number>('recovered')) ?? 0) > JOB_LEASE_SECONDS * 1000) {
+        return await this.cancel(`its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`, 'cancelled');
+      }
     }
 
     if (phase === 'running') {
@@ -357,6 +362,8 @@ export class ArmadaJob extends DurableObject<Env> {
     if ((await this.ctx.storage.get<Generation>('environment')) === undefined) await this.awaitEnvironment(spec);
 
     if ((await this.ctx.storage.get<Phase>('phase')) !== 'done') await this.schedule(spec);
+    // The watchdog ran to its end: when the next comes, the object has been running since (`alarm`, a lease).
+    await this.ctx.storage.put('watched', Date.now());
   }
 
   /** Watch at most every 15 seconds, sooner for a job or gang's own deadline. Claims only move an alarm earlier,

@@ -14,7 +14,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, JOB_LEASE_SECONDS, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
+import { argumentRefusal, CommitSchema, deadlineRefusal, detach, itemRefusal, errorOf, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, jsonOf, type JobSpecSchema, JsonValueSchema, MAX_TASKS, RecipeSchema, type Retries, type Cpu, type Host, type JobStatus, type Mode, type Outcome, type Recipe as RecipeSpec, type Size, type Task as WireTask } from './protocol';
 import { pushed } from './push';
 import { EnvelopeSchema, remoteError, RUN, secretsFrom, type Context, type Envelope, type Json, type RemoteError, type Runnable } from './runner';
 import { connect, RequestError, summaryOf, type Armada, type Summary } from './sdk';
@@ -721,7 +721,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     this.id = submission.id;
     this.itemOf = itemOf;
 
-    this.renewal = lease ? setInterval(() => { detach(this.renew(), (failure) => { this.renewFailed(failure); }); }, JOB_LEASE_SECONDS * 1000 / 6) : undefined;
+    this.renewal = lease ? setInterval(() => { detach(this.renew(), (failure) => { this.renewFailed(failure); }); }, JOB_RENEWAL_SECONDS * 1000) : undefined;
     this.renewal?.unref();
   }
 

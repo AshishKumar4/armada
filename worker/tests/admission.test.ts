@@ -325,34 +325,61 @@ describe('a job its client follows', () => {
     }
   });
 
-  // Train 58: the job's storage failed and reset its object, whose next instance hung 165 s; the client's renewals, sent
-  // every 30 s throughout, failed with it, and the instance after cancelled the job for a client that had not gone.
-  test('counts its client silent only while its object could hear it: an object reset loses renewals, not its client', async () => {
+  // A storage failure reset a CI run's job and hung its next instance 165 s; the client's renewals, sent every 30 s
+  // throughout, failed with it, and the instance after cancelled the job for a client that had not gone.
+  test('counts its client silent only while its object runs: renewals lost while it did not are not its silence', async () => {
     const { armada, jobs, reset } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
     const began = Date.now();
-    const lease = JOB_LEASE_SECONDS * 1000;
+    const [lease, watchdog] = [JOB_LEASE_SECONDS * 1000, 15_000];
+    const reasons = async (id: string) => (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]);
 
     try {
       setSystemTime(began);
       const id = await armada.create({ ...spec, lease: true });
 
-      setSystemTime(began + lease / 6);
+      await jobs.get(id)?.alarm();
+      setSystemTime(began + watchdog);
       await armada.renew(id);
+      await jobs.get(id)?.alarm();
 
-      // Its object reset over the same storage, after an outage longer than the lease that its renewals fell into.
-      const back = began + lease / 6 + lease + 60_000;
+      // Its object reset and not running for longer than the lease, its client's renewals lost meanwhile.
+      const back = began + watchdog + lease + 60_000;
 
       setSystemTime(back);
       reset(id);
       await jobs.get(id)?.alarm();
-      const kept = (await armada.events(id, 0)).events.length;
+      const kept = await reasons(id);
 
-      // A client gone for good still ends it, a lease after the reset.
-      setSystemTime(back + lease + 1);
-      await jobs.get(id)?.alarm();
-      const ended = (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]);
+      // A client gone for good still ends it, a lease after, its watchdog on time throughout.
+      for (let at = back + watchdog; at <= back + lease + watchdog; at += watchdog) {
+        setSystemTime(at);
+        await jobs.get(id)?.alarm();
+      }
 
-      expect({ kept, ended }).toEqual({ kept: 0, ended: [['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]] });
+      expect({ kept, ended: await reasons(id) }).toEqual({ kept: [], ended: [['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]] });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('ends a job with no deadline whose client is gone, though its object hibernates between watchdogs', async () => {
+    const { armada, jobs, reset } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: idleVessels() });
+    const began = Date.now();
+    const watchdog = 15_000;
+
+    try {
+      setSystemTime(began);
+      const id = await armada.create({ ...spec, lease: true, deadline: null, timeout: null });
+
+      // Each watchdog on time, each to an object made again over its storage, as one after hibernation is.
+      for (let at = began; at <= began + JOB_LEASE_SECONDS * 1000 + watchdog; at += watchdog) {
+        setSystemTime(at);
+        reset(id);
+        await jobs.get(id)?.alarm();
+      }
+
+      expect((await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]))
+        .toEqual([['cancelled', `its client went away: it renewed no lease in ${String(JOB_LEASE_SECONDS)} s`]]);
     } finally {
       setSystemTime();
     }

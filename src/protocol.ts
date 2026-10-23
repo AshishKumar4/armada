@@ -271,6 +271,9 @@ export const JOB_DEADLINE_SECONDS = 6 * 60 * 60;
  *  client that died, or lost its network, holds the fleet no longer than this (#50). */
 export const JOB_LEASE_SECONDS = 3 * 60;
 
+/** How often a following client renews its lease: six times a lease, so a lease outlasts five renewals lost. */
+export const JOB_RENEWAL_SECONDS = JOB_LEASE_SECONDS / 6;
+
 /** CI reports its own deadline below a typical runner's 40-minute timeout, leaving time to report and clean up. */
 export const CI_DEADLINE_SECONDS = 30 * 60;
 
