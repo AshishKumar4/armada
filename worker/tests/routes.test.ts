@@ -200,5 +200,3 @@ describe('a gang rank\'s hub', () => {
     expect({ statuses, reached }).toEqual({ statuses: [200, 200, 404, 404, 404, 404], reached: [`${id}/3/1/2`, `${id}/3/1/0`] });
   });
 });
-  });
-});

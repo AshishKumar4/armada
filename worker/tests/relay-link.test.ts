@@ -149,7 +149,9 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
     port: 0,
     fetch(request, bun) {
       const url = new URL(request.url);
-      const [kind = '', link = '', accept, resume] = [url.pathname.split('/')[6], url.searchParams.get('id') ?? '', url.searchParams.has('accept'), url.searchParams.has('resume')];
+      const kind = url.pathname.split('/')[6] ?? '';
+      const link = url.searchParams.get('id') ?? '';
+      const [accept, resume] = [url.searchParams.has('accept'), url.searchParams.has('resume')];
 
       if (kind === 'link' && !accept) {
         if (resume && Date.now() < outageUntil) {

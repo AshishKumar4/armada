@@ -2,6 +2,7 @@ import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { environmentKey, JOB_LEASE_SECONDS, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEnvironments, type Generation } from '../src/environments';
+import { gangToken } from '../src/env';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { listSchedule } from '../../src/dispatch';
@@ -1275,8 +1276,11 @@ describe('a gang task', () => {
     const held = await formed(open, ['v1', 'v2']);
     const ranks = ['v1', 'v2'].map((vessel) => [held[vessel]?.env['ARMADA_RANK'], held[vessel]?.env['ARMADA_WORLD'], held[vessel]?.gang?.vessels, held[vessel]?.gang?.rank]);
 
-    expect({ begun, first, ranks, tokens: new Set(Object.values(held).map((claim) => claim.gang?.token)).size, length: held['v1']?.gang?.token.length })
-      .toEqual({ begun: ['j1/v1', 'j1/v2'], first: { waitMs: 1000 }, ranks: [['0', '2', ['v1', 'v2'], 0], ['1', '2', ['v1', 'v2'], 1]], tokens: 1, length: 48 });
+    // The attempt's token, derived from the bearer, so a hub checks it with no storage (`gangToken`).
+    const token = await gangToken('t'.repeat(32), 'j1', 0, 1);
+
+    expect({ begun, first, ranks, tokens: [...new Set(Object.values(held).map((claim) => claim.gang?.token))] })
+      .toEqual({ begun: ['j1/v1', 'j1/v2'], first: { waitMs: 1000 }, ranks: [['0', '2', ['v1', 'v2'], 0], ['1', '2', ['v1', 'v2'], 1]], tokens: [token] });
   });
 
   test('lands rank 0\'s outcome once every rank exited 0, and the first failing rank\'s at once, stopping the others', async () => {
