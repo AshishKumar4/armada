@@ -426,6 +426,9 @@ export function lanesFor(estimates: readonly (number | undefined)[], weights: re
 export interface RunOptions {
   /** The whole run's bound in seconds; the commit's config (1800 by default) when absent. */
   readonly deadline?: number;
+  /** The most containers the run takes at once, within the commit's config `pool`: a run beside others on one
+   *  deployment, bounded so they share its fleet. What it runs, and so its verdict, is the commit's either way. */
+  readonly pool?: number;
   readonly label: string;
   readonly planArgs: readonly string[];
   readonly secrets: readonly string[];
@@ -495,7 +498,7 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
-async function runGraded(armada: Armada, target: string, { deadline, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
+async function runGraded(armada: Armada, target: string, { deadline, pool: bound, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, environment, spec, upload, of } = await commitOf(armada, target);
   const deadlineAt = began + (deadline ?? config.deadline) * 1000;
@@ -632,11 +635,12 @@ async function runGraded(armada: Armada, target: string, { deadline, label, plan
     if (own !== undefined) note(`environment ${name} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
   }
 
-  const shares = sharesFor(config.pool, slots, groups.map((group) => ({ estimates: group.indexes.map((index) => estimates[index]), ranks: group.indexes.map((index) => ranks[index] ?? 1) })));
+  const containers = Math.min(config.pool, bound ?? config.pool);
+  const shares = sharesFor(containers, slots, groups.map((group) => ({ estimates: group.indexes.map((index) => estimates[index]), ranks: group.indexes.map((index) => ranks[index] ?? 1) })));
 
   // Every environment's job runs at once, so none of a run's jobs waits on another's end, deadline or cancel.
   if ('need' in shares) {
-    return await ungraded(`the plan's ${String(groups.length)} environments run at once and need ${String(shares.need)} containers for it, one each or their widest gang, past the pool of ${String(config.pool)}: raise pool in .armada.json`);
+    return await ungraded(`the plan's ${String(groups.length)} environments run at once and need ${String(shares.need)} containers for it, one each or their widest gang, past the pool of ${String(containers)}: raise pool in .armada.json, or the run's --pool`);
   }
 
   // What is left of the run's deadline, read once for every task job, so all of them start or none does.

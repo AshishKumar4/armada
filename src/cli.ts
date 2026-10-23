@@ -27,7 +27,7 @@ Usage:
                                        purge exactly this deployment; refuses open jobs unless forced;
                                        R2 expires objects/uploads in 1 day; re-run to remove the empty bucket
   armada map [options] -- <command>    run the command once per item
-  armada run <commit|worktree> [--deadline=S] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
+  armada run <commit|worktree> [--deadline=S] [--pool=N] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json; --json prints the
                                        progress to stderr and one JSON verdict object to stdout
   armada verdict <commit|worktree> [--json]
@@ -102,7 +102,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
-  ['run', { options: ['deadline=', 'label=', 'secrets=', 'json'], words: 1 }],
+  ['run', { options: ['deadline=', 'pool=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
@@ -834,7 +834,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, { deadline: whole('deadline'), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
+      return await runCI(connect(), target, { deadline: whole('deadline'), pool: whole('pool'), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');

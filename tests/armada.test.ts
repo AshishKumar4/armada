@@ -1123,6 +1123,16 @@ describe('armada run', () => {
       .toEqual({ gang: [0, [1, 6]], refused: [[2, 0, 'not graded'], [2, 0, 'not graded']], need: ['3', '7'] });
   });
 
+  test('a CLI pool bounds the run below the commit\'s, and its verdict is still the commit\'s', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'd' }] };
+    const bounded = await run(['--pool=2'], plan, {}, { config: { pool: 8 }, taskConfig: { verdict: false }, exitOf });
+    const above = await run(['--pool=20'], plan, {}, { config: { pool: 3 }, taskConfig: { verdict: false }, exitOf });
+
+    expect({ bounded: [bounded.exit, taskJobs(bounded.bodies).map(({ pool }) => pool)], above: [above.exit, taskJobs(above.bodies).map(({ pool }) => pool)] })
+      .toEqual({ bounded: [0, [2]], above: [0, [3]] });
+    expect(reportOf(bounded.report).graded).not.toBe('not graded');
+  });
+
   test('is not graded, and leaves no task job running, when the plan names an unknown environment or a task job does not start (#31)', async () => {
     const unknown = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py399' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf });
     const refused = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf, refuse: 2 });
