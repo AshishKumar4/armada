@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -299,6 +299,18 @@ export class Armada {
 
   async log(id: string, index: number): Promise<string | null> {
     const response = await this.call(`/jobs/${id}/tasks/${String(index)}/log`);
+
+    return response.status === 404 ? null : await response.text();
+  }
+
+  /** Each run of a task that kept a log: for a gang, every rank of every attempt (`TaskRunsSchema`). */
+  async runs(id: string, index: number): Promise<TaskRun[]> {
+    return v.parse(TaskRunsSchema, await (await this.call(`/jobs/${id}/tasks/${String(index)}/runs`)).json()).runs;
+  }
+
+  /** One run's log (`runs`), or null. */
+  async runLog(id: string, index: number, { vessel, attempt }: Pick<TaskRun, 'vessel' | 'attempt'>): Promise<string | null> {
+    const response = await this.call(`/jobs/${id}/tasks/${String(index)}/runs/${vessel}.${String(attempt)}/log`);
 
     return response.status === 404 ? null : await response.text();
   }

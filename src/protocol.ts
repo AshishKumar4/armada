@@ -249,6 +249,14 @@ export const INLINE_BYTES = 32 * 1024;
 
 /** When a task that failed by itself runs again: up to `attempts` runs in all, on one of these exit codes, or on one of
  *  these errors a pushed task's body threw, by name. Each retry waits `backoffSeconds`, doubled each time. */
+/** `GET /jobs/<id>/tasks/<index>/runs`: each run of the task that kept a log, a vessel's attempt at it, and its rank in
+ *  the task's gang (null for one not of a gang, or kept by an earlier Worker, which did not say), by attempt and rank. */
+export const TaskRunsSchema = v.object({
+  runs: v.array(v.object({ vessel: v.string(), attempt: v.pipe(v.number(), v.integer()), rank: v.nullable(v.pipe(v.number(), v.integer())) })),
+});
+
+export type TaskRun = v.InferOutput<typeof TaskRunsSchema>['runs'][number];
+
 export const RetriesSchema = v.object({
   attempts: v.pipe(v.number(), v.integer(), v.minValue(2), v.maxValue(10)),
   backoffSeconds: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(3600)), 1),

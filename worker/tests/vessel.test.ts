@@ -574,13 +574,19 @@ describe('a gang rank', () => {
       await vessel.begin(spec);
       await vessel.alarm();
 
-      return { logged: [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz')), completed: completed.length, relayLogs, stops };
+      const logged = [...artifacts.objects.keys()].filter((key) => key.endsWith('log.gz'));
+
+      return { logged, ranks: logged.map((key) => artifacts.kept.get(key)?.customMetadata), completed: completed.length, relayLogs, stops };
     };
 
     const log = runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'log');
+    // Each says its rank, which its key does not, for its task's runs to list.
+    const ranks = [{ rank: '1' }];
 
-    expect([await kept(false, true), await kept(true, false), await kept(true, true)])
-      .toEqual([{ logged: [log], completed: 0, relayLogs: 1, stops: 0 }, { logged: [log], completed: 0, relayLogs: 1, stops: 1 }, { logged: [log], completed: 1, relayLogs: 1, stops: 0 }]);
+    expect([await kept(false, true), await kept(true, false), await kept(true, true)]).toEqual([
+      { logged: [log], ranks, completed: 0, relayLogs: 1, stops: 0 }, { logged: [log], ranks, completed: 0, relayLogs: 1, stops: 1 },
+      { logged: [log], ranks, completed: 1, relayLogs: 1, stops: 0 },
+    ]);
   });
 
   test('takes a relay only with its gang\'s token, and only to a port under a link id', async () => {

@@ -6,9 +6,9 @@
 import * as v from 'valibot';
 import {
   briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
-  HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json,
+  HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
-import { bundleKey, equal, hmac, packKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
+import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
 import { driverSpec, eventOf } from './hooks';
 import type { ArmadaFleet } from './fleet';
@@ -200,10 +200,31 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
 /** The most jobs `GET /jobs` lists at once. */
 const LISTED = 100;
 
+/** Task `index` of job `id`'s runs that kept a log (`TaskRunsSchema`), read from the bucket, where every rank and attempt
+ *  keeps its own (`runKey`), and each says its rank (`keepLog`). */
+async function runsOf(env: Env, id: string, index: number): Promise<TaskRun[]> {
+  const runs: TaskRun[] = [];
+
+  for (let cursor: string | undefined; ;) {
+    const listed = await env.ARTIFACTS.list({ prefix: `jobs/${id}/tasks/${String(index)}/`, cursor, include: ['customMetadata'] });
+
+    for (const object of listed.objects) {
+      const run = logRun(id, index, object.key);
+      const rank = object.customMetadata?.['rank'];
+
+      if (run !== null) runs.push({ ...run, rank: rank === undefined ? null : Number(rank) });
+    }
+
+    if (!listed.truncated) return runs.toSorted((a, b) => a.attempt - b.attempt || (a.rank ?? -1) - (b.rank ?? -1) || a.vessel.localeCompare(b.vessel));
+    cursor = listed.cursor;
+  }
+}
+
 /** `POST /jobs` starts one (`route`) and `GET /jobs` lists the recent ones; `/jobs/<id>` is its status,
  *  `/events?after=n` its outcomes, `/cancel` ends it, an open job takes `POST /items` and `POST /close`, `GET /items`
- *  lists its items, and `/tasks/<index>/{output,log}` are a task's stored output and log. */
-const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
+ *  lists its items, `/tasks/<index>/{output,log}` are a task's stored output and log, and `/tasks/<index>/runs` lists
+ *  every run of it that kept a log, each at `/tasks/<index>/runs/<vessel>.<attempt>/log`: a gang's every rank. */
+const jobs: Handler = async (request, env, [id, tail, index, leaf, run, file], url) => {
   if (id === undefined) {
     if (request.method !== 'GET') return undefined;
     // `?before=<id>` pages back from a job the last page ended with.
@@ -246,6 +267,15 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf], url) => {
     await job.close();
 
     return Response.json({ closed: id });
+  }
+
+  if (tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && leaf === 'runs' && request.method === 'GET') {
+    if (run === undefined) return Response.json({ runs: await runsOf(env, id, Number(index)) });
+    const named = /^([^/]+)\.(\d+)$/u.exec(run);
+
+    if (file !== 'log' || named?.[1] === undefined || named[2] === undefined || !VESSEL_NAME.test(named[1])) return notFound();
+
+    return await object(env, runKey(id, Number(index), { vessel: named[1], attempt: Number(named[2]) }, 'log'));
   }
 
   if (tail !== 'tasks' || index === undefined || !/^\d+$/u.test(index) || (leaf !== 'output' && leaf !== 'log' && leaf !== 'artifacts')) return undefined;

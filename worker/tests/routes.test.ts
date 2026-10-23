@@ -37,6 +37,31 @@ describe('a task\'s files', () => {
     expect({ kept: [kept?.status, await kept?.text(), kept?.headers.get('content-type')], none: none?.status, earlier: await earlier?.text(), leaf: leaf?.status, missing: missing?.status })
       .toEqual({ kept: [200, 'packed', 'application/gzip'], none: 404, earlier: 'earlier', leaf: 404, missing: 404 });
   });
+
+  // A gang's red ends in one rank's answer, while its cause is often in another rank's log, or an earlier attempt's.
+  test('list every run of a task that kept a log, each gang rank and attempt with its rank, and serve each run\'s log', async () => {
+    const id = '20261011120000-0123abcd';
+    const artifacts = bucket();
+    const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts });
+    const log = { httpMetadata: { contentType: 'text/plain; charset=utf-8' } };
+
+    await artifacts.put(runKey(id, 0, { vessel: 'v2', attempt: 1 }, 'log'), 'rank one', { ...log, customMetadata: { rank: '1' } });
+    await artifacts.put(runKey(id, 0, { vessel: 'v1', attempt: 1 }, 'log'), 'rank zero', { ...log, customMetadata: { rank: '0' } });
+    await artifacts.put(runKey(id, 0, { vessel: 'v1', attempt: 1 }, 'output'), 'its answer');
+    await artifacts.put(runKey(id, 0, { vessel: 'v3', attempt: 2 }, 'log'), 'again', { ...log, customMetadata: { rank: '0' } });
+    // An earlier Worker's log says no rank.
+    await artifacts.put(runKey(id, 0, { vessel: 'v4', attempt: 1 }, 'log'), 'earlier', log);
+    await artifacts.put(runKey(id, 1, { vessel: 'v5', attempt: 1 }, 'log'), 'another task', log);
+    const ask = async (path: string) => await worker.fetch(new Request(`https://armada.test/jobs/${id}/tasks/${path}`, { headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': '7' } }), env);
+    const runs = await (await ask('0/runs'))?.json();
+    const served = await Promise.all(['0/runs/v2.1/log', '0/runs/v3.2/log'].map(async (path) => await (await ask(path))?.text()));
+    const absent = await Promise.all(['0/runs/v2.2/log', '0/runs/v1.1/output', '0/runs/x.1/log', '0/runs/v1/log'].map(async (path) => (await ask(path))?.status));
+
+    expect({ runs, served, absent, none: await (await ask('7/runs'))?.json() }).toEqual({
+      runs: { runs: [{ vessel: 'v4', attempt: 1, rank: null }, { vessel: 'v1', attempt: 1, rank: 0 }, { vessel: 'v2', attempt: 1, rank: 1 }, { vessel: 'v3', attempt: 2, rank: 0 }] },
+      served: ['rank one', 'again'], absent: [404, 404, 404, 404], none: { runs: [] },
+    });
+  });
 });
 
 describe('a task\'s status token', () => {

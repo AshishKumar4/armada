@@ -71,6 +71,16 @@ const LEAVES = { output: 'output', log: 'log.gz', artifacts: 'artifacts.tar.gz' 
 export const runKey = (job: string, index: number, { vessel, attempt }: { readonly vessel: string; readonly attempt: number }, leaf: keyof typeof LEAVES): string =>
   `jobs/${job}/tasks/${String(index)}/${vessel}.${String(attempt)}/${LEAVES[leaf]}`;
 
+/** The run whose log `key` is under task `index` of `job` (`runKey`), or null for any other key. */
+export function logRun(job: string, index: number, key: string): { readonly vessel: string; readonly attempt: number } | null {
+  const [prefix, suffix] = [`jobs/${job}/tasks/${String(index)}/`, `/${LEAVES.log}`];
+
+  if (!key.startsWith(prefix) || !key.endsWith(suffix)) return null;
+  const run = /^([^/]+)\.(\d+)$/u.exec(key.slice(prefix.length, -suffix.length));
+
+  return run?.[1] === undefined || run[2] === undefined ? null : { vessel: run[1], attempt: Number(run[2]) };
+}
+
 /** Where an earlier Worker kept a task's files, under the task itself. */
 export const taskKey = (job: string, index: number, leaf: keyof typeof LEAVES): string => `jobs/${job}/tasks/${String(index)}/${LEAVES[leaf]}`;
 

@@ -715,8 +715,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     }
 
     await must(this.container(), 'packing the log', ['/bin/sh', '-c', `gzip -c ${dir}/log > ${dir}/log.gz 2>/dev/null || : > ${dir}/log.gz`], { ms: EXEC_MS });
+    // A gang rank's log says its rank, which its key does not, for the task's runs to list (`/runs`).
     await this.store(`${dir}/log.gz`, runKey(spec.jobId, current.claim.index, { vessel: spec.name, attempt: current.claim.attempt }, 'log'),
-      { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' });
+      { contentType: 'text/plain; charset=utf-8', contentEncoding: 'gzip' }, current.claim.gang === undefined ? undefined : { rank: String(current.claim.gang.rank) });
   }
 
   /** The values the task started with, replaced in its log before any of it is read. The deployment's secrets are not
@@ -727,11 +728,11 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /**
-   * A file in the container into R2 under `key`, streamed at any size: R2 takes a stream of a length it knows, so the
-   * file's size is read first. Null when there is no such file; else the file's bytes when it is small enough to ride
-   * in the task's outcome.
+   * A file in the container into R2 under `key`, with `customMetadata` beside it, streamed at any size: R2 takes a
+   * stream of a length it knows, so the file's size is read first. Null when there is no such file; else the file's
+   * bytes when it is small enough to ride in the task's outcome.
    */
-  private async store(path: string, key: string, httpMetadata: R2HTTPMetadata): Promise<{ readonly small: ArrayBuffer | null } | null> {
+  private async store(path: string, key: string, httpMetadata: R2HTTPMetadata, customMetadata?: Record<string, string>): Promise<{ readonly small: ArrayBuffer | null } | null> {
     const container = this.container();
     const sized = await run(container, ['stat', '-c', '%s', path], { ms: EXEC_MS });
 
@@ -742,7 +743,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       return await bounded(EXEC_MS, async (signal) => {
         const read = await (await container.exec(['cat', path], { signal })).output();
 
-        await this.env.ARTIFACTS.put(key, read.stdout, { httpMetadata });
+        await this.env.ARTIFACTS.put(key, read.stdout, { httpMetadata, customMetadata });
 
         return { small: read.stdout };
       });
@@ -753,7 +754,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (reading.stdout === null) throw new Error(`reading ${path}: the exec gave no stdout`);
     const known = new FixedLengthStream(size);
 
-    await Promise.all([reading.stdout.pipeTo(known.writable), this.env.ARTIFACTS.put(key, known.readable, { httpMetadata })]);
+    await Promise.all([reading.stdout.pipeTo(known.writable), this.env.ARTIFACTS.put(key, known.readable, { httpMetadata, customMetadata })]);
     const exitCode = await reading.exitCode;
 
     if (exitCode !== 0) throw new Error(`reading ${path} exited ${String(exitCode)}`);
