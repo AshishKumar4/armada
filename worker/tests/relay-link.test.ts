@@ -149,6 +149,7 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
 
         if (Math.floor(Math.max(before, end) / dropAfter) > Math.floor(before / dropAfter)) {
           drops += 1;
+
           if (sending === 'outage' && drops === 1) outageUntil = Date.now() + 4500;
 
           if (drops % 2 === 0) ws.data.cut?.();
