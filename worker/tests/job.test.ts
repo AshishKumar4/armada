@@ -138,8 +138,13 @@ describe('a job with no deadline', () => {
 
     const running = (await unbounded.job.status())?.phase;
 
-    await unbounded.stored.ctx.storage.put('renewed', Date.now() - JOB_LEASE_SECONDS * 1000 - 1);
-    await unbounded.job.alarm();
+    // The client gone: a lease passes, on the object's own clock, with no renewal.
+    try {
+      setSystemTime(Date.now() + JOB_LEASE_SECONDS * 1000 + 1);
+      await unbounded.job.alarm();
+    } finally {
+      setSystemTime();
+    }
 
     expect({ running, gone: (await unbounded.job.status())?.phase, bounded: (await bounded.job.status())?.phase, limits: [unbounded.specs[0]?.deadlineAt, unbounded.specs[0]?.timeout] })
       .toEqual({ running: 'running', gone: 'done', bounded: 'done', limits: [null, null] });
