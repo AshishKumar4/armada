@@ -132,7 +132,8 @@ describe('a job with no deadline', () => {
     const bounded = await job(task);
 
     for (const each of [unbounded, bounded]) {
-      await each.stored.ctx.storage.put({ createdAt: 0, renewed: Date.now() });
+      // Made six hours and more ago, its watchdog on time since.
+      await each.stored.ctx.storage.put({ createdAt: 0, renewed: Date.now(), watched: Date.now() });
       await each.job.alarm();
     }
 
