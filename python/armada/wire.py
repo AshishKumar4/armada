@@ -92,7 +92,7 @@ class Fields:
 
 
 # The wire's version, which every request names in PROTOCOL_HEADER.
-PROTOCOL = 11
+PROTOCOL = 14
 
 PROTOCOL_HEADER = "armada-protocol"
 
