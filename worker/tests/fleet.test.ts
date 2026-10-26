@@ -48,6 +48,26 @@ describe('the fleet', () => {
     expect({ asked: waited.asked, freed, after }).toEqual({ asked: [null, null], freed: [null, 'held', 'held'], after: 'held' });
   });
 
+  // #60: a train's suite waited a median of 530 s for containers that developers' suites held between their tasks.
+  test('grants a job of higher priority before older waiters, and recalls the newest holds of lower ones until it fits', async () => {
+    const fleet = fleetOf(8);
+
+    for (const holder of ['low/v1', 'low/v2']) await fleet.acquire(holder, 4, { deadlineAt });
+    const asked = [await fleet.acquire('older/v1', 4, { deadlineAt }), await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5 })];
+    const renews = [await fleet.renews('low/v1'), await fleet.renews('low/v2')];
+
+    // The recalled container finishes its task and ends: the train's is granted, though the older waiter asks first.
+    await fleet.release('low/v2');
+    const freed = [await fleet.acquire('older/v1', 4, { deadlineAt }), await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5 })];
+    // Jobs of one priority recall nothing of each other.
+    const level = fleetOf(4);
+
+    await level.acquire('a/v1', 4, { deadlineAt });
+    await level.acquire('b/v1', 4, { deadlineAt });
+
+    expect({ asked, renews, freed, level: await level.renews('a/v1') }).toEqual({ asked: [null, null], renews: [true, false], freed: [null, 'held'], level: true });
+  });
+
   test('keeps one line across jobs: a job\'s newer holder waits behind another job\'s older one, however old its own', async () => {
     const fleet = fleetOf(4);
 
@@ -275,6 +295,7 @@ describe('a vessel stopped while the fleet answers', () => {
           return answer(await fleet.acquire('j/v1', 4, { deadlineAt }));
         },
         release: fleet.release.bind(fleet),
+        renews: fleet.renews.bind(fleet),
       })),
       JOB: namespace(() => ({ moved: async () => true })),
     });
@@ -315,5 +336,20 @@ describe('a vessel its job no longer wants', () => {
     await fleet.release('x/v1');
 
     expect({ newer: await fleet.acquire('n/v1', 4, { deadlineAt }), alarm: await stored.ctx.storage.getAlarm() }).toEqual({ newer: 'held', alarm: null });
+  });
+});
+
+describe('a vessel of a job of higher priority (#60)', () => {
+  test('has the fleet recall a lower job\'s container while it waits, which takes no new task', async () => {
+    const fleet = fleetOf(4);
+
+    await fleet.acquire('low/v1', 4, { deadlineAt });
+    const stored = state();
+    const vessel = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ moved: async () => true })) }));
+
+    await vessel.begin({ jobId: 'train', name: 'v1', snapshot: 's', instance: 'standard-4', vcpus: 4, workdir: '/w', commit: null, tmpfs: [], files: {}, bundle: null, output: false, timeout: 60, priority: 5 });
+    await vessel.alarm();
+
+    expect({ low: await fleet.renews('low/v1'), state: await stored.ctx.storage.get('state') }).toEqual({ low: false, state: 'waiting' });
   });
 });

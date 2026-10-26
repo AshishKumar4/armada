@@ -122,6 +122,9 @@ export interface MapOptions {
   readonly lease?: boolean;
   /** The limit for a formed gang to launch all its ranks, once every one has a container, in seconds. Default 300. */
   readonly gangStartTimeout?: number;
+  /** Whose containers start first while the fleet is full: a job of a higher priority waits ahead of lower ones, and
+   *  has their newest containers end at their next task's start until it fits (`JobSpec.priority`). Default 0. */
+  readonly priority?: number;
   readonly label?: string;
   readonly env?: Readonly<Record<string, string>>;
   /** Small files every container gets under `context.files`. */
@@ -424,7 +427,7 @@ abstract class Base<I extends Json, O> {
 
     const spec = {
       recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, budget: options.budget, mode: options.mode, cpu: options.cpu === undefined ? undefined : [options.cpu].flat(), label: options.label, env: options.env, files: options.files, tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
-      deadline: options.deadline, gangStartTimeout: options.gangStartTimeout, lease: options.lease,
+      deadline: options.deadline, gangStartTimeout: options.gangStartTimeout, lease: options.lease, priority: options.priority,
       timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };

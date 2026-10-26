@@ -429,6 +429,8 @@ export interface RunOptions {
   /** The most containers the run takes at once, within the commit's config `pool`: a run beside others on one
    *  deployment, bounded so they share its fleet. What it runs, and so its verdict, is the commit's either way. */
   readonly pool?: number;
+  /** The priority of each of the run's jobs at the fleet (`MapOptions.priority`): a land queue's run goes first. */
+  readonly priority?: number;
   readonly label: string;
   readonly planArgs: readonly string[];
   readonly secrets: readonly string[];
@@ -498,7 +500,7 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
-async function runGraded(armada: Armada, target: string, { deadline, pool: bound, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
+async function runGraded(armada: Armada, target: string, { deadline, pool: bound, priority, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, environment, spec, upload, of } = await commitOf(armada, target);
   const deadlineAt = began + (deadline ?? config.deadline) * 1000;
@@ -514,7 +516,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   if (uploaded !== null) note(`uploaded its pack, ${(uploaded / 1e6).toFixed(1)} MB`);
   const placed = (word: string) => word.replaceAll('{target}', String(config.target)).replaceAll('{timings}', `{files}/${TIMINGS_FILE}`);
   // Each job ends with this run, however it ends: its lease lapses once this process has gone (#50).
-  const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots, mode: config.task.mode, lease: true };
+  const options = { env: spec.env, tmpfs: spec.tmpfs, files: { [TIMINGS_FILE]: JSON.stringify(timings) }, label, armada, slots: config.task.slots, mode: config.task.mode, lease: true, priority };
 
   let planId = 'local';
   // The plan's job, when it ran in a container: an ungraded run reports its status.

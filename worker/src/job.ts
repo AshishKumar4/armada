@@ -559,6 +559,7 @@ export class ArmadaJob extends DurableObject<Env> {
       reserve: Number(this.sql.exec('SELECT ranks FROM vessels WHERE name = ?', name).one()['ranks']) * SIZES[spec.recipe.size].vcpus,
       deadlineAt: spec.deadline === null ? null : ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + spec.deadline * 1000,
       cpu: spec.cpu,
+      priority: spec.priority,
     };
 
     try {

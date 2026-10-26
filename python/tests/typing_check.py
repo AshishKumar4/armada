@@ -132,9 +132,12 @@ def followed(job: Job[int, str]) -> None:
 
 
 # A job's mode is "efficient" or "fast": mypy refuses any other word. Its CPU is one model, or a list, any one of them.
+# Its priority is a whole number.
 def placed(items: list[int]) -> None:
     assert_type(square.stream(items, mode="fast"), Job[int, int])
     square.map(items, mode="slow")  # type: ignore[arg-type]
     genoa: Cpu = {"vendor": "AuthenticAMD", "family": 25, "model": 17}
     assert_type(square.stream(items, cpu=[genoa, {"vendor": "AuthenticAMD", "family": 26, "model": 17}]), Job[int, int])
     square.map(items, cpu="AuthenticAMD/25/17")  # type: ignore[arg-type]
+    assert_type(square.stream(items, priority=5), Job[int, int])
+    square.map(items, priority="high")  # type: ignore[arg-type]

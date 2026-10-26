@@ -56,6 +56,15 @@ describe('a job that ends', () => {
   });
 });
 
+describe('a job\'s priority (#60)', () => {
+  test('reaches every container it starts, which asks the fleet with it; a job that names none has 0', async () => {
+    const urgent = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, priority: 5 });
+    const plain = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
+
+    expect([urgent.specs.map((spec) => spec.priority), plain.specs.map((spec) => spec.priority)]).toEqual([[5], [0]]);
+  });
+});
+
 describe('an open job', () => {
   test('starts vessels for items as they come beside those still alive, takes none once closed, and settles once closed and drained', async () => {
     const task = { item: 'a', argv: ['true'] };
@@ -642,7 +651,7 @@ describe('a job that ended', () => {
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
       ENVIRONMENTS: readyRegistry(),
       FLEET: namespace(() => ({
-        acquire: async () => 'held', release: async () => undefined, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
+        acquire: async () => 'held', release: async () => undefined, renews: async () => true, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
         closed: async (id: string) => {
           if (refuse) throw new Error('the fleet is not answering');
           closed.push(id);

@@ -369,6 +369,9 @@ export const JobSpecSchema = v.object({
   mode: v.optional(ModeSchema, 'efficient'),
   /** The CPUs a container's host may have (`CpusSchema`). A container on another host is replaced before it takes a task. */
   cpu: v.optional(CpusSchema),
+  /** Which job's containers start first while the fleet is full: a higher one waits ahead of lower ones, and has their
+   *  newest containers end at their next task's start until it fits (#60). */
+  priority: v.optional(v.pipe(v.number(), v.integer()), 0),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow

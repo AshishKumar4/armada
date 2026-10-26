@@ -56,6 +56,8 @@ export interface VesselSpec {
   readonly deadlineAt?: number | null;
   /** The CPUs its host may have, any one of them (`JobSpec.cpu`); absent for any. */
   readonly cpu?: readonly Cpu[];
+  /** Its job's priority at the fleet (`JobSpec.priority`); absent for 0. */
+  readonly priority?: number;
 }
 
 /** A stored spec with its later fields filled: an earlier Worker's lacks `slots`, `slotMemoryBytes` and `runtime`. */
@@ -200,7 +202,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // One whose job runs no gang wider than it may borrow past the fleet's cap: it asks before each new task.
         const grant = grantOf(await fleet.acquire(this.holder(spec), spec.vcpus, {
-          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: deadlineOf(spec), renewed: spec.deadlineAt === null,
+          reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: deadlineOf(spec), renewed: spec.deadlineAt === null, priority: spec.priority,
         }));
 
         if (grant === null) {
@@ -383,8 +385,9 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         if (stopping !== '') throw new Error(`the platform asked the container to stop at ${stopping}`);
 
-        // Borrowed vCPUs the fleet recalled take no new task: the slot retires, and the vessel once all of them have.
-        if ((await this.ctx.storage.get<boolean>('borrowed')) === true && !(await this.env.FLEET.getByName(SINGLE).renews(this.holder(spec)))) return 'retired';
+        // vCPUs the fleet recalled, lent or wanted by a job of a higher priority, take no new task: the slot retires, and
+        // the vessel once all of them have.
+        if (!(await this.env.FLEET.getByName(SINGLE).renews(this.holder(spec)))) return 'retired';
         const claim = await job.claim(spec.name, slot);
 
         if (claim === null) return 'retired';

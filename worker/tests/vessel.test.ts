@@ -66,7 +66,7 @@ interface Run {
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
-  fleet = { acquire: async () => 'held', release: async () => undefined }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
+  fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
 }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
@@ -165,6 +165,7 @@ describe('a task of a job with no limits', () => {
       },
       release: async (holder: string) => { calls.push(`release ${holder}`); },
       extend: async (holder: string) => { calls.push(`extend ${holder}`); },
+      renews: async () => true,
     };
 
     // Taken up an hour into its task, as a restarted object finds it.
@@ -207,14 +208,20 @@ describe('a task of a job with no limits', () => {
 });
 
 describe('a vessel\'s place in its fleet', () => {
-  test('takes no new task once the fleet recalls them: it finishes the one it runs, then retires', async () => {
-    let renewals = 0;
+  test('takes no new task once the fleet recalls its vCPUs, lent or held (#60): it finishes the one it runs, then retires', async () => {
+    const recalled = async (grant: 'borrowed' | 'held') => {
+      let renewals = 0;
 
-    const { exits, claims, failed, retired } = await run(0, {
-      tasks: 2, fleet: { acquire: async () => 'borrowed', renews: async () => (renewals += 1) === 1, release: async () => undefined },
-    });
+      const { exits, claims, failed, retired } = await run(0, {
+        tasks: 2, fleet: { acquire: async () => grant, renews: async () => (renewals += 1) === 1, release: async () => undefined },
+      });
 
-    expect({ exits, claims, failed, retired }).toEqual({ exits: [0], claims: 1, failed: [], retired: true });
+      return { exits, claims, failed, retired };
+    };
+
+    const after = { exits: [0], claims: 1, failed: [], retired: true };
+
+    expect({ lent: await recalled('borrowed'), held: await recalled('held') }).toEqual({ lent: after, held: after });
   });
 
   test('starts nothing while a fleet still on earlier code, as one is for minutes after a deploy, answers it is full', async () => {
@@ -652,7 +659,7 @@ describe('a vessel\'s boot', () => {
 
       const vessel = new ArmadaVessel(stored.ctx, world({
         // The fleet has no room at the first ask, and has 10 s later.
-        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined })),
+        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined, renews: async () => true })),
         JOB: namespace(() => ({
           moved: async (_name: string, to: string) => {
             moved.push(to);
@@ -700,7 +707,7 @@ describe('a vessel\'s boot', () => {
     const stored = state(box);
 
     const vessel = new ArmadaVessel(stored.ctx, world({
-      FLEET: namespace(() => ({ acquire: async () => 'held', release })),
+      FLEET: namespace(() => ({ acquire: async () => 'held', release, renews: async () => true })),
       JOB: namespace(() => ({
         moved: async (_name: string, to: string) => {
           moved.push(to);
