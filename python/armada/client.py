@@ -18,6 +18,9 @@ CONFIG_DIR = Path.home() / ".config" / "armada"
 # How often a read is asked of a runner whose gateway failed to answer it.
 READ_ATTEMPTS = 5
 
+# How often a bundle is stored while another client stores the same at that moment.
+STORE_ATTEMPTS = 6
+
 
 @dataclass(frozen=True)
 class Connection:
@@ -177,12 +180,21 @@ class Armada:
         return None if response.status == 404 else response.body
 
     def upload_bundle(self, content: bytes) -> str:
-        """Stores a bundle once, under the sha-256 of its bytes, and returns that digest."""
+        """Stores a bundle once, under the sha-256 of its bytes, and returns that digest. While another client stores the
+        same bundle at that moment, the Worker answers 429 and it is asked for again (#62)."""
         import hashlib
 
         digest = hashlib.sha256(content).hexdigest()
-        if self.call(f"/bundles/{digest}", "HEAD").status == 404:
-            self.call(f"/bundles/{digest}", "PUT", content)
+        attempt = 1
+        while self.call(f"/bundles/{digest}", "HEAD").status == 404:
+            try:
+                self.call(f"/bundles/{digest}", "PUT", content)
+                break
+            except RequestError as failed:
+                if failed.status != 429 or attempt == STORE_ATTEMPTS:
+                    raise
+            time.sleep(attempt)
+            attempt += 1
         return digest
 
     def set_secret(self, name: str, value: str) -> None:

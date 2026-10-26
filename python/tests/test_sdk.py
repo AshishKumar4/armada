@@ -347,6 +347,40 @@ class TestClient(unittest.TestCase):
         finally:
             server.shutdown()
 
+    def test_asks_for_a_bundle_another_client_stores_at_the_same_moment_again(self) -> None:
+        # #62: the Worker answers 429 while another client's write of the same bundle has not landed yet.
+        heads = [404, 200]
+        puts = [429]
+        seen: list[str] = []
+
+        class Fake(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args: object) -> None:
+                pass
+
+            def do_HEAD(self) -> None:
+                seen.append("HEAD")
+                self.send_response(heads.pop(0))
+                self.end_headers()
+
+            def do_PUT(self) -> None:
+                seen.append("PUT")
+                self.rfile.read(int(self.headers.get("content-length", "0")))
+                payload = json.dumps({"error": "another client is storing it at the same moment: ask again"}).encode()
+                self.send_response(puts.pop(0))
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Fake)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            armada = Armada(Connection(f"http://127.0.0.1:{server.server_port}", "tok"))
+            digest = armada.upload_bundle(b"a bundle")
+            self.assertEqual((len(digest), seen), (64, ["HEAD", "PUT", "HEAD"]))
+        finally:
+            server.shutdown()
+
 
 class TestTaskShapes(unittest.TestCase):
     def test_retries_split_codes_from_names(self) -> None:

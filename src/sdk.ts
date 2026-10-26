@@ -16,6 +16,9 @@ export const READ_ATTEMPTS = 5;
 /** The largest pack, in bytes, sent in one request; a Worker takes 100 MB, and R2 wants every part but the last alike. */
 export const PACK_PART = 64 * 1024 * 1024;
 
+/** The times a pack or bundle is stored while another client stores the same at that moment (`storeOnce`). */
+const STORE_ATTEMPTS = 6;
+
 export const ConnectionSchema = v.object({ url: v.string(), token: v.string(), account: v.string() });
 
 export type Connection = v.InferOutput<typeof ConnectionSchema>;
@@ -183,14 +186,38 @@ export class Armada {
    *  that died left. */
   async uploadPack(project: string, { sha, base, shallow = [] }: Pick<Commit, 'sha' | 'base' | 'shallow'>, pack: () => Blob): Promise<number | null> {
     const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}${shallow.length === 0 ? '' : `&shallow=${shallow.join(',')}`}`;
+    let body: Blob | undefined;
 
-    if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
-    const body = pack();
+    return await this.storeOnce(path, async () => {
+      body ??= pack();
+      await this.putPack(path, body);
 
+      return body.size;
+    });
+  }
+
+  /** Stores what `path` names once: none when the runner has it, else `put`'s, asked again while another client stores
+   *  the same at that moment, which the runner answers 429 (#62); what `put` answered, or null for none. */
+  private async storeOnce<T>(path: string, put: () => Promise<T>): Promise<T | null> {
+    for (let attempt = 1; ; attempt += 1) {
+      if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
+
+      try {
+        return await put();
+      } catch (cause) {
+        if (!(cause instanceof RequestError) || cause.status !== 429 || attempt >= STORE_ATTEMPTS) throw cause;
+      }
+
+      await Bun.sleep(attempt * 1000);
+    }
+  }
+
+  /** `body` at `path`: in one PUT, or in parts past PACK_PART bytes. */
+  private async putPack(path: string, body: Blob): Promise<void> {
     if (body.size <= PACK_PART) {
       await this.call(path, { method: 'PUT', body });
 
-      return body.size;
+      return;
     }
 
     const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}&uploads`, {}));
@@ -211,8 +238,6 @@ export class Armada {
       await Promise.allSettled([this.call(uploading, { method: 'DELETE' })]);
       throw cause;
     }
-
-    return body.size;
   }
 
   /** Stores a function's bundle once, under the sha-256 of its bytes, and returns that digest. */
@@ -220,7 +245,7 @@ export class Armada {
     const digest = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
     const path = `/bundles/${digest}`;
 
-    if ((await this.call(path, { method: 'HEAD' })).status === 404) await this.call(path, { method: 'PUT', body: bytes });
+    await this.storeOnce(path, async () => await this.call(path, { method: 'PUT', body: bytes }));
 
     return digest;
   }

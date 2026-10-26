@@ -62,6 +62,37 @@ type Handler = (request: Request, env: Env, path: readonly string[], url: URL) =
 
 const Parts = v.object({ parts: v.array(v.object({ partNumber: v.pipe(v.number(), v.integer(), v.minValue(1)), etag: v.string() })) });
 
+/** How often a write R2 refused for another client's looks for that client's object, and for how long: as long as a
+ *  pack of PACK_PART bytes takes to arrive over a slow link. */
+const OTHER_POLL_MS = 1000;
+
+const OTHER_WAIT_MS = 30_000;
+
+/** What a request answers when another client's write of the same pack or bundle neither landed nor failed in time. */
+const contended = (key: string): Response => Response.json({ error: `another client is storing ${key} at the same moment: ask again` }, { status: 429 });
+
+/** `write` of `key`, whose every writer stores the same content: a pack or a bundle. R2 takes one write a second to a
+ *  key and refuses another with error 10058 at the end of its message, so a client storing what another stores at the
+ *  same moment waits for the other's object (#62). Whether this write stored it, the other client did, or neither has
+ *  yet. The body is not written again: a pack streams through, and a Worker holds no copy of 64 MiB. */
+async function storeOnce(bucket: R2Bucket, key: string, write: () => Promise<void>): Promise<'stored' | 'present' | 'contended'> {
+  try {
+    await write();
+
+    return 'stored';
+  } catch (cause) {
+    if (!(cause instanceof Error) || !cause.message.endsWith('(10058)')) throw cause;
+  }
+
+  for (let waited = 0; waited < OTHER_WAIT_MS; waited += OTHER_POLL_MS) {
+    await scheduler.wait(OTHER_POLL_MS);
+
+    if ((await bucket.head(key)) !== null) return 'present';
+  }
+
+  return 'contended';
+}
+
 /** `/packs/<project>/<sha>/<base>[?shallow=<sha>,…]`: a commit's pack, stored once (`packKey`), with the shallow
  *  boundary its client sent (`CommitSchema`). A pack larger than a request may carry
  *  arrives in parts: `POST ?uploads` opens it, `PUT ?upload=<id>&part=<n>` stores each, `POST ?upload=<id>` with the
@@ -82,7 +113,15 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
   }
 
   if (upload !== null && request.method === 'POST') {
-    await env.ARTIFACTS.resumeMultipartUpload(key, upload).complete(v.parse(Parts, await request.json()).parts);
+    const { parts } = v.parse(Parts, await request.json());
+    const multipart = env.ARTIFACTS.resumeMultipartUpload(key, upload);
+
+    const stored = await storeOnce(env.ARTIFACTS, key, async () => { await multipart.complete(parts); });
+
+    if (stored === 'contended') return contended(key);
+
+    // Another client's pack took the key: this upload's parts are given back, not left to the bucket's lifecycle.
+    if (stored === 'present') await multipart.abort();
 
     return Response.json({ stored: key });
   }
@@ -93,10 +132,11 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
     return Response.json({ aborted: upload });
   }
 
-  if (request.method !== 'PUT' || request.body === null) return undefined;
-  await env.ARTIFACTS.put(key, request.body);
+  const body = request.body;
 
-  return Response.json({ stored: key });
+  if (request.method !== 'PUT' || body === null) return undefined;
+
+  return await storeOnce(env.ARTIFACTS, key, async () => { await env.ARTIFACTS.put(key, body); }) === 'contended' ? contended(key) : Response.json({ stored: key });
 };
 
 /** `POST /tasks` records a push: each id now runs from its bundle, and the project's ids it no longer exports go. */
@@ -126,7 +166,8 @@ const bundles: Handler = async (request, env, [digest]) => {
   const actual = hex(await crypto.subtle.digest('SHA-256', bytes));
 
   if (actual !== digest) return Response.json({ error: `the bundle's digest is ${actual}, not ${digest}` }, { status: 400 });
-  await env.ARTIFACTS.put(bundleKey(digest), bytes);
+
+  if (await storeOnce(env.ARTIFACTS, bundleKey(digest), async () => { await env.ARTIFACTS.put(bundleKey(digest), bytes); }) === 'contended') return contended(bundleKey(digest));
   await registry.uploaded(digest);
 
   return Response.json({ stored: digest });

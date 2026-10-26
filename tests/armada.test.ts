@@ -471,6 +471,43 @@ describe('uploading a pack', () => {
     }
   });
 
+  // #62: a run lost every outcome when another run of its commit stored the same pack at that moment.
+  test('one another client stores at the same moment is asked for again: taken once there, else stored', async () => {
+    const seen: string[] = [];
+    // What the runner answers each HEAD and PUT, in order.
+    const heads = [404, 200, 404, 404];
+    const puts = [429, 429, 200];
+    const original = globalThis.fetch;
+
+    globalThis.fetch = fakeFetch(async (request) => {
+      seen.push(request.method);
+
+      if (request.method === 'HEAD') return new Response(null, { status: heads.shift() ?? 500 });
+
+      const status = puts.shift() ?? 500;
+
+      return Response.json(status === 200 ? { stored: 'key' } : { error: 'another client is storing it at the same moment: ask again' }, { status });
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+      let packed = 0;
+
+      const pack = () => {
+        packed += 1;
+
+        return new Blob([new Uint8Array(5)]);
+      };
+
+      const taken = await armada.uploadPack('app', { sha: 'd'.repeat(40), base: 'root' }, pack);
+      const stored = await armada.uploadPack('app', { sha: 'e'.repeat(40), base: 'root' }, pack);
+
+      expect({ taken, stored, packed, seen }).toEqual({ taken: null, stored: 5, packed: 2, seen: ['HEAD', 'PUT', 'HEAD', 'HEAD', 'PUT', 'HEAD', 'PUT'] });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   test('a part that fails aborts the upload, so its parts don\'t stay, and the failure is the error', async () => {
     const seen: string[] = [];
     const original = globalThis.fetch;
