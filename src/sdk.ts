@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun } from './protocol';
+import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -296,6 +296,15 @@ export class Armada {
     if (answer.status === 404) throw new RequestError(404, `no job ${id} in this deployment`);
 
     return v.parse(JobStatusSchema, await answer.json());
+  }
+
+  /** Task `index` of job `id`: what it ran, where it stands, and once it ended, how long its last run took and where. */
+  async task(id: string, index: number): Promise<TaskStatus> {
+    const answer = await this.call(`/jobs/${id}/tasks/${String(index)}`);
+
+    if (answer.status === 404) throw new RequestError(404, `no task ${String(index)} in job ${id}`);
+
+    return v.parse(TaskStatusSchema, await answer.json());
   }
 
   /** Outcomes after `after`, in batches, and whether the job is done. */

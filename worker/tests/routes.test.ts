@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { JobSpecSchema, TaskStatusSchema } from '../../src/protocol';
+import { JobSpecSchema, PROTOCOL, TaskStatusSchema } from '../../src/protocol';
 import { runKey, taskKey } from '../src/env';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
@@ -118,6 +118,39 @@ describe('a task\'s status token', () => {
       stuck: ['done', 'failed', 'cancelled', [['v2', 0, 1]]],
       stopped: ['failed', []],
       refused: [403, 403, 403, 404, 404],
+    });
+  });
+});
+
+// #61: finding which of Dew's test files made its suite slow meant matching verdict rows to timings for 15 minutes.
+describe('a job\'s task', () => {
+  test('says at /jobs/<job>/tasks/<index> what it ran, how long its last run took, and where, as its status token reads it', async () => {
+    const id = '20261026120000-0123abcd';
+    const host = { vendor: 'AuthenticAMD', family: 25, model: 17, name: 'AMD EPYC', level: 4 };
+    const env = world({ JOB: namespace(() => job), ENVIRONMENTS: readyRegistry(), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })) });
+    const job = new ArmadaJob(state().ctx, env);
+    const slow = { item: { files: ['tests/test_slow.py'] }, argv: ['pytest', 'tests/test_slow.py'] };
+    const items = [slow, { item: 'b', argv: ['true'] }];
+
+    await job.create(id, v.parse(JobSpecSchema, { recipe: {}, items, run: { kind: 'command' }, mode: 'fast' }), 'https://armada.test');
+    await job.alarm();
+    const claim = await job.claim('v1');
+
+    if (claim === null || 'waitMs' in claim) throw new Error('v1 got no task');
+    await job.accept('v1', 0, 0, { slot: 0, attempt: 1 });
+    await job.complete('v1', { index: 0, kind: 'exited', exitCode: 0, seconds: 412.5, vessel: 'v1', attempt: 1, tail: '', output: false, host }, 1000);
+
+    const ask = async (path: string, as: string) => {
+      const answer = await worker.fetch(new Request(`https://armada.test${path}`, { headers: { authorization: `Bearer ${as}`, 'armada-protocol': String(PROTOCOL) } }), env);
+
+      return answer.status === 200 ? v.parse(TaskStatusSchema, await answer.json()) : answer.status;
+    };
+
+    const [landed, queued, absent, token] = [await ask(`/jobs/${id}/tasks/0`, TOKEN), await ask(`/jobs/${id}/tasks/1`, TOKEN), await ask(`/jobs/${id}/tasks/2`, TOKEN), await ask(`/status/${id}/0`, claim.env['ARMADA_STATUS_TOKEN'] ?? '')];
+
+    expect({ landed, queued, absent, token }).toEqual({
+      landed: { job: id, phase: 'running', index: 0, state: 'exited', attempt: 1, running: [], exitCode: 0, item: slow.item, argv: slow.argv, seconds: 412.5, vessel: 'v1', host },
+      queued: { job: id, phase: 'running', index: 1, state: 'queued', attempt: 0, running: [], item: 'b', argv: ['true'] }, absent: 404, token: landed,
     });
   });
 });

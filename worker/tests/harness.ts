@@ -8,7 +8,7 @@ import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { mock } from 'bun:test';
 import { timingSafeEqual } from 'node:crypto';
 import * as v from 'valibot';
-import { JsonSchema, type Json } from '../../src/protocol';
+import { JsonSchema, TaskStatusSchema, type Json, type TaskStatus } from '../../src/protocol';
 import type { Env } from '../src/env';
 import type { ArmadaJob } from '../src/job';
 import type { RunEnd } from '../src/runs';
@@ -295,9 +295,16 @@ export function container(answer: Answer, received?: (argv: readonly string[], b
   return machine as Container;
 }
 
+/** Task `index`'s status as its job answers it (`TaskStatusSchema`), or why there is none. */
+export async function statusOf(job: Pick<ArmadaJob, 'taskStatus'>, index: number): Promise<{ readonly status: TaskStatus } | { readonly refused: string }> {
+  const said = await job.taskStatus(index);
+
+  return 'status' in said ? { status: v.parse(TaskStatusSchema, JSON.parse(said.status)) } : said;
+}
+
 /** How `vessel` would say its run of task `index` ended (`RunEnd`): its newest run of the task, as its job holds it. */
 export async function runOf(job: Pick<ArmadaJob, 'taskStatus'>, vessel: string, index: number): Promise<RunEnd | undefined> {
-  const said = await job.taskStatus(index);
+  const said = await statusOf(job, index);
   const run = 'status' in said ? said.status.running.findLast((each) => each.vessel === vessel) : undefined;
 
   return run === undefined ? undefined : { slot: run.slot, attempt: run.attempt };

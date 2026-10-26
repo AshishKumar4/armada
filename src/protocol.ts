@@ -495,19 +495,25 @@ export const JobStatusSchema = v.object({
 
 export type JobStatus = v.InferOutput<typeof JobStatusSchema>;
 
-/** A task's status, as `GET /status/<job>/<index>` answers its job's status token: the job's phase, the task's state and
- *  attempt, every run of it that may still be going, by the container its tasks know as ARMADA_VESSEL (every rank of a
- *  gang, each copy of a repeated one, one the job stopped until its process or container is gone), and once it ended,
- *  its last outcome's exit code and reason. */
+/** A task's status, as `GET /status/<job>/<index>` answers its job's status token and `GET /jobs/<job>/tasks/<index>`
+ *  the deployment's bearer: the job's phase, the task's item and argv, its state and attempt, every run of it that may
+ *  still be going, by the container its tasks know as ARMADA_VESSEL (every rank of a gang, each copy of a repeated one,
+ *  one the job stopped until its process or container is gone), and once it ended, its last outcome's exit code,
+ *  reason, seconds, and the container and host it ran on (#61). */
 export const TaskStatusSchema = v.object({
   job: v.string(),
   phase: JobStatusSchema.entries.phase,
   index: v.number(),
+  item: JsonSchema,
+  argv: TaskSchema.entries.argv,
   state: v.picklist(['queued', 'running', 'exited', 'failed']),
   attempt: v.number(),
   running: v.array(v.object({ vessel: v.string(), slot: v.number(), attempt: v.number(), started: v.number() })),
   exitCode: v.optional(v.number()),
   reason: OutcomeSchema.entries.reason,
+  seconds: v.optional(v.number()),
+  vessel: v.optional(v.string()),
+  host: OutcomeSchema.entries.host,
 });
 
 export type TaskStatus = v.InferOutput<typeof TaskStatusSchema>;

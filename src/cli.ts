@@ -34,7 +34,7 @@ Usage:
                                        print the verdict armada run stored for the commit
   armada push                          send this project's tasks (armada.config.ts) to armada
   armada dev                           push them again on every save
-  armada status <job-id>               print a job's status as JSON
+  armada status <job-id> [<index>]     print a job's status as JSON, or one task's: its item, how long it ran, and where
   armada dashboard [--serve=<port>] [--all]
                                        open the deployment's dashboard in your browser, signed in;
                                        --serve serves it from this machine instead; --all reads every
@@ -106,7 +106,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
-  ['status', { options: [], words: 1 }],
+  ['status', { options: [], words: 2 }],
   ['dashboard', { options: ['serve=', 'all'], words: 0 }],
   ['secret', { options: [], words: 2 }],
   ['webhook', { options: ['repo=', 'branches=', 'pull-requests', 'token-secret='], words: 2 }],
@@ -849,11 +849,15 @@ async function main(): Promise<number> {
     case 'dev':
       return await dev(connect());
 
-    case 'status':
+    case 'status': {
       if (target === undefined) throw new Error('status needs a job id, which map and run print');
-      console.log(JSON.stringify(await connect().status(target), null, 2));
+      const index = words[1];
+
+      if (index !== undefined && !/^\d+$/u.test(index)) throw new Error(`status takes a task's index after its job id, not ${index}`);
+      console.log(JSON.stringify(index === undefined ? await connect().status(target) : await connect().task(target, Number(index)), null, 2));
 
       return 0;
+    }
 
     case 'secret':
       return await secret(connect(), target, words[1]);

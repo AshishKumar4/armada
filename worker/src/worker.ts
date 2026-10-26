@@ -12,7 +12,7 @@ import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusTo
 import { retentionOf } from './environments';
 import { driverSpec, eventOf } from './hooks';
 import type { ArmadaFleet } from './fleet';
-import { fleetRefusal, VESSEL_NAME } from './job';
+import { fleetRefusal, VESSEL_NAME, type ArmadaJob } from './job';
 
 export { ArmadaJob } from './job';
 
@@ -263,7 +263,8 @@ async function runsOf(env: Env, id: string, index: number): Promise<TaskRun[]> {
 
 /** `POST /jobs` starts one (`route`) and `GET /jobs` lists the recent ones; `/jobs/<id>` is its status,
  *  `/events?after=n` its outcomes, `/cancel` ends it, an open job takes `POST /items` and `POST /close`, `GET /items`
- *  lists its items, `/tasks/<index>/{output,log}` are a task's stored output and log, and `/tasks/<index>/runs` lists
+ *  lists its items, `/tasks/<index>` is a task's status (`TaskStatusSchema`), `/tasks/<index>/{output,log}` its stored
+ *  output and log, and `/tasks/<index>/runs` lists
  *  every run of it that kept a log, each at `/tasks/<index>/runs/<vessel>.<attempt>/log`: a gang's every rank. */
 const jobs: Handler = async (request, env, [id, tail, index, leaf, run, file], url) => {
   if (id === undefined) {
@@ -309,6 +310,8 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf, run, file], u
 
     return Response.json({ closed: id });
   }
+
+  if (tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && leaf === undefined && request.method === 'GET') return await taskAnswer(job, Number(index));
 
   if (tail === 'tasks' && index !== undefined && /^\d+$/u.test(index) && leaf === 'runs' && request.method === 'GET') {
     if (run === undefined) return Response.json({ runs: await runsOf(env, id, Number(index)) });
@@ -685,9 +688,14 @@ async function statused(request: Request, env: Env, [job, index, ...extra]: read
     return Response.json({ error: 'forbidden' }, { status: 403 });
   }
 
-  const answer = await env.JOB.getByName(job).taskStatus(Number(index));
+  return await taskAnswer(env.JOB.getByName(job), Number(index));
+}
 
-  return 'refused' in answer ? Response.json({ error: answer.refused }, { status: answer.code }) : Response.json(answer.status);
+/** Task `index` of `job`'s status (`TaskStatusSchema`), or why there is none, for its status token and the bearer. */
+async function taskAnswer(job: DurableObjectStub<ArmadaJob>, index: number): Promise<Response> {
+  const answer = await job.taskStatus(index);
+
+  return 'refused' in answer ? Response.json({ error: answer.refused }, { status: answer.code }) : new Response(answer.status, { headers: { 'content-type': 'application/json' } });
 }
 
 export default {

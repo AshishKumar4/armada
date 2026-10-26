@@ -485,7 +485,7 @@ armada run <commit|worktree> [--label=<text>] [--secrets=<A,B>] [--json] [-- <pl
 armada verdict <commit|worktree> [--json]
 armada push
 armada dev
-armada status <job-id>
+armada status <job-id> [<index>]
 armada dashboard [--serve=<port>] [--all]
 armada secret set <NAME> | list | delete <NAME>
 armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-requests] [--token-secret=NAME]

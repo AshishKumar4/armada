@@ -835,6 +835,37 @@ describe('the CLI following a job', () => {
   });
 });
 
+describe('armada status', () => {
+  test('prints one task\'s item, seconds and container after its job id, and refuses an index that is not one (#61)', async () => {
+    const task = { job: 'j1', phase: 'done', index: 3, item: { files: ['tests/test_slow.py'] }, argv: ['pytest'], state: 'exited', attempt: 1, running: [], exitCode: 0, seconds: 412.5, vessel: 'v7' };
+    const asked: string[] = [];
+
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        asked.push(new URL(request.url).pathname);
+
+        return Response.json(task);
+      },
+    });
+
+    try {
+      const status = async (...words: string[]) => {
+        const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'status', ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe' });
+
+        return { exit: await cli.exited, out: await new Response(cli.stdout).text() };
+      };
+
+      const printed = await status('j1', '3');
+      const refused = await status('j1', 'x');
+
+      expect({ printed: [printed.exit, JSON.parse(printed.out)], refused: refused.exit, asked }).toEqual({ printed: [0, task], refused: 2, asked: ['/jobs/j1/tasks/3'] });
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
 describe('armada verdict', () => {
   test('prints the verdict armada run stored for the commit, and exits 0 green, 1 red and 2 with none', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-verdict-'));

@@ -1443,12 +1443,12 @@ export class ArmadaJob extends DurableObject<Env> {
     return (await this.ctx.storage.get<string>('key')) ?? '';
   }
 
-  /** Task `index`'s status for its job's status token (`GET /status/<job>/<index>`), with every run of it that may
-   *  still be going (`Runs`); or why there is none: the job has no such task, or an earlier Worker made the job and
-   *  recorded none of its runs, so none can be said to be over. */
-  async taskStatus(index: number): Promise<{ readonly status: TaskStatus } | { readonly refused: string; readonly code: 404 | 409 }> {
+  /** Task `index`'s status (`TaskStatusSchema`), with every run of it that may still be going (`Runs`), as JSON: an
+   *  item is too deep a type for an RPC's. Or why there is none: the job has no such task, or an earlier Worker made the
+   *  job and recorded none of its runs, so none can be said to be over. */
+  async taskStatus(index: number): Promise<{ readonly status: string } | { readonly refused: string; readonly code: 404 | 409 }> {
     const id = await this.ctx.storage.get<string>('id');
-    const task = this.sql.exec<{ state: string; attempts: number }>('SELECT state, attempts FROM tasks WHERE idx = ?', index).toArray()[0];
+    const task = this.sql.exec<{ state: string; attempts: number; item: string }>('SELECT state, attempts, item FROM tasks WHERE idx = ?', index).toArray()[0];
 
     if (id === undefined || task === undefined) return { refused: 'no such task', code: 404 };
 
@@ -1457,13 +1457,14 @@ export class ArmadaJob extends DurableObject<Env> {
     const [last] = this.sql.exec<{ outcome: string }>(`SELECT outcome FROM events WHERE json_extract(outcome, '$.index') = ? ORDER BY seq DESC LIMIT 1`, index).toArray();
     const ended = task.state === 'exited' || task.state === 'failed' ? task.state : undefined;
     const outcome = ended === undefined || last === undefined ? undefined : v.parse(OutcomeSchema, JSON.parse(last.outcome));
+    const { item, argv } = v.parse(TaskSchema, JSON.parse(task.item));
 
-    return {
-      status: {
-        job: id, phase, index, attempt: task.attempts, state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
-        running: this.runs.of(index), exitCode: outcome?.exitCode, reason: outcome?.reason,
-      },
+    const status: TaskStatus = {
+      job: id, phase, index, item, argv, attempt: task.attempts, state: ended ?? (task.state === 'running' || task.state === 'landing' ? 'running' : 'queued'),
+      running: this.runs.of(index), exitCode: outcome?.exitCode, reason: outcome?.reason, seconds: outcome?.seconds, vessel: outcome?.vessel, host: outcome?.host,
     };
+
+    return { status: JSON.stringify(status) };
   }
 
   /** The pushed bundle the job runs from, or null for a command job, one never made, or one done. */

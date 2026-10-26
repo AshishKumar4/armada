@@ -5,7 +5,7 @@ import { CPU_INFO } from '../src/container';
 import { ArmadaFleet } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
 import { ArmadaVessel } from '../src/vessel';
-import { container, namespace, readyRegistry, state, world, type Answer, type Stored } from './harness';
+import { container, namespace, readyRegistry, state, statusOf, world, type Answer, type Stored } from './harness';
 
 afterEach(() => { setSystemTime(); });
 
@@ -124,7 +124,7 @@ describe('a task whose vessel loses its claim reply (#45)', () => {
 
     // The job has assigned task 0, but the original vessel object never receives the answer or persists a Current.
     await Promise.race([run.vessel('v1').vessel.alarm(), run.claimed]);
-    expect(await run.open.taskStatus(0)).toMatchObject({ status: { state: 'running', attempt: 1 } });
+    expect(await statusOf(run.open, 0)).toMatchObject({ status: { state: 'running', attempt: 1 } });
     expect(await run.vessel('v1').stored.ctx.storage.get('slot:0')).toBeUndefined();
 
     // Every other task runs, and the surviving vessel retires. The reset object resumes its real worker alarm.
@@ -160,7 +160,7 @@ describe('a task whose vessel loses its claim reply (#45)', () => {
     // The old slot's ownership is ambiguous. Its container must be stopped and its tasks recovered, not reused.
     expect((await run.open.status())?.vessels.find(({ name }) => name === 'v1')?.state).toBe('failed');
     expect(run.launches).not.toContain('v1');
-    expect(await run.open.taskStatus(0)).toMatchObject({ status: { state: 'queued', attempt: 1, running: [] } });
+    expect(await statusOf(run.open, 0)).toMatchObject({ status: { state: 'queued', attempt: 1, running: [] } });
   });
 
   test('releases a held green when the lost claim belonged to its other copy, without losing the answered copy', async () => {
@@ -200,7 +200,7 @@ describe('a task whose vessel loses its claim reply (#45)', () => {
     await run.restart('v1').alarm();
     expect((await run.open.status())?.vessels.find(({ name }) => name === 'v1')?.state).toBe('failed');
     expect(run.launches.filter((name) => name === 'v1')).toHaveLength(1);
-    expect(await run.open.taskStatus(0)).toMatchObject({ status: { state: 'queued', attempt: 1, running: [] } });
+    expect(await statusOf(run.open, 0)).toMatchObject({ status: { state: 'queued', attempt: 1, running: [] } });
   });
 
   test('repairs a persisted orphan left on a retired vessel by an earlier worker', async () => {
@@ -275,7 +275,7 @@ describe('a task whose vessel is actually lost or silent (#45 controls)', () => 
     expect((await run.open.status())?.vessels.find(({ name }) => name === 'v2')?.state).toBe('done');
     lost.resolve();
     await losing;
-    expect(await run.open.taskStatus(0)).toMatchObject({ status: { state: 'queued', attempt: 1 } });
+    expect(await statusOf(run.open, 0)).toMatchObject({ status: { state: 'queued', attempt: 1 } });
     await Promise.race([run.vessel('v3').vessel.alarm(), booting.promise]);
 
     for (let tick = 1; tick <= 32; tick += 1) {
@@ -354,7 +354,7 @@ describe('a task whose container ended before its launch', () => {
 
     await run.vessel('v1').vessel.alarm();
     expect((await run.open.status())?.vessels.find(({ name }) => name === 'v1')?.state).toBe('failed');
-    expect(await run.open.taskStatus(0)).toMatchObject({ status: { state: 'queued', attempt: 1 } });
+    expect(await statusOf(run.open, 0)).toMatchObject({ status: { state: 'queued', attempt: 1 } });
 
     for (let tick = 1; tick <= 40 && !(await run.open.events(0)).done; tick += 1) {
       setSystemTime(start + tick * 15_000);
