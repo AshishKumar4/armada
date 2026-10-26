@@ -286,22 +286,21 @@ describe('destroy, against a fake wrangler and fake named deployment only', () =
     expect(missing.state).toBeNull();
   });
 
-  test('refuses a prefix even when the exact Worker exists, including a matching name on a later account page', async () => {
+  // #55: `armada`, the default name, is a prefix of `armada-kinu` and `armada-dew7`, and could not be destroyed.
+  test('destroys exactly its own name beside deployments it is a prefix of, with or without a dash, on any account page', async () => {
     const fleet = new Fleet();
 
-    fleet.scripts.unshift({ id: 'armada' });
+    for (const other of [`${NAME}0`, `${NAME}-kinu`]) {
+      fleet.scripts.push({ id: other });
+      fleet.namespaces.push({ id: `${other}-vessel`, script: other, class: 'ArmadaVessel' });
+      fleet.applications.push({ id: `${other}-app`, name: `${other}-armadavessel`, durable_objects: { namespace_id: `${other}-vessel` } });
+    }
+
     fleet.twoScriptPages = true;
-    expect(await settled(destroyDeployment('armada', ACCOUNT, true, fleet))).toContain('prefix of other deployments');
-    expect(fleet.events).not.toContain('connection');
-    expect(fleet.state).toBeNull();
-  });
-
-  test('refuses a literal name prefix even without a dash boundary', async () => {
-    const fleet = new Fleet();
-
-    fleet.scripts.push({ id: `${NAME}0` });
-    expect(await settled(destroyDeployment(NAME, ACCOUNT, true, fleet))).toContain('prefix of other deployments');
-    expect(fleet.events).not.toContain('connection');
+    expect(await destroyDeployment(NAME, ACCOUNT, false, fleet)).toBe(0);
+    expect({ scripts: fleet.scripts.map((script) => script.id), namespaces: fleet.namespaces.map((namespace) => namespace.id), applications: fleet.applications.map((application) => application.id) }).toEqual({
+      scripts: ['armada-dew3', `${NAME}0`, `${NAME}-kinu`], namespaces: ['other-vessel', `${NAME}0-vessel`, `${NAME}-kinu-vessel`], applications: ['app-other', `${NAME}0-app`, `${NAME}-kinu-app`],
+    });
   });
 
   test('refuses an exact application name attached to another deployment\'s namespace', async () => {

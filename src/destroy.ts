@@ -295,17 +295,7 @@ export async function destroyDeployment(name: string, account: string, force: bo
   const scripts = v.parse(v.array(v.object({ id: v.string() })), await cloud.list('/workers/scripts'));
   const namespaces = v.parse(v.array(Namespace), await cloud.list('/workers/durable_objects/namespaces'));
   const applications = v.parse(v.array(Application), await cloud.read('/containers/applications'));
-  const related = new Set([...scripts.map((script) => script.id), ...namespaces.map((namespace) => namespace.script)]);
-
-  for (const application of applications) {
-    const owner = /^(.*)-(?:armadavessel|armadapreparer)$/u.exec(application.name)?.[1];
-
-    if (owner !== undefined) related.add(owner);
-  }
-
-  const prefixed = [...related].filter((other) => other !== name && other.startsWith(name));
-
-  if (prefixed.length !== 0) throw new Error(`--name=${name} is a prefix of other deployments: ${prefixed.join(', ')}; use an unambiguous exact name`);
+  // Every resource below is matched by the exact name, never a prefix: `armada` is destroyed beside `armada-kinu` (#55).
   const worker = scripts.some((script) => script.id === name);
   let state = io.load();
 
