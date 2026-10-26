@@ -64,8 +64,15 @@ describe('the fleet', () => {
 
     await level.acquire('a/v1', 4, { deadlineAt });
     await level.acquire('b/v1', 4, { deadlineAt });
+    // A preparation holds its container to its end, newest though it is: a job's container is recalled in its place.
+    const preparing = fleetOf(8);
 
-    expect({ asked, renews, freed, level: await level.renews('a/v1') }).toEqual({ asked: [null, null], renews: [true, false], freed: [null, 'held'], level: true });
+    await preparing.acquire('low/v1', 4, { deadlineAt });
+    await preparing.acquire('preparing/k/1', 4, { deadlineAt, recallable: false });
+    await preparing.acquire('train/v1', 4, { deadlineAt, priority: 5 });
+
+    expect({ asked, renews, freed, level: await level.renews('a/v1'), preparing: [await preparing.renews('low/v1'), await preparing.renews('preparing/k/1')] })
+      .toEqual({ asked: [null, null], renews: [true, false], freed: [null, 'held'], level: true, preparing: [false, true] });
   });
 
   test('keeps one line across jobs: a job\'s newer holder waits behind another job\'s older one, however old its own', async () => {

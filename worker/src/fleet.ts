@@ -74,6 +74,9 @@ export interface Hold {
   readonly priority?: number;
   /** Its container takes no new task: it finishes what it runs, then ends. A vessel asks before each new task (`renews`). */
   readonly recalled?: boolean;
+  /** False for a hold that runs to its end and never asks (`renews`), as a preparation's does: no recall frees it. An
+   *  earlier Worker's holds lack it, and are recallable. */
+  readonly recallable?: boolean;
   /** Its job has no deadline: its vessel renews it each slice of its work (`extend`), and one that ends with a container
    *  that would not stop keeps it for that container's whole inactivity timeout from then (`release`). */
   readonly renewed?: boolean;
@@ -101,7 +104,7 @@ const loansOf = (holds: Record<string, Hold>): string[] => newestOf(holds, (_hol
 
 /** The holds of `holds` a holder of job `job` and `priority` that waits has recalled: other jobs' below it, the lowest
  *  first, then the newest. */
-const belowOf = (holds: Record<string, Hold>, priority: number, job: string): string[] => newestOf(holds, (holder, hold) => jobOf(holder) !== job && (hold.priority ?? 0) < priority)
+const belowOf = (holds: Record<string, Hold>, priority: number, job: string): string[] => newestOf(holds, (holder, hold) => jobOf(holder) !== job && hold.recallable !== false && (hold.priority ?? 0) < priority)
   .sort((left, right) => (holds[left]?.priority ?? 0) - (holds[right]?.priority ?? 0));
 
 /** What each job of `holds` keeps from the others: what it holds, or what it reserves, whichever is more. */
@@ -152,8 +155,8 @@ export class ArmadaFleet extends ArmadaSingle {
    *  single container asked next, and a gang's reserve would never come free at once. A holder that stops asking leaves
    *  the line after WANT_MS. One refused has the newest holds of jobs below its priority recalled until it fits: their
    *  containers end at their next task's start, rather than hold the fleet between tasks while it waits (#60). */
-  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, renewed = false, priority = 0, now = Date.now() }: {
-    readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly renewed?: boolean; readonly priority?: number; readonly now?: number;
+  async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, renewed = false, priority = 0, recallable = true, now = Date.now() }: {
+    readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly renewed?: boolean; readonly priority?: number; readonly recallable?: boolean; readonly now?: number;
   }): Promise<Grant | null> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: replaced, ...others } = holds;
@@ -190,7 +193,7 @@ export class ArmadaFleet extends ArmadaSingle {
     const granted = replaced?.granted ?? grants + 1;
 
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
-    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap, renewed, priority } }, grants: Math.max(grants, granted) });
+    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap, renewed, priority, recallable } }, grants: Math.max(grants, granted) });
 
     return charge > cap ? 'borrowed' : 'held';
   }

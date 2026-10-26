@@ -536,7 +536,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
           return;
         }
 
-        const granted = await this.env.FLEET.getByName(SINGLE).acquire(holderOf(preparation), SIZES[preparation.recipe.size].vcpus, { deadlineAt: preparation.since + preparationMs(preparation.recipe.size) });
+        const granted = await this.env.FLEET.getByName(SINGLE).acquire(holderOf(preparation), SIZES[preparation.recipe.size].vcpus, {
+          deadlineAt: preparation.since + preparationMs(preparation.recipe.size), recallable: false,
+        });
 
         if (grantOf(granted) === null) return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
       }
