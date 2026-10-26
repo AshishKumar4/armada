@@ -33,8 +33,9 @@ const LEASE_MS = 60 * 60_000;
 const preparing = (entry: Entry | undefined, now: number): entry is Extract<Entry, { readonly state: 'preparing' }> =>
   entry?.state === 'preparing' && now - (entry.beat ?? entry.since) < LEASE_MS;
 
-/** A failed preparation is the answer for this long, so the jobs waiting on it end; then it may be asked again. */
-const FAILURE_HOLD_MS = 5 * 60_000;
+/** How long a preparation that waits for capacity waits with no job asking for it: a job waiting on its environment asks
+ *  at each of its alarms, every 15 s, so one that stopped was cancelled or ended (#57). */
+const WANTED_MS = 2 * 60_000;
 
 /** Attempts at an environment the platform, not its recipe, fails (`PlatformFailed`), each in a fresh container, before
  *  the jobs waiting on it fail: Nimbus's failed twice in three minutes on 2026-10-13 ("the container does not meet the
@@ -84,8 +85,11 @@ export class ArmadaEnvironments extends ArmadaSingle {
     return preparing(entry, Date.now()) ? of(entry.sha, entry.shallow) : 'root';
   }
 
-  /** The key's environment, or its preparation begun; a repository recipe prepares only from a `root` pack. */
-  async ensure(key: string, recipe: Recipe, commit: Commit | null, now = Date.now()): Promise<Readiness> {
+  /** The key's environment, or its preparation begun, for a job `made` then; a repository recipe prepares only from a
+   *  `root` pack. A failed preparation fails the jobs made by the time it failed, which waited on it; a job made after it
+   *  prepares the environment again, as the failure may have been the platform's or the network's for a moment (#57).
+   *  Each ask while it is prepared says a job still waits on it (`wanted`). */
+  async ensure(key: string, recipe: Recipe, commit: Commit | null, { now = Date.now(), made = now }: { readonly made?: number; readonly now?: number } = {}): Promise<Readiness> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     if (entry?.state === 'ready') {
@@ -94,9 +98,13 @@ export class ArmadaEnvironments extends ArmadaSingle {
       return { kind: 'ready', generation: entry.generation };
     }
 
-    if (preparing(entry, now)) return { kind: 'preparing' };
+    if (preparing(entry, now)) {
+      await this.ctx.storage.put(`env:${key}`, { ...entry, wanted: Math.max(entry.wanted ?? 0, now) } satisfies Entry);
 
-    if (entry?.state === 'failed' && now - entry.at < FAILURE_HOLD_MS) return { kind: 'failed', reason: entry.reason };
+      return { kind: 'preparing' };
+    }
+
+    if (entry?.state === 'failed' && made <= entry.at) return { kind: 'failed', reason: entry.reason };
 
     if (recipe.repo !== undefined && commit?.base !== 'root') return { kind: 'failed', reason: 'the environment this job was packed against is gone; run again, which packs from the root' };
     const shallow = recipe.repo !== undefined && commit !== null && boundaryOf(commit, recipe.repo.history).length > 0;
@@ -323,6 +331,20 @@ export class ArmadaEnvironments extends ArmadaSingle {
   }
 
   /** The preparation of `key` begun `since` is under way: its preparer beats, so it is not taken for lost. */
+  /** Whether the preparation of `key` begun `since` is still wanted while it waits for capacity: no longer once a later
+   *  attempt replaced it, or no job asked for it in WANTED_MS. One no job asks for any more is ended here, so the next job
+   *  prepares the environment again, and its preparer takes no capacity for jobs that are gone (#57). */
+  async wanted(key: string, since: number, now = Date.now()): Promise<boolean> {
+    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+
+    if (entry?.state !== 'preparing' || entry.since !== since) return false;
+
+    if (now - (entry.wanted ?? entry.since) <= WANTED_MS) return true;
+    await this.ctx.storage.delete(`env:${key}`);
+
+    return false;
+  }
+
   async beat(key: string, since: number): Promise<void> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
@@ -505,8 +527,15 @@ export class ArmadaPreparer extends DurableObject<Env> {
     let made = preparation.snapshot;
 
     try {
-      // Its container starts once the fleet has room for it, as every job's does, and holds it to the end.
+      // Its container starts once the fleet has room for it, as every job's does, and holds it to the end. While it waits,
+      // it holds nothing, and ends once no job wants it.
       if (preparation.phase === 'base' && preparation.started === undefined) {
+        if (!(await this.env.ENVIRONMENTS.getByName(SINGLE).wanted(preparation.key, preparation.since))) {
+          await this.ctx.storage.delete('preparation');
+
+          return;
+        }
+
         const granted = await this.env.FLEET.getByName(SINGLE).acquire(holderOf(preparation), SIZES[preparation.recipe.size].vcpus, { deadlineAt: preparation.since + preparationMs(preparation.recipe.size) });
 
         if (grantOf(granted) === null) return await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);

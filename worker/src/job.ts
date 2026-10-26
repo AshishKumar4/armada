@@ -389,7 +389,7 @@ export class ArmadaJob extends DurableObject<Env> {
   private async awaitEnvironment(spec: Kept): Promise<void> {
     if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return;
     const key = (await this.ctx.storage.get<string>('key')) ?? '';
-    const readiness = await this.env.ENVIRONMENTS.getByName(SINGLE).ensure(key, spec.recipe, spec.commit ?? null);
+    const readiness = await this.env.ENVIRONMENTS.getByName(SINGLE).ensure(key, spec.recipe, spec.commit ?? null, { made: (await this.ctx.storage.get<number>('createdAt')) ?? Date.now() });
     const phase = await this.ctx.storage.get<Phase>('phase');
 
     if (phase === 'done' || (await this.ctx.storage.get<Generation>('environment')) !== undefined) return;

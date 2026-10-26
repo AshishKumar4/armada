@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { PACKER, RecipeSchema, sha256 } from '../../src/protocol';
+import { JobSpecSchema, PACKER, RecipeSchema, sha256 } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
 import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
+import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
-import { container, namespace, state, world } from './harness';
+import { container, idleVessels, namespace, state, world } from './harness';
 
 const MINUTE = 60_000;
 
@@ -474,7 +475,7 @@ describe('a preparation under way', () => {
     const recipe = v.parse(RecipeSchema, {});
     const start = Date.now();
 
-    await environments.ensure('k', recipe, null, start);
+    await environments.ensure('k', recipe, null, { now: start });
     const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get('env:k'));
 
     // Its phases run on, past an hour, its preparer beating at each alarm.
@@ -483,11 +484,115 @@ describe('a preparation under way', () => {
       await environments.beat('k', since);
     }
 
-    const beating = await environments.ensure('k', recipe, null, start + 150 * MINUTE);
-    const silent = await environments.ensure('k', recipe, null, start + 211 * MINUTE);
+    const beating = await environments.ensure('k', recipe, null, { now: start + 150 * MINUTE });
+    const silent = await environments.ensure('k', recipe, null, { now: start + 211 * MINUTE });
 
     setSystemTime();
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
+  });
+
+  // #57: a failed pre-warm turned the grading run made after it into "not graded" for five minutes.
+  test('fails the jobs made before its failure, and is prepared again for a job made after it', async () => {
+    const stored = state();
+    let begun = 0;
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+    const recipe = v.parse(RecipeSchema, {});
+    const start = Date.now();
+
+    await environments.ensure('k', recipe, null, { made: start, now: start });
+    const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get('env:k'));
+
+    setSystemTime(start + 10 * MINUTE);
+    await environments.preparationFailed('k', since, 'install: exited 1');
+    const waiter = await environments.ensure('k', recipe, null, { made: start, now: start + 10 * MINUTE + 15_000 });
+    const after = await environments.ensure('k', recipe, null, { made: start + 11 * MINUTE, now: start + 11 * MINUTE });
+
+    setSystemTime();
+    expect({ waiter, after: after.kind, begun }).toEqual({ waiter: { kind: 'failed', reason: 'install: exited 1' }, after: 'preparing', begun: 2 });
+  });
+
+  test('fails the job that waited on it with its reason, and a job made after it waits on a fresh preparation', async () => {
+    const stored = state();
+    let begun = 0;
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+    const env = world({ ENVIRONMENTS: namespace(() => environments), VESSEL: idleVessels() });
+    const spec = v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
+    const start = Date.now();
+
+    try {
+      const waited = new ArmadaJob(state().ctx, env);
+
+      await waited.create('j1', spec);
+      await waited.alarm();
+      const key = await waited.environment();
+      const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get(`env:${key}`));
+
+      setSystemTime(start + 10 * MINUTE);
+      await environments.preparationFailed(key, since, 'install: exited 1');
+      // The job's next alarm, its watchdog's.
+      setSystemTime(start + 10 * MINUTE + 15_000);
+      await waited.alarm();
+      setSystemTime(start + 11 * MINUTE);
+      const later = new ArmadaJob(state().ctx, env);
+
+      await later.create('j2', spec);
+      await later.alarm();
+
+      expect({ waited: (await waited.events(0)).events.map(({ outcome }) => outcome.tail), later: (await later.events(0)).done, begun }).toEqual({
+        waited: [`the environment ${key.slice(0, 12)} could not be prepared: install: exited 1`], later: false, begun: 2,
+      });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('ends while it waits for capacity once no job asks for it, so it takes none after its jobs are gone', async () => {
+    const stored = state();
+    let begun = 0;
+    let asked = 0;
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+    const recipe = v.parse(RecipeSchema, {});
+    const start = Date.now();
+
+    await environments.ensure('k', recipe, null, { made: start, now: start });
+    const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get('env:k'));
+    const preparing = state(container(() => ({ exitCode: 0, stdout: '' })));
+
+    // The fleet is full.
+    const fleet = {
+      acquire: async () => {
+        asked += 1;
+
+        return null;
+      },
+      release: async () => undefined,
+    };
+
+    const preparer = new ArmadaPreparer(preparing.ctx, world({ ENVIRONMENTS: namespace(() => environments), FLEET: namespace(() => fleet) }));
+
+    await preparing.ctx.storage.put('preparation', { key: 'k', since, recipe, sha: null, phase: 'base', seconds: {}, snapshot: null });
+
+    try {
+      // Its job asks on at each alarm of its own: the preparation waits on for room.
+      for (const minute of [1, 2]) {
+        setSystemTime(start + minute * MINUTE);
+        await environments.ensure('k', recipe, null, { made: start });
+        await preparer.alarm();
+      }
+
+      const waited = { asked, alarm: (await preparing.ctx.storage.getAlarm()) !== null };
+
+      // Its job was cancelled: nothing asks for it any more. It ends, and a later alarm asks the fleet for nothing.
+      setSystemTime(start + 5 * MINUTE);
+      await preparer.alarm();
+      await preparer.alarm();
+      const ended = { asked, preparation: await preparing.ctx.storage.get('preparation') };
+      const next = (await environments.ensure('k', recipe, null, { made: start + 6 * MINUTE, now: start + 6 * MINUTE })).kind;
+
+      expect({ waited, ended, next, begun }).toEqual({ waited: { asked: 2, alarm: true }, ended: { asked: 2, preparation: undefined }, next: 'preparing', begun: 2 });
+    } finally {
+      setSystemTime();
+    }
   });
 
   test('fails at once whose preparer cannot be told to begin, unless a later preparation took its place while it was told', async () => {
@@ -552,7 +657,7 @@ describe('a preparation phase whose every exec times out', () => {
       }));
 
       const preparer = new ArmadaPreparer(stored.ctx, world({
-        ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
+        ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, wanted: async () => true, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
       }));
 
       await stored.ctx.storage.put('preparation', { key: 'k'.repeat(64), since: start, recipe: v.parse(RecipeSchema, { setup: 'true' }), sha: null, phase: 'setup', started: start, seconds: {}, snapshot: null });
@@ -597,7 +702,7 @@ describe('a preparation phase after one whose execs were lost', () => {
 
       const preparer = new ArmadaPreparer(stored.ctx, world({
         ENVIRONMENTS: namespace(() => ({
-          beat: async () => undefined, prepared: async () => { prepared.push('made'); },
+          beat: async () => undefined, wanted: async () => true, prepared: async () => { prepared.push('made'); },
           preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); },
         })),
       }));
@@ -644,8 +749,10 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
     }
 
     const recipe = v.parse(RecipeSchema, {});
+    // The job that waits on the preparation, made as it began.
+    const made = Date.now();
 
-    await environments.ensure('new', recipe, null);
+    await environments.ensure('new', recipe, null, { made });
     const { since } = v.parse(v.object({ since: v.number() }), await stored.ctx.storage.get('env:new'));
     let taken = 0;
 
@@ -664,7 +771,7 @@ describe('a snapshot the account refuses for its storage (#30)', () => {
 
     await preparing.ctx.storage.put('preparation', { key: 'new', since, recipe, sha: null, phase: 'snapshot', seconds: {}, snapshot: null });
 
-    return { stored, environments, preparer, fake, readiness: async () => await environments.ensure('new', recipe, null), taken: () => taken };
+    return { stored, environments, preparer, fake, readiness: async () => await environments.ensure('new', recipe, null, { made }), taken: () => taken };
   };
 
   test('frees the least recently used environment no open job uses, and the jobs waiting on it wait for the snapshot taken again', async () => {

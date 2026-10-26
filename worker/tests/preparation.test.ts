@@ -19,6 +19,7 @@ interface Prepared {
 function registry({ generations, failures }: Prepared) {
   return namespace(() => ({
     beat: async () => undefined,
+    wanted: async () => true,
     prepared: async (generation: Generation) => { generations.push(generation); },
     preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); },
   }));
@@ -341,7 +342,7 @@ async function atSetup(phases: Recipe) {
   const stored = state(here());
 
   const preparer = new ArmadaPreparer(stored.ctx, world({
-    ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
+    ENVIRONMENTS: namespace(() => ({ beat: async () => undefined, wanted: async () => true, preparationFailed: async (_key: string, _since: number, reason: string) => { failures.push(reason); } })),
   }));
 
   rmSync(`${STATE}/phases`, { recursive: true, force: true });
