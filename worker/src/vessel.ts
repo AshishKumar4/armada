@@ -222,7 +222,7 @@ export class ArmadaVessel extends DurableObject<Env> {
 
         // The fleet's answer let other calls in: a vessel stopped meanwhile gives back what it was just granted.
         if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return await fleet.release(this.holder(spec));
-        await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now(), borrowed: grant === 'borrowed' });
+        await this.ctx.storage.put({ state: 'booting' satisfies State, granted: Date.now() });
 
         if (!(await job.moved(spec.name, 'booting'))) {
           await this.stop();
