@@ -112,6 +112,9 @@ export const JOB_ID = /^\d{14}-[0-9a-f]{8}$/u;
 /** The most tasks' artifacts a job takes as its inputs, each an archive every container takes in at boot. */
 export const MAX_INPUT_RUNS = 1000;
 
+/** The most jobs a job takes artifacts from, each read when the job is made. */
+export const MAX_INPUT_JOBS = 100;
+
 export const BUNDLE_PATH = '/armada/bundle.mjs';
 
 /** The bundle a Python task's container runs, for `python3 <path>`: a zipapp. */
@@ -366,7 +369,7 @@ export const JobSpecSchema = v.object({
   files: v.optional(v.record(v.pipe(v.string(), v.regex(/^[A-Za-z0-9._-]+$/u)), v.string()), {}),
   /** Ended jobs whose tasks' artifacts every container gets under `{inputs}/<job>/<index>`, as a reduce takes what a
    *  map's tasks wrote (#59). */
-  inputs: v.optional(v.array(v.pipe(v.string(), v.regex(JOB_ID, 'an input is a job id'))), []),
+  inputs: v.optional(v.pipe(v.array(v.pipe(v.string(), v.regex(JOB_ID, 'an input is a job id'))), v.maxLength(MAX_INPUT_JOBS, `a job takes the artifacts of ${String(MAX_INPUT_JOBS)} jobs at most`)), []),
   env: v.optional(v.record(v.string(), v.string()), {}),
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
   /** The most tasks this job runs at once, and so the most containers; the account's ceiling and the item count bound

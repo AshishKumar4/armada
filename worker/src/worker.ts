@@ -117,12 +117,11 @@ const packs: Handler = async (request, env, [project, sha, base], url) => {
 
     const stored = await storeOnce(env.ARTIFACTS, key, async () => { await multipart.complete(parts); });
 
-    if (stored === 'contended') return contended(key);
+    // Another client's pack took the key, or will: this upload's parts are given back, not left to the bucket's
+    // lifecycle, as a client asked again uploads anew.
+    if (stored !== 'stored') await multipart.abort();
 
-    // Another client's pack took the key: this upload's parts are given back, not left to the bucket's lifecycle.
-    if (stored === 'present') await multipart.abort();
-
-    return Response.json({ stored: key });
+    return stored === 'contended' ? contended(key) : Response.json({ stored: key });
   }
 
   if (upload !== null && request.method === 'DELETE') {

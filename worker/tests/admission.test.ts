@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { Armada } from '../../src/sdk';
-import { JOB_LEASE_SECONDS, PROTOCOL } from '../../src/protocol';
+import { JOB_LEASE_SECONDS, MAX_INPUT_JOBS, PROTOCOL } from '../../src/protocol';
 import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
@@ -433,6 +433,7 @@ describe('a job that takes another job\'s artifacts as inputs', () => {
     await sharding.alarm();
     const refused = await settled(armada.create({ ...spec, inputs: [shards] }));
     const unknown = await settled(armada.create({ ...spec, inputs: ['20200101000000-00000000'] }));
+    const many = await settled(armada.create({ ...spec, inputs: Array.from({ length: MAX_INPUT_JOBS + 1 }, () => shards) }));
 
     // Tasks 0 and 2 kept artifacts; task 1 wrote none.
     for (const [index, artifacts] of [[0, true], [1, false], [2, true]] as const) {
@@ -448,8 +449,9 @@ describe('a job that takes another job\'s artifacts as inputs', () => {
 
     await jobs.get(merge)?.alarm();
 
-    expect({ refused, unknown, inputs: begun.map((each) => each.inputs) }).toEqual({
+    expect({ refused, unknown, many, inputs: begun.map((each) => each.inputs) }).toEqual({
       refused: expect.stringContaining(`job ${shards} has not ended`), unknown: expect.stringContaining('no job 20200101000000-00000000'),
+      many: expect.stringContaining(`a job takes the artifacts of ${String(MAX_INPUT_JOBS)} jobs at most`),
       inputs: [[{ job: shards, index: 0, key: `jobs/${shards}/tasks/0/v1.1/artifacts.tar.gz` }, { job: shards, index: 2, key: `jobs/${shards}/tasks/2/v1.1/artifacts.tar.gz` }]],
     });
   });

@@ -100,33 +100,36 @@ describe('a pack or bundle two clients store at once', () => {
     expect({ taken, never, bundle, failed }).toEqual({ taken: [200, 'the other client\'s', 1], never: [429, undefined, 30], bundle: 200, failed: 500 });
   });
 
-  test('a large pack completes, or gives its parts back once the other client\'s pack is there', async () => {
+  test('a large pack completes, or gives its parts back where the other client\'s pack took the key or may yet', async () => {
     Object.assign(globalThis, { scheduler: { wait: async () => undefined } });
     const { stored, call } = deployment('commit');
     const key = await packKey('proj', { sha: SHA, base: 'root', packer: PACKER });
     const aborted: string[] = [];
-    let others = 1;
+    // How each upload's completion goes: R2 refuses it and the other client's pack lands, it refuses it and the other's
+    // never does, or it completes.
+    const goes = new Map<string, 'other' | 'never' | 'completes'>([['u1', 'other'], ['u2', 'never'], ['u3', 'completes']]);
 
     Object.assign(stored, {
-      createMultipartUpload: async () => ({ uploadId: 'u1' }),
       resumeMultipartUpload: (at: string, upload: string) => ({
-        uploadPart: async (partNumber: number) => ({ partNumber, etag: `e${String(partNumber)}` }),
         complete: async () => {
-          if (others > 0) {
-            others -= 1;
-            await stored.put(at, 'the other client\'s');
-            throw new Error(LIMITED.replace('put', 'completeMultipartUpload'));
-          }
+          if (goes.get(upload) === 'completes') return await stored.put(at, 'this client\'s pack');
 
-          await stored.put(at, 'this client\'s pack');
+          if (goes.get(upload) === 'other') await stored.put(at, 'the other client\'s');
+          throw new Error(LIMITED.replace('put', 'completeMultipartUpload'));
         },
         abort: async () => { aborted.push(upload); },
       }),
     });
 
-    const pack = `/packs/proj/${SHA}/root?packer=${String(PACKER)}&upload=u1`;
-    const completed = await call('POST', pack, JSON.stringify({ parts: [{ partNumber: 1, etag: 'e1' }] }));
+    const complete = async (upload: string) => [await call('POST', `/packs/proj/${SHA}/root?packer=${String(PACKER)}&upload=${upload}`, JSON.stringify({ parts: [{ partNumber: 1, etag: 'e1' }] })), stored.text(key)];
+    const other = await complete('u1');
 
-    expect({ completed, aborted, text: stored.text(key) }).toEqual({ completed: 200, aborted: ['u1'], text: 'the other client\'s' });
+    stored.objects.delete(key);
+    const never = await complete('u2');
+    const completes = await complete('u3');
+
+    expect({ other, never, completes, aborted }).toEqual({
+      other: [200, 'the other client\'s'], never: [429, undefined], completes: [200, 'this client\'s pack'], aborted: ['u1', 'u2'],
+    });
   });
 });
