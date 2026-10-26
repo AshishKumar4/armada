@@ -132,7 +132,7 @@ def followed(job: Job[int, str]) -> None:
 
 
 # A job's mode is "efficient" or "fast": mypy refuses any other word. Its CPU is one model, or a list, any one of them.
-# Its priority is a whole number.
+# Its priority is a whole number, and its inputs other jobs' ids.
 def placed(items: list[int]) -> None:
     assert_type(square.stream(items, mode="fast"), Job[int, int])
     square.map(items, mode="slow")  # type: ignore[arg-type]
@@ -141,3 +141,4 @@ def placed(items: list[int]) -> None:
     square.map(items, cpu="AuthenticAMD/25/17")  # type: ignore[arg-type]
     assert_type(square.stream(items, priority=5), Job[int, int])
     square.map(items, priority="high")  # type: ignore[arg-type]
+    assert_type(square.stream(items, inputs=["20261026120000-0123abcd"]), Job[int, int])

@@ -72,6 +72,7 @@ armada map --items=urls.txt --output -- sh -c 'curl -sL {item} > {out}'
 | `{index}` | The item's position. |
 | `{out}` | The file a task writes when `output` is set. |
 | `{files}` | The directory with the job's small `files`. |
+| `{inputs}` | The directory with the `inputs` jobs' artifacts: each task's unpacked, read-only, at `<job>/<index>`. |
 | `{artifacts}` | The directory whose files the task keeps, as a tar.gz at the task's `artifacts` route. |
 
 An unknown placeholder is an error. An object item's numeric `weight` moves it up the queue, and its whole `cost` is
@@ -285,9 +286,10 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 | `priority` | While the fleet is full, a job of a higher priority starts first, and lower jobs' newest containers end at their next task's start until it fits (`--priority=N`; `armada run --priority=N` gives it to each of the run's jobs). Default 0. |
 | `lease` | `true` ends the job 3 minutes after this process stops following it, however the process ends: killed, its runner gone, or its network lost. `armada map` and `armada run` always set it. Default `false`: the job runs on alone. |
 | `deadline` | The whole job's limit in seconds, starts included: 21600 (6 hours) unless set. `null` (`--deadline=none`) for none, only with `lease`: the job then ends when its tasks do, when it is cancelled, or 3 minutes after its client stops following it. |
+| `inputs` | Ended jobs, by id, whose tasks' artifacts every container gets under `{inputs}` (`--inputs=<job,...>`), so a reduce takes what a map's tasks wrote. A job's artifacts expire 7 days after they are written. |
 | `label`, `env`, `files`, `tmpfs` | The job's name in the dashboard, its environment, its small files (`{files}`), and the paths that get a fresh tmpfs. |
 
-These go to `.map` and `.stream` as `map(items, { pool, slots, budget, mode, cpu, priority, lease, deadline, label, env, files, tmpfs })`.
+These go to `.map` and `.stream` as `map(items, { pool, slots, budget, mode, cpu, priority, lease, deadline, label, env, files, inputs, tmpfs })`.
 
 armada records each task's CPU, peak memory and disk, by its task and environment and by its item. Its CPU counts only
 from runs that had their container to themselves. A packed container takes another task only while their recorded use
@@ -481,7 +483,7 @@ what open jobs use. A client and a Worker too far apart in version refuse each o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--budget=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--priority=N] [--timeout=S|none] [--deadline=S|none] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--budget=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--priority=N] [--inputs=<job,...>] [--timeout=S|none] [--deadline=S|none] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--deadline=S] [--pool=N] [--priority=N] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

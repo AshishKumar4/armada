@@ -484,12 +484,12 @@ class Task(Generic[In, Out]):
 
     def _spec(self, pool: int | None, slots: int | None, mode: Mode | None, cpu: Cpu | list[Cpu] | None,
               priority: int | None, label: str, env: dict[str, str] | None, files: dict[str, str] | None,
-              tmpfs: list[str] | None, bundle: str | None) -> dict[str, object]:
+              inputs: list[str] | None, tmpfs: list[str] | None, bundle: str | None) -> dict[str, object]:
         spec = {
             "recipe": self.recipe,
             "run": {"kind": "task", "id": self.id, **({"bundle": bundle, "runtime": "python"} if bundle is not None else {})},
             "output": True, "pool": pool, "slots": slots, "mode": mode, "cpu": cpu, "priority": priority, "label": label,
-            "env": env or {}, "files": files or {}, "tmpfs": tmpfs,
+            "env": env or {}, "files": files or {}, "inputs": inputs, "tmpfs": tmpfs,
             "timeout": self.timeout, "speculative": self.speculative, "retries": _retries(self.retries),
             "secrets": self.secrets, "cache": self.cache,
         }
@@ -497,14 +497,15 @@ class Task(Generic[In, Out]):
 
     def stream(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
                cpu: Cpu | list[Cpu] | None = None, priority: int | None = None, label: str = "",
-               env: dict[str, str] | None = None, files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
-               armada: Armada | None = None) -> Job[In, Out]:
+               env: dict[str, str] | None = None, files: dict[str, str] | None = None, inputs: list[str] | None = None,
+               tmpfs: list[str] | None = None, armada: Armada | None = None) -> Job[In, Out]:
         """The job, whose results arrive as they land. Items stream in when given as a generator. `mode` is how it places
         its tasks: "efficient", the default, packs them into containers by their measured use; "fast" runs one a
         container. More than one slot turns packing off. `cpu` is the CPU every container's host has (`Cpu`), or a list of
         them, any one; a container on another host is replaced before it takes a task. One keeps float results alike
         between hosts; several keep out a slow host. While the fleet is full, a job of a higher `priority` (default 0)
-        starts first, and lower jobs' newest containers end at their next task's start until it fits."""
+        starts first, and lower jobs' newest containers end at their next task's start until it fits. `inputs` are
+        ended jobs whose tasks' artifacts every container gets, read-only, under $ARMADA_INPUTS/<job>/<index>."""
         client = armada or connect()
         from .push import pushed
 
@@ -516,10 +517,11 @@ class Task(Generic[In, Out]):
                 if isinstance(items, list):
                     submission.sent = list(items)
                     wired = [self._wire(item, at) for at, item in enumerate(items)]
-                    spec = {**self._spec(pool, slots, mode, cpu, priority, label, env, files, tmpfs, bundle), "items": wired}
+                    spec = {**self._spec(pool, slots, mode, cpu, priority, label, env, files, inputs, tmpfs, bundle), "items": wired}
                     submission.resolve(client.create(spec))
                 else:
-                    spec = {**self._spec(pool, slots, mode, cpu, priority, label, env, files, tmpfs, bundle), "items": [], "open": True}
+                    made = self._spec(pool, slots, mode, cpu, priority, label, env, files, inputs, tmpfs, bundle)
+                    spec = {**made, "items": [], "open": True}
                     submission.resolve(client.create(spec))
                     submission.pump(items, self._wire)
             except BaseException as cause:
@@ -530,20 +532,20 @@ class Task(Generic[In, Out]):
 
     def map(self, items: Iterable[In], *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
             cpu: Cpu | list[Cpu] | None = None, priority: int | None = None, label: str = "",
-            env: dict[str, str] | None = None, files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
-            armada: Armada | None = None) -> list[Out]:
+            env: dict[str, str] | None = None, files: dict[str, str] | None = None, inputs: list[str] | None = None,
+            tmpfs: list[str] | None = None, armada: Armada | None = None) -> list[Out]:
         """Every item's value, in input order, or a MapError holding every result when one is not ok."""
         streamed = self.stream(items, pool=pool, slots=slots, mode=mode, cpu=cpu, priority=priority, label=label, env=env, files=files,
-                               tmpfs=tmpfs, armada=armada)
+                               inputs=inputs, tmpfs=tmpfs, armada=armada)
         return streamed.values()
 
     def run(self, item: In, *, pool: int | None = None, slots: int | None = None, mode: Mode | None = None,
             cpu: Cpu | list[Cpu] | None = None, priority: int | None = None, label: str = "",
-            env: dict[str, str] | None = None, files: dict[str, str] | None = None, tmpfs: list[str] | None = None,
-            armada: Armada | None = None) -> Out:
+            env: dict[str, str] | None = None, files: dict[str, str] | None = None, inputs: list[str] | None = None,
+            tmpfs: list[str] | None = None, armada: Armada | None = None) -> Out:
         """One item's value, on one container."""
         streamed = self.stream([item], pool=pool, slots=slots, mode=mode, cpu=cpu, priority=priority, label=label, env=env, files=files,
-                               tmpfs=tmpfs, armada=armada)
+                               inputs=inputs, tmpfs=tmpfs, armada=armada)
         results = streamed.settled()
         first = results[0] if results else None
         if not isinstance(first, Ok):

@@ -135,6 +135,18 @@ rm -rf /var/lib/apt/lists/*`;
  *  argv a launch sources as root, the mask file. */
 export const OWN_STATE = `chown root:root ${STATE} && chmod 755 ${STATE}`;
 
+/** As root: each other job's artifacts under `dir`, `<job>/<index>.tar.gz`, unpacked into `<job>/<index>`, owned by root and
+ *  readable by the tasks, which may not change what every task of the job shares (`JobSpec.inputs`). */
+export const unpackInputs = (dir: string): string => `set -eu
+for archive in '${dir}'/*/*.tar.gz; do
+  [ -e "$archive" ] || continue
+  into="\${archive%.tar.gz}"
+  mkdir -p "$into"
+  tar --no-same-owner -xzf "$archive" -C "$into"
+  rm -f "$archive"
+done
+chmod -R a+rX,go-w '${dir}'`;
+
 /** As the user: the pack at /armada/pack into the checkout's repository (a new one while preparing), then its boundary,
  *  the arguments after the commit, marked shallow, and of what was marked before only the commits still lacking a
  *  parent, which a later pack may have brought: so git walks exactly what the repository holds (#34). Then the commit

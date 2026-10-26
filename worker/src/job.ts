@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -35,7 +35,7 @@ import { classOf, itemKey, tasksMemoryOf } from './estimates';
 import { costOf, Placement, ranksOf, type Load } from './placement';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
-import type { VesselSpec } from './vessel';
+import type { Input, VesselSpec } from './vessel';
 
 export type Phase = JobStatus['phase'];
 
@@ -230,13 +230,14 @@ export class ArmadaJob extends DurableObject<Env> {
     if (!vessels.includes('ranks')) this.sql.exec('ALTER TABLE vessels ADD COLUMN ranks INTEGER');
   }
 
-  async create(id: string, spec: JobSpec, origin = ''): Promise<void> {
+  /** Job `id` of `spec`, made at `origin`, whose containers each take `inputs`, as `inputsOf` read them. */
+  async create(id: string, spec: JobSpec, origin = '', inputs: readonly Input[] = []): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     const { items, env, open, ...kept } = spec;
     const key = await environmentKey(spec.recipe);
 
     await this.insert(items, kept, key);
-    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key, createdAt: Date.now(), problems: [], replaced: 0 });
+    await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key, createdAt: Date.now(), problems: [], replaced: 0, inputs });
     // Counted open before it can run, so its conclusion, which counts it closed, comes after.
     await this.env.FLEET.getByName(SINGLE).opened(id);
     await this.ctx.storage.setAlarm(Date.now());
@@ -466,6 +467,26 @@ export class ArmadaJob extends DurableObject<Env> {
     }
   }
 
+  /** Each task's kept artifacts, for a job that takes them as its inputs (`JobSpec.inputs`), in task order, and whether
+   *  the job has ended, so no more can come; null for a job this object never made. */
+  async artifacts(): Promise<{ readonly ended: boolean; readonly runs: readonly Input[] } | null> {
+    const id = await this.ctx.storage.get<string>('id');
+
+    if (id === undefined) return null;
+    const kept = new Map<number, Outcome>();
+
+    for (const row of this.sql.exec<{ outcome: string }>('SELECT outcome FROM events ORDER BY seq').toArray()) {
+      const outcome = v.parse(OutcomeSchema, JSON.parse(row.outcome));
+
+      kept.set(outcome.index, outcome);
+    }
+
+    const runs = [...kept.values()].filter((outcome) => outcome.artifacts === true).toSorted((left, right) => left.index - right.index)
+      .map((outcome) => ({ job: id, index: outcome.index, key: runKey(id, outcome.index, outcome, 'artifacts') }));
+
+    return { ended: (await this.ctx.storage.get<Phase>('phase')) === 'done', runs };
+  }
+
   /** Where task `index`'s `leaf` file is read from: the cached output, for a task answered from the cache; else the
    *  files of its kept run, the run its outcome names, or none for a task with no outcome yet. */
   async fileOf(index: number, leaf: 'output' | 'log' | 'artifacts'): Promise<string | null> {
@@ -560,6 +581,7 @@ export class ArmadaJob extends DurableObject<Env> {
       deadlineAt: spec.deadline === null ? null : ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + spec.deadline * 1000,
       cpu: spec.cpu,
       priority: spec.priority,
+      inputs: await this.ctx.storage.get<readonly Input[]>('inputs'),
     };
 
     try {
@@ -893,7 +915,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const common = {
       ...commandEnv(spec.recipe, own), ARMADA_ITEM: JSON.stringify(task.item) ?? 'null', ARMADA_INDEX: String(index), ARMADA_ATTEMPT: String(attempt),
-      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH,
+      ARMADA_OUT: OUT_PATH, ARMADA_ANSWER: ANSWER_PATH, ARMADA_ARTIFACTS: ARTIFACTS_PATH, ARMADA_INPUTS: INPUTS_DIR,
     };
 
     const { run } = spec;

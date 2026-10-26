@@ -65,6 +65,7 @@ map options:
                        before it takes a task
   --priority=N         while the fleet is full, a job of a higher priority starts first, and lower jobs' newest
                        containers end at their next task's start until it fits (default 0)
+  --inputs=<job,...>   ended jobs whose tasks' artifacts each container gets under {inputs}/<job>/<index>
   --timeout=S          a task's limit, in seconds, or none (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h), or none: the job
                        then ends with its tasks, its cancel, or 3 minutes after this command stops following it
@@ -93,7 +94,7 @@ run options:
                        (default .armada.json's deadline, or 1800)
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment.
-The command's {item}, {index}, {out}, {files} and {artifacts} are filled per item.
+The command's {item}, {index}, {out}, {files}, {inputs} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
 verdict exits 1 when a row is red, and 2 when the commit has none; with --json it then prints null.`;
@@ -103,7 +104,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
-  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'priority=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
+  ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'priority=', 'inputs=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'pool=', 'priority=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
@@ -207,7 +208,7 @@ async function map(): Promise<number> {
   const taskOptions = { speculative: flag('speculative'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const mode = option('mode');
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), budget: whole('budget'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), priority: whole('priority', -Infinity), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), budget: whole('budget'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), priority: whole('priority', -Infinity), inputs: option('inputs')?.split(',').filter(Boolean), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
   const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
   // An interrupt while the job is made cancels it once it is.
   const id = await cancelOnInterrupt([job], async () => await job.id);

@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JobSpecSchema, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -13,6 +13,7 @@ import { retentionOf } from './environments';
 import { driverSpec, eventOf } from './hooks';
 import type { ArmadaFleet } from './fleet';
 import { fleetRefusal, VESSEL_NAME, type ArmadaJob } from './job';
+import type { Input } from './vessel';
 
 export { ArmadaJob } from './job';
 
@@ -40,8 +41,6 @@ function authorized(request: Request, env: Env): boolean {
 function jobId(): string {
   return `${new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
 }
-
-const JOB_ID = /^\d{14}-[0-9a-f]{8}$/u;
 
 const notFound = (): Response => Response.json({ error: 'not found' }, { status: 404 });
 
@@ -182,6 +181,24 @@ const spokenBy = (request: Request): number => Number(request.headers.get(PROTOC
  *  for one task a container, and may count on it (a task's cgroup at `TASK_GROUP`). */
 const MODES = 9;
 
+/** The kept artifacts of every task of the `jobs` a job takes as its inputs (`JobSpec.inputs`), or why it may not: one
+ *  is no job of this deployment, one has not ended, so its artifacts are not all written, or there are past
+ *  MAX_INPUT_RUNS, each an archive every container takes in at boot. */
+async function inputsOf(env: Env, jobs: readonly string[]): Promise<{ readonly runs: readonly Input[] } | { readonly refused: string; readonly code: 400 | 409 }> {
+  const runs: Input[] = [];
+
+  for (const job of new Set(jobs)) {
+    const artifacts = await env.JOB.getByName(job).artifacts();
+
+    if (artifacts === null) return { refused: `no job ${job} is on this deployment to take its artifacts from`, code: 409 };
+
+    if (!artifacts.ended) return { refused: `job ${job} has not ended: a job takes the artifacts of a job that has, as they are all written`, code: 409 };
+    runs.push(...artifacts.runs);
+  }
+
+  return runs.length > MAX_INPUT_RUNS ? { refused: `the inputs hold ${String(runs.length)} tasks' artifacts, past the ${String(MAX_INPUT_RUNS)} a job takes`, code: 400 } : { runs };
+}
+
 /** `POST /jobs`: the job `created`, which the fleet has already admitted and counts open, made from the request's spec,
  *  or why it is refused. */
 async function createJob(request: Request, env: Env, created: string): Promise<Response> {
@@ -221,6 +238,9 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
     if ((await env.ARTIFACTS.head(await packKey(spec.recipe.repo.project, spec.commit))) === null) return Response.json({ error: `upload the pack of ${spec.commit.sha} first` }, { status: 409 });
   }
 
+  const inputs = await inputsOf(env, spec.inputs);
+
+  if ('refused' in inputs) return Response.json({ error: inputs.refused }, { status: inputs.code });
   const registry = env.TASKS.getByName(SINGLE);
   // The job holds its bundle from its last check until it ends (`ArmadaJob.settleUp`), or its making fails.
   const pinned = spec.run.kind === 'task' && spec.run.bundle !== undefined ? await registry.pin(created, spec.run.bundle) : null;
@@ -228,7 +248,7 @@ async function createJob(request: Request, env: Env, created: string): Promise<R
   if (pinned !== null) return Response.json({ error: pinned }, { status: 409 });
 
   try {
-    await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin);
+    await env.JOB.getByName(created).create(created, spec, new URL(request.url).origin, inputs.runs);
   } catch (cause) {
     await registry.unpin(created);
 

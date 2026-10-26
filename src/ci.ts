@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -152,9 +152,9 @@ function exitWord(result: Result<Json, string | null>): string {
 }
 
 /** A command template's argv for one item: `{item}`, an object item's scalar keys, `{index}`, `{out}`, `{files}`,
- *  `{artifacts}`, `{workdir}` and `{commit}` filled; any other placeholder is an error, never an empty string. */
+ *  `{inputs}`, `{artifacts}`, `{workdir}` and `{commit}` filled; any other placeholder is an error, never an empty string. */
 export function argvOf(template: readonly string[], recipe: Recipe): (item: Json, at: { readonly index: number }) => string[] {
-  const fixed = { out: OUT_PATH, files: FILES_DIR, artifacts: ARTIFACTS_PATH, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
+  const fixed = { out: OUT_PATH, files: FILES_DIR, inputs: INPUTS_DIR, artifacts: ARTIFACTS_PATH, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
 
   return (item, { index }) => template.map((word) => fill(word, { ...itemValues(item, index), ...fixed }));
 }

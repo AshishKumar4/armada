@@ -102,6 +102,16 @@ export const PackBase = v.union([v.literal('root'), Sha]);
  *  writes its output to, and the file the runner says there which kind of answer that is. */
 export const FILES_DIR = '/armada/files';
 
+/** The directory under which a task finds the artifacts of the jobs its job takes (`JobSpec.inputs`): each task's at
+ *  `<job>/<index>`, read-only. */
+export const INPUTS_DIR = '/armada/inputs';
+
+/** A job's id: when it was made, to the second, and eight hex digits. */
+export const JOB_ID = /^\d{14}-[0-9a-f]{8}$/u;
+
+/** The most tasks' artifacts a job takes as its inputs, each an archive every container takes in at boot. */
+export const MAX_INPUT_RUNS = 1000;
+
 export const BUNDLE_PATH = '/armada/bundle.mjs';
 
 /** The bundle a Python task's container runs, for `python3 <path>`: a zipapp. */
@@ -354,6 +364,9 @@ export const JobSpecSchema = v.object({
   output: v.optional(v.boolean(), false),
   /** Small files every container gets under `{files}`, by name. */
   files: v.optional(v.record(v.pipe(v.string(), v.regex(/^[A-Za-z0-9._-]+$/u)), v.string()), {}),
+  /** Ended jobs whose tasks' artifacts every container gets under `{inputs}/<job>/<index>`, as a reduce takes what a
+   *  map's tasks wrote (#59). */
+  inputs: v.optional(v.array(v.pipe(v.string(), v.regex(JOB_ID, 'an input is a job id'))), []),
   env: v.optional(v.record(v.string(), v.string()), {}),
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
   /** The most tasks this job runs at once, and so the most containers; the account's ceiling and the item count bound

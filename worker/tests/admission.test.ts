@@ -5,6 +5,7 @@ import { JOB_LEASE_SECONDS, PROTOCOL } from '../../src/protocol';
 import type { Env } from '../src/env';
 import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
+import type { VesselSpec } from '../src/vessel';
 import worker from '../src/worker';
 import { fakeFetch, settled } from '../../tests/fakes';
 import { idleVessels, namespace, readyRegistry, state, world } from './harness';
@@ -417,5 +418,39 @@ describe('a job its client follows', () => {
     } finally {
       setSystemTime();
     }
+  });
+});
+
+// #59: Dew merged 40 shards a map wrote as artifacts on a VM, as no armada job could take them.
+describe('a job that takes another job\'s artifacts as inputs', () => {
+  test('gives each container the kept artifacts of every task of an ended job, and is refused one still running or none', async () => {
+    const begun: VesselSpec[] = [];
+    const { armada, jobs } = deployment(undefined, 'a', { ENVIRONMENTS: readyRegistry(), VESSEL: namespace(() => ({ begin: async (given: VesselSpec) => { begun.push(given); }, stop: async () => true })) });
+    const shards = await armada.create({ ...spec, items: ['a', 'b', 'c'].map((item) => ({ item, argv: ['true'] })), mode: 'fast' });
+    const sharding = jobs.get(shards);
+
+    if (sharding === undefined) throw new Error('no shards job');
+    await sharding.alarm();
+    const refused = await settled(armada.create({ ...spec, inputs: [shards] }));
+    const unknown = await settled(armada.create({ ...spec, inputs: ['20200101000000-00000000'] }));
+
+    // Tasks 0 and 2 kept artifacts; task 1 wrote none.
+    for (const [index, artifacts] of [[0, true], [1, false], [2, true]] as const) {
+      const claim = await sharding.claim('v1');
+
+      if (claim === null || 'waitMs' in claim || !(await sharding.accept('v1', claim.index, 0, { slot: 0, attempt: claim.attempt }))) throw new Error(`v1 got no task ${String(index)}`);
+      await sharding.complete('v1', { index: claim.index, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: claim.attempt, tail: '', output: false, artifacts: artifacts || undefined }, 1000);
+    }
+
+    // Its last task landed: it has ended.
+    begun.length = 0;
+    const merge = await armada.create({ ...spec, inputs: [shards] });
+
+    await jobs.get(merge)?.alarm();
+
+    expect({ refused, unknown, inputs: begun.map((each) => each.inputs) }).toEqual({
+      refused: expect.stringContaining(`job ${shards} has not ended`), unknown: expect.stringContaining('no job 20200101000000-00000000'),
+      inputs: [[{ job: shards, index: 0, key: `jobs/${shards}/tasks/0/v1.1/artifacts.tar.gz` }, { job: shards, index: 2, key: `jobs/${shards}/tasks/2/v1.1/artifacts.tar.gz` }]],
+    });
   });
 });

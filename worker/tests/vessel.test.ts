@@ -2,8 +2,8 @@ import { describe, expect, setSystemTime, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Boot, Cpu, Host, Outcome } from '../../src/protocol';
-import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, usageOf } from '../src/container';
+import { INPUTS_DIR, type Boot, type Cpu, type Host, type Outcome } from '../../src/protocol';
+import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, unpackInputs, usageOf } from '../src/container';
 import { ArmadaFleet } from '../src/fleet';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
@@ -61,12 +61,16 @@ interface Run {
   readonly pending?: number;
   readonly timeout?: number | null;
   readonly deadlineAt?: number | null;
+  /** Other jobs' artifacts its job takes, and which of them R2 holds, by key. */
+  readonly inputs?: VesselSpec['inputs'];
+  readonly held?: readonly string[];
 }
 
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
   fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
+  inputs, held = [],
 }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
@@ -129,11 +133,11 @@ async function run(lost: number, {
     },
   };
 
-  // A pushed task's bundle, which its container takes in at boot.
-  const artifacts = bucket(new Map(marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};']]));
+  // A pushed task's bundle, and other jobs' artifacts, which its container takes in at boot.
+  const artifacts = bucket(new Map([...marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};'] as const], ...held.map((key) => [key, `the archive at ${key}`] as const)]));
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts, FLEET: namespace(() => fleet) }));
 
-  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu, timeout, deadlineAt });
+  await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu, timeout, deadlineAt, inputs });
 
   // An object the runtime restarted under its task finds that task, launched `launched` ms before it started, in
   // storage.
@@ -228,6 +232,48 @@ describe('a vessel\'s place in its fleet', () => {
     const { exits, claims, execs } = await run(0, { fleet: { acquire: async () => false, release: async () => undefined } });
 
     expect({ exits, claims, execs: execs.length }).toEqual({ exits: [], claims: 0, execs: 0 });
+  });
+});
+
+describe('a vessel whose job takes other jobs\' artifacts (#59)', () => {
+  const shards = '20261026120000-0123abcd';
+  const inputs = [0, 2].map((index) => ({ job: shards, index, key: `jobs/${shards}/tasks/${String(index)}/v1.1/artifacts.tar.gz` }));
+
+  test('takes each in once at boot, unpacked under {inputs}/<job>/<index>, before its first task; fails naming one R2 no longer holds', async () => {
+    const taken = await run(0, { inputs, held: inputs.map((input) => input.key) });
+    const unpacked = taken.execs.findIndex((argv) => argv[3] === 'unpack-inputs');
+    const missing = await run(0, { inputs, held: [inputs[0]?.key ?? ''] });
+
+    expect({
+      exits: taken.exits, piped: [...taken.piped].filter(([path]) => path.startsWith(INPUTS_DIR)), before: unpacked >= 0 && unpacked < taken.execs.findIndex((argv) => argv[3] === 'launch'),
+      missing: [missing.exits, missing.failed],
+    }).toEqual({
+      exits: [0], piped: inputs.map((input) => [`${INPUTS_DIR}/${shards}/${String(input.index)}.tar.gz`, `the archive at ${input.key}`]), before: true,
+      missing: [[], [`the artifacts of task 2 of job ${shards} are not in R2: a job's artifacts expire 7 days after they are written`]],
+    });
+  });
+
+  test('has each archive unpacked into its own directory, read-only to its tasks, and the archive gone', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-inputs-'));
+
+    try {
+      for (const [index, text] of [[0, 'shard 0'], [2, 'shard 2']] as const) {
+        const source = join(scratch, `source-${String(index)}`);
+
+        Bun.spawnSync(['mkdir', '-p', join(source, 'nested'), join(scratch, 'inputs', shards)]);
+        writeFileSync(join(source, 'nested', 'part.json'), text);
+        Bun.spawnSync(['tar', '-czf', join(scratch, 'inputs', shards, `${String(index)}.tar.gz`), '-C', source, '.']);
+      }
+
+      const unpacked = Bun.spawnSync(['/bin/sh', '-c', unpackInputs(join(scratch, 'inputs')), 'unpack-inputs'], { stderr: 'pipe' });
+      const listed = Bun.spawnSync(['find', join(scratch, 'inputs'), '-type', 'f'], { stdout: 'pipe' }).stdout.toString().trim().split('\n').map((path) => path.slice(scratch.length)).toSorted();
+      const read = [0, 2].map((index) => Bun.file(join(scratch, 'inputs', shards, String(index), 'nested', 'part.json')).text());
+
+      expect({ exit: unpacked.exitCode, listed, read: await Promise.all(read) })
+        .toEqual({ exit: 0, listed: [`/inputs/${shards}/0/nested/part.json`, `/inputs/${shards}/2/nested/part.json`], read: ['shard 0', 'shard 2'] });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
 

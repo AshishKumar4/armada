@@ -10,14 +10,21 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
+import { boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
-  AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, usageFrom, usageOf, waitOn,
+  AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, unpackInputs, usageFrom, usageOf, waitOn,
 } from './container';
 import { bundleKey, equal, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
 import type { Claim, Gang } from './job';
 import { GANG_DOWN, GANG_UP, LINK_ID, Piped, RELAY, RELAY_HEADER, RELAY_IN, RELAY_LOG, RELAY_PY } from './relay';
+
+/** One task's artifacts another job takes (`JobSpec.inputs`): its job, its index, and the R2 key of its kept run's archive. */
+export interface Input {
+  readonly job: string;
+  readonly index: number;
+  readonly key: string;
+}
 
 export interface VesselSpec {
   readonly jobId: string;
@@ -29,6 +36,8 @@ export interface VesselSpec {
   readonly commit: (Commit & { readonly project: string; readonly history: 'full' | 'commit' }) | null;
   readonly tmpfs: readonly string[];
   readonly files: Record<string, string>;
+  /** Other jobs' artifacts it takes in at boot (`JobSpec.inputs`); absent for none. */
+  readonly inputs?: readonly Input[];
   /** A function job's bundle, by digest. */
   readonly bundle: string | null;
   /** What runs the bundle; absent on an earlier Worker's spec, which is always node. */
@@ -310,6 +319,16 @@ export class ArmadaVessel extends DurableObject<Env> {
     await must(container, 'owning the state', ['/bin/sh', '-c', OWN_STATE], { ms: EXEC_MS });
 
     for (const [name, text] of Object.entries(spec.files)) await pipeIn(container, text, `${STATE}/files/${name}`);
+
+    // Once a container: its tasks, and the slots that pack them, read them where they are.
+    for (const input of spec.inputs ?? []) {
+      const archive = await this.env.ARTIFACTS.get(input.key);
+
+      if (archive === null) throw new Error(`the artifacts of task ${String(input.index)} of job ${input.job} are not in R2: a job's artifacts expire 7 days after they are written`);
+      await pipeIn(container, archive.body, `${INPUTS_DIR}/${input.job}/${String(input.index)}.tar.gz`);
+    }
+
+    if ((spec.inputs ?? []).length > 0) await must(container, 'unpacking the inputs', ['/bin/sh', '-c', unpackInputs(INPUTS_DIR), 'unpack-inputs'], { ms: EXEC_MS });
 
     if (spec.bundle !== null) {
       const bundle = await this.env.ARTIFACTS.get(bundleKey(spec.bundle));
