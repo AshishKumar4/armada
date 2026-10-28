@@ -225,9 +225,11 @@ describe('a vessel\'s place in its fleet', () => {
     // Taken up mid-task, as a restarted object finds it: one whose grace is out, and one whose grace outlasts its task.
     const out = await run(0, { launched: 60_000, pending: 1_000, fleet: recalled(Date.now() - 1) });
     const within = await run(0, { launched: 60_000, pending: 1, fleet: recalled(Date.now() + 10 * 60_000) });
+    // Its task ended as the grace ran out, before the vessel looked: it lands, not runs again.
+    const ended = await run(0, { launched: 60_000, pending: 0, fleet: recalled(Date.now() - 1) });
 
-    expect({ out: [out.exits, out.preempted, out.failed, out.retired], within: [within.exits, within.preempted, within.retired] })
-      .toEqual({ out: [[], [true], [], false], within: [[0], [], true] });
+    expect({ out: [out.exits, out.preempted, out.failed, out.retired], within: [within.exits, within.preempted, within.retired], ended: [ended.exits, ended.preempted, ended.retired] })
+      .toEqual({ out: [[], [true], [], false], within: [[0], [], true], ended: [[0], [], true] });
   });
 
   test('takes no new task once the fleet recalls its vCPUs, lent or held (#60): it finishes the one it runs, then retires', async () => {

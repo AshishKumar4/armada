@@ -400,9 +400,6 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
-      // A task still running once its container's recall's grace is out ends with the container, and runs again elsewhere.
-      if (current !== undefined && endsBy !== null && Date.now() >= endsBy) return 'preempted';
-
       if (current === undefined) {
         // A container the platform is stopping takes no new task: the vessel fails, and the job replaces it.
         const stopping = (await must(container, 'the stop check', ['/bin/sh', '-c', STOPPED], { ms: EXEC_MS })).stdout.trim();
@@ -432,7 +429,10 @@ export class ArmadaVessel extends DurableObject<Env> {
         }
       }
 
-      const seconds = Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
+      // Past its container's recall's grace, one short look lands a task that has ended; one still running ends with the
+      // container, and runs again elsewhere.
+      const graced = endsBy !== null && Date.now() >= endsBy;
+      const seconds = graced ? 1 : Math.max(1, Math.min(WAIT_SECONDS, Math.floor((until - Date.now()) / 1000)));
       const [waited] = await Promise.allSettled([run(container, ['/bin/sh', '-c', waitOn(dir), 'wait', String(seconds)], { ms: (seconds + 30) * 1000 })]);
 
       if (waited.status === 'rejected') {
@@ -457,6 +457,8 @@ export class ArmadaVessel extends DurableObject<Env> {
         await this.finish(spec, slot, current, { exitCode: 124, reason: 'timeout' });
         continue;
       }
+
+      if (graced) return 'preempted';
 
       if (!(await job.still(spec.name, current.claim.index, slot, current.claim.attempt))) await this.stopTask(spec, slot, current);
     }
