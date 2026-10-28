@@ -13,13 +13,20 @@ import { echo, encode, flaky, fromFile, greet, keyed, lie, lookalike, refuse, re
 
 const FIXTURES = join(import.meta.dir, 'fixtures');
 
+/** The most tasks the local fleet runs at once, as a job's pool bounds its containers. Run as each arrived, a stream of
+ *  1,100 items ran up to 709 processes at once, past a 4-vCPU CI container's 1,024 open files (EMFILE, 2026-10-28). */
+const LOCAL_POOL = 16;
+
 /**
  * A deployment that runs each task on this machine as a container would: a pushed task's bundle under `node`, a
- * command's argv, each with the item in `ARMADA_ITEM` and its output to `ARMADA_OUT`. Tasks at `lose` are lost. It
- * refuses what the Worker refuses.
+ * command's argv, each with the item in `ARMADA_ITEM` and its output to `ARMADA_OUT`, LOCAL_POOL at once. Tasks at
+ * `lose` are lost. It refuses what the Worker refuses.
  */
 function localFleet(lose: readonly number[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'armada-fleet-'));
+  // Free places in the pool, and the tasks waiting for one.
+  let free = LOCAL_POOL;
+  const queued: (() => void)[] = [];
   const bundles = new Map<string, Uint8Array>();
   const ids = new Map<string, string>();
   const outputs = new Map<string, Uint8Array>();
@@ -43,13 +50,27 @@ function localFleet(lose: readonly number[] = []) {
       const { run: spec } = job.spec;
       const argv = spec.kind === 'task' ? ['node', join(dir, `${spec.bundle ?? ''}.mjs`)] : entry.argv ?? [];
 
-      const ran = Bun.spawn(argv, {
-        env: { ...process.env, ARMADA_ITEM: JSON.stringify(entry.item), ARMADA_INDEX: String(index), ARMADA_ATTEMPT: '1', ARMADA_OUT: out, ARMADA_ANSWER: marker, ARMADA_TASK: spec.kind === 'task' ? spec.id : '' },
-        stdout: 'pipe', stderr: 'pipe',
-      });
+      if (free > 0) free -= 1;
+      else await new Promise<void>((resolve) => { queued.push(resolve); });
+      let exitCode: number;
+      let tail: string;
 
-      const exitCode = await ran.exited;
-      const tail = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
+      try {
+        const ran = Bun.spawn(argv, {
+          env: { ...process.env, ARMADA_ITEM: JSON.stringify(entry.item), ARMADA_INDEX: String(index), ARMADA_ATTEMPT: '1', ARMADA_OUT: out, ARMADA_ANSWER: marker, ARMADA_TASK: spec.kind === 'task' ? spec.id : '' },
+          stdout: 'pipe', stderr: 'pipe',
+        });
+
+        exitCode = await ran.exited;
+        tail = await new Response(ran.stdout).text() + await new Response(ran.stderr).text();
+      } finally {
+        // Its place goes to the next task waiting, else back to the pool.
+        const next = queued.shift();
+
+        if (next === undefined) free += 1;
+        else next();
+      }
+
       const kept = job.spec.output || spec.kind === 'task' ? readFileSync(out, { flag: 'a+' }) : null;
       const text = kept === null || kept.byteLength > INLINE_BYTES ? undefined : new TextDecoder('utf-8', { fatal: false }).decode(kept);
       const [said, error] = spec.kind === 'task' ? readFileSync(marker, { flag: 'a+' }).toString().split('\n') : [];
