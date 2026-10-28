@@ -53,7 +53,7 @@ map options:
   --items=<file|->     a JSON array, or one item per line
   --env=<recipe.json>  {"base", "setup", "install", "size"}, scripts relative to it
   --commit=<rev>       run in the commit's checkout, in the environment its .armada.json names
-  --size=<size>        each container's size: micro, mini, small or medium (default medium)
+  --size=<size>        each container's size: micro, mini, small, medium or large (default medium)
   --pool=N             the most containers at once (default 50)
   --slots=N            the tasks one container runs at once, each in its own slot (default 1; more turns packing off)
   --budget=N           the most the runs spend at once, each its item's "cost" (default 1); a container takes the

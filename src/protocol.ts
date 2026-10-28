@@ -9,7 +9,7 @@ export const Sha = v.pipe(v.string(), v.regex(/^[0-9a-f]{40}$/u));
 
 /** The wire's version, which every request names in its PROTOCOL_HEADER: bump it when a request or an answer changes
  *  shape, so a client and a Worker that do not match say so instead of failing to parse each other. */
-export const PROTOCOL = 14;
+export const PROTOCOL = 15;
 
 /** The oldest client version a Worker still serves. A version that only adds to the wire keeps it, so a project's
  *  pinned client keeps working across a deploy; one that changes what an older client sends or reads raises it. */
@@ -24,9 +24,11 @@ export const DEPLOYMENT_HEADER = 'armada-deployment';
  *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it. */
 export const DRIVER = 2;
 
-/** The container sizes, smallest first, each a Cloudflare instance type. Cloudflare's largest is 4 vCPU and 12 GiB. A
- *  container's start refuses its `basic` type, and `lite`, at 1/16 vCPU, is too small to prepare an environment on. */
-export const SIZE_NAMES = ['micro', 'mini', 'small', 'medium'] as const;
+/** The container sizes, smallest first, each a Cloudflare instance type, or for `large` the resources a start names.
+ *  Cloudflare's largest type is 4 vCPU and 12 GiB, and an account may start up to 8 vCPU in its 12 GiB (started on
+ *  2026-10-28). A container's start refuses its `basic` type, and `lite`, at 1/16 vCPU, is too small to prepare an
+ *  environment on. */
+export const SIZE_NAMES = ['micro', 'mini', 'small', 'medium', 'large'] as const;
 
 export type Size = (typeof SIZE_NAMES)[number];
 
@@ -35,9 +37,12 @@ export const SIZES = {
   mini: { instance: 'standard-2', vcpus: 1, memoryGiB: 6, diskGB: 12 },
   small: { instance: 'standard-3', vcpus: 2, memoryGiB: 8, diskGB: 16 },
   medium: { instance: 'standard-4', vcpus: 4, memoryGiB: 12, diskGB: 20 },
-} as const satisfies Record<Size, { readonly instance: string; readonly vcpus: number; readonly memoryGiB: number; readonly diskGB: number }>;
+  large: { instance: { vcpu: 8, memoryMib: 12 * 1024, diskMb: 20_000 }, vcpus: 8, memoryGiB: 12, diskGB: 20 },
+} as const satisfies Record<Size, {
+  readonly instance: string | { readonly vcpu: number; readonly memoryMib: number; readonly diskMb: number }; readonly vcpus: number; readonly memoryGiB: number; readonly diskGB: number;
+}>;
 
-export const SizeSchema = v.picklist(SIZE_NAMES, 'a size is micro, mini, small or medium');
+export const SizeSchema = v.picklist(SIZE_NAMES, 'a size is micro, mini, small, medium or large');
 
 /** A project's slug, which scopes its environments, packs, timings and verdicts. */
 export const Project = v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,39}$/u));
@@ -668,16 +673,21 @@ export function mustDrain(health: Health | null, force: boolean, contract: strin
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });
 
 /** The timings a project's graded run reports back, and the medians a plan reads: `{rows, files}`. `usage` is the
- *  most one task used in the run reported, or in the last runs read. */
+ *  most one task of the run's own size used in the run reported, or in the last runs read; `tasks`, what each task
+ *  used, by its name, which sizes it under `auto` (#64). */
 export const TimingsSchema = v.object({
   rows: v.record(v.string(), v.number()), files: v.record(v.string(), v.number()), usage: v.optional(v.nullable(UsageSchema)),
+  tasks: v.optional(v.record(v.string(), UsageSchema), {}),
 });
 
 export type Timings = v.InferOutput<typeof TimingsSchema>;
 
 /** A full run's timings, with what its project keeps the timings of: the rows its plan named and its tasks reported,
- *  and the files its commit holds. A client before wire 12 names none, and its rows and files join those kept. */
-export const RecordedSchema = v.object({ ...TimingsSchema.entries, keep: v.optional(v.object({ rows: v.array(v.string()), files: v.array(v.string()) })) });
+ *  the files its commit holds, and the tasks its plan named. A client before wire 12 names none, and its rows and files
+ *  join those kept; one before wire 15 names no tasks, and keeps every task kept so far. */
+export const RecordedSchema = v.object({
+  ...TimingsSchema.entries, keep: v.optional(v.object({ rows: v.array(v.string()), files: v.array(v.string()), tasks: v.optional(v.array(v.string())) })),
+});
 
 export type Recorded = v.InferOutput<typeof RecordedSchema>;
 
@@ -721,8 +731,11 @@ export async function environmentKey(recipe: Recipe): Promise<string> {
     manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map((entry) => `${entry.path} ${entry.id}`),
   };
 
-  // The size keys by its instance type, as the instance type did before sizes were named.
-  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[recipe.size].instance, repo];
+  // A snapshot starts at any size of its disk (one prepared on medium started on large, small and micro, 2026-10-28), so
+  // sizes of one disk share an environment, keyed as the smallest of them by its instance type, as the instance type
+  // did before sizes were named.
+  const shared = SIZE_NAMES.find((size) => SIZES[size].diskGB === SIZES[recipe.size].diskGB) ?? recipe.size;
+  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[shared].instance, repo];
 
   return await sha256(JSON.stringify(inputs));
 }
@@ -801,10 +814,13 @@ export function usageOf(outcomes: readonly { readonly seconds: number; readonly 
   };
 }
 
-/** The smallest size whose memory and vCPUs this usage fills to three quarters at most. Measured on a smaller size, a
- *  task held to its vCPUs fills them, so the next run goes a size up. */
-export function fitSize(usage: Usage): Size {
-  return SIZE_NAMES.find((size) => usage.memory <= SIZES[size].memoryGiB * 2 ** 30 * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? 'medium';
+/** The smallest size `from` to `to` whose memory and vCPUs this usage fills to three quarters at most, else `to`. Measured
+ *  on a smaller size, a task held to its vCPUs fills them, so the next run goes a size up. A run's sizes stop at medium;
+ *  a task's own may go to large (#64). */
+export function fitSize(usage: Usage, { from = SIZE_NAMES[0], to = 'medium' }: { readonly from?: Size; readonly to?: Size } = {}): Size {
+  const sizes = SIZE_NAMES.slice(SIZE_NAMES.indexOf(from), SIZE_NAMES.indexOf(to) + 1);
+
+  return sizes.find((size) => usage.memory <= SIZES[size].memoryGiB * 2 ** 30 * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? to;
 }
 
 export const describeUsage = (usage: Usage): string => `${(usage.memory / 2 ** 30).toFixed(2)} GiB and ${usage.cores.toFixed(2)} cores`;

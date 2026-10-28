@@ -376,7 +376,8 @@ them, such as
 `"artifacts": ["shots/home.png"]`. `armada run` extracts them next to the report and prints each one under a red row,
 and a row naming a file its task didn't keep leaves the run ungraded. Artifacts are kept as written, so the log's
 secret mask doesn't apply. `armada map --artifacts=<dir>` extracts a job's under `<dir>/<index>`. A matrix entry may
-also name the `rows` its task must report; other rows leave the run ungraded.
+also name the `rows` its task must report; other rows leave the run ungraded, and a `size` its task runs on, such as
+`large` for a test that uses more cores.
 
 A matrix entry may name an `environment` from `environments`: the project's `environment` with the fields it gives
 replaced, in a snapshot and a task job of its own, so a container restores only what its tasks need. The pool is split
@@ -427,9 +428,13 @@ for the other.
 | `mini` | 1 | 6 GiB | `standard-2` |
 | `small` | 2 | 8 GiB | `standard-3` |
 | `medium` | 4 | 12 GiB | `standard-4` |
+| `large` | 8 | 12 GiB | 8 vCPU, 12 GiB and 20 GB, named at its start |
 
-With `"size": "auto"`, each run takes the smallest size that the last five runs' tasks fill to three quarters at most,
-in peak memory and average busy cores. A new size prepares its own environment once.
+With `"size": "auto"`, each run takes the smallest size up to `medium` that the last five runs' tasks fill to three
+quarters at most, in peak memory and average busy cores. A task whose own last five runs used more goes up from it, as
+far as `large`; a light one stays, as packing shares a container among light tasks. A plan entry's `size` sets its
+own. Each size's tasks run in a job of their own. A new size prepares its own environment once, but `large` starts from
+`medium`'s, as a snapshot starts at any size of its disk.
 
 ### CI on push, through a GitHub webhook
 

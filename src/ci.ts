@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -289,10 +289,10 @@ async function commitOf(armada: Armada, target: string) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
-  const size = sizeOf(config, timings);
-  const of = async (name: string | undefined) => await prepared(armada, { repo, sha, config, size, name });
+  const base = sizeOf(config, timings);
+  const of = async (name: string | undefined, size = base) => await prepared(armada, { repo, sha, config, size, name });
 
-  return { sha, repo, config, timings, of, ...await of(undefined) };
+  return { sha, repo, config, timings, base, of, ...await of(undefined) };
 }
 
 /** One of the commit's environments, the project's or one `environments` names: its key and base as the deployment
@@ -502,7 +502,7 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
  *  printed and reported but never stored as the commit's. */
 async function runGraded(armada: Armada, target: string, { deadline, pool: bound, priority, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
-  const { sha, repo, config, timings, environment, spec, upload, of } = await commitOf(armada, target);
+  const { sha, repo, config, timings, base, environment, spec, upload, of } = await commitOf(armada, target);
   const deadlineAt = began + (deadline ?? config.deadline) * 1000;
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
@@ -603,8 +603,22 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   });
 
   const estimates = plan.include.map((entry, index) => estimateOf(entry, nameOf(index), timings));
-  // The project's environment first, then each named one in the plan's order, by their entries' plan indexes.
-  const groups = [undefined, ...named].map((name) => ({ name, indexes: plan.include.flatMap((entry, index) => entry.environment === name ? [index] : []) })).filter((group) => group.indexes.length > 0);
+
+  // Each entry's size: its own, else its run's; under auto, a size up from its run's, as far as large, where its own
+  // last runs used more (#64). A light task never goes down: packing shares a container among light tasks.
+  const sizes = plan.include.map((entry, index) => {
+    const used = timings.tasks[nameOf(index)];
+
+    return entry.size ?? (config.size === 'auto' && used !== undefined ? fitSize(used, { from: base, to: 'large' }) : base);
+  });
+
+  // The project's environment first, then each named one in the plan's order, each size smallest first, by their
+  // entries' plan indexes: each runs in a task job of its own (#31, #64).
+  const groups = [undefined, ...named].flatMap((name) => SIZE_NAMES.map((size) => ({ name, size, indexes: plan.include.flatMap((entry, index) => entry.environment === name && sizes[index] === size ? [index] : []) })))
+    .filter((group) => group.indexes.length > 0);
+
+  // How a group is said: its environment's name, and its size where that is not the run's.
+  const labelOf = ({ name, size }: { readonly name: string | undefined; readonly size: Size }): string => [name, size === base ? undefined : size].filter((word) => word !== undefined).join(', ');
   // Its own secrets join the config's only for this run.
   const taskSecrets = [...new Set([...config.task.secrets, ...secrets])];
 
@@ -612,29 +626,37 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // environment is resolved again and its pack goes up; then each is resolved alone, with nothing between those
   // resolves and the jobs' start, as resolving counts as a use that keeps it until they open. One whose base moved is
   // packed again and the check repeats. Each before any task job starts: one that fails leaves none running.
-  let built = await Promise.all(groups.map(async ({ name }) => [name, await of(name)] as const));
-  let owns = new Map(built);
+  const owns = await Promise.all(groups.map(async ({ name, size }) => await of(name, size)));
+  let built = owns.map((_, at) => at);
 
   for (;;) {
-    await Promise.all(built.map(async ([name, own]) => {
-      const sent = await own.upload();
+    await Promise.all(built.map(async (at) => {
+      const sent = await owns[at]?.upload() ?? null;
+      const said = labelOf(groups[at] ?? { name: undefined, size: base });
 
-      if (sent !== null) note(`uploaded its pack${name === undefined ? ' again' : ` for ${name}`}, ${(sent / 1e6).toFixed(1)} MB`);
+      if (sent !== null) note(`uploaded its pack${said === '' ? ' again' : ` for ${said}`}, ${(sent / 1e6).toFixed(1)} MB`);
     }));
 
-    const moved = (await Promise.all([...owns].map(async ([name, own]) => (await armada.resolve(own.spec.recipe)).base === own.environment.base ? [] : [name]))).flat();
+    const moved = (await Promise.all(owns.map(async (own, at) => (await armada.resolve(own.spec.recipe)).base === own.environment.base ? [] : [at]))).flat();
 
     if (moved.length === 0) break;
 
     if (remainingDeadline(deadlineAt) === null) return await ungraded(PASSED('task jobs'));
-    built = await Promise.all(moved.map(async (name) => [name, await of(name)] as const));
-    owns = new Map([...owns, ...built]);
+
+    for (const at of moved) {
+      const group = groups[at];
+
+      if (group !== undefined) owns[at] = await of(group.name, group.size);
+    }
+
+    built = moved;
   }
 
-  for (const name of named) {
-    const own = owns.get(name);
+  for (const [at, group] of groups.entries()) {
+    const own = owns[at];
+    const said = labelOf(group);
 
-    if (own !== undefined) note(`environment ${name} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
+    if (own !== undefined && said !== '') note(`environment ${said} ${own.environment.key.slice(0, 12)}${own.environment.base === 'root' ? ' (to prepare)' : ''}`);
   }
 
   const containers = Math.min(config.pool, bound ?? config.pool);
@@ -653,8 +675,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   /** Group `at`'s task job, started on `share` containers. Its deadline is what is left of the run's, and bounds its
    *  tasks' timeout. */
   const start = (at: number, share: number) => {
-    const group = groups[at] ?? { name: undefined, indexes: [] };
-    const own = owns.get(group.name) ?? { environment, spec };
+    const group = groups[at] ?? { name: undefined, size: base, indexes: [] };
+    const own = owns[at] ?? { environment, spec };
     const groupRanks = group.indexes.map((index) => ranks[index] ?? 1);
     const most = Math.min(share * slots, groupRanks.reduce((sum, each) => sum + each, 0));
     const { lanes, pool } = lanesFor(group.indexes.map((index) => estimates[index]), groupRanks, share, slots);
@@ -674,7 +696,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const jobOptions = { ...options, deadline: left, pool, cpu: config.task.cpu };
     const job = config.task.verdict ? commandTask(own.spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(own.spec.recipe, argv, taskOptions).stream(entries, jobOptions);
 
-    return { ...group, job, lanes, most, pool, size: entries.length };
+    return { ...group, job, lanes, most, pool, tasks: entries.length };
   };
 
   // Each task's rows, by its plan index, read from its verdict file as its result lands, and graded as read: a task
@@ -730,7 +752,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   // Every job started, its creation perhaps in flight, for an interrupt to cancel; and those started and followed.
   const started: Job<Json, string | null>[] = [];
-  const jobs: { readonly name: string | undefined; readonly id: string; readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }[] = [];
+  const jobs: { readonly name: string | undefined; readonly size: Size; readonly id: string; readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }[] = [];
 
   const tasked = await cancelOnInterrupt(started, async () => {
     const starting = groups.map((_, at) => start(at, shares[at] ?? 1));
@@ -749,7 +771,9 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     for (const [place, each] of starting.entries()) {
       const id = created[place]?.status === 'fulfilled' ? created[place].value : '';
 
-      note(`task job ${id}${each.name === undefined ? '' : ` (${each.name})`}: ${String(each.size)} tasks on ${String(each.pool)} containers${slots > 1 ? ` of ${String(slots)} slots` : ''}`
+      const said = labelOf(each);
+
+      note(`task job ${id}${said === '' ? '' : ` (${said})`}: ${String(each.tasks)} tasks on ${String(each.pool)} containers${slots > 1 ? ` of ${String(slots)} slots` : ''}`
         + `${each.lanes < each.most ? `, which the plan's estimates say finish as soon as ${String(Math.ceil(each.most / slots))} would` : ''}`);
       jobs.push({ ...each, id });
     }
@@ -795,7 +819,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   const summary = together(await Promise.all(jobs.map(async ({ job }) => await job.summary())));
   const problems = statuses.flatMap((each) => each.problems);
   // A run of more than one environment names each job: the report's `job` and `status` are the first's.
-  const each = jobs.length === 1 ? undefined : jobs.map(({ name, id }, at) => ({ environment: name ?? '', job: id, status: statuses[at] ?? status }));
+  const each = jobs.length === 1 ? undefined : jobs.map(({ name, size, id }, at) => ({ environment: name ?? '', size, job: id, status: statuses[at] ?? status }));
 
   const report = writeReport({
     planJob: planId, job: first.id, graded: outcome, status, summary, problems: graded.problems, rows: graded.rows,
@@ -808,7 +832,16 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
 
-  const usage = usageOf([...planRun, ...results].map((result) => result.meta));
+  // The most one task of each size used, the run's own with its plan's, which sizes the next run (`sizeOf`); and what
+  // each task used, by its name, which sizes it in the next run under auto (#64).
+  const usages = SIZE_NAMES.map((size) => [size, usageOf([...size === base ? planRun : [], ...results.filter((result) => sizes[result.index] === size)].map((result) => result.meta))] as const);
+  const usage = usages.find(([size]) => size === base)?.[1] ?? null;
+
+  const tasks = Object.fromEntries([...new Set(names)].flatMap((name) => {
+    const used = usageOf(results.filter((result) => nameOf(result.index) === name).map((result) => result.meta));
+
+    return used === null ? [] : [[name, used]];
+  }));
 
   // The usage of a narrowed run is not the commit's either: it would size the next full run down to a part's needs.
   // A run that cannot grade still records what its green rows took: one out of time is planned anew from them (#46).
@@ -824,8 +857,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
     try {
       await armada.post(`/timings/${config.name}`, {
-        rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: graded.files, usage,
-        keep: { rows: [...new Set([...planned, ...graded.rows.map(rowName), ...unowned ? Object.keys(timings.rows) : []])], files },
+        rows: Object.fromEntries(green.map((row) => [rowName(row), row.seconds])), files: graded.files, usage, tasks,
+        keep: { rows: [...new Set([...planned, ...graded.rows.map(rowName), ...unowned ? Object.keys(timings.rows) : []])], files, tasks: [...new Set(names)] },
       });
     } catch (cause) {
       note(`this run's timings were not recorded, so the next plan weighs its rows without them: ${errorOf({ cause }).message}`);
@@ -850,7 +883,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   note(`\n${graded.reds.length === 0 ? 'PASS' : 'FAIL'}: ${greenOf(graded.rows)}, wall ${clock(Date.now() - began)} (tasks ${clock(summary.mapMs)})`);
   note(describeBoots(summary));
 
-  if (usage !== null) note(`one task used at most ${describeUsage(usage)} on size ${spec.recipe.size}`);
+  for (const [size, used] of usages) if (used !== null) note(`one task used at most ${describeUsage(used)} on size ${size}`);
   note(`report: ${report}`);
 
   return { ...ran, problems, rows: graded.rows };

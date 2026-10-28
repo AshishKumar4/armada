@@ -6,7 +6,7 @@
  * problem names: that one carries the `problem`, and exits 2 where it reported green, so no reader counts it green.
  */
 import * as v from 'valibot';
-import { HostSchema, JsonSchema } from './protocol';
+import { HostSchema, JsonSchema, SizeSchema } from './protocol';
 
 /** One row a task must report, and the files it must report a timing for, when the project splits rows by file. */
 const ExpectedRow = v.union([v.string(), v.object({ name: v.string(), files: v.optional(v.array(v.string())) })]);
@@ -16,7 +16,11 @@ export const expectedOf = (want: v.InferOutput<typeof ExpectedRow>): { readonly 
 
 /** The plan: a GitHub-Actions-shaped matrix. */
 export const PlanSchema = v.object({
-  include: v.pipe(v.array(v.objectWithRest({ rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()), environment: v.optional(v.string()) }, JsonSchema)), v.minLength(1)),
+  include: v.pipe(v.array(v.objectWithRest({
+    rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()), environment: v.optional(v.string()),
+    // The entry's container size, over its run's: a task that knows it needs more cores (#64).
+    size: v.optional(SizeSchema),
+  }, JsonSchema)), v.minLength(1)),
 });
 
 export type PlanEntry = v.InferOutput<typeof PlanSchema>['include'][number];

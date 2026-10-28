@@ -47,10 +47,15 @@ describe('an environment', () => {
       // A client that sends its packs' boundary never shares an environment an earlier client prepared (#34), as the
       // Worker keys the recipe it parsed.
       packed: await environmentKey(v.parse(RecipeSchema, { ...recipe, repo: { ...repo, packer: PACKER } })),
+      // A snapshot starts at any size of its disk (#64): large shares medium's 20 GB; small's 16 GB is its own.
+      large: await environmentKey({ ...recipe, size: 'large' }),
+      small: await environmentKey({ ...recipe, size: 'small' }),
     };
 
-    expect({ fixed: keys.fixed === key, rebased: keys.rebased === key, repo: keys.repo === key, reordered: keys.reordered === keys.repo, relocked: keys.relocked === keys.repo, packed: keys.packed === keys.repo })
-      .toEqual({ fixed: false, rebased: false, repo: false, reordered: true, relocked: false, packed: false });
+    expect({
+      fixed: keys.fixed === key, rebased: keys.rebased === key, repo: keys.repo === key, reordered: keys.reordered === keys.repo, relocked: keys.relocked === keys.repo, packed: keys.packed === keys.repo,
+      large: keys.large === key, small: keys.small === key,
+    }).toEqual({ fixed: false, rebased: false, repo: false, reordered: true, relocked: false, packed: false, large: true, small: false });
   });
 
   test('a row\'s estimate is the median of its last five green runs: one slow run moves nothing, and old ones age out', () => {
@@ -353,8 +358,10 @@ describe('a size', () => {
   test('fits the most a task used with a quarter to spare, and goes up when a task filled its vCPUs', () => {
     expect([
       fitSize({ memory: 0.5 * GiB, cores: 0.3 }), fitSize({ memory: 0.5 * GiB, cores: 0.6 }), fitSize({ memory: 5 * GiB, cores: 0.3 }),
-      fitSize({ memory: 2 * GiB, cores: 1.9 }), fitSize({ memory: 10 * GiB, cores: 1 }),
-    ]).toEqual(['micro', 'mini', 'small', 'medium', 'medium']);
+      fitSize({ memory: 2 * GiB, cores: 1.9 }), fitSize({ memory: 10 * GiB, cores: 1 }), fitSize({ memory: GiB, cores: 3.5 }),
+    ]).toEqual(['micro', 'mini', 'small', 'medium', 'medium', 'medium']);
+    // A task's own size goes up from its run's, as far as large: 8 vCPUs, and medium's 12 GiB (#64).
+    expect([fitSize({ memory: GiB, cores: 3.5 }, { from: 'medium', to: 'large' }), fitSize({ memory: GiB, cores: 0.3 }, { from: 'medium', to: 'large' })]).toEqual(['large', 'medium']);
   });
 
   test('reads what tasks used from the outcomes that measured it', () => {
@@ -952,6 +959,8 @@ interface Runner {
   readonly within?: string;
   /** The timings upload is refused, as #43's 500 SQLITE_TOOBIG was. */
   readonly timingsRefused?: boolean;
+  /** What a task of this item used, which its outcome says. */
+  readonly usage?: (item: Json) => { readonly cpuSeconds: number; readonly peakMemory: number };
 }
 
 /** The host most containers ran on (2026-10-13). */
@@ -961,7 +970,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -1044,7 +1053,8 @@ describe('armada run', () => {
           return Response.json({
             events: exitsOf(job).map((exitCode, index) => {
               const item = items[index];
-              const landed = { ...outcome, index, exitCode, artifacts: archives };
+              const used = item === undefined ? undefined : usage?.(item);
+              const landed = { ...outcome, index, exitCode, artifacts: archives, ...used };
               const aloneAfter = item === undefined ? undefined : aloneOf?.(item);
 
               return { seq: index + 1, outcome: aloneAfter === undefined ? landed : { ...landed, aloneAfter } };
@@ -1282,7 +1292,7 @@ describe('armada run', () => {
 
   // 2026-10-16: a project kept the timings of every row a run ever named, and the answer, which each job of a run
   // carries in its stored spec, outgrew what the platform stores: every `armada run` was refused SQLITE_TOOBIG.
-  test('a full run names what its project keeps: the rows its plan named or its tasks reported, and its commit\'s files', async () => {
+  test('a full run names what its project keeps: the rows its plan named or its tasks reported, its commit\'s files, and its tasks', async () => {
     const plan = { include: [{ name: 'a', rows: [{ name: 'x', files: ['sub/x.py'] }, { name: 'y', files: ['y.py'] }] }] };
     const kept = { rows: { z: 2, old: 3 }, files: {} };
     // One task cut off before its second row, run from a directory of the checkout.
@@ -1292,9 +1302,9 @@ describe('armada run', () => {
     const silent = await run([], { include: [{ name: 'b' }] }, null, { taskExit: 1, timings: kept });
 
     expect([...cut.timed, ...unnamed.timed, ...silent.timed].map((body) => v.parse(v.looseObject({ keep: v.unknown() }), body).keep)).toEqual([
-      { rows: ['x', 'y'], files: ['.armada.json', 'sub/x.py', 'y.py'] },
-      { rows: ['b', 'z'], files: ['.armada.json'] },
-      { rows: ['b', 'z', 'old'], files: ['.armada.json'] },
+      { rows: ['x', 'y'], files: ['.armada.json', 'sub/x.py', 'y.py'], tasks: ['a'] },
+      { rows: ['b', 'z'], files: ['.armada.json'], tasks: ['b'] },
+      { rows: ['b', 'z', 'old'], files: ['.armada.json'], tasks: ['b'] },
     ]);
   });
 
@@ -1314,6 +1324,31 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, graded: ran.stdout.includes('NOT GRADED'), verdicts: ran.seen.filter((one) => one.startsWith('PUT /verdicts')), timed: ran.timed })
       .toEqual({ exit: 2, graded: true, verdicts: [], timed: [expect.objectContaining({ rows: { x: 4 }, files: { 'x.py': 3 } })] });
+  });
+
+  // #64: one size served a whole run, the smallest its heaviest task fit, so a few tests that could use more cores ran
+  // on 4 vCPUs beside the rest.
+  test('runs each size\'s tasks in a job of its own: an entry\'s own size, else under auto the one its last runs needed, and records each task\'s use', async () => {
+    const GIB = 2 ** 30;
+    const plan: Json = { include: [{ name: 'heavy' }, { name: 'light' }, { name: 'declared', size: 'large' }, { name: 'new' }] };
+    // The last runs: heavy kept 3.5 cores busy on a medium container, light under one; new has run on none.
+    const timings = { rows: {}, files: {}, usage: { memory: GIB, cores: 3.5 }, tasks: { heavy: { memory: GIB, cores: 3.5 }, light: { memory: GIB, cores: 0.8 } } };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+
+    const ran = await run([], plan, {}, {
+      config: { size: 'auto' }, taskConfig: { verdict: false }, timings, exitOf: () => 0,
+      usage: (item) => ({ cpuSeconds: nameOf(item) === 'heavy' ? 5 : 0.5, peakMemory: GIB }),
+    });
+
+    const jobs = ran.bodies.map((body) => v.parse(v.object({ recipe: v.object({ size: v.string() }), items: v.array(v.object({ item: JsonSchema })) }), body))
+      .filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}').map(({ recipe, items }) => [recipe.size, items.map(({ item }) => nameOf(item))]);
+
+    const [recorded] = ran.timed.map((body) => v.parse(v.object({ tasks: v.record(v.string(), v.object({ cores: v.number(), memory: v.number() })), keep: v.object({ tasks: v.array(v.string()) }) }), body));
+
+    expect({ exit: ran.exit, jobs, tasks: recorded?.tasks, keep: recorded?.keep.tasks }).toEqual({
+      exit: 0, jobs: [['medium', ['light', 'new']], ['large', ['heavy', 'declared']]],
+      tasks: { heavy: { cores: 5, memory: GIB }, light: { cores: 0.5, memory: GIB }, declared: { cores: 0.5, memory: GIB }, new: { cores: 0.5, memory: GIB } }, keep: ['heavy', 'light', 'declared', 'new'],
+    });
   });
 
   test('a CI deadline passed before the task jobs could start leaves the run ungraded, with its report and its --json object (#37)', async () => {

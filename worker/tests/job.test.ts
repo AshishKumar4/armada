@@ -78,6 +78,16 @@ describe('a job whose containers the fleet takes for a job of a higher priority'
   });
 });
 
+describe('a job of size large (#64)', () => {
+  test('starts containers of 8 vCPUs in 12 GiB, held as 8 of its fleet\'s, from the environment medium prepares', async () => {
+    const { specs } = await job({ recipe: { size: 'large' }, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' } });
+    const recipe = v.parse(RecipeSchema, {});
+
+    expect({ started: specs.map(({ instance, vcpus }) => [instance, vcpus]), environment: await environmentKey({ ...recipe, size: 'large' }) === await environmentKey(recipe) })
+      .toEqual({ started: [[{ vcpu: 8, memoryMib: 12_288, diskMb: 20_000 }, 8]], environment: true });
+  });
+});
+
 describe('a job\'s priority (#60)', () => {
   test('reaches every container it starts, which asks the fleet with it; a job that names none has 0', async () => {
     const urgent = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, priority: 5 });

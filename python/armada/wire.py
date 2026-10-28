@@ -92,7 +92,7 @@ class Fields:
 
 
 # The wire's version, which every request names in PROTOCOL_HEADER.
-PROTOCOL = 14
+PROTOCOL = 15
 
 PROTOCOL_HEADER = "armada-protocol"
 
@@ -104,7 +104,7 @@ ANSWER_PATH = "/armada/task/answer"
 ARTIFACTS_PATH = "/armada/task/artifacts"
 
 # The container sizes, smallest first: protocol.ts's SIZES, which the Worker checks a recipe against.
-SIZES = ("micro", "mini", "small", "medium")
+SIZES = ("micro", "mini", "small", "medium", "large")
 
 DEFAULT_BASE = "cloudflare/debian-trixie"
 
