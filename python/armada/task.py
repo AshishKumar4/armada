@@ -505,8 +505,8 @@ class Task(Generic[In, Out]):
         them, any one; a container on another host is replaced before it takes a task. One keeps float results alike
         between hosts; several keep out a slow host. While the fleet is full, a job of a higher `priority` (default 0)
         starts first, and lower jobs' newest containers end until it fits: a task they still run a minute on runs again
-        later, at no cost to its retries. `inputs` are
-        ended jobs whose tasks' artifacts every container gets, read-only, under $ARMADA_INPUTS/<job>/<index>."""
+        later, at no cost to its retries. `inputs` are ended jobs whose tasks' artifacts every container gets, read-only,
+        under $ARMADA_INPUTS/<job>/<index>; `<job>/<index>` takes one task's."""
         client = armada or connect()
         from .push import pushed
 

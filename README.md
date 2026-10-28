@@ -286,7 +286,7 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 | `priority` | While the fleet is full, a job of a higher priority starts first, and lower jobs' newest containers end until it fits: a task they still run a minute on runs again later, at no cost to its retries (`--priority=N`; `armada run --priority=N` gives it to each of the run's jobs). Default 0. |
 | `lease` | `true` ends the job 3 minutes after this process stops following it, however the process ends: killed, its runner gone, or its network lost. `armada map` and `armada run` always set it. Default `false`: the job runs on alone. |
 | `deadline` | The whole job's limit in seconds, starts included: 21600 (6 hours) unless set. `null` (`--deadline=none`) for none, only with `lease`: the job then ends when its tasks do, when it is cancelled, or 3 minutes after its client stops following it. |
-| `inputs` | Ended jobs, by id, whose tasks' artifacts every container gets under `{inputs}` (`--inputs=<job,...>`), so a reduce takes what a map's tasks wrote. A job's artifacts expire 7 days after they are written. |
+| `inputs` | Ended jobs, by id, whose tasks' artifacts every container gets under `{inputs}` (`--inputs=<job,...>`), so a reduce takes what a map's tasks wrote; `<job>/<index>` takes one task's. A job's artifacts expire 7 days after they are written. |
 | `label`, `env`, `files`, `tmpfs` | The job's name in the dashboard, its environment, its small files (`{files}`), and the paths that get a fresh tmpfs. |
 
 These go to `.map` and `.stream` as `map(items, { pool, slots, budget, mode, cpu, priority, lease, deadline, label, env, files, inputs, tmpfs })`.
@@ -378,6 +378,16 @@ and a row naming a file its task didn't keep leaves the run ungraded. Artifacts 
 secret mask doesn't apply. `armada map --artifacts=<dir>` extracts a job's under `<dir>/<index>`. A matrix entry may
 also name the `rows` its task must report; other rows leave the run ungraded, and a `size` its task runs on, such as
 `large` for a test that uses more cores.
+
+A matrix entry that names others `after` is a judge: it runs once those map tasks have all passed, in a second wave of
+task jobs, and reads their artifacts under `{inputs}`. `{files}/after.json` maps each judge's name to its map tasks'
+directories. A judge whose map tasks didn't all pass reads red, naming them. Only the judge is graded: its map tasks
+count as its inputs, and their seconds weigh them in the next plan. This splits one long pooled check into map tasks
+of a few minutes each and a light judge:
+
+```json
+{"include": [{"name": "cell-0"}, {"name": "cell-1"}, {"name": "cell", "after": ["cell-0", "cell-1"]}]}
+```
 
 A matrix entry may name an `environment` from `environments`: the project's `environment` with the fields it gives
 replaced, in a snapshot and a task job of its own, so a container restores only what its tasks need. The pool is split

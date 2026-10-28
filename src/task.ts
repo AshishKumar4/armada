@@ -123,7 +123,7 @@ export interface MapOptions {
   /** The limit for a formed gang to launch all its ranks, once every one has a container, in seconds. Default 300. */
   readonly gangStartTimeout?: number;
   /** Ended jobs, by id, whose tasks' artifacts every container gets under `{inputs}/<job>/<index>` (`JobSpec.inputs`): a
-   *  reduce over what a map's tasks wrote. */
+   *  reduce over what a map's tasks wrote. `<job>/<index>` takes one task's. */
   readonly inputs?: readonly string[];
   /** Whose containers start first while the fleet is full: a job of a higher priority waits ahead of lower ones, and
    *  has their newest containers end until it fits; a task they still run a minute on runs again later, at no cost to

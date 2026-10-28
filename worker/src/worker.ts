@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -180,19 +180,29 @@ const spokenBy = (request: Request): number => Number(request.headers.get(PROTOC
  *  for one task a container, and may count on it (a task's cgroup at `TASK_GROUP`). */
 const MODES = 9;
 
-/** The kept artifacts of every task of the `jobs` a job takes as its inputs (`JobSpec.inputs`), or why it may not: one
- *  is no job of this deployment, one has not ended, so its artifacts are not all written, or there are past
- *  MAX_INPUT_RUNS, each an archive every container takes in at boot. */
-async function inputsOf(env: Env, jobs: readonly string[]): Promise<{ readonly runs: readonly Input[] } | { readonly refused: string; readonly code: 400 | 409 }> {
+/** The kept artifacts a job takes as its `inputs` (`JobSpec.inputs`): every task's of a job, or one task's,
+ *  `<job>/<index>`. Or why it may not: one is no job of this deployment, one has not ended, so its artifacts are not all
+ *  written, or there are past MAX_INPUT_RUNS, each an archive every container takes in at boot. */
+async function inputsOf(env: Env, inputs: readonly string[]): Promise<{ readonly runs: readonly Input[] } | { readonly refused: string; readonly code: 400 | 409 }> {
   const runs: Input[] = [];
+  // Each job's tasks taken, or null for every one.
+  const wanted = new Map<string, Set<number> | null>();
 
-  for (const job of new Set(jobs)) {
+  for (const input of inputs) {
+    const [, job = '', index] = INPUT.exec(input) ?? [];
+    const taken = wanted.get(job);
+
+    if (index === undefined || taken === null) wanted.set(job, null);
+    else wanted.set(job, new Set([...taken ?? [], Number(index)]));
+  }
+
+  for (const [job, taken] of wanted) {
     const artifacts = await env.JOB.getByName(job).artifacts();
 
     if (artifacts === null) return { refused: `no job ${job} is on this deployment to take its artifacts from`, code: 409 };
 
     if (!artifacts.ended) return { refused: `job ${job} has not ended: a job takes the artifacts of a job that has, as they are all written`, code: 409 };
-    runs.push(...artifacts.runs);
+    runs.push(...artifacts.runs.filter((run) => taken === null || taken.has(run.index)));
   }
 
   return runs.length > MAX_INPUT_RUNS ? { refused: `the inputs hold ${String(runs.length)} tasks' artifacts, past the ${String(MAX_INPUT_RUNS)} a job takes`, code: 400 } : { runs };

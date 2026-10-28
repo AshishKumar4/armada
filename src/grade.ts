@@ -20,6 +20,8 @@ export const PlanSchema = v.object({
     rows: v.optional(v.array(ExpectedRow)), weight: v.optional(v.number()), environment: v.optional(v.string()),
     // The entry's container size, over its run's: a task that knows it needs more cores (#64).
     size: v.optional(SizeSchema),
+    // The map tasks a judge waits on, by name: it runs once they have all passed, and reads their artifacts (#65).
+    after: v.optional(v.array(v.string())),
   }, JsonSchema)), v.minLength(1)),
 });
 

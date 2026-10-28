@@ -1046,7 +1046,7 @@ describe('armada run', () => {
 
         if (pathname.endsWith('/events')) {
           // A task job of artifacts lands each task with its archive.
-          const archives = tasked.has(job) && exitOf === undefined && artifacts !== undefined;
+          const archives = tasked.has(job) && artifacts !== undefined;
 
           const items = tasked.get(job) ?? [];
 
@@ -1063,7 +1063,7 @@ describe('armada run', () => {
           });
         }
 
-        const archive = /^\/jobs\/tasks\/tasks\/(\d+)\/artifacts$/u.exec(pathname)?.[1];
+        const archive = /^\/jobs\/[^/]+\/tasks\/(\d+)\/artifacts$/u.exec(pathname)?.[1];
 
         if (archive !== undefined) return new Response(artifacts?.[Number(archive)]);
 
@@ -1348,6 +1348,36 @@ describe('armada run', () => {
     expect({ exit: ran.exit, jobs, tasks: recorded?.tasks, keep: recorded?.keep.tasks }).toEqual({
       exit: 0, jobs: [['medium', ['light', 'new']], ['large', ['heavy', 'declared']]],
       tasks: { heavy: { cores: 5, memory: GIB }, light: { cores: 0.5, memory: GIB }, declared: { cores: 0.5, memory: GIB }, new: { cores: 0.5, memory: GIB } }, keep: ['heavy', 'light', 'declared', 'new'],
+    });
+  });
+
+  // #65: a cell of Dew's accuracy gate pooled 512 to 2048 draws in one task of 12 to 35 minutes, as no task could wait on
+  // others: the cell's wall was one container's.
+  test('runs a judge after the map tasks it names, given their artifacts, its row the verdict; one whose map task failed fails naming it', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'c' }, { name: 'plain' }, { name: 'j', after: ['a', 'b'] }, { name: 'k', after: ['c'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    // Each task keeps its draws as its artifacts.
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    const ran = await run(['--json'], plan, {}, { taskConfig: { verdict: false }, exitOf: (item) => nameOf(item) === 'c' ? 1 : 0, artifacts: [draws, draws, draws, draws] });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    const jobs = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())), files: v.optional(v.record(v.string(), v.string())) }), body))
+      .filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
+      .map(({ items, inputs, files }) => ({ items: items.map(({ item }) => nameOf(item)), inputs, after: files?.['after.json'] === undefined ? undefined : JSON.parse(files['after.json']) }));
+
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.string() })) }), JSON.parse(ran.stdout));
+
+    const [recorded] = ran.timed.map((body) => v.parse(v.object({ rows: v.record(v.string(), v.number()) }), body).rows);
+
+    expect({ exit: ran.exit, jobs, rows: rows.map(({ name, exitCode }) => [name, exitCode]), why: rows.find(({ name }) => name === 'k')?.output, recorded }).toEqual({
+      exit: 1, recorded: { a: 1, b: 1, plain: 1, j: 1 },
+      jobs: [{ items: ['a', 'b', 'c', 'plain'], inputs: undefined, after: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks/1'], after: { j: ['/armada/inputs/tasks/0', '/armada/inputs/tasks/1'] } }],
+      rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
     });
   });
 

@@ -433,7 +433,7 @@ describe('a job that takes another job\'s artifacts as inputs', () => {
     await sharding.alarm();
     const refused = await settled(armada.create({ ...spec, inputs: [shards] }));
     const unknown = await settled(armada.create({ ...spec, inputs: ['20200101000000-00000000'] }));
-    const many = await settled(armada.create({ ...spec, inputs: Array.from({ length: MAX_INPUT_JOBS + 1 }, () => shards) }));
+    const many = await settled(armada.create({ ...spec, inputs: Array.from({ length: MAX_INPUT_JOBS + 1 }, (_, at) => `20200101000000-${String(at).padStart(8, '0')}`) }));
 
     // Tasks 0 and 2 kept artifacts; task 1 wrote none.
     for (const [index, artifacts] of [[0, true], [1, false], [2, true]] as const) {
@@ -448,11 +448,18 @@ describe('a job that takes another job\'s artifacts as inputs', () => {
     const merge = await armada.create({ ...spec, inputs: [shards] });
 
     await jobs.get(merge)?.alarm();
+    // A judge takes only its own map tasks' (#65): task 2, and task 1, which kept none.
+    const judge = await armada.create({ ...spec, inputs: [`${shards}/2`, `${shards}/1`] });
+
+    await jobs.get(judge)?.alarm();
 
     expect({ refused, unknown, many, inputs: begun.map((each) => each.inputs) }).toEqual({
       refused: expect.stringContaining(`job ${shards} has not ended`), unknown: expect.stringContaining('no job 20200101000000-00000000'),
       many: expect.stringContaining(`a job takes the artifacts of ${String(MAX_INPUT_JOBS)} jobs at most`),
-      inputs: [[{ job: shards, index: 0, key: `jobs/${shards}/tasks/0/v1.1/artifacts.tar.gz` }, { job: shards, index: 2, key: `jobs/${shards}/tasks/2/v1.1/artifacts.tar.gz` }]],
+      inputs: [
+        [{ job: shards, index: 0, key: `jobs/${shards}/tasks/0/v1.1/artifacts.tar.gz` }, { job: shards, index: 2, key: `jobs/${shards}/tasks/2/v1.1/artifacts.tar.gz` }],
+        [{ job: shards, index: 2, key: `jobs/${shards}/tasks/2/v1.1/artifacts.tar.gz` }],
+      ],
     });
   });
 });
