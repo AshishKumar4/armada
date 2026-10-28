@@ -62,17 +62,17 @@
   vessel takes it up where it was. Keep new steps in that record.
 
 ## Deployments (account f44999d1ddda7012e9a87729eba250f1)
-- As read on 2026-10-26 (the account's Worker scripts, each one's `FLEET_VCPUS` binding, and its `/health`):
+- As read on 2026-10-28 (the account's Worker scripts, each one's `/fleet` cap, and its `/health`):
 
   | Worker | Owner | Version | Wire | Cap (vCPUs) |
   |---|---|---|---|---|
   | `armada-kinu` | Kinu's production CI | `eefcd6d` | 13 | 600 |
-  | `armada-dew7` | Dew's CI, from 2026-10-20 | `19db7bf` | 13 | 864 |
+  | `armada-dew8` | Dew's CI | `86b8902` | 14 | 2,900 |
   | `armada` | Dew's before `armada-dew7`; Dew deletes it once its CI has moved | `d3ddca1` (2026-10-20) | 10 | 432 |
   | `nimbus-armada-v2` | Nimbus's | `b2bf6df` | 7 | 600 |
 
   `armada`'s version is #54's reading of 2026-10-20: no connection here holds its bearer. `armada-v2` and `armada-dew3`
-  to `armada-dew6` are gone. The caps sum to 2,496, past the account's 1,500 (see Account limits).
+  to `armada-dew7` are gone. The caps sum to 4,532, past the account's 3,000 (see Account limits).
   - Don't deploy to them, roll them back, prune them or change their secrets. Each owner redeploys from `main`.
   - A deploy whose Worker serves every client the deployed one does, and whose Durable Objects call each other and
     store their records as the deployed one's do (`contractOf`), takes over running jobs; otherwise it drains them
@@ -80,11 +80,13 @@
     (`ArmadaFleet.admitJob`). Each type an object stores is exported, so its shape is in the fingerprint. Either way a
     redeploy needs the owner's go-ahead. On 2026-10-12 a takeover of armada-dew3 across an interface change, before
     this check, let objects on the old code misread the new calls for minutes: its fleet dropped every hold.
-  - `main` is wire 14 (a task's status, #61; a job's priority, #60; its inputs, #59) and changes the contract
-    (#57's environment entries, #59's inputs, #60's priorities), so each one's next deploy drains, then refuses new
-    jobs for about 5 min while the deployment-wide objects still run the old code (measured on armada-ci2: 296 s). A
-    newer client gets 426 from an older Worker: redeploy the Worker before a project moves its client pin to `main`.
-    Borrowing past the cap needs `ARMADA_ACCOUNT_TOKEN` at a deploy.
+  - `main` is wire 15 (14: a task's status, #61; a job's priority, #60; its inputs, #59. 15: the `large` size, a task's
+    own size and usage, #64; one task's artifacts as an input, #65) and changes the contract (14: #57's environment
+    entries, #59's inputs, #60's priorities; 15: #63's timed recall, the fleet's `beat`, a job's `preempted`), so each
+    one's next deploy drains, then refuses new jobs for about 5 min while the deployment-wide objects still run the old
+    code (measured on armada-ci2: 296 s). armada-dew8 runs wire 14. A newer client gets 426 from an older Worker:
+    redeploy the Worker before a project moves its client pin to `main`. Borrowing past the cap needs
+    `ARMADA_ACCOUNT_TOKEN` at a deploy.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every
@@ -95,12 +97,15 @@
   the `.stale-*` and `.bak-*` files are their owners'. Leave them alone; an agent may still read one. Dew's
   `armada-dew2.destroy.json` is its own destroy.
 
-## Account limits (measured 2026-10-12)
-- Every container app in the account shares 1,500 concurrent vCPUs, 6 TiB of memory and 30 TB of disk
-  (`GET /accounts/<id>/containers/me`). A start past them fails: "Account resource limit exceeded".
+## Account limits (measured 2026-10-12; raised 2026-10-28)
+- Every container app in the account shares 3,000 concurrent vCPUs (1,500 until 2026-10-28), 6 TiB of memory and
+  30 TB of disk (`GET /accounts/<id>/containers/me`). A start past them fails: "Account resource limit exceeded".
+- One container may have 8 vCPUs, 12 GiB and 20 GB (`maxVcpuPerDeployment`, `maxMemoryPerDeployment`,
+  `maxDiskPerDeployment`). `large` starts that, by resources named at its start: on 2026-10-28 one showed 8 CPUs to
+  `nproc` and its cgroup, 11.7 GiB of memory, on an AMD EPYC 25/17. The docs' 3 GiB per vCPU did not apply.
 - A deployment's fleet cap (`--vcpus`, default 1,500) counts only its own containers. On 2026-10-12, `armada-dew3`
-  (cap 5,000) ran 375 `medium` containers, all 1,500 vCPUs, and `armada-v2`'s starts failed with that error.
-  Caps that sum past 1,500 let one deployment starve the others. A fleet deployed with ARMADA_ACCOUNT_TOKEN borrows
+  (cap 5,000) ran 375 `medium` containers, all 1,500 vCPUs then, and `armada-v2`'s starts failed with that error.
+  Caps that sum past the account's let one deployment starve the others. A fleet deployed with ARMADA_ACCOUNT_TOKEN borrows
   past its cap what the account leaves idle, and gives it back within a task (`ArmadaFleet`): only a cap below the
   account's lets one deployment yield to another.
 - The snapshot limit is not documented. New snapshots were refused at 66 GiB on 2026-10-10 and at about 70 GiB on
