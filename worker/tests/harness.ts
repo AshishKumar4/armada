@@ -224,7 +224,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   let whole: Env;
 
   Object.assign(env, {
-    FLEET: namespace(() => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => true, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] })),
+    FLEET: namespace(() => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARMADA_TOKEN: 't'.repeat(32),
     FLEET_VCPUS: '1500',

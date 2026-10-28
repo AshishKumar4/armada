@@ -4,9 +4,10 @@
  * holder and lapses at its lease, so a holder that died returns it.
  *
  * Past the cap, it lends a job's containers what the rest of the account leaves idle, read from Cloudflare's API
- * (`readAccount`) under the token `armada deploy` gives it, while it lends. A borrowed hold asks before each new task (`renews`), and one recalled finishes what it
- * runs and ends: the fleet recalls its newest loans once the account fills, its read goes stale, or a holder that may
- * not borrow (a preparation, a gang's rank) waits for room under the cap.
+ * (`readAccount`) under the token `armada deploy` gives it, while it lends. Every hold asks before each new task
+ * (`renews`), and one recalled starts no new task and ends what it runs within RECALL_GRACE_MS (`beat`): the fleet
+ * recalls its newest loans once the account fills, its read goes stale, or a holder that may not borrow (a preparation,
+ * a gang's rank) waits for room under the cap; and the newest holds below a waiting holder's priority (`acquire`).
  *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
@@ -36,6 +37,11 @@ const SAMPLE_LIFE_MS = 4 * SAMPLE_MS;
 
 /** How long a want counts once its holder stops asking, which it does every CAPACITY_RETRY_MS while it waits. */
 export const WANT_MS = 60_000;
+
+/** How long a recalled hold's container runs the tasks it has once recalled: one that ends by then lands, and one that
+ *  runs on is ended and queued again (`beat`). Dew's train waited out its deadline on lower jobs' tasks of minutes to
+ *  tens of minutes, each ended only at its next task's start (#63, #66). */
+export const RECALL_GRACE_MS = 60_000;
 
 /** The account's share left idle for other apps to start containers in, which then show in the next read. */
 const HEADROOM = 0.1;
@@ -72,8 +78,9 @@ export interface Hold {
   readonly borrowed?: boolean;
   /** Its job's priority (`JobSpec.priority`): a holder of a higher one that waits has the newest holds below it recalled. */
   readonly priority?: number;
-  /** Its container takes no new task: it finishes what it runs, then ends. A vessel asks before each new task (`renews`). */
-  readonly recalled?: boolean;
+  /** When the fleet recalled it: its container takes no new task (`renews`), and ends the tasks it runs within
+   *  RECALL_GRACE_MS (`beat`). */
+  readonly recalled?: number;
   /** False for a hold that runs to its end and never asks (`renews`), as a preparation's does: no recall frees it. An
    *  earlier Worker's holds lack it, and are recallable. */
   readonly recallable?: boolean;
@@ -97,7 +104,7 @@ const jobOf = (holder: string): string => holder.slice(0, holder.lastIndexOf('/'
 
 /** The holders of `holds` not yet recalled that `keep` picks, newest grant first. */
 const newestOf = (holds: Record<string, Hold>, keep: (holder: string, hold: Hold) => boolean): string[] => Object.entries(holds)
-  .filter(([holder, hold]) => hold.recalled !== true && keep(holder, hold)).sort(([, left], [, right]) => (right.granted ?? 0) - (left.granted ?? 0)).map(([holder]) => holder);
+  .filter(([holder, hold]) => hold.recalled === undefined && keep(holder, hold)).sort(([, left], [, right]) => (right.granted ?? 0) - (left.granted ?? 0)).map(([holder]) => holder);
 
 /** The loans of `holds` the fleet recalls when it holds more than it may: the newest first. */
 const loansOf = (holds: Record<string, Hold>): string[] => newestOf(holds, (_holder, hold) => hold.borrowed === true);
@@ -184,7 +191,7 @@ export class ArmadaFleet extends ArmadaSingle {
       // Holds below its priority, lowest and newest first, until it and those ahead of it fit; as `want` left them.
       const after = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
 
-      await this.recall(after, limit, belowOf(after, priority, jobOf(holder)), { ...before, ...asked });
+      await this.recall(after, { limit, candidates: belowOf(after, priority, jobOf(holder)), asked: { ...before, ...asked }, now });
 
       return null;
     }
@@ -203,9 +210,9 @@ export class ArmadaFleet extends ArmadaSingle {
   async renews(holder: string): Promise<boolean> {
     const now = Date.now();
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
-    const held = (await this.recall(holds, await this.limit(now), loansOf(holds)))[holder];
+    const held = (await this.recall(holds, { limit: await this.limit(now), candidates: loansOf(holds), now }))[holder];
 
-    return held !== undefined && held.recalled !== true;
+    return held !== undefined && held.recalled === undefined;
   }
 
   /** Reads the account while it lends, or a holder wants a loan: the most it holds until the next read is what it held,
@@ -213,7 +220,7 @@ export class ArmadaFleet extends ArmadaSingle {
    *  trade the same vCPUs back and forth. A read that fails leaves the last one to go stale. */
   override async alarm(): Promise<void> {
     const now = Date.now();
-    const lent = Object.values(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now)).some((hold) => hold.borrowed === true && hold.recalled !== true);
+    const lent = Object.values(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now)).some((hold) => hold.borrowed === true && hold.recalled === undefined);
 
     if (!lent && ((await this.ctx.storage.get<number>('wanted')) ?? 0) <= now - WANT_MS) return;
 
@@ -229,7 +236,7 @@ export class ArmadaFleet extends ArmadaSingle {
       const charge = chargeOf(holds);
 
       await this.ctx.storage.put('lending', { limit: Math.floor(charge + (account.vcpus * (1 - HEADROOM) - account.others - charge) / 2), at: now } satisfies Lending);
-      await this.recall(holds, await this.limit(answered), loansOf(holds));
+      await this.recall(holds, { limit: await this.limit(answered), candidates: loansOf(holds), now: answered });
     } catch (cause) {
       console.error(JSON.stringify({ fleet: 'reading the account', error: said({ cause }) }));
     }
@@ -265,7 +272,7 @@ export class ArmadaFleet extends ArmadaSingle {
 
     if (!Object.values(holds).some((hold) => hold.borrowed === true) || chargeOf(unlent) > cap) return;
     await this.ctx.storage.put('pressed', now);
-    await this.recall(holds, cap, loansOf(holds), asked);
+    await this.recall(holds, { limit: cap, candidates: loansOf(holds), asked, now });
   }
 
   /** Who reads the account for this deployment: none without the token `armada deploy` gives, which it gives empty
@@ -276,12 +283,14 @@ export class ArmadaFleet extends ArmadaSingle {
     return token === '' || account === undefined || name === undefined ? null : { token, account, name };
   }
 
-  /** `holds` with the `candidates` recalled in order until what the rest will keep fits `limit`, with `asked` in its
-   *  holders' place: a recalled hold still runs its tasks, so it counts as gone already. A hold is recalled whole, so the
-   *  fleet may end a little under `limit`. */
-  private async recall(holds: Record<string, Hold>, limit: number, candidates: readonly string[], asked: Record<string, Hold> = {}): Promise<Record<string, Hold>> {
+  /** `holds` with the `candidates` recalled `now`, in order, until what the rest will keep fits `limit`, with `asked` in its
+   *  holders' place: a recalled hold still runs its tasks for its grace, so it counts as gone already. A hold is recalled
+   *  whole, so the fleet may end a little under `limit`. */
+  private async recall(holds: Record<string, Hold>, { limit, candidates, asked = {}, now }: {
+    readonly limit: number; readonly candidates: readonly string[]; readonly asked?: Record<string, Hold>; readonly now: number;
+  }): Promise<Record<string, Hold>> {
     const recalled = { ...holds };
-    const kept = (): number => chargeOf(Object.fromEntries(Object.entries({ ...recalled, ...asked }).filter(([, hold]) => hold.recalled !== true)));
+    const kept = (): number => chargeOf(Object.fromEntries(Object.entries({ ...recalled, ...asked }).filter(([, hold]) => hold.recalled === undefined)));
     let changed = false;
 
     for (const holder of candidates) {
@@ -290,7 +299,7 @@ export class ArmadaFleet extends ArmadaSingle {
       if (kept() <= limit) break;
 
       if (hold === undefined) continue;
-      recalled[holder] = { ...hold, recalled: true };
+      recalled[holder] = { ...hold, recalled: now };
       changed = true;
     }
 
@@ -302,15 +311,18 @@ export class ArmadaFleet extends ArmadaSingle {
   /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. A
    *  holder kept that way has ended: it keeps only its own vCPUs, not its job's reserve, which is for holders still
    *  to be granted. */
-  /** `holder` still runs: its hold, if it has one, lasts LEASE_MS past `now` at least. A vessel whose job has no deadline
-   *  says so each slice of its work (`VesselSpec.deadlineAt`), so a hold whose release was lost ends as a deadline's
-   *  does. */
-  async extend(holder: string, now = Date.now()): Promise<void> {
+  /** `holder` still runs, as its vessel says each slice of its work: the time its container ends the tasks it runs by,
+   *  RECALL_GRACE_MS after the fleet recalled it, or null while it runs on (#63, #66). A hold of a job with no deadline
+   *  lasts LEASE_MS past `now` at least, so a hold whose release was lost ends as a deadline's does. */
+  async beat(holder: string, now = Date.now()): Promise<number | null> {
     const holds = await this.ctx.storage.get<Record<string, Hold>>('holds');
     const held = holds?.[holder];
 
-    if (held === undefined) return;
-    await this.ctx.storage.put('holds', { ...holds, [holder]: { ...held, until: Math.max(held.until, now + LEASE_MS) } });
+    if (held === undefined) return null;
+
+    if (held.renewed === true) await this.ctx.storage.put('holds', { ...holds, [holder]: { ...held, until: Math.max(held.until, now + LEASE_MS) } });
+
+    return held.recalled === undefined ? null : held.recalled + RECALL_GRACE_MS;
   }
 
   async release(holder: string, afterMs = 0): Promise<void> {

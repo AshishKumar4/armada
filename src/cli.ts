@@ -64,7 +64,8 @@ map options:
                        (AuthenticAMD/25/17), or several, any one of them; a container on another host is replaced
                        before it takes a task
   --priority=N         while the fleet is full, a job of a higher priority starts first, and lower jobs' newest
-                       containers end at their next task's start until it fits (default 0)
+                       containers end until it fits: a task they still run a minute on runs again later, at no cost
+                       to its retries (default 0)
   --inputs=<job,...>   ended jobs whose tasks' artifacts each container gets under {inputs}/<job>/<index>
   --timeout=S          a task's limit, in seconds, or none (default 3600)
   --deadline=S         the whole job's limit, including starts, in seconds (default 21600 / 6 h), or none: the job

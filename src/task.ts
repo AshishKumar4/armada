@@ -126,7 +126,8 @@ export interface MapOptions {
    *  reduce over what a map's tasks wrote. */
   readonly inputs?: readonly string[];
   /** Whose containers start first while the fleet is full: a job of a higher priority waits ahead of lower ones, and
-   *  has their newest containers end at their next task's start until it fits (`JobSpec.priority`). Default 0. */
+   *  has their newest containers end until it fits; a task they still run a minute on runs again later, at no cost to
+   *  its retries (`JobSpec.priority`). Default 0. */
   readonly priority?: number;
   readonly label?: string;
   readonly env?: Readonly<Record<string, string>>;

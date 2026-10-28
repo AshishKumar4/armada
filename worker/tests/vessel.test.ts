@@ -69,7 +69,7 @@ interface Run {
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
-  fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
+  fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
   inputs, held = [],
 }: Run = {}) {
   const completed: Outcome[] = [];
@@ -79,6 +79,8 @@ async function run(lost: number, {
   const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
   const started: { name: string; index: number; attempt: number; afterLaunch: boolean; stored: boolean }[] = [];
+  // Each word that the fleet took the vessel's container for a job of a higher priority: whether it was gone.
+  const preempted: boolean[] = [];
   const task = once({ index: 0, attempt: 1, argv: [...words], env: { ...env }, secrets: [], duplicate: false, gang }, tasks);
   let retired = false;
   let waits = 0;
@@ -127,6 +129,7 @@ async function run(lost: number, {
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
+    preempted: async (_name: string, gone: boolean) => { preempted.push(gone); },
     vesselFailed: async (_name: string, error: string, how?: { readonly misplaced?: Host }) => {
       failed.push(error);
       misplaced.push(how?.misplaced);
@@ -148,7 +151,7 @@ async function run(lost: number, {
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, stored: artifacts.objects, execs, envs, piped, started };
+  return { exits: completed.map((outcome) => outcome.exitCode), failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, preempted, stored: artifacts.objects, execs, envs, piped, started };
 }
 
 /** The first CPU of a host's /proc/cpuinfo, `flags` its flags. */
@@ -168,7 +171,11 @@ describe('a task of a job with no limits', () => {
         return 'held';
       },
       release: async (holder: string) => { calls.push(`release ${holder}`); },
-      extend: async (holder: string) => { calls.push(`extend ${holder}`); },
+      beat: async (holder: string) => {
+        calls.push(`beat ${holder}`);
+
+        return null;
+      },
       renews: async () => true,
     };
 
@@ -181,7 +188,7 @@ describe('a task of a job with no limits', () => {
 
     const slices = calls.slice(1, -1);
 
-    expect({ limited: limited.exits, unlimited: unlimited.exits, granted: calls[0], renewed: slices.length > 0 && slices.every((call) => call === 'extend job/v1'), last: calls.at(-1) })
+    expect({ limited: limited.exits, unlimited: unlimited.exits, granted: calls[0], renewed: slices.length > 0 && slices.every((call) => call === 'beat job/v1'), last: calls.at(-1) })
       .toEqual({ limited: [124], unlimited: [0], granted: 'acquire job/v1, renewed', renewed: true, last: 'release job/v1' });
   });
 
@@ -212,12 +219,23 @@ describe('a task of a job with no limits', () => {
 });
 
 describe('a vessel\'s place in its fleet', () => {
+  // #63, #66: a recalled container ran its task on, however long, and the job of a higher priority waited for it.
+  test('ends a task still running past its recall\'s grace, its job told the fleet took it; one that ends within it lands', async () => {
+    const recalled = (endsBy: number) => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => false, beat: async () => endsBy });
+    // Taken up mid-task, as a restarted object finds it: one whose grace is out, and one whose grace outlasts its task.
+    const out = await run(0, { launched: 60_000, pending: 1_000, fleet: recalled(Date.now() - 1) });
+    const within = await run(0, { launched: 60_000, pending: 1, fleet: recalled(Date.now() + 10 * 60_000) });
+
+    expect({ out: [out.exits, out.preempted, out.failed, out.retired], within: [within.exits, within.preempted, within.retired] })
+      .toEqual({ out: [[], [true], [], false], within: [[0], [], true] });
+  });
+
   test('takes no new task once the fleet recalls its vCPUs, lent or held (#60): it finishes the one it runs, then retires', async () => {
     const recalled = async (grant: 'borrowed' | 'held') => {
       let renewals = 0;
 
       const { exits, claims, failed, retired } = await run(0, {
-        tasks: 2, fleet: { acquire: async () => grant, renews: async () => (renewals += 1) === 1, release: async () => undefined },
+        tasks: 2, fleet: { acquire: async () => grant, renews: async () => (renewals += 1) === 1, release: async () => undefined, beat: async () => null },
       });
 
       return { exits, claims, failed, retired };
@@ -705,7 +723,7 @@ describe('a vessel\'s boot', () => {
 
       const vessel = new ArmadaVessel(stored.ctx, world({
         // The fleet has no room at the first ask, and has 10 s later.
-        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined, renews: async () => true })),
+        FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined, renews: async () => true, beat: async () => null })),
         JOB: namespace(() => ({
           moved: async (_name: string, to: string) => {
             moved.push(to);
@@ -753,7 +771,7 @@ describe('a vessel\'s boot', () => {
     const stored = state(box);
 
     const vessel = new ArmadaVessel(stored.ctx, world({
-      FLEET: namespace(() => ({ acquire: async () => 'held', release, renews: async () => true })),
+      FLEET: namespace(() => ({ acquire: async () => 'held', release, renews: async () => true, beat: async () => null })),
       JOB: namespace(() => ({
         moved: async (_name: string, to: string) => {
           moved.push(to);

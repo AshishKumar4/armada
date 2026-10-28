@@ -129,7 +129,7 @@ export interface Current {
 }
 
 /** How one slot's loop ended its slice: the slice ran out, the job had no task for it, or how long to wait for one. */
-type SlotEnd = 'reslice' | 'retired' | number;
+type SlotEnd = 'reslice' | 'retired' | 'preempted' | number;
 
 /** A slice of a vessel's slot loops: when it ends, the flag the first failed loop sets, and what a loop calls when it
  *  started a task (a packing vessel then opens one more slot to ask). */
@@ -137,6 +137,8 @@ interface Slice {
   readonly until: number;
   readonly abort: { failed: boolean };
   readonly started: () => void;
+  /** When the fleet takes the container back from the tasks it runs (`ArmadaFleet.beat`); null while it runs on. */
+  readonly endsBy: number | null;
 }
 
 /** The most tasks a packing container runs at once, as the most slots a fixed one has. */
@@ -379,7 +381,7 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** One slot's slice: pull a task while free, block on `waitOn` while one runs, finish it, repeat — all slots' loops
    *  run beside each other, so one slot's store never idles another's launch. A null claim ends this loop retired; a
    *  `waitMs` parks only this slot; a fatal error fails the vessel once through `abort`. */
-  private async slotLoop(spec: SlotSpec, slot: number, { until, abort, started }: Slice): Promise<SlotEnd> {
+  private async slotLoop(spec: SlotSpec, slot: number, { until, abort, started, endsBy }: Slice): Promise<SlotEnd> {
     const container = this.container();
     const job = this.env.JOB.getByName(spec.jobId);
     const { dir, group } = layoutOf(spec, slot);
@@ -397,6 +399,9 @@ export class ArmadaVessel extends DurableObject<Env> {
         await this.stopTask(spec, slot, current);
         continue;
       }
+
+      // A task still running once its container's recall's grace is out ends with the container, and runs again elsewhere.
+      if (current !== undefined && endsBy !== null && Date.now() >= endsBy) return 'preempted';
 
       if (current === undefined) {
         // A container the platform is stopping takes no new task: the vessel fails, and the job replaces it.
@@ -465,9 +470,10 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  loop the job has nothing fitting for ends, and the next task started opens another to ask again. */
   private async work(spec: SlotSpec): Promise<boolean> {
     this.watch(this.container());
-
-    if (spec.deadlineAt === null) await this.env.FLEET.getByName(SINGLE).extend(this.holder(spec));
-    const until = Date.now() + SLICE_MS;
+    const endsBy = await this.env.FLEET.getByName(SINGLE).beat(this.holder(spec));
+    // A slice that would run past its container's recall's grace ends at it, and the next one ends its tasks; the one past
+    // it runs only to land what has ended.
+    const until = endsBy === null || Date.now() >= endsBy ? Date.now() + SLICE_MS : Math.min(Date.now() + SLICE_MS, endsBy);
     const abort = { failed: false };
     // Every loop opened this slice, and the slots whose loops still run: a slot ended this slice is not opened again.
     const loops: Promise<SlotEnd>[] = [];
@@ -479,7 +485,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       // that failure fails the vessel once, through the alarm's catch, with no loop still claiming for it.
       loops.push((async () => {
         try {
-          return await this.slotLoop(spec, slot, { until, abort, started: widen });
+          return await this.slotLoop(spec, slot, { until, abort, started: widen, endsBy });
         } catch (cause) {
           abort.failed = true;
 
@@ -512,11 +518,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (failed !== undefined) throw failed.reason;
     const ended = settled.flatMap((each) => each.status === 'fulfilled' ? [each.value] : []);
 
+    if (ended.includes('preempted')) return await this.preempt(spec);
+
     if (ended.every((each) => each === 'retired')) return await this.retire(spec);
 
     if (ended.includes('reslice')) return true;
     // Every slot that has not retired waits out a backoff: the next alarm is the soonest of them.
-    await this.ctx.storage.setAlarm(Date.now() + Math.min(...ended.filter((each): each is number => each !== 'retired' && each !== 'reslice')));
+    await this.ctx.storage.setAlarm(Date.now() + Math.min(...ended.filter((each): each is number => each !== 'retired' && each !== 'reslice' && each !== 'preempted')));
 
     return false;
   }
@@ -788,6 +796,16 @@ export class ArmadaVessel extends DurableObject<Env> {
     const gone = await this.end('done', spec);
 
     await this.env.JOB.getByName(spec.jobId).retired(spec.name, gone);
+
+    return false;
+  }
+
+  /** The fleet took its container back for a job of a higher priority, or for room, from tasks that ran past the grace
+   *  (`ArmadaFleet.beat`): the container ends with them, and its job queues them again (`ArmadaJob.preempted`). */
+  private async preempt(spec: VesselSpec): Promise<false> {
+    const gone = await this.end('done', spec);
+
+    await this.env.JOB.getByName(spec.jobId).preempted(spec.name, gone);
 
     return false;
   }

@@ -56,6 +56,28 @@ describe('a job that ends', () => {
   });
 });
 
+// #63, #66: a train waited on lower jobs' containers until each one's running task ended, and hit its deadline.
+describe('a job whose containers the fleet takes for a job of a higher priority', () => {
+  test('queues their tasks again at no cost to their retries or losses, and spends no replacement on them', async () => {
+    const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1 });
+
+    // Preempted ten times, past INFRA_ATTEMPTS and the job's replacements, each on its own container.
+    for (let at = 1; at <= 10; at += 1) {
+      const vessel = `v${String(at)}`;
+      const claim = await open.claim(vessel);
+
+      if (claim === null || 'waitMs' in claim || !(await open.accept(vessel, claim.index, 0, { slot: 0, attempt: claim.attempt }))) throw new Error(`${vessel} got no task`);
+      await open.preempted(vessel, true);
+    }
+
+    await finish(open, 'v11');
+    const [landed] = (await open.events(0)).events;
+
+    expect({ begun: begun.length, landed: [landed?.outcome.kind, landed?.outcome.exitCode, landed?.outcome.attempt], vessels: (await open.status())?.vessels?.filter((each) => each.state === 'failed').length })
+      .toEqual({ begun: 11, landed: ['exited', 0, 11], vessels: 0 });
+  });
+});
+
 describe('a job\'s priority (#60)', () => {
   test('reaches every container it starts, which asks the fleet with it; a job that names none has 0', async () => {
     const urgent = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, priority: 5 });
@@ -651,7 +673,7 @@ describe('a job that ended', () => {
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
       ENVIRONMENTS: readyRegistry(),
       FLEET: namespace(() => ({
-        acquire: async () => 'held', release: async () => undefined, renews: async () => true, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
+        acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
         closed: async (id: string) => {
           if (refuse) throw new Error('the fleet is not answering');
           closed.push(id);

@@ -1182,38 +1182,13 @@ export class ArmadaJob extends DurableObject<Env> {
       else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
-    // Every task it ran still, a copy or a gang's rank included, whichever goes on elsewhere: any of them may have
-    // ended it. One whose run there answered had ended.
-    const ran = [
-      ...this.unfinished(name).map(({ idx }) => idx),
-      ...this.sql.exec<{ idx: number }>(`SELECT m.idx FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name).toArray().map(({ idx }) => idx),
-    ];
-
-    // A lost copy cannot end red: the other copy's held green is reported.
-    for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
     // Each task lost with it counts the loss as its own unless another vessel was lost under other tasks just before.
     const now = Date.now();
     const recent = ((await this.ctx.storage.get<Loss[]>('losses')) ?? []).filter((loss) => now - loss.at < LOSS_WINDOW_MS);
 
-    const lose = (index: number, infra: number): void => {
+    const ran = await this.abandon(name, (index, infra) => {
       this.lost(index, infra, { vessel: name, error, stormed: recent.some((loss) => !loss.tasks.includes(index)) });
-    };
-
-    this.lostRank(name, lose);
-
-    for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null; state: string }>(`SELECT idx, infra, dup, state FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
-      if (task.state === 'landing' && (await this.ctx.storage.get(heldKey(task.idx))) !== undefined) {
-        // Its answer is in, held for the other copy.
-        continue;
-      }
-
-      if (task.dup !== null) {
-        // The other copy runs on, if it has not stopped yet, as the only one, keeping the slot it ran in.
-        this.sql.exec(`UPDATE tasks SET state = 'running', vessel = dup, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?`, task.idx);
-      } else {
-        lose(task.idx, task.infra);
-      }
-    }
+    });
 
     if (ran.length > 0) await this.ctx.storage.put('losses', [...recent, { at: now, tasks: ran } satisfies Loss]);
 
@@ -1238,6 +1213,53 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.settle();
   }
 
+  /** Every task vessel `name` ran still, a copy or a gang's rank included, goes on elsewhere, as any of them may have
+   *  ended it: a copy's other copy runs on as the only one, its held green reported, and each other task, a gang whole,
+   *  is lost (`lose`). One whose run there answered had ended. The tasks it ran. */
+  private async abandon(name: string, lose: (index: number, infra: number) => void): Promise<number[]> {
+    const ran = [
+      ...this.unfinished(name).map(({ idx }) => idx),
+      ...this.sql.exec<{ idx: number }>(`SELECT m.idx FROM members m JOIN tasks t ON t.idx = m.idx WHERE m.vessel = ? AND t.state IN ('forming', 'running', 'landing')`, name).toArray().map(({ idx }) => idx),
+    ];
+
+    // A lost copy cannot end red: the other copy's held green is reported.
+    for (const { idx } of this.sql.exec<{ idx: number }>('UPDATE tasks SET dup = NULL, dup_slot = NULL WHERE dup = ? RETURNING idx', name).toArray()) await this.release(idx);
+    this.lostRank(name, lose);
+
+    for (const task of this.sql.exec<{ idx: number; infra: number; dup: string | null; state: string }>(`SELECT idx, infra, dup, state FROM tasks WHERE vessel = ? AND state IN ('running', 'landing')`, name).toArray()) {
+      if (task.state === 'landing' && (await this.ctx.storage.get(heldKey(task.idx))) !== undefined) {
+        // Its answer is in, held for the other copy.
+        continue;
+      }
+
+      if (task.dup !== null) {
+        // The other copy runs on, if it has not stopped yet, as the only one, keeping the slot it ran in.
+        this.sql.exec(`UPDATE tasks SET state = 'running', vessel = dup, dup = NULL, slot = dup_slot, dup_slot = NULL WHERE idx = ?`, task.idx);
+      } else {
+        lose(task.idx, task.infra);
+      }
+    }
+
+    return ran;
+  }
+
+  /** Vessel `name` ended the tasks it ran past its recall's grace, the fleet taking its container back for a job of a
+   *  higher priority or for room (`ArmadaFleet.beat`, #63, #66). Each goes on elsewhere at no cost to its retries or
+   *  INFRA_ATTEMPTS, as the fleet took it, not its task. No replacement is spent: the job's next vessels wait their
+   *  turn in the fleet's line. Its runs end once its container is `gone`. */
+  async preempted(name: string, gone = false): Promise<void> {
+    if ((await this.spec()) === undefined) return;
+
+    if (gone) this.runs.gone(name);
+
+    // Said again, by an object restarted on the way, it changes nothing.
+    if (this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, Date.now(), name).toArray().length === 0) return;
+    this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
+    await this.abandon(name, (index, infra) => { this.lost(index, infra, { vessel: name, error: '', stormed: true }); });
+    await this.grow();
+    await this.settle();
+  }
+
   /** A lost vessel's gangs, each lost whole as the platform's loss of one of its ranks, forming, launching or
    *  launched: queued again as one task to form anew, or failed after INFRA_ATTEMPTS losses (`lose`). Its other ranks'
    *  runs end at their next `still`, and a late launch or answer of theirs is of an attempt no longer the task's. */
@@ -1251,8 +1273,8 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** Task `index`, which the infrastructure lost `infra` times before as its own, lost on `vessel`: queued again, or
-   *  failed once that makes INFRA_ATTEMPTS. One lost with the platform's (`stormed`, `LOSS_WINDOW_MS`) is queued again and
-   *  counts nothing. */
+   *  failed once that makes INFRA_ATTEMPTS. One lost with the platform's (`stormed`, `LOSS_WINDOW_MS`), or taken by the
+   *  fleet (`preempted`), is queued again and counts nothing. */
   private lost(index: number, infra: number, { vessel, error, stormed }: { readonly vessel: string; readonly error: string; readonly stormed: boolean }): void {
     if (stormed || infra + 1 < INFRA_ATTEMPTS) {
       this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, dup = NULL, dup_slot = NULL, infra = infra + ? WHERE idx = ?`, stormed ? 0 : 1, index);

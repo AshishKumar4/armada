@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import { fakeFetch } from '../../tests/fakes';
 import { INACTIVITY_MS } from '../src/container';
-import { ArmadaFleet, SAMPLE_MS, WANT_MS, type Grant } from '../src/fleet';
+import { ArmadaFleet, RECALL_GRACE_MS, SAMPLE_MS, WANT_MS, type Grant } from '../src/fleet';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { container, namespace, state, world } from './harness';
 
@@ -51,10 +51,13 @@ describe('the fleet', () => {
   // #60: a train's suite waited a median of 530 s for containers that developers' suites held between their tasks.
   test('grants a job of higher priority before older waiters, and recalls the newest holds of lower ones until it fits', async () => {
     const fleet = fleetOf(8);
+    const at = Date.now();
 
     for (const holder of ['low/v1', 'low/v2']) await fleet.acquire(holder, 4, { deadlineAt });
-    const asked = [await fleet.acquire('older/v1', 4, { deadlineAt }), await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5 })];
+    const asked = [await fleet.acquire('older/v1', 4, { deadlineAt, now: at }), await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5, now: at })];
     const renews = [await fleet.renews('low/v1'), await fleet.renews('low/v2')];
+    // The recalled one ends the task it runs within a grace from its recall (#63, #66); the other runs on.
+    const ends = [await fleet.beat('low/v1'), await fleet.beat('low/v2')];
 
     // The recalled container finishes its task and ends: the train's is granted, though the older waiter asks first.
     await fleet.release('low/v2');
@@ -71,8 +74,8 @@ describe('the fleet', () => {
     await preparing.acquire('preparing/k/1', 4, { deadlineAt, recallable: false });
     await preparing.acquire('train/v1', 4, { deadlineAt, priority: 5 });
 
-    expect({ asked, renews, freed, level: await level.renews('a/v1'), preparing: [await preparing.renews('low/v1'), await preparing.renews('preparing/k/1')] })
-      .toEqual({ asked: [null, null], renews: [true, false], freed: [null, 'held'], level: true, preparing: [false, true] });
+    expect({ asked, renews, ends, freed, level: await level.renews('a/v1'), preparing: [await preparing.renews('low/v1'), await preparing.renews('preparing/k/1')] })
+      .toEqual({ asked: [null, null], renews: [true, false], ends: [null, at + RECALL_GRACE_MS], freed: [null, 'held'], level: true, preparing: [false, true] });
   });
 
   test('keeps one line across jobs: a job\'s newer holder waits behind another job\'s older one, however old its own', async () => {
@@ -129,8 +132,8 @@ describe('the fleet', () => {
     const start = Date.now();
     const said = start + 10 * 60 * 60_000;
 
-    await fleet.acquire('open/v1', 4, { deadlineAt: start, now: start });
-    await fleet.extend('open/v1', said);
+    await fleet.acquire('open/v1', 4, { deadlineAt: start, renewed: true, now: start });
+    await fleet.beat('open/v1', said);
     const running = await fleet.acquire('b/v1', 4, { deadlineAt, now: said + INACTIVITY_MS - 1 });
     const lapsed = await fleet.acquire('b/v1', 4, { deadlineAt, now: said + INACTIVITY_MS + 1 });
 
@@ -303,6 +306,7 @@ describe('a vessel stopped while the fleet answers', () => {
         },
         release: fleet.release.bind(fleet),
         renews: fleet.renews.bind(fleet),
+        beat: fleet.beat.bind(fleet),
       })),
       JOB: namespace(() => ({ moved: async () => true })),
     });
@@ -358,5 +362,33 @@ describe('a vessel of a job of higher priority (#60)', () => {
     await vessel.alarm();
 
     expect({ low: await fleet.renews('low/v1'), state: await stored.ctx.storage.get('state') }).toEqual({ low: false, state: 'waiting' });
+  });
+
+  // #66: Dew's train waited on lower lanes' containers, each until its task of minutes ended, and hit its deadline.
+  test('takes a recalled container running a long task within the grace, so the higher job starts then, not at the task\'s end', async () => {
+    const fleet = fleetOf(4);
+    const preempted: boolean[] = [];
+    const recalled = Date.now();
+    // The lower job's container, a task launched on it and still running.
+    const stored = state(container((argv) => ({ exitCode: 0, stdout: argv[3] === 'wait' ? '' : '' })));
+    const low = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ preempted: async (_name: string, gone: boolean) => { preempted.push(gone); }, still: async () => true })) }));
+
+    await fleet.acquire('low/v1', 4, { deadlineAt });
+    await stored.ctx.storage.put({ spec: { jobId: 'low', name: 'v1', snapshot: 's', instance: 'standard-4', vcpus: 4, workdir: '/w', commit: null, tmpfs: [], files: {}, bundle: null, output: false, timeout: null, deadlineAt },
+      state: 'working', 'slot:0': { claim: { index: 0, attempt: 1, argv: ['sleep', '900'], secrets: [], duplicate: false }, startedAt: recalled - 60_000 } });
+
+    try {
+      setSystemTime(recalled);
+      const asked = await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5 });
+
+      // Past its grace: the container ends, and its job hears the fleet took it.
+      setSystemTime(recalled + RECALL_GRACE_MS + 1);
+      await low.alarm();
+
+      expect({ asked, preempted, state: await stored.ctx.storage.get('state'), train: await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5 }) })
+        .toEqual({ asked: null, preempted: [true], state: 'done', train: 'held' });
+    } finally {
+      setSystemTime();
+    }
   });
 });
