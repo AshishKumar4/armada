@@ -678,11 +678,14 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     estimates: indexes.map((index) => estimates[index]), ranks: indexes.map((index) => ranks[index] ?? 1),
   })));
 
-  // Each wave's jobs run at once, so none of them waits on another's end, deadline or cancel.
-  const needs = [false, true].map((judging) => sharesOf(groups.filter((group) => group.judging === judging))).find((shares) => 'need' in shares);
+  // Each wave's jobs, one for each environment and size, run at once, so none of them waits on another's end, deadline or
+  // cancel.
+  for (const wave of [false, true].map((judging) => groups.filter((group) => group.judging === judging))) {
+    const shares = sharesOf(wave);
 
-  if (needs !== undefined && 'need' in needs) {
-    return await ungraded(`the plan's ${String(groups.length)} environments run at once and need ${String(needs.need)} containers for it, one each or their widest gang, past the pool of ${String(containers)}: raise pool in .armada.json, or the run's --pool`);
+    if ('need' in shares) {
+      return await ungraded(`the plan's ${String(wave.length)} task jobs, one for each environment and size, run at once and need ${String(shares.need)} containers for it, one each or their widest gang, past the pool of ${String(containers)}: raise pool in .armada.json, or the run's --pool`);
+    }
   }
 
   // What is left of the run's deadline, read once for every task job, so all of them start or none does.
@@ -773,8 +776,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   const jobs: { readonly name: string | undefined; readonly size: Size; readonly id: string; readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }[] = [];
 
   /** A wave's jobs, each a group's `indexes` given `more`, started at once within `within` seconds, and followed to their
-   *  ends:
-   *  their results, by their plan indexes; or why one did not start, the others then cancelled. */
+   *  ends: their results, by their plan indexes; or why one did not start, the others then cancelled. */
   const wave = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number) => {
     const shares = sharesOf(groupsOf);
     const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, within, each.more));
@@ -834,7 +836,12 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     // Each judges' job takes the artifacts its judges read, and names where each judge finds its own.
     const judging = groups.flatMap((group, at) => {
       const indexes = group.judging ? group.indexes.filter((index) => !unjudged.has(index)) : [];
-      const read = (index: number) => (mapsOf[index] ?? []).filter((map) => resultOf.get(map)?.meta.artifacts === true).flatMap((map) => [runOf.get(map) ?? []].flat());
+
+      const read = (index: number) => (mapsOf[index] ?? []).flatMap((map) => {
+        const run = runOf.get(map);
+
+        return run === undefined || resultOf.get(map)?.meta.artifacts !== true ? [] : [run];
+      });
 
       const after = Object.fromEntries(indexes.map((index) => [nameOf(index), read(index).map((run) => `${INPUTS_DIR}/${run}`)]));
 
