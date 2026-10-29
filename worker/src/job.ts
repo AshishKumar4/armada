@@ -1328,10 +1328,11 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = this.sql.exec<{ attempts: number }>(`UPDATE tasks SET state = 'failed' WHERE idx = ? AND state IN ('forming', 'running', 'landing') RETURNING attempts`, index).toArray()[0];
 
     if (task === undefined) return;
-    // A gang that formed short of its ranks waited for vessels the fleet never gave it.
-    const short = error === 'GangFormDeadlineExceeded' ? { capacity: true as const } : {};
+    const outcome: Outcome = { index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel, attempt: task.attempts, tail: reason, output: false, error };
 
-    this.append({ index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel, attempt: task.attempts, tail: reason, output: false, error, ...short });
+    // A gang that formed short of its ranks waited for vessels the fleet never gave it.
+    if (error === 'GangFormDeadlineExceeded') outcome.capacity = true;
+    this.append(outcome);
     await this.ctx.storage.put('problems', [...(await this.ctx.storage.get<string[]>('problems')) ?? [], `${error}: ${reason}`]);
     await this.settle();
 
@@ -1449,10 +1450,9 @@ export class ArmadaJob extends DurableObject<Env> {
       const tail = held ? `${reason}: task ${String(task.idx)} attempt ${String(task.attempts)} still ran on ${task.vessel ?? '?'}` : reason;
       // A task stopped as it ran says how long it ran, so one that ran to a deadline never reads as one that never ran.
       const seconds = held && task.started !== null ? Math.max(0, (Date.now() - task.started) / 1000) : 0;
-      const outcome: Outcome = {
-        index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false,
-        ...(short === 'all' || (short === 'unplaced' && !held) ? { capacity: true as const } : {}),
-      };
+      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false };
+
+      if (short === 'all' || (short === 'unplaced' && !held)) outcome.capacity = true;
 
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
       this.append(outcome);

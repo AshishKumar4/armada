@@ -595,6 +595,7 @@ describe('a job whose containers start on hosts of another CPU than its own (#40
     const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } });
 
     await open.claim('v1');
+
     while ((await open.events(0)).done !== true && begun.length < 100) {
       await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'its host is another', { misplaced: zen3 });
     }
