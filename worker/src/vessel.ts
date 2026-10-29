@@ -150,11 +150,14 @@ const slotKey = (slot: number): string => `slot:${String(slot)}`;
 
 /** A start that has not answered in this long is a lost vessel; a snapshot new to a machine has taken 92 s. */
 const START_MS = 240_000;
+
 /** The longest a vessel waits between asks of a full fleet: one of a train's priority (above 0) asks sooner. Its waits
  *  double from CAPACITY_RETRY_MS to this, with up to a quarter more at random, so a full fleet's waiters, however many,
  *  ask the one fleet object at a bounded rate, its every beat and job submission answered between them, and well
  *  within WANT_MS, so none loses its place in line (Dew, 2026-10-29: 726 waiters asking every 5 s overloaded it). */
 const ASKS_APART_MS = 30_000;
+
+/** The longest a vessel of a train's priority (above 0) waits between asks of a full fleet. */
 const PRIORITY_ASKS_APART_MS = 10_000;
 
 /** A name `export` takes: the task's variables named so reach it through its launch file (`positional`). */
@@ -262,6 +265,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
 
       if (cause instanceof AccountFull) return await this.waitForRoom(spec);
+
       // The platform's own load (an object that queued too many requests) is no failure of the vessel's: it asks
       // again later, its job none the wiser.
       if (said({ cause }).includes('Durable Object is overloaded')) return await this.askAgain(spec);

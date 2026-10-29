@@ -778,6 +778,7 @@ describe('a vessel\'s boot', () => {
   test('asks a full fleet again later each time it is refused, up to a cap, so its waiters ask at a bounded rate', async () => {
     const waits = async (priority: number) => {
       const stored = state();
+
       const vessel = new ArmadaVessel(stored.ctx, world({
         FLEET: namespace(() => ({ acquire: async () => null, release: async () => undefined, renews: async () => true, beat: async () => null })),
         JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined })),
