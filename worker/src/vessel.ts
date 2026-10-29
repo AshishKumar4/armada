@@ -150,6 +150,12 @@ const slotKey = (slot: number): string => `slot:${String(slot)}`;
 
 /** A start that has not answered in this long is a lost vessel; a snapshot new to a machine has taken 92 s. */
 const START_MS = 240_000;
+/** The longest a vessel waits between asks of a full fleet: one of a train's priority (above 0) asks sooner. Its waits
+ *  double from CAPACITY_RETRY_MS to this, with up to a quarter more at random, so a full fleet's waiters, however many,
+ *  ask the one fleet object at a bounded rate, its every beat and job submission answered between them, and well
+ *  within WANT_MS, so none loses its place in line (Dew, 2026-10-29: 726 waiters asking every 5 s overloaded it). */
+const ASKS_APART_MS = 30_000;
+const PRIORITY_ASKS_APART_MS = 10_000;
 
 /** A name `export` takes: the task's variables named so reach it through its launch file (`positional`). */
 const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
@@ -235,11 +241,8 @@ export class ArmadaVessel extends DurableObject<Env> {
           reserve: spec.reserve, borrows: (spec.reserve ?? spec.vcpus) <= spec.vcpus, deadlineAt: deadlineOf(spec), renewed: spec.deadlineAt === null, priority: spec.priority,
         }));
 
-        if (grant === null) {
-          await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
-
-          return;
-        }
+        if (grant === null) return await this.askAgain(spec);
+        await this.ctx.storage.delete('refused');
 
         // The fleet's answer let other calls in: a vessel stopped meanwhile gives back what it was just granted.
         if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return await fleet.release(this.holder(spec));
@@ -259,11 +262,24 @@ export class ArmadaVessel extends DurableObject<Env> {
       if ((await this.ctx.storage.get<State>('state')) === 'stopped') return;
 
       if (cause instanceof AccountFull) return await this.waitForRoom(spec);
+      // The platform's own load (an object that queued too many requests) is no failure of the vessel's: it asks
+      // again later, its job none the wiser.
+      if (said({ cause }).includes('Durable Object is overloaded')) return await this.askAgain(spec);
       console.error(JSON.stringify({ vessel: this.holder(spec), state, error: said({ cause }) }));
       const gone = await this.end('failed', spec);
 
       await job.vesselFailed(spec.name, said({ cause }), { gone, missing: cause instanceof MissingSnapshot ? cause.snapshot : undefined, misplaced: cause instanceof Misplaced ? cause.host : undefined });
     }
+  }
+
+  /** Asks the fleet again after a wait twice the last, from CAPACITY_RETRY_MS up to ASKS_APART_MS (a train's
+   *  PRIORITY_ASKS_APART_MS), with up to a quarter more at random, so its job's many waiters do not ask at once. */
+  private async askAgain(spec: VesselSpec): Promise<void> {
+    const refused = ((await this.ctx.storage.get<number>('refused')) ?? 0) + 1;
+    const apart = Math.min(CAPACITY_RETRY_MS * 2 ** (refused - 1), (spec.priority ?? 0) > 0 ? PRIORITY_ASKS_APART_MS : ASKS_APART_MS);
+
+    await this.ctx.storage.put('refused', refused);
+    await this.ctx.storage.setAlarm(Date.now() + apart * (1 + Math.random() / 4));
   }
 
   /** The account had no room for the container: its fleet's hold goes back, and it waits for room again, as for its
