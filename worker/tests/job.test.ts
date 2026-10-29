@@ -1233,7 +1233,9 @@ describe('a gang task', () => {
 
       // Two of its four vessels ever ask: the fleet has no room for the others, and nothing of the job runs to free one.
       setSystemTime(began + 1_000);
+
       for (const name of ['v1', 'v2']) expect(await open.claim(name)).toEqual({ waitMs: 1000 });
+
       setSystemTime(began + 10_000);
       await open.alarm();
       expect((await open.events(0)).events).toHaveLength(0);
