@@ -385,9 +385,10 @@ export const JobSpecSchema = v.object({
   ), []),
   env: v.optional(v.record(v.string(), v.string()), {}),
   tmpfs: v.optional(v.array(v.pipe(v.string(), v.startsWith('/'))), ['/tmp', '/dev/shm']),
-  /** The most tasks this job runs at once, and so the most containers; the account's ceiling and the item count bound
-   *  it too. With `slots`, the most containers, each running `slots` tasks. */
-  pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(375)), 50),
+  /** The most tasks this job runs at once, and so the most containers; the deployment's vCPU ceiling and the item count
+   *  bound it, no constant (Dew, 2026-10-29: a fixed 375 held a 725-container fleet's runs to half of it). With
+   *  `slots`, the most containers, each running `slots` tasks. */
+  pool: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 50),
   /** The tasks one container runs at once, each isolated in its own slot: the job's lanes are pool × slots. More than
    *  one fixes the count, whatever `mode`. */
   slots: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(16)), 1),

@@ -544,6 +544,14 @@ describe('a vessel lost after its task answered', () => {
   });
 });
 
+describe('a job\'s pool', () => {
+  test('is bounded by the deployment\'s ceiling, not a constant: a job of 725 starts 725 containers', async () => {
+    const { begun } = await job({ recipe: {}, items: Array.from({ length: 725 }, (_, index) => ({ item: index, argv: ['true'] })), run: { kind: 'command' }, pool: 725 });
+
+    expect(begun).toHaveLength(725);
+  });
+});
+
 describe('a vessel lost before it took a task', () => {
   test('is replaced apart from the losses under a task, as many as the job\'s pool, and past them each costs a place in it', async () => {
     const { job: booting, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 12 });
