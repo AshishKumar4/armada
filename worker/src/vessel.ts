@@ -318,9 +318,20 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
     await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
 
-    const gone = await letGo(this.ctx, this.env, { holder: spec === undefined ? undefined : this.holder(spec), inactivityMs: INACTIVITY_MS, kept: 'cleanupGone' });
+    // A destroy's outcome kept until the release lands: a release retried after its RPC failed destroys no absent
+    // container again, which would make a hold known free a lease of INACTIVITY_MS.
+    let gone = await this.ctx.storage.get<boolean>('cleanupGone');
 
-    await this.ctx.storage.delete('cleanup');
+    if (gone === undefined) {
+      const [destroyed] = await Promise.allSettled([this.ctx.container?.destroy()]);
+
+      gone = destroyed.status === 'fulfilled';
+      await this.ctx.storage.put('cleanupGone', gone);
+    }
+
+    if (spec !== undefined) await this.env.FLEET.getByName(SINGLE).release(this.holder(spec), gone ? 0 : INACTIVITY_MS);
+
+    await this.ctx.storage.delete(['cleanup', 'cleanupGone']);
     await this.ctx.storage.deleteAlarm();
 
     return gone;
