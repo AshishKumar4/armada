@@ -1417,12 +1417,14 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.ctx.storage.put({ problems: [...(await this.ctx.storage.get<string[]>('problems')) ?? [], reason], open: false });
 
     // Each names where it stood: the vessel holding it and its attempt, or none for a task still queued.
-    for (const task of this.sql.exec<{ idx: number; state: string; vessel: string | null; attempts: number }>(
-      `SELECT idx, state, vessel, attempts FROM tasks WHERE state IN ('queued', 'checking', 'forming', 'running', 'landing')`,
+    for (const task of this.sql.exec<{ idx: number; state: string; vessel: string | null; attempts: number; started: number | null }>(
+      `SELECT idx, state, vessel, attempts, started FROM tasks WHERE state IN ('queued', 'checking', 'forming', 'running', 'landing')`,
     ).toArray()) {
       const held = task.state === 'running' || task.state === 'landing';
       const tail = held ? `${reason}: task ${String(task.idx)} attempt ${String(task.attempts)} still ran on ${task.vessel ?? '?'}` : reason;
-      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds: 0, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false };
+      // A task stopped as it ran says how long it ran, so one that ran to a deadline never reads as one that never ran.
+      const seconds = held && task.started !== null ? Math.max(0, (Date.now() - task.started) / 1000) : 0;
+      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false };
 
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
       this.append(outcome);

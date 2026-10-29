@@ -185,7 +185,20 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** The job ended or gave this vessel up: whatever it runs stops, and its capacity returns. Whether its container is
    *  gone (`end`). */
   async stop(): Promise<boolean> {
-    const gone = await this.end('stopped', await this.ctx.storage.get<VesselSpec>('spec'));
+    const stored = await this.ctx.storage.get<VesselSpec>('spec');
+
+    // A gang rank stopped with its job (a cancel, its deadline) keeps its log as one its gang failed does (`stopTask`):
+    // the cause of a gang that ran to its deadline is in its ranks' logs, which `end` would drop (armada#67).
+    if (stored !== undefined && this.ctx.container?.running === true) {
+      for (const [key, current] of await this.ctx.storage.list<Current>({ prefix: 'slot:' })) {
+        if (current.claim.gang === undefined || current.read === true) continue;
+        await this.keepLog(specOf(stored), Number(key.slice('slot:'.length)), current).catch((error: unknown) => {
+          console.error(JSON.stringify({ vessel: stored.name, keeping: key, error: String(error) }));
+        });
+      }
+    }
+
+    const gone = await this.end('stopped', stored);
 
     await this.ctx.storage.deleteAlarm();
 
