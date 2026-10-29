@@ -578,16 +578,29 @@ describe('a job whose containers start on hosts of another CPU than its own (#40
       while ((await open.events(0)).done !== true && begun.length < 100) await misplace(open, begun);
       const [ended] = (await open.events(0)).events;
 
-      return { begun: begun.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail };
+      return { begun: begun.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail, capacity: ended?.outcome.capacity };
     }));
 
     expect({ lucky: { done: (await lucky.events(0)).done, begun: luckyBegun.length }, unlucky }).toEqual({
       lucky: { done: false, begun: 31 },
       unlucky: [
-        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it' },
-        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17 or AuthenticAMD/26/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it' },
+        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it', capacity: true },
+        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17 or AuthenticAMD/26/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it', capacity: true },
       ],
     });
+  });
+
+  test('ends a task still running on a host of its CPU as cut short for want of capacity, not failed by its code', async () => {
+    const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
+    const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } });
+
+    await open.claim('v1');
+    while ((await open.events(0)).done !== true && begun.length < 100) {
+      await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'its host is another', { misplaced: zen3 });
+    }
+
+    expect((await open.events(0)).events.map(({ outcome }) => ({ index: outcome.index, vessel: outcome.vessel, capacity: outcome.capacity })))
+      .toEqual([{ index: 0, vessel: 'v1', capacity: true }, { index: 1, vessel: '', capacity: true }]);
   });
 });
 
@@ -1243,7 +1256,7 @@ describe('a gang task', () => {
       await open.alarm();
 
       expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: {
-        error: 'GangFormDeadlineExceeded', kind: 'failed', seconds: 0, vessel: '',
+        error: 'GangFormDeadlineExceeded', kind: 'failed', seconds: 0, vessel: '', capacity: true,
         tail: 'gang formed 2 of 4 ranks within its 10 s start bound, with nothing of its job running to free a vessel for it',
       } }] });
       expect(stopped).toEqual(['j1/v1', 'j1/v2']);
@@ -1466,6 +1479,7 @@ describe('a job deadline', () => {
         kind: 'failed', reason: 'lost', vessel: 'v1', attempt: 1,
         tail: 'JobDeadlineExceeded: the job did not finish within 20 s: task 0 attempt 1 still ran on v1',
       } }] });
+      expect((await open.events(0)).events[0]?.outcome.capacity).toBeUndefined();
       expect(stopped).toEqual(['j1/v1']);
 
       // A gang whose containers never got the fleet's capacity says so, not a bare deadline (#49).
@@ -1473,9 +1487,10 @@ describe('a job deadline', () => {
 
       setSystemTime(began + 40_000);
       await starved.alarm();
-      expect((await starved.events(0)).events.map(({ outcome }) => outcome.tail)).toEqual([
+      expect((await starved.events(0)).events.map(({ outcome }) => [outcome.tail, outcome.capacity])).toEqual([[
         'JobDeadlineExceeded: the job did not finish within 20 s, with 2 containers still waiting for capacity: 8 vCPUs at once for a gang of 2, under the fleet\'s cap of 1500',
-      ]);
+        true,
+      ]]);
     } finally {
       setSystemTime();
     }
