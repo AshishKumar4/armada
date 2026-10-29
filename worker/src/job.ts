@@ -1406,11 +1406,27 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.settleUp();
   }
 
-  /** What the done job still owes, said: its close to the fleet, its environment's use up to now to the registry, its
-   *  hold on its bundle, and its runs' use to their classes' stores (`send`). Each is idempotent and said again at the next alarm until it is
-   *  taken; the alarm stays until all are. */
+  /** What the done job still owes, said: the stop of each container it ended alive (`cancel`), its close to the fleet,
+   *  its environment's use up to now to the registry, its hold on its bundle, and its runs' use to their classes' stores
+   *  (`send`). Each is idempotent and said again at the next alarm until it is taken; the alarm stays until all are: a
+   *  stop whose RPC failed once is no container left holding its share of the fleet until its inactivity timeout. */
   private async settleUp(): Promise<void> {
     const id = (await this.ctx.storage.get<string>('id')) ?? '';
+    const stopping = (await this.ctx.storage.get<string[]>('stopping')) ?? [];
+    const stopped = await Promise.allSettled(stopping.map(async (name) => await this.env.VESSEL.getByName(`${id}/${name}`).stop()));
+
+    const remaining = stopping.filter((name, at) => {
+      const result = stopped[at];
+
+      if (result?.status !== 'fulfilled' || !result.value) return true;
+
+      this.runs.gone(name);
+
+      return false;
+    });
+
+    await this.ctx.storage.put('stopping', remaining);
+
     const owed = (await this.ctx.storage.get<Owed[]>('owed')) ?? [];
 
     const taken = await Promise.allSettled(owed.map(async (each) => {
@@ -1431,7 +1447,7 @@ export class ArmadaJob extends DurableObject<Env> {
     await this.ctx.storage.put('owed', left);
     await this.send();
 
-    if (left.length > 0 || this.placement.pending()) await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
+    if (remaining.length > 0 || left.length > 0 || this.placement.pending()) await this.ctx.storage.setAlarm(Date.now() + WATCHDOG_MS);
     else await this.ctx.storage.deleteAlarm();
   }
 
@@ -1458,19 +1474,11 @@ export class ArmadaJob extends DurableObject<Env> {
       this.append(outcome);
     }
 
-    await this.conclude();
-    const id = (await this.ctx.storage.get<string>('id')) ?? '';
+    // Its live containers are stopped as it settles up (`settleUp`), which retries a stop that failed until it lands.
     const live = this.sql.exec<{ name: string }>(`SELECT name FROM vessels WHERE state IN ${ALIVE}`).toArray();
 
-    // The job is concluded already; a vessel that cannot be told ends at its container's inactivity timeout, and its
-    // runs stay until then.
-    const stopped = await Promise.allSettled(live.map(async ({ name }) => await this.env.VESSEL.getByName(`${id}/${name}`).stop()));
-
-    for (const [at, { name }] of live.entries()) {
-      const each = stopped[at];
-
-      if (each?.status === 'fulfilled' && each.value) this.runs.gone(name);
-    }
+    await this.ctx.storage.put('stopping', live.map(({ name }) => name));
+    await this.conclude();
   }
 
   private async watch(): Promise<void> {
