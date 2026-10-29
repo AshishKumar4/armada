@@ -190,11 +190,17 @@ export class ArmadaVessel extends DurableObject<Env> {
     // A gang rank stopped with its job (a cancel, its deadline) keeps its log as one its gang failed does (`stopTask`):
     // the cause of a gang that ran to its deadline is in its ranks' logs, which `end` would drop (armada#67).
     if (stored !== undefined && this.ctx.container?.running === true) {
-      for (const [key, current] of await this.ctx.storage.list<Current>({ prefix: 'slot:' })) {
-        if (current.claim.gang === undefined || current.read === true) continue;
-        await this.keepLog(specOf(stored), Number(key.slice('slot:'.length)), current).catch((error: unknown) => {
-          console.error(JSON.stringify({ vessel: stored.name, keeping: key, error: String(error) }));
-        });
+      const ranks = [...await this.ctx.storage.list<Current>({ prefix: 'slot:' })]
+        .filter(([, current]) => current.claim.gang !== undefined && current.read !== true);
+
+      const kept = await Promise.allSettled(ranks.map(async ([key, current]) => {
+        await this.keepLog(specOf(stored), Number(key.slice('slot:'.length)), current);
+      }));
+
+      for (const [at, [key]] of ranks.entries()) {
+        const each = kept[at];
+
+        if (each?.status === 'rejected') console.error(JSON.stringify({ vessel: stored.name, keeping: key, error: String(each.reason) }));
       }
     }
 
