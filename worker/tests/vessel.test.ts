@@ -772,6 +772,50 @@ describe('a vessel\'s boot', () => {
     expect({ moved, booted }).toEqual({ moved: ['waiting', 'waiting', 'booting'], booted: [{ bootMs: 6000, boot: { waitMs: 10_000, startMs: 6000, restarts: ['killed as it came up (137)'], setupMs: 3000, host: { vendor: '', family: -1, model: -1, name: '', level: 0 } } }] });
   });
 
+  // A full fleet's every waiter asked every 5 s: 726 waiting vessels sent the one fleet object ~150 asks a second,
+  // which overloaded it, and every job's submission and every running vessel's beat failed behind them (Dew,
+  // 2026-10-29: train 295's suite never started).
+  test('asks a full fleet again later each time it is refused, up to a cap, so its waiters ask at a bounded rate', async () => {
+    const waits = async (priority: number) => {
+      const stored = state();
+      const vessel = new ArmadaVessel(stored.ctx, world({
+        FLEET: namespace(() => ({ acquire: async () => null, release: async () => undefined, renews: async () => true, beat: async () => null })),
+        JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined })),
+      }));
+      const asked: number[] = [];
+
+      await vessel.begin({ ...spec, priority });
+      for (let ask = 0; ask < 6; ask += 1) {
+        const before = Date.now();
+
+        await vessel.alarm();
+        asked.push(Math.round(((await stored.ctx.storage.getAlarm()) ?? before) - before) / 1000);
+      }
+
+      return asked;
+    };
+    const lane = await waits(-10);
+    const train = await waits(10);
+    const within = (seconds: readonly number[], expected: readonly number[]) => seconds.every((at, index) => at >= (expected[index] ?? 0) && at <= (expected[index] ?? 0) * 1.25);
+
+    expect({ lane: within(lane, [5, 10, 20, 30, 30, 30]), train: within(train, [5, 10, 10, 10, 10, 10]), lane_s: lane, train_s: train })
+      .toMatchObject({ lane: true, train: true });
+  });
+
+  test('waits and asks again when the fleet is overloaded, never failing its job for the platform\'s load', async () => {
+    const stored = state();
+    const failed: string[] = [];
+    const vessel = new ArmadaVessel(stored.ctx, world({
+      FLEET: namespace(() => ({ acquire: async () => { throw new Error('Durable Object is overloaded. Requests queued for too long.'); }, release: async () => undefined, renews: async () => true, beat: async () => null })),
+      JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined, vesselFailed: async (_name: string, error: string) => { failed.push(error); } })),
+    }));
+
+    await vessel.begin(spec);
+    await vessel.alarm();
+
+    expect({ failed, asksAgain: (await stored.ctx.storage.getAlarm()) !== null }).toEqual({ failed: [], asksAgain: true });
+  });
+
   /** A vessel whose container's every start the platform ends while the account is full, and whose fleet gives a
    *  hold back as `release` does. */
   function crowded(release: (holder: string) => Promise<void>) {
