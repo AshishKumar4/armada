@@ -330,7 +330,11 @@ export class ArmadaJob extends DurableObject<Env> {
     const { deadline } = spec;
 
     if (deadline !== null && Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) {
-      return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${this.waitingFor(spec)}`, 'lost');
+      // Its unplaced tasks ended for want of capacity where its containers still waited for the fleet; a running task
+      // ran its code that long.
+      const waiting = this.waitingFor(spec);
+
+      return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${waiting}`, 'lost', waiting === '' ? 'none' : 'unplaced');
     }
 
     // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from
@@ -1206,7 +1210,7 @@ export class ArmadaJob extends DurableObject<Env> {
     }
 
     if (misplaced !== undefined && spec.cpu !== undefined && misplacedInRow >= MISPLACED_LIMIT + spec.pool) {
-      return await this.cancel(`${String(misplacedInRow)} containers in a row started on hosts of another CPU than ${cpuLabel(spec.cpu)}, the last on ${hostLabel(misplaced)}: no host this job reaches has it`, 'lost');
+      return await this.cancel(`${String(misplacedInRow)} containers in a row started on hosts of another CPU than ${cpuLabel(spec.cpu)}, the last on ${hostLabel(misplaced)}: no host this job reaches has it`, 'lost', 'all');
     }
 
     await this.grow();
@@ -1324,7 +1328,10 @@ export class ArmadaJob extends DurableObject<Env> {
     const task = this.sql.exec<{ attempts: number }>(`UPDATE tasks SET state = 'failed' WHERE idx = ? AND state IN ('forming', 'running', 'landing') RETURNING attempts`, index).toArray()[0];
 
     if (task === undefined) return;
-    this.append({ index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel, attempt: task.attempts, tail: reason, output: false, error });
+    // A gang that formed short of its ranks waited for vessels the fleet never gave it.
+    const short = error === 'GangFormDeadlineExceeded' ? { capacity: true as const } : {};
+
+    this.append({ index, kind: 'failed', reason: 'lost', exitCode: -1, seconds: 0, vessel, attempt: task.attempts, tail: reason, output: false, error, ...short });
     await this.ctx.storage.put('problems', [...(await this.ctx.storage.get<string[]>('problems')) ?? [], `${error}: ${reason}`]);
     await this.settle();
 
@@ -1427,8 +1434,10 @@ export class ArmadaJob extends DurableObject<Env> {
     else await this.ctx.storage.deleteAlarm();
   }
 
-  /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment. */
-  async cancel(reason: string, why: 'cancelled' | 'lost'): Promise<void> {
+  /** Ends the job: each task not done fails, `cancelled` by its client or its deadline, or `lost` with its environment;
+   *  `short` says which of them ended for want of capacity (`Outcome.capacity`): every one, those not yet on a
+   *  container, or none. */
+  async cancel(reason: string, why: 'cancelled' | 'lost', short: 'all' | 'unplaced' | 'none' = 'none'): Promise<void> {
     if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return;
     await this.ctx.storage.put({ problems: [...(await this.ctx.storage.get<string[]>('problems')) ?? [], reason], open: false });
 
@@ -1440,7 +1449,10 @@ export class ArmadaJob extends DurableObject<Env> {
       const tail = held ? `${reason}: task ${String(task.idx)} attempt ${String(task.attempts)} still ran on ${task.vessel ?? '?'}` : reason;
       // A task stopped as it ran says how long it ran, so one that ran to a deadline never reads as one that never ran.
       const seconds = held && task.started !== null ? Math.max(0, (Date.now() - task.started) / 1000) : 0;
-      const outcome: Outcome = { index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false };
+      const outcome: Outcome = {
+        index: task.idx, kind: 'failed', reason: why, exitCode: -1, seconds, vessel: held ? task.vessel ?? '' : '', attempt: task.attempts, tail, output: false,
+        ...(short === 'all' || (short === 'unplaced' && !held) ? { capacity: true as const } : {}),
+      };
 
       this.sql.exec(`UPDATE tasks SET state = 'failed' WHERE idx = ?`, task.idx);
       this.append(outcome);

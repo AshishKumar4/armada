@@ -457,6 +457,10 @@ export const OutcomeSchema = v.object({
   answer: v.optional(v.picklist(['value', 'command'])),
   /** The name of the error a pushed task's body threw. */
   error: v.optional(v.string()),
+  /** It never ran to its end for want of capacity, not for its code: no host its job reaches has its CPU, its gang
+   *  formed short of its ranks, or its job's deadline came while its containers waited for the fleet; a task running
+   *  on a host of its CPU as such a job ended was cut short. Absent for any other end. */
+  capacity: v.optional(v.literal(true)),
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),
