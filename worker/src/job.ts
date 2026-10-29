@@ -708,8 +708,8 @@ export class ArmadaJob extends DurableObject<Env> {
     ).toArray()[0];
 
     if (first !== undefined && gangOf(v.parse(TaskSchema, JSON.parse(first.item)).item) > 1) {
-      // A gang forms from the vessels that ask next, this one rank 0.
-      this.sql.exec(`UPDATE tasks SET state = 'forming' WHERE idx = ?`, first.idx);
+      // A gang forms from the vessels that ask next, this one rank 0, from now (`watchGangs`' forming bound).
+      this.sql.exec(`UPDATE tasks SET state = 'forming', started = ? WHERE idx = ?`, now, first.idx);
       this.sql.exec(`INSERT INTO members (idx, rank, vessel, state) VALUES (?, 0, ?, 'joined')`, first.idx, name);
 
       return { waitMs: WAIT_MS };
@@ -1288,10 +1288,26 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** A formed gang whose ranks did not all launch within its start bound fails: its launch is bounded by wall time, not
-   *  by its ranks' heartbeats or task timers, which arm only once it launched. A forming gang is not bounded: its ranks
-   *  join as vessels come free, however long their tasks before take (#35). */
+   *  by its ranks' heartbeats or task timers, which arm only once it launched. A forming gang waits while anything of
+   *  its job runs, as its ranks join as vessels come free, however long their tasks before take (#35); with nothing of
+   *  its job running to free one, past its start bound from its first join, it fails, naming the ranks it has, and lets
+   *  them go: the fleet left it no vessels, and its joined ranks would otherwise idle to the job's deadline (#67). */
   private async watchGangs(spec: Kept): Promise<void> {
     const timeout = spec.gangStartTimeout ?? GANG_START_SECONDS;
+
+    if (this.count(`state IN ('running', 'landing')`) === 0) {
+      const forming = this.sql.exec<{ idx: number; started: number | null; item: string; joined: number }>(
+        `SELECT t.idx, t.started, t.item, (SELECT COUNT(*) FROM members m WHERE m.idx = t.idx) AS joined FROM tasks t WHERE t.state = 'forming'`,
+      ).toArray();
+
+      for (const { idx, started, item, joined } of forming) {
+        if (started === null || Date.now() - started < timeout * 1000) continue;
+        const world = gangOf(v.parse(TaskSchema, JSON.parse(item)).item);
+
+        await this.failGang(idx, 'GangFormDeadlineExceeded', `gang formed ${String(joined)} of ${String(world)} ranks within its ${String(timeout)} s start bound, with nothing of its job running to free a vessel for it`);
+      }
+    }
+
     const launching = this.sql.exec<{ idx: number; started: number }>(`SELECT t.idx, t.started FROM tasks t WHERE ${LAUNCHING}`).toArray();
 
     for (const { idx, started } of launching) {
