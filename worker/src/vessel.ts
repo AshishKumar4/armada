@@ -224,7 +224,15 @@ export class ArmadaVessel extends DurableObject<Env> {
     const stored = await this.ctx.storage.get<VesselSpec>('spec');
     const state = await this.ctx.storage.get<State>('state');
 
+    // A terminal vessel whose cleanup is still owed (`end`) retries it; any other terminal one has nothing to do.
+    if ((state === 'stopped' || state === 'failed' || state === 'done') && (await this.ctx.storage.get<boolean>('cleanup')) === true) {
+      await this.end(state, stored);
+
+      return;
+    }
+
     if (stored === undefined || (state !== 'waiting' && state !== 'booting' && state !== 'working')) return;
+
     const spec = specOf(stored);
     const job = this.env.JOB.getByName(spec.jobId);
 
@@ -304,11 +312,18 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  container is gone. Whether it is: one that will not stop ends at its inactivity timeout, and until then its tasks
    *  may run and its capacity stays held. */
   private async end(state: 'stopped' | 'failed' | 'done', spec: VesselSpec | undefined): Promise<boolean> {
-    await this.ctx.storage.put('state', state);
+    // Its cleanup is owed until its release lands: one whose RPC fails is retried at the alarm (`alarm`), which a
+    // terminal state otherwise ignores, so a hold its release never reached does not stay a lease long.
+    await this.ctx.storage.put({ state, cleanup: true });
+    await this.ctx.storage.setAlarm(Date.now() + CAPACITY_RETRY_MS);
     await this.ctx.storage.delete([...(await this.ctx.storage.list<Current>({ prefix: 'slot:' })).keys()]);
 
+    const gone = await letGo(this.ctx, this.env, { holder: spec === undefined ? undefined : this.holder(spec), inactivityMs: INACTIVITY_MS, kept: 'cleanupGone' });
 
-    return await letGo(this.ctx, this.env, { holder: spec === undefined ? undefined : this.holder(spec), inactivityMs: INACTIVITY_MS });
+    await this.ctx.storage.delete('cleanup');
+    await this.ctx.storage.deleteAlarm();
+
+    return gone;
   }
 
   private holder(spec: VesselSpec): string {

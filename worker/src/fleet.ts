@@ -58,11 +58,22 @@ export type Grant = 'held' | 'borrowed';
 /** An object's container goes, and `holder`'s vCPUs, where it holds any, return to the fleet once it is gone: one that
  *  will not stop ends at the inactivity timeout it was started with, `inactivityMs`, and holds them until then. Whether
  *  it is gone. */
-export async function letGo(ctx: DurableObjectState, env: Env, { holder, inactivityMs }: { readonly holder: string | undefined; readonly inactivityMs: number }): Promise<boolean> {
-  const [destroyed] = await Promise.allSettled([ctx.container?.destroy()]);
-  const gone = destroyed.status === 'fulfilled';
+export async function letGo(ctx: DurableObjectState, env: Env, { holder, inactivityMs, kept }: { readonly holder: string | undefined; readonly inactivityMs: number; readonly kept?: string }): Promise<boolean> {
+  // A destroy's outcome kept under `kept` until the release lands: a release retried after its RPC failed destroys no
+  // absent container again, which would make a hold known free a lease of `inactivityMs` (`ArmadaVessel.end`).
+  let gone = kept === undefined ? undefined : await ctx.storage.get<boolean>(kept);
+
+  if (gone === undefined) {
+    const [destroyed] = await Promise.allSettled([ctx.container?.destroy()]);
+
+    gone = destroyed.status === 'fulfilled';
+
+    if (kept !== undefined) await ctx.storage.put(kept, gone);
+  }
 
   if (holder !== undefined) await env.FLEET.getByName(SINGLE).release(holder, gone ? 0 : inactivityMs);
+
+  if (kept !== undefined) await ctx.storage.delete(kept);
 
   return gone;
 }
