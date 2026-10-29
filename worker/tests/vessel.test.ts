@@ -662,6 +662,29 @@ describe('a gang rank', () => {
     ]);
   });
 
+  test('a gang rank stopped with its job as it runs keeps its log, the relay\'s appended, which its runs then list (#67)', async () => {
+    const gang = { rank: 2, job: 'job', vessels: ['v1', 'v2', 'v3'], origin: '', token: 't'.repeat(48) };
+    let relayLogs = 0;
+
+    const stored = state(container((argv) => {
+      relayLogs += (argv[2] ?? '').includes(RELAY_LOG) && (argv[2] ?? '').includes('>> /armada/task/log') ? 1 : 0;
+
+      return { exitCode: 0, stdout: '' };
+    }));
+
+    const artifacts = bucket();
+    const vessel = new ArmadaVessel(stored.ctx, world({ ARTIFACTS: artifacts }));
+
+    await stored.ctx.storage.put('spec', spec);
+    await stored.ctx.storage.put('slot:0', { claim: { index: 0, attempt: 1, argv: ['true'], duplicate: false, gang }, startedAt: 0 });
+    await vessel.stop();
+
+    const log = runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'log');
+
+    expect({ logged: [...artifacts.objects.keys()], rank: artifacts.kept.get(log)?.customMetadata, relayLogs })
+      .toEqual({ logged: [log], rank: { rank: '2' }, relayLogs: 1 });
+  });
+
   test('takes a relay only with its gang\'s token, and only to a port under a link id', async () => {
     const stored = state(container(() => ({ exitCode: 0, stdout: '' })));
     const vessel = new ArmadaVessel(stored.ctx, world({}));

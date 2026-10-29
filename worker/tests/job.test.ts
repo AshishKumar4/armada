@@ -1224,6 +1224,50 @@ describe('a gang task', () => {
     }
   });
 
+  test('a forming gang that nothing of its job holds back fails at its start bound, naming the ranks it has, and lets them go (#67)', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open, stopped } = await job({ ...gang(4), gangStartTimeout: 10 });
+
+      // Two of its four vessels ever ask: the fleet has no room for the others, and nothing of the job runs to free one.
+      setSystemTime(began + 1_000);
+      for (const name of ['v1', 'v2']) expect(await open.claim(name)).toEqual({ waitMs: 1000 });
+      setSystemTime(began + 10_000);
+      await open.alarm();
+      expect((await open.events(0)).events).toHaveLength(0);
+      setSystemTime(began + 11_000);
+      await open.alarm();
+
+      expect(await open.events(0)).toMatchObject({ done: true, events: [{ outcome: {
+        error: 'GangFormDeadlineExceeded', kind: 'failed', seconds: 0, vessel: '',
+        tail: 'gang formed 2 of 4 ranks within its 10 s start bound, with nothing of its job running to free a vessel for it',
+      } }] });
+      expect(stopped).toEqual(['j1/v1', 'j1/v2']);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('a task stopped with its job as it ran says how long it ran', async () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      const { job: open } = await job({ ...gang(2), gangStartTimeout: 10 });
+
+      await formed(open, ['v1', 'v2']);
+      setSystemTime(began + 90_000);
+      await open.cancel('JobDeadlineExceeded: the job did not finish within 90 s', 'cancelled');
+
+      expect(await open.events(0)).toMatchObject({ events: [{ outcome: { seconds: 90, vessel: 'v1',
+        tail: 'JobDeadlineExceeded: the job did not finish within 90 s: task 0 attempt 1 still ran on v1' } }] });
+    } finally {
+      setSystemTime();
+    }
+  });
+
   test('a forming gang waits for a rank busy past its start bound, which counts only once it formed (#35)', async () => {
     const began = Date.now();
 
