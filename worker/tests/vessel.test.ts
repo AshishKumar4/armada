@@ -782,9 +782,11 @@ describe('a vessel\'s boot', () => {
         FLEET: namespace(() => ({ acquire: async () => null, release: async () => undefined, renews: async () => true, beat: async () => null })),
         JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined })),
       }));
+
       const asked: number[] = [];
 
       await vessel.begin({ ...spec, priority });
+
       for (let ask = 0; ask < 6; ask += 1) {
         const before = Date.now();
 
@@ -794,6 +796,7 @@ describe('a vessel\'s boot', () => {
 
       return asked;
     };
+
     const lane = await waits(-10);
     const train = await waits(10);
     const within = (seconds: readonly number[], expected: readonly number[]) => seconds.every((at, index) => at >= (expected[index] ?? 0) && at <= (expected[index] ?? 0) * 1.25);
@@ -805,6 +808,7 @@ describe('a vessel\'s boot', () => {
   test('waits and asks again when the fleet is overloaded, never failing its job for the platform\'s load', async () => {
     const stored = state();
     const failed: string[] = [];
+
     const vessel = new ArmadaVessel(stored.ctx, world({
       FLEET: namespace(() => ({ acquire: async () => { throw new Error('Durable Object is overloaded. Requests queued for too long.'); }, release: async () => undefined, renews: async () => true, beat: async () => null })),
       JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined, vesselFailed: async (_name: string, error: string) => { failed.push(error); } })),
