@@ -10,16 +10,20 @@ const API = 'https://api.cloudflare.com/client/v4';
 /** How long one read of the API may take. */
 const ASKED_MS = 10_000;
 
-const MeSchema = v.object({ result: v.object({ limits: v.object({ total_vcpu: v.number(), vcpu_per_deployment: v.number() }) }) });
+const MeSchema = v.object({ result: v.object({ limits: v.object({
+  total_vcpu: v.number(), vcpu_per_deployment: v.number(), total_memory_mib: v.number(), memory_mib_per_deployment: v.number(),
+}) }) });
 
 const AppsSchema = v.object({
   result: v.array(v.object({ name: v.string(), health: v.object({ instances: v.object({ active: v.number(), starting: v.number() }) }) })),
 });
 
-/** The account's vCPUs, and those the other apps' containers hold now. */
+/** The account's vCPUs and memory (MiB), and those the other apps' containers hold now. */
 export interface Account {
   readonly vcpus: number;
   readonly others: number;
+  readonly memory: number;
+  readonly othersMemory: number;
 }
 
 /** Who reads it: the token, the account, and the deployment whose own apps it leaves out. */
@@ -29,8 +33,8 @@ export interface Reader {
   readonly name: string;
 }
 
-/** The account as the API says now. Each other app's running and starting containers count at the most vCPUs one
- *  container may have: the apps list says how many each runs, not their sizes, and each app's instances would cost a
+/** The account as the API says now. Each other app's running and starting containers count at the most vCPUs and
+ *  memory one container may have: the apps list says how many each runs, not their sizes, and each app's instances would cost a
  *  request a page. The deployment's own apps are its fleet's, which counts them itself. */
 export async function readAccount({ token, account, name }: Reader): Promise<Account> {
   const read = async <S extends v.GenericSchema>(path: string, schema: S): Promise<v.InferOutput<S>> => {
@@ -45,5 +49,9 @@ export async function readAccount({ token, account, name }: Reader): Promise<Acc
   const own = new Set([`${name}-armadavessel`, `${name}-armadapreparer`]);
   const containers = apps.result.filter((app) => !own.has(app.name)).reduce((sum, app) => sum + app.health.instances.active + app.health.instances.starting, 0);
 
-  return { vcpus: me.result.limits.total_vcpu, others: containers * me.result.limits.vcpu_per_deployment };
+  const { limits } = me.result;
+
+  return {
+    vcpus: limits.total_vcpu, others: containers * limits.vcpu_per_deployment, memory: limits.total_memory_mib, othersMemory: containers * limits.memory_mib_per_deployment,
+  };
 }

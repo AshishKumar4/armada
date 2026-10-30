@@ -409,10 +409,18 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
 
   if (given !== undefined) accountToken = given === '' ? undefined : given;
 
-  // Checked before anything changes, as the registry's credentials are minted.
+  // Checked before anything changes, as the registry's credentials are minted; its memory caps the fleet's in the
+  // fleet's share of its vCPUs, as a container holds both (`ArmadaFleet`).
+  let memoryMib: number | undefined;
+
   if (accountToken !== undefined) {
     try {
-      await readAccount({ token: accountToken, account, name });
+      const read = await readAccount({ token: accountToken, account, name });
+
+      const cap = vcpus ?? Number(v.parse(v.looseObject({ vars: v.looseObject({ FLEET_VCPUS: v.string() }) }),
+        Bun.JSONC.parse(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'))).vars.FLEET_VCPUS);
+
+      memoryMib = Math.floor(read.memory * Math.min(1, cap / read.vcpus));
     } catch (cause) {
       throw new Error(`the account token cannot read account ${account}'s containers (${errorOf({ cause }).message}); it needs Account > Containers: Read`, { cause });
     }
@@ -450,7 +458,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
     const health = deployed === null ? null : await healthOf(name, deployed);
 
     if (deployed !== null && mustDrain(health, forceDrain, contractOf(ROOT))) await drain(deployed, () => { drained = true; });
-    await install(account, name, file, { vcpus, token: known?.token, accountToken, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    await install(account, name, file, { vcpus, memoryMib, token: known?.token, accountToken, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
@@ -553,13 +561,14 @@ const DASHBOARD = join(ROOT, 'dist', 'dashboard');
  *  one when undefined), and its secrets. */
 interface Given {
   readonly vcpus: number | undefined;
+  readonly memoryMib: number | undefined;
   readonly token: string | undefined;
   /** The token its fleet reads the account with, which the connection file keeps for the next deploy. */
   readonly accountToken: string | undefined;
   readonly secrets: Readonly<Record<string, string>>;
 }
 
-async function install(account: string, name: string, file: string, { vcpus, token: kept, accountToken, secrets }: Given): Promise<void> {
+async function install(account: string, name: string, file: string, { vcpus, memoryMib, token: kept, accountToken, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -580,7 +589,7 @@ async function install(account: string, name: string, file: string, { vcpus, tok
   await buildDashboard(DASHBOARD);
   // Read from the checkout as it is deployed, as its commit is, not as it was before a drain that may have taken hours.
   writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
-    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, sha: sourceSha(), contract: contractOf(ROOT),
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
   }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));
