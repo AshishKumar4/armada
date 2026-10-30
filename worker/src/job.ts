@@ -625,11 +625,12 @@ export class ArmadaJob extends DurableObject<Env> {
     const spec = await this.spec();
 
     if (state === 'waiting' && phase === 'running' && spec !== undefined) {
-      const ahead = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working')
-        OR (state = 'waiting' AND rowid < (SELECT rowid FROM vessels WHERE name = ?))`, name).one()['n']);
+      // Itself aside: one the platform refused room after its grant (AccountFull) waits again from booting.
+      const ahead = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name != ? AND (state IN ('booting', 'working')
+        OR (state = 'waiting' AND rowid < (SELECT rowid FROM vessels WHERE name = ?)))`, name, name).one()['n']);
 
       if (ahead >= await this.needed(spec)) {
-        this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state = 'waiting'`, Date.now(), name);
+        this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state IN ${ALIVE}`, Date.now(), name);
 
         return false;
       }
