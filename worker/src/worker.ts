@@ -291,7 +291,7 @@ async function runsOf(env: Env, id: string, index: number): Promise<TaskRun[]> {
 }
 
 /** `POST /jobs` starts one (`route`) and `GET /jobs` lists the recent ones; `/jobs/<id>` is its status,
- *  `/events?after=n` its outcomes, `/cancel` ends it, an open job takes `POST /items` and `POST /close`, `GET /items`
+ *  `/events?after=n` its outcomes, `/cancel` ends it, `/release` gives a done job's holds back, an open job takes `POST /items` and `POST /close`, `GET /items`
  *  lists its items, `/tasks/<index>` is a task's status (`TaskStatusSchema`), `/tasks/<index>/{output,log}` its stored
  *  output and log, and `/tasks/<index>/runs` lists
  *  every run of it that kept a log, each at `/tasks/<index>/runs/<vessel>.<attempt>/log`: a gang's every rank. */
@@ -321,6 +321,24 @@ const jobs: Handler = async (request, env, [id, tail, index, leaf, run, file], u
     await job.cancel('cancelled by its client', 'cancelled');
 
     return Response.json({ cancelled: id });
+  }
+
+  // A done job's containers give their holds back: every vessel's, released in the fleet, as a stop or a release its
+  // cleanup lost before armada#71 stayed held to its container's inactivity timeout, the job's row of it left as it
+  // was (2026-10-29: a cancelled job's 288 vessels its rows still called working held their share of the fleet). A
+  // container still running finds its hold gone at its next renewal and takes no further task (`renews`).
+  if (tail === 'release' && request.method === 'POST') {
+    const status = await job.status();
+
+    if (status === null) return Response.json({ error: 'no such job' }, { status: 404 });
+
+    if (status.phase !== 'done') return Response.json({ error: 'the job is not done' }, { status: 409 });
+
+    const fleet = env.FLEET.getByName(SINGLE);
+
+    await Promise.all(status.vessels.map(async ({ name }) => { await fleet.release(`${id}/${name}`); }));
+
+    return Response.json({ released: status.vessels.length });
   }
 
   if (tail === 'lease' && request.method === 'POST') return Response.json({ held: await job.renew() });
