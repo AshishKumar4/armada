@@ -22,7 +22,7 @@ const ROOT = join(import.meta.dir, '..');
 const USAGE = `armada runs a command over many inputs at once, on Cloudflare Containers.
 
 Usage:
-  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
+  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--memory=GiB] [--drain] [--keep=N]
                                        deploy armada to your Cloudflare account, logging in if needed
   armada destroy --name=<name> [--account=<id>] [--force]
                                        purge exactly this deployment; refuses open jobs unless forced;
@@ -86,6 +86,8 @@ deploy options:
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
+  --memory=GiB         the most memory its fleet holds at once (default: the account's, in --vcpus's share of
+                       its vCPUs, where the deploy has the account token; none without)
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
                        client the deployed one serves, its driver differs, or its Durable
                        Objects call each other or store their records differently
@@ -106,7 +108,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
-  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'drain', 'keep='], words: 0 }],
+  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'memory=', 'drain', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'priority=', 'inputs=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'pool=', 'priority=', 'label=', 'secrets=', 'json'], words: 1 }],
@@ -391,7 +393,7 @@ const KeptSchema = v.object({ ...ConnectionSchema.entries, accountToken: v.optio
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
-async function deploy(name: string, vcpus: number | undefined, forceDrain: boolean, keep: number): Promise<number> {
+async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined }, forceDrain: boolean, keep: number): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
   // One read of the deployment as this machine knows it, for both its preflight and its bearer: a connection of another
@@ -411,7 +413,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
 
   // Checked before anything changes, as the registry's credentials are minted; its memory caps the fleet's in the
   // fleet's share of its vCPUs, as a container holds both (`ArmadaFleet`).
-  let memoryMib: number | undefined;
+  let memoryMib = memoryGiB === undefined ? undefined : memoryGiB * 1024;
 
   if (accountToken !== undefined) {
     try {
@@ -420,7 +422,7 @@ async function deploy(name: string, vcpus: number | undefined, forceDrain: boole
       const cap = vcpus ?? Number(v.parse(v.looseObject({ vars: v.looseObject({ FLEET_VCPUS: v.string() }) }),
         Bun.JSONC.parse(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'))).vars.FLEET_VCPUS);
 
-      memoryMib = Math.floor(read.memory * Math.min(1, cap / read.vcpus));
+      memoryMib ??= Math.floor(read.memory * Math.min(1, cap / read.vcpus));
     } catch (cause) {
       throw new Error(`the account token cannot read account ${account}'s containers (${errorOf({ cause }).message}); it needs Account > Containers: Read`, { cause });
     }
@@ -901,7 +903,7 @@ async function main(): Promise<number> {
 
       if (!v.safeParse(DeploymentName, name).success) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, whole('vcpus'), flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
+      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory') }, flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
     }
 
     case 'destroy':
