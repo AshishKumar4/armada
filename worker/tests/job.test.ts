@@ -843,6 +843,18 @@ describe('a vessel still waiting for room', () => {
   });
 });
 
+describe('a vessel the platform refused room after its grant', () => {
+  test('waits again in line, still wanted, where its own boot was all the job had', async () => {
+    const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1 });
+
+    await open.moved('v1', 'booting');
+    // The platform had no room for its container (AccountFull): it waits for room again.
+    const asked = await open.moved('v1', 'waiting');
+
+    expect({ asked, state: (await open.status())?.vessels.find((vessel) => vessel.name === 'v1')?.state }).toEqual({ asked: true, state: 'waiting' });
+  });
+});
+
 describe('a vessel that found no task', () => {
   test('no longer counts toward the pool, so an item an open job takes before the vessel retires gets a vessel', async () => {
     const task = { item: 'a', argv: ['true'] };
