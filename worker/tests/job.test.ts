@@ -824,6 +824,37 @@ describe('a vessel\'s watchdog', () => {
   });
 });
 
+describe('a vessel still waiting for room', () => {
+  test('leaves the fleet\'s line once the vessels ahead of it hold every task left, and one still needed stays', async () => {
+    const items = ['a', 'b', 'c', 'd'].map((item) => ({ item, argv: ['true'] }));
+    const { job: open, begun } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 4 });
+
+    await open.moved('v1', 'booting');
+    await finish(open, 'v1');
+    await finish(open, 'v1');
+    // Two tasks left, and v1 granted: v2, the first in line behind it, is still wanted; v3 and v4 are not.
+    const asked = { v2: await open.moved('v2', 'waiting'), v3: await open.moved('v3', 'waiting'), v4: await open.moved('v4', 'waiting') };
+    const states = Object.fromEntries((await open.status())?.vessels.map((vessel) => [vessel.name, vessel.state]) ?? []);
+
+    expect({ begun, asked, states }).toEqual({
+      begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4'], asked: { v2: true, v3: false, v4: false },
+      states: { v1: 'working', v2: 'waiting', v3: 'done', v4: 'done' },
+    });
+  });
+});
+
+describe('a vessel the platform refused room after its grant', () => {
+  test('waits again in line, still wanted, where its own boot was all the job had', async () => {
+    const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1 });
+
+    await open.moved('v1', 'booting');
+    // The platform had no room for its container (AccountFull): it waits for room again.
+    const asked = await open.moved('v1', 'waiting');
+
+    expect({ asked, state: (await open.status())?.vessels.find((vessel) => vessel.name === 'v1')?.state }).toEqual({ asked: true, state: 'waiting' });
+  });
+});
+
 describe('a vessel that found no task', () => {
   test('no longer counts toward the pool, so an item an open job takes before the vessel retires gets a vessel', async () => {
     const task = { item: 'a', argv: ['true'] };
