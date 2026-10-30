@@ -567,51 +567,136 @@ describe('a vessel lost before it took a task', () => {
 });
 
 describe('a job whose containers start on hosts of another CPU than its own (#40, #48)', () => {
-  // 2026-10-30: while the account was full, 64 of a job's 166 containers started on AMD 25/1, each replaced at no cost.
-  test('replaces eight of them, past which each costs its place, and ends once none is left', async () => {
+  // 2026-10-30: just after a deploy, every one of a job's 24 starts landed on AMD 25/1, and a budget of replacements
+  // ended it for want of a host it would have had minutes later.
+  test('holds each such place back, twice as long each time in a row, until a container boots on its CPU', async () => {
     const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
-    const cpu = { vendor: 'AuthenticAMD', family: 25, model: 17 };
     const items = Array.from({ length: 4 }, (_, index) => ({ item: String(index), argv: ['true'] }));
-    const misplace = async (open: ArmadaJob, name: string) => await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
-    const { job: placed, begun } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 2, cpu });
+    const start = Date.now();
 
-    // v1 boots on a host of its CPU; v2 and each of its replacements does not.
-    await placed.booted('v1', 1000);
+    try {
+      setSystemTime(start);
+      const { job: open, begun } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 2, cpu: [{ vendor: 'AuthenticAMD', family: 25, model: 17 }] });
+      const misplace = async (name: string) => await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
 
-    for (let misplaced = 0; misplaced < 9; misplaced += 1) await misplace(placed, (begun.at(-1) ?? '').slice('j1/'.length));
-    const begunThen = begun.length;
+      const at = async (ms: number) => {
+        setSystemTime(start + ms);
+        await open.alarm();
 
-    // v1 runs every task, and the job ends with them.
-    for (const _ of items) await finish(placed, 'v1');
-    const { done, events } = await placed.events(0);
-    const runsOn = { begun: begunThen, done, exits: events.map(({ outcome }) => outcome.kind === 'exited' ? outcome.exitCode : outcome.kind) };
+        return begun.length;
+      };
 
-    // One CPU as a client before wire 11 sends it, and two as a list (#48).
-    const unplaced = await Promise.all([cpu, [cpu, { ...cpu, family: 26 }]].map(async (each) => {
-      const { job: open, begun: started } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 2, cpu: each });
-      const lost = new Set<string>();
+      // v1 waits; v2 starts on another CPU, and its place waits 30 s, then v3's 60 s.
+      await misplace('v2');
+      const started = [begun.length, await at(29_000), await at(31_000)];
 
-      // The newest vessel not yet lost is, each time.
-      for (let name = started.at(-1); (await open.events(0)).done !== true && name !== undefined && lost.size < 100; name = started.findLast((one) => !lost.has(one))) {
-        lost.add(name);
-        await misplace(open, name.slice('j1/'.length));
+      await misplace('v3');
+      started.push(await at(31_000 + 59_000), await at(31_000 + 61_000));
+      // v4's would wait 120 s; v1 boots on a host of its CPU, which then has room, so the place starts again now.
+      await misplace('v4');
+      await open.booted('v1', 1000);
+      started.push(await at(31_000 + 62_000));
+
+      expect({ started, done: (await open.events(0)).done }).toEqual({ started: [2, 2, 3, 3, 4, 5], done: false });
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
+describe('a job holding places back after starts on another CPU', () => {
+  const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
+  const cpu = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+
+  test('holds back the place its one task needs, however large its pool, and an earlier budget is no streak', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const { job: open, begun, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 16, cpu });
+
+      // An earlier Worker's budget of such starts, spent.
+      await stored.ctx.storage.put('misplaced', 8);
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+      const held = begun.length;
+
+      setSystemTime(start + 31_000);
+      await open.alarm();
+
+      expect({ held, after: begun.length }).toEqual({ held: 1, after: 2 });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('lets a gang that forms while a place is held back wait for that rank, its start bound counted from the hold\'s end', async () => {
+    const start = Date.now();
+
+    // Its gang forming before the start on another CPU, a peer's boot clearing the hold meanwhile; and its gang first
+    // joined after it, by a vessel that ran a task of its own first.
+    const cases: readonly { readonly spec: v.InferInput<typeof JobSpecSchema>; readonly before: readonly string[]; readonly after: readonly string[]; readonly boots?: string }[] = [
+      { spec: { ...gang(3), pool: 3 }, before: ['v1'], after: [], boots: 'v3' },
+      { spec: { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 }, before: [], after: ['v1'] },
+    ];
+
+    try {
+      const outcomes = [];
+
+      for (const { spec, before, after, boots } of cases) {
+        setSystemTime(start);
+        const { job: open, begun } = await job({ ...spec, cpu, gangStartTimeout: 10 });
+
+        for (const name of before) await open.claim(name);
+        await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
+        setSystemTime(start + 1_000);
+
+        if (after.length > 0) await finish(open, 'v1');
+
+        for (const name of after) await open.claim(name);
+        setSystemTime(start + 20_000);
+
+        if (boots !== undefined) {
+          await open.booted(boots, 1000);
+          await open.claim(boots);
+        }
+
+        await open.alarm();
+        setSystemTime(start + 35_000);
+        await open.alarm();
+        const replaced = begun.at(-1) ?? '';
+        const joined = await open.claim(replaced.slice('j1/'.length));
+
+        outcomes.push({ failed: (await open.events(0)).events.filter(({ outcome }) => outcome.kind === 'failed').length, formed: joined !== null && !('waitMs' in joined) });
       }
 
+      expect(outcomes).toEqual([{ failed: 0, formed: true }, { failed: 0, formed: true }]);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('says at its deadline that its places were held back for want of a host of its CPU', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1, cpu, deadline: 60 });
+
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 31_000);
+      await open.alarm();
+      await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 61_000);
+      await open.alarm();
       const [ended] = (await open.events(0)).events;
 
-      return { begun: started.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail, capacity: ended?.outcome.capacity };
-    }));
-
-    const tail = (cpus: string) => `its containers started on hosts of another CPU than ${cpus}, the last on AMD EPYC 25/1 (x86-64-v3): past 8 replaced, each cost a place in its pool of 2, and none is left`;
-
-    // v1 and v2, eight replacements, and the last two forfeit the places.
-    expect({ runsOn, unplaced }).toEqual({
-      runsOn: { begun: 10, done: true, exits: [0, 0, 0, 0] },
-      unplaced: [
-        { begun: 10, kind: 'failed', tail: tail('AuthenticAMD/25/17'), capacity: true },
-        { begun: 10, kind: 'failed', tail: tail('AuthenticAMD/25/17 or AuthenticAMD/26/17'), capacity: true },
-      ],
-    });
+      expect({ kind: ended?.outcome.kind, capacity: ended?.outcome.capacity, tail: ended?.outcome.tail }).toEqual({
+        kind: 'failed', capacity: true,
+        tail: 'JobDeadlineExceeded: the job did not finish within 60 s, its containers starting on hosts of another CPU than AuthenticAMD/25/17 since one last booted on its own, the last on AMD EPYC 25/1 (x86-64-v3)',
+      });
+    } finally {
+      setSystemTime();
+    }
   });
 });
 
