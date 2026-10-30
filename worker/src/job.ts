@@ -128,13 +128,9 @@ interface Attempt {
 
 /** Vessels lost under a task that a job replaces before it stops replacing them. One lost before it took any task
  *  was lost to its container's start, which says nothing of the job's tasks: those are replaced apart, as many as the
- *  job's pool and at least as many as these (`vesselFailed`). */
+ *  job's pool and at least as many as these, and those that started on a host of another CPU than the job's apart
+ *  again, as many as these (`vesselFailed`). */
 const REPLACEMENTS = 8;
-
-/** Containers in a row, past one a place in the pool, that start on hosts of another CPU than the job's (`JobSpec.cpu`)
- *  before the job ends. Of 62 containers on 2026-10-13, 52 were AMD 25/17, 7 AMD 26/17, 2 AMD 25/1 and 1 AMD 23/49, so
- *  even a pool of the rarest boots past this, and this many in a row says no host here has it. */
-const MISPLACED_LIMIT = 20;
 
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
  *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. Only a loss of its own
@@ -519,13 +515,31 @@ export class ArmadaJob extends DurableObject<Env> {
     if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ${ALIVE}`).one()['n']);
     const named = Number(this.sql.exec('SELECT COUNT(*) AS n FROM vessels').one()['n']);
-    const wanted = await this.needed(spec) - alive;
+    const wanted = await this.wanted(spec, { asks: true }) - alive;
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => vesselName(named + index + 1));
 
     const widest = Number(this.sql.exec(WIDEST).one()['n']);
 
     for (const name of names) this.sql.exec('INSERT INTO vessels (name, state, beat, ranks) VALUES (?, ?, ?, ?)', name, 'waiting', Date.now(), widest);
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
+  }
+
+  /** The vessels the job keeps at once: those its open tasks need (`needed`), and of them no more waiting for the fleet
+   *  than the fleet could grant it (`ArmadaFleet.room`), one at least, which asks for the rest as room comes free. Each
+   *  vessel waiting asks the fleet twice a minute, so a full fleet's line of every vessel each job could use overloaded
+   *  it (2026-10-30: 690 for 12 jobs). The room is read as the job grows (`asks`), and kept for its waiting vessels' own
+   *  asks between (`moved`), which count the vessels ahead of one `besides` it. */
+  private async wanted(spec: Kept, { asks = false, besides = '' }: { readonly asks?: boolean; readonly besides?: string }): Promise<number> {
+    const needed = await this.needed(spec);
+    const busy = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working') AND name != ?`, besides).one()['n']);
+
+    if (asks && needed > busy) {
+      const room = await this.env.FLEET.getByName(SINGLE).room((await this.ctx.storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
+
+      await this.ctx.storage.put('room', room);
+    }
+
+    return Math.min(needed, busy + Math.max(1, (await this.ctx.storage.get<number>('room')) ?? Infinity));
   }
 
   /** The most vessels the job may hold at once: its pool, less a place for each vessel it lost past its replacements
@@ -608,14 +622,13 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
    *  vessel). */
   async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
-    await this.ctx.storage.delete('misplaced');
     this.sql.exec(`UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
   /** Vessel `name` waits for the fleet's capacity, or was granted it and boots: its watchdog bounds its silence by that
    *  (`SILENT_MS`). A word from a vessel that ended changes nothing. Whether the job still wants the vessel: not once
    *  either has ended, which a vessel whose stop was lost learns here; nor, while it waits, once the vessels ahead of it,
-   *  every one granted and those that waited before it, make what the open tasks need (`needed`). It then leaves the
+   *  every one granted and those that waited before it, make what the job keeps (`wanted`). It then leaves the
    *  fleet's line rather than take a grant, boot and find no task, its place ahead of other jobs' vessels held meanwhile
    *  (12% of Dew's vessels over 6 h, 2026-10-30); one the queue needs again later is a new vessel, at the line's end. */
   async moved(name: string, state: 'waiting' | 'booting'): Promise<boolean> {
@@ -629,7 +642,7 @@ export class ArmadaJob extends DurableObject<Env> {
       const ahead = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name != ? AND (state IN ('booting', 'working')
         OR (state = 'waiting' AND rowid < (SELECT rowid FROM vessels WHERE name = ?)))`, name, name).one()['n']);
 
-      if (ahead >= await this.needed(spec)) {
+      if (ahead >= await this.wanted(spec, { besides: name })) {
         this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state IN ${ALIVE}`, Date.now(), name);
 
         return false;
@@ -1189,19 +1202,18 @@ export class ArmadaJob extends DurableObject<Env> {
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
 
-    // One on a host of another CPU is replaced at no cost to its budget, until so many in a row say no host has it.
-    const misplacedInRow = misplaced !== undefined && live ? ((await this.ctx.storage.get<number>('misplaced')) ?? 0) + 1 : 0;
-
-    if (misplacedInRow > 0) await this.ctx.storage.put('misplaced', misplacedInRow);
-
-    if (missing === undefined && live && misplaced === undefined) {
-      // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
-      // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
-      // pool, which would refill the place for nothing.
-      const spent = (await this.ctx.storage.get<number>(took ? 'replaced' : 'rebooted')) ?? 0;
+    if (missing === undefined && live) {
+      // Its place is refilled from a budget: a lost start's apart from a loss under a task, and a start on a host of
+      // another CPU than the job's from one of its own, as the platform places containers by region alone, and while
+      // the account is full may place one after another on such hosts (2026-10-30: 64 of a job's 166 starts, on AMD
+      // 25/1). Past it, the job forfeits the place, and runs on with one vessel fewer (`grow`). Decided before anything
+      // below lets an alarm grow the pool, which would refill the place for nothing.
+      const lost = took ? 'replaced' : 'rebooted';
+      const budget = misplaced === undefined ? lost : 'misplaced';
+      const spent = (await this.ctx.storage.get<number>(budget)) ?? 0;
       const forfeited = (await this.ctx.storage.get<number>('forfeited')) ?? 0;
 
-      if (spent < (took ? REPLACEMENTS : Math.max(REPLACEMENTS, spec.pool))) await this.ctx.storage.put(took ? 'replaced' : 'rebooted', spent + 1);
+      if (spent < (budget === 'rebooted' ? Math.max(REPLACEMENTS, spec.pool) : REPLACEMENTS)) await this.ctx.storage.put(budget, spent + 1);
       else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
@@ -1228,8 +1240,9 @@ export class ArmadaJob extends DurableObject<Env> {
       await this.awaitEnvironment(spec);
     }
 
-    if (misplaced !== undefined && spec.cpu !== undefined && misplacedInRow >= MISPLACED_LIMIT + spec.pool) {
-      return await this.cancel(`${String(misplacedInRow)} containers in a row started on hosts of another CPU than ${cpuLabel(spec.cpu)}, the last on ${hostLabel(misplaced)}: no host this job reaches has it`, 'lost', 'all');
+    if (misplaced !== undefined && spec.cpu !== undefined && live && (await this.capacity(spec)) <= 0) {
+      return await this.cancel(`its containers started on hosts of another CPU than ${cpuLabel(spec.cpu)}, the last on ${hostLabel(misplaced)}: past ${String(REPLACEMENTS)} replaced, `
+        + `each cost a place in its pool of ${String(spec.pool)}, and none is left`, 'lost', 'all');
     }
 
     await this.grow();

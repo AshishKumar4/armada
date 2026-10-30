@@ -4,6 +4,7 @@
  * answer as a test says. Stubs passed across the RPC boundary are the objects themselves. bunfig.toml preloads this
  * file, so the mock is in place before a test imports the Worker's modules.
  */
+import { serialize } from 'bun:jsc';
 import { Database, type SQLQueryBindings } from 'bun:sqlite';
 import { mock } from 'bun:test';
 import { timingSafeEqual } from 'node:crypto';
@@ -58,6 +59,9 @@ export interface Stored {
   readonly dump: () => string;
   /** The work the object handed `waitUntil`. */
   readonly pending: readonly Promise<unknown>[];
+  /** The bytes the object's storage calls have carried so far: each value put or read, each SQL binding and each row
+   *  answered. */
+  readonly carried: () => number;
 }
 
 /** An in-memory Durable Object state, with `held` as its container. */
@@ -65,6 +69,14 @@ export function state(held?: Container): Stored {
   const entries = new Map<string, unknown>();
   let alarm: number | null = null;
   const db = new Database(':memory:');
+  let carried = 0;
+
+  /** `value`, counted as carried, in the structured-clone form the platform keeps a value in. */
+  const carry = <T>(value: T): T => {
+    carried += serialize(value).byteLength;
+
+    return value;
+  };
 
   // The platform's own bounds on the key-value API: one call names at most 128 keys, and a value is at most 2 MB, past
   // which SQLite refuses it as too big (armada#43, a project's timings in one value).
@@ -76,8 +88,8 @@ export function state(held?: Container): Stored {
     get: async (key: string | readonly string[]) => {
       if (many(key)) bounded(key.length);
 
-      return many(key) ? new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : []))
-        : structuredClone(entries.get(key));
+      return carry(many(key) ? new Map(key.flatMap((each) => entries.has(each) ? [[each, structuredClone(entries.get(each))]] : []))
+        : structuredClone(entries.get(key)));
     },
     put: async <T>(key: string | Readonly<Record<string, T>>, value?: T) => {
       const written = v.is(v.string(), key) ? [[key, value] as const] : Object.entries(key);
@@ -86,7 +98,7 @@ export function state(held?: Container): Stored {
 
       for (const [name, each] of written) {
         if (new TextEncoder().encode(JSON.stringify(each)).length > 2_000_000) throw new Error('string or blob too big: SQLITE_TOOBIG');
-        entries.set(name, structuredClone(each));
+        entries.set(name, structuredClone(carry(each)));
       }
     },
     delete: async (keys: string | readonly string[]) => many(keys) ? keys.filter((key) => entries.delete(key)).length : entries.delete(keys),
@@ -95,7 +107,7 @@ export function state(held?: Container): Stored {
       const keys = [...entries.keys()].filter((key) => key.startsWith(prefix) && (end === undefined || key < end)).sort();
       const ordered = reverse ? keys.reverse() : keys;
 
-      return new Map(ordered.slice(0, limit ?? ordered.length).map((key) => [key, structuredClone(entries.get(key))]));
+      return carry(new Map(ordered.slice(0, limit ?? ordered.length).map((key) => [key, structuredClone(entries.get(key))])));
     },
     // One alarm an object, as the platform keeps it: set replaces it, delete clears it.
     getAlarm: async () => alarm,
@@ -107,7 +119,7 @@ export function state(held?: Container): Stored {
         if (bindings.length > 100) throw new Error(`too many SQL variables: ${String(bindings.length)}`);
 
         if (bindings.some((each) => v.is(v.pipe(v.string(), v.minLength(2_000_001)), each))) throw new Error('string or blob too big');
-        const rows = db.query(query).all(...bindings);
+        const rows = carry(db.query(query).all(...carry(bindings)));
 
         return {
           toArray: () => rows,
@@ -136,7 +148,7 @@ export function state(held?: Container): Stored {
   Object.assign(ctx, { storage, container: held, waitUntil: (promise: Promise<unknown>) => { pending.push(promise); }, blockConcurrencyWhile: async <T>(run: () => Promise<T>) => await run() });
 
   // SAFETY: the objects call only these storage methods, `container`, `waitUntil` and `blockConcurrencyWhile`, each constructed above.
-  return { ctx: ctx as DurableObjectState, dump, pending };
+  return { ctx: ctx as DurableObjectState, dump, pending, carried: () => carried };
 }
 
 /** A namespace whose `getByName` answers from `named`. */
@@ -224,7 +236,7 @@ export function world(bindings: Partial<Record<keyof Env, Fake>>): Env {
   let whole: Env;
 
   Object.assign(env, {
-    FLEET: namespace(() => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] })),
+    FLEET: namespace(() => ({ acquire: async () => 'held', room: async () => Infinity, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] })),
     VERSION: { id: 'version', tag: '', timestamp: '' },
     ARMADA_TOKEN: 't'.repeat(32),
     FLEET_VCPUS: '1500',
