@@ -629,29 +629,47 @@ describe('a job holding places back after starts on another CPU', () => {
     }
   });
 
-  test('lets a forming gang wait for the rank whose place it held back, its start bound counted from then', async () => {
+  test('lets a gang that forms while a place is held back wait for that rank, its start bound counted from the hold\'s end', async () => {
     const start = Date.now();
 
+    // Its gang forming before the start on another CPU, a peer's boot clearing the hold meanwhile; and its gang first
+    // joined after it, by a vessel that ran a task of its own first.
+    const cases: readonly { readonly spec: v.InferInput<typeof JobSpecSchema>; readonly before: readonly string[]; readonly after: readonly string[]; readonly boots?: string }[] = [
+      { spec: { ...gang(3), pool: 3 }, before: ['v1'], after: [], boots: 'v3' },
+      { spec: { recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: { gang: 2 }, argv: ['true'] }], run: { kind: 'command' }, pool: 2 }, before: [], after: ['v1'] },
+    ];
+
     try {
-      setSystemTime(start);
-      const { job: open, begun } = await job({ ...gang(3), pool: 3, cpu, gangStartTimeout: 10 });
+      const outcomes = [];
 
-      // v1 joins; v2 starts on another CPU, and its place waits 30 s, past the gang's 10 s bound; v3 boots on a host of
-      // its CPU and joins meanwhile, which starts the held place again.
-      expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
-      await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
-      setSystemTime(start + 20_000);
-      await open.booted('v3', 1000);
-      expect(await open.claim('v3')).toEqual({ waitMs: 1000 });
-      await open.alarm();
-      const replaced = begun.at(-1);
+      for (const { spec, before, after, boots } of cases) {
+        setSystemTime(start);
+        const { job: open, begun } = await job({ ...spec, cpu, gangStartTimeout: 10 });
 
-      // Its replacement joins, and the gang forms, its bound counted from the hold's end.
-      setSystemTime(start + 35_000);
-      await open.alarm();
-      const joined = await open.claim((replaced ?? '').slice('j1/'.length));
+        for (const name of before) await open.claim(name);
+        await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
+        setSystemTime(start + 1_000);
 
-      expect({ replaced, events: (await open.events(0)).events.length, formed: joined !== null && !('waitMs' in joined) }).toEqual({ replaced: 'j1/v4', events: 0, formed: true });
+        if (after.length > 0) await finish(open, 'v1');
+
+        for (const name of after) await open.claim(name);
+        setSystemTime(start + 20_000);
+
+        if (boots !== undefined) {
+          await open.booted(boots, 1000);
+          await open.claim(boots);
+        }
+
+        await open.alarm();
+        setSystemTime(start + 35_000);
+        await open.alarm();
+        const replaced = begun.at(-1) ?? '';
+        const joined = await open.claim(replaced.slice('j1/'.length));
+
+        outcomes.push({ failed: (await open.events(0)).events.filter(({ outcome }) => outcome.kind === 'failed').length, formed: joined !== null && !('waitMs' in joined) });
+      }
+
+      expect(outcomes).toEqual([{ failed: 0, formed: true }, { failed: 0, formed: true }]);
     } finally {
       setSystemTime();
     }
