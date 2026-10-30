@@ -634,23 +634,24 @@ describe('a job holding places back after starts on another CPU', () => {
 
     try {
       setSystemTime(start);
-      const { job: open, begun } = await job({ ...gang(2), pool: 2, cpu, gangStartTimeout: 10 });
+      const { job: open, begun } = await job({ ...gang(3), pool: 3, cpu, gangStartTimeout: 10 });
 
-      // v1 joins; v2 starts on another CPU, and its place waits 30 s, past the gang's 10 s bound.
+      // v1 joins; v2 starts on another CPU, and its place waits 30 s, past the gang's 10 s bound; v3 boots on a host of
+      // its CPU and joins meanwhile, which starts the held place again.
       expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
       await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
       setSystemTime(start + 20_000);
+      await open.booted('v3', 1000);
+      expect(await open.claim('v3')).toEqual({ waitMs: 1000 });
       await open.alarm();
-      const during = { events: (await open.events(0)).events.length, begun: begun.length };
+      const replaced = begun.at(-1);
 
-      setSystemTime(start + 31_000);
+      // Its replacement joins, and the gang forms, its bound counted from the hold's end.
+      setSystemTime(start + 35_000);
       await open.alarm();
-      const after = { events: (await open.events(0)).events.length, begun: begun.length };
+      const joined = await open.claim((replaced ?? '').slice('j1/'.length));
 
-      setSystemTime(start + 39_000);
-      await open.alarm();
-
-      expect({ during, after, still: (await open.events(0)).events.length }).toEqual({ during: { events: 0, begun: 2 }, after: { events: 0, begun: 3 }, still: 0 });
+      expect({ replaced, events: (await open.events(0)).events.length, formed: joined !== null && !('waitMs' in joined) }).toEqual({ replaced: 'j1/v4', events: 0, formed: true });
     } finally {
       setSystemTime();
     }

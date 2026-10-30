@@ -1260,6 +1260,8 @@ export class ArmadaJob extends DurableObject<Env> {
       const places = held !== undefined && held.until > now ? held.places : 0;
 
       await this.ctx.storage.put({ misplacedInRow: inRow, heldBack: { places: places + 1, until, host: misplaced } satisfies Held });
+      // A forming gang waits for the rank whose place is held: its start bound counts from the hold's end.
+      this.sql.exec(`UPDATE tasks SET started = MAX(started, ?) WHERE state = 'forming' AND started IS NOT NULL`, until);
     } else if (missing === undefined && live) {
       // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
       // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
@@ -1385,12 +1387,8 @@ export class ArmadaJob extends DurableObject<Env> {
         `SELECT t.idx, t.started, t.item, (SELECT COUNT(*) FROM members m WHERE m.idx = t.idx) AS joined FROM tasks t WHERE t.state = 'forming'`,
       ).toArray();
 
-      // A rank whose place the job held back after a start on another CPU (`heldBack`) joins once its time is up: the
-      // bound counts from then.
-      const held = (await this.ctx.storage.get<Held>('heldBack'))?.until ?? 0;
-
       for (const { idx, started, item, joined } of forming) {
-        if (started === null || Date.now() - Math.max(started, held) < timeout * 1000) continue;
+        if (started === null || Date.now() - started < timeout * 1000) continue;
         const world = gangOf(v.parse(TaskSchema, JSON.parse(item)).item);
 
         await this.failGang(idx, 'GangFormDeadlineExceeded', `gang formed ${String(joined)} of ${String(world)} ranks within its ${String(timeout)} s start bound, with nothing of its job running to free a vessel for it`);
