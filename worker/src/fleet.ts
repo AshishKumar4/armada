@@ -5,7 +5,9 @@
  * 512 of them, and a fleet that counted vCPUs alone granted 725). A container over the cap waits for capacity rather
  * than being refused by the platform mid-job; one the platform refuses for the account's own room waits in the
  * fleet's line all the same, and the fleet holds no more than it held then for WANT_MS (`crowded`). A hold names its
- * holder and lapses at its lease, so a holder that died returns it.
+ * holder and lapses at its lease, so a holder that died returns it. Each hold is a row of its own, as is each holder
+ * waiting in line, and what they keep is summed where they are (`charge`): a call reads and writes only the rows it
+ * changes, and costs the same however many containers the fleet holds.
  *
  * Past the cap, it lends a job's containers what the rest of the account leaves idle, read from Cloudflare's API
  * (`readAccount`) under the token `armada deploy` gives it, while it lends. Every hold asks before each new task
@@ -98,28 +100,6 @@ export async function letGo(ctx: DurableObjectState, env: Env, { holder, inactiv
   return gone;
 }
 
-export interface Hold {
-  readonly vcpus: number;
-  readonly until: number;
-  /** The vCPUs its job must hold at once (`VesselSpec.reserve`), which no other job is granted while the job holds any. */
-  readonly reserve?: number;
-  /** Its first grant's place among the fleet's grants: the newest loan is recalled first. */
-  readonly granted?: number;
-  /** Granted past the cap. */
-  readonly borrowed?: boolean;
-  /** Its job's priority (`JobSpec.priority`): a holder of a higher one that waits has the newest holds below it recalled. */
-  readonly priority?: number;
-  /** When the fleet recalled it: its container takes no new task (`renews`), and ends the tasks it runs within
-   *  RECALL_GRACE_MS (`beat`). */
-  readonly recalled?: number;
-  /** False for a hold that runs to its end and never asks (`renews`), as a preparation's does: no recall frees it. An
-   *  earlier Worker's holds lack it, and are recallable. */
-  readonly recallable?: boolean;
-  /** Its job has no deadline: its vessel renews it each slice of its work (`extend`), and one that ends with a container
-   *  that would not stop keeps it for that container's whole inactivity timeout from then (`release`). */
-  readonly renewed?: boolean;
-}
-
 /** A grant as any fleet answers it: one still on earlier code for a while after a deploy answers true or false. */
 export function grantOf(answer: Grant | boolean | null): Grant | null {
   if (answer === true) return 'held';
@@ -127,44 +107,57 @@ export function grantOf(answer: Grant | boolean | null): Grant | null {
   return answer === false ? null : answer;
 }
 
-/** What `holds` keep together, as `acquire` grants them. */
-const chargeOf = (holds: Record<string, Hold>): Room => [...needs(holds).values()].reduce(
-  (sum, need) => ({ vcpus: sum.vcpus + need.vcpus, memory: sum.memory + need.memory }), { vcpus: 0, memory: 0 });
-
 /** The job of `holder`, which is `<job>/<vessel>`. */
 const jobOf = (holder: string): string => holder.slice(0, holder.lastIndexOf('/'));
 
-/** The holders of `holds` not yet recalled that `keep` picks, newest grant first. */
-const newestOf = (holds: Record<string, Hold>, keep: (holder: string, hold: Hold) => boolean): string[] => Object.entries(holds)
-  .filter(([holder, hold]) => hold.recalled === undefined && keep(holder, hold)).sort(([, left], [, right]) => (right.granted ?? 0) - (left.granted ?? 0)).map(([holder]) => holder);
+/** The memory of a hold or an ask of `vcpus` (`roomOf`), and of its job's `reserve` at its containers' memory per vCPU. */
+function memoryOf(vcpus: number, reserve: number) {
+  const { memory } = roomOf(vcpus);
 
-/** The loans of `holds` the fleet recalls when it holds more than it may: the newest first. */
-const loansOf = (holds: Record<string, Hold>): string[] => newestOf(holds, (_holder, hold) => hold.borrowed === true);
-
-/** The holds of `holds` a holder of job `job` and `priority` that waits has recalled: other jobs' below it, the lowest
- *  first, then the newest. */
-const belowOf = (holds: Record<string, Hold>, priority: number, job: string): string[] => newestOf(holds, (holder, hold) => jobOf(holder) !== job && hold.recallable !== false && (hold.priority ?? 0) < priority)
-  .sort((left, right) => (holds[left]?.priority ?? 0) - (holds[right]?.priority ?? 0));
-
-/** What each job of `holds` keeps from the others: what it holds, or what it reserves, whichever is more, in vCPUs and
- *  in memory, a reserve's memory its containers' (`roomOf` of each hold's own vCPUs, as many as the reserve holds). */
-function needs(holds: Record<string, Hold>): Map<string, Room> {
-  const held = new Map<string, { room: Room; reserve: Room }>();
-
-  for (const [holder, hold] of Object.entries(holds)) {
-    const job = jobOf(holder);
-    const sum = held.get(job) ?? { room: { vcpus: 0, memory: 0 }, reserve: { vcpus: 0, memory: 0 } };
-    const own = roomOf(hold.vcpus);
-    const reserve = hold.reserve ?? 0;
-
-    held.set(job, {
-      room: { vcpus: sum.room.vcpus + own.vcpus, memory: sum.room.memory + own.memory },
-      reserve: larger(sum.reserve, { vcpus: reserve, memory: hold.vcpus > 0 ? own.memory * reserve / hold.vcpus : 0 }),
-    });
-  }
-
-  return new Map([...held].map(([job, sum]) => [job, larger(sum.room, sum.reserve)]));
+  return { memory, reserveMemory: vcpus > 0 ? memory * reserve / vcpus : 0 };
 }
+
+/** Rows a sum or a recall picks: a condition on a table's rows, and what it binds. */
+interface Where {
+  readonly where: string;
+  readonly bindings: readonly SqlStorageValue[];
+}
+
+const ALL: Where = { where: '1', bindings: [] };
+
+/** No ask in line. */
+const NONE: Where = { where: '0', bindings: [] };
+
+/** The holds not recalled: a recalled hold still runs its tasks for its grace, and counts as gone already. */
+const UNRECALLED: Where = { where: 'recalled IS NULL', bindings: [] };
+
+/** `holder`'s own ask. */
+const own = (holder: string): Where => ({ where: 'holder = ?', bindings: [holder] });
+
+/** The asks ahead of `holder`, at `place` in line for `priority`: of a higher priority, or of its own and older. */
+const aheadOf = (holder: string, priority: number, place: number): Where => ({
+  where: 'holder != ? AND (priority > ? OR (priority = ? AND place < ?))', bindings: [holder, priority, priority, place],
+});
+
+/** The asks ahead of `holder`, and its own. */
+const throughOf = (holder: string, priority: number, place: number): Where => ({
+  where: 'holder = ? OR priority > ? OR (priority = ? AND place < ?)', bindings: [holder, priority, priority, place],
+});
+
+/** Holds a recall frees, and the order it frees them in. */
+interface Recallable {
+  readonly picked: Where;
+  readonly order: string;
+}
+
+/** The fleet's loans, the newest first: it recalls them when it holds more than it may. */
+const LOANS: Recallable = { picked: { where: 'borrowed = 1', bindings: [] }, order: 'granted DESC, holder' };
+
+/** The holds a holder of job `job` and `priority` that waits has recalled: other jobs' below it, the lowest first, then
+ *  the newest. */
+const belowOf = (priority: number, job: string): Recallable => ({
+  picked: { where: 'job != ? AND recallable = 1 AND priority < ?', bindings: [job, priority] }, order: 'priority, granted DESC, holder',
+});
 
 /** How long a drain holds unless it is asked again: longer than a deploy's install, the Worker upload and its
  *  secrets, takes between two asks. */
@@ -180,12 +173,23 @@ export class ArmadaFleet extends ArmadaSingle {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // Each holder the fleet had no room for: what it asks, its job's priority, its place in line from its first refusal,
-    // and when it last asked, which it does every CAPACITY_RETRY_MS while it waits.
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS waiting (holder TEXT PRIMARY KEY, vcpus REAL NOT NULL, reserve REAL NOT NULL, place INTEGER NOT NULL, asked INTEGER NOT NULL,
-      priority INTEGER NOT NULL DEFAULT 0)`);
+    // Each hold: its holder, `<job>/<vessel>`, and its job; its vCPUs and memory, and its job's reserve in both; when it
+    // lapses; its first grant's place among the fleet's grants, as the newest loan is recalled first; whether it was
+    // lent past the cap; its job's priority; when it was recalled; whether a recall may free it, which a preparation's
+    // hold, run to its end, and a container's that would not stop are not; and whether its vessel renews it, as one of a
+    // job with no deadline does each slice of its work (`beat`). An earlier Worker kept every hold in one value, which
+    // this one does not read: `armada deploy` drains every job before it replaces the Worker, and the holds that outlive
+    // their jobs, of containers that would not stop, lapse within INACTIVITY_MS.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS holds (holder TEXT PRIMARY KEY, job TEXT NOT NULL, vcpus REAL NOT NULL, memory REAL NOT NULL, reserve REAL NOT NULL,
+      reserve_memory REAL NOT NULL, until INTEGER NOT NULL, granted INTEGER NOT NULL, borrowed INTEGER NOT NULL, priority INTEGER NOT NULL, recalled INTEGER,
+      recallable INTEGER NOT NULL, renewed INTEGER NOT NULL)`);
 
-    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(waiting)').toArray().some((column) => column.name === 'priority')) this.sql.exec('ALTER TABLE waiting ADD COLUMN priority INTEGER NOT NULL DEFAULT 0');
+    // An earlier Worker's line, which kept no ask's job or memory, goes: its holders take places again as they next ask.
+    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(waiting)').toArray().some((column) => column.name === 'job')) this.sql.exec('DROP TABLE IF EXISTS waiting');
+    // Each holder the fleet had no room for: its job, what it asks, its job's priority, its place in line from its first
+    // refusal, and when it last asked, which it does every CAPACITY_RETRY_MS or more while it waits.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS waiting (holder TEXT PRIMARY KEY, job TEXT NOT NULL, vcpus REAL NOT NULL, memory REAL NOT NULL, reserve REAL NOT NULL,
+      reserve_memory REAL NOT NULL, place INTEGER NOT NULL, asked INTEGER NOT NULL, priority INTEGER NOT NULL)`);
   }
 
   /** Whether `holder` holds `vcpus` now; it keeps them until `release`, or its lease ends past its job's `deadlineAt`.
@@ -203,56 +207,76 @@ export class ArmadaFleet extends ArmadaSingle {
   async acquire(holder: string, vcpus: number, { reserve = vcpus, deadlineAt, borrows = false, renewed = false, priority = 0, recallable = true, now = Date.now() }: {
     readonly reserve?: number; readonly deadlineAt: number; readonly borrows?: boolean; readonly renewed?: boolean; readonly priority?: number; readonly recallable?: boolean; readonly now?: number;
   }): Promise<Grant | null> {
-    const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
-    const { [holder]: replaced, ...others } = holds;
+    const job = jobOf(holder);
     const cap = this.cap();
-    const asked = { [holder]: { vcpus, until: now, reserve } };
-    const charge = chargeOf({ ...others, ...asked });
     const limit = borrows ? await this.limit(now) : await this.held(cap, now);
+    const { memory, reserveMemory } = memoryOf(vcpus, reserve);
 
+    this.sql.exec('DELETE FROM holds WHERE until <= ?', now);
     this.sql.exec('DELETE FROM waiting WHERE asked <= ?', now - WANT_MS);
-    const place = this.sql.exec<{ place: number }>('SELECT place FROM waiting WHERE holder = ?', holder).toArray()[0]?.place ?? null;
+    const replaced = this.sql.exec<{ granted: number }>('SELECT granted FROM holds WHERE holder = ?', holder).toArray()[0];
 
-    // Those ahead in line, as if they held what they ask: of a higher priority, or of its own and older; a new holder is
-    // behind every one of its own.
-    const before = Object.fromEntries(this.sql.exec<{ holder: string; vcpus: number; reserve: number }>(
-      'SELECT holder, vcpus, reserve FROM waiting WHERE holder != ? AND (priority > ? OR (priority = ? AND (? IS NULL OR place < ?)))', holder, priority, priority, place, place,
-    ).toArray().map((wait) => [wait.holder, { vcpus: wait.vcpus, until: now, reserve: wait.reserve }]));
-
-    const ahead = { ...others, ...before };
-    const passes = replaced === undefined && !within(chargeOf({ ...ahead, ...asked }), larger(limit, chargeOf(ahead)));
+    // It asks in line, at its place from its first refusal, or behind every holder of its own priority; and leaves the
+    // line once granted.
+    this.sql.exec(`INSERT INTO waiting (holder, job, vcpus, memory, reserve, reserve_memory, place, asked, priority) VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(place), 0) + 1 FROM waiting), ?, ?)
+      ON CONFLICT (holder) DO UPDATE SET vcpus = excluded.vcpus, memory = excluded.memory, reserve = excluded.reserve, reserve_memory = excluded.reserve_memory, asked = excluded.asked,
+      priority = excluded.priority`, holder, job, vcpus, memory, reserve, reserveMemory, now, priority);
+    const { place } = this.sql.exec<{ place: number }>('SELECT place FROM waiting WHERE holder = ?', holder).one();
+    const others: Where = { where: 'holder != ?', bindings: [holder] };
+    const charge = this.charge(now, others, own(holder));
+    // Those ahead in line, as if they held what they ask.
+    const ahead = this.charge(now, others, aheadOf(holder, priority, place));
+    const passes = replaced === undefined && !within(this.charge(now, others, throughOf(holder, priority, place)), larger(limit, ahead));
 
     if (!within(charge, limit) || passes) {
-      this.sql.exec(`INSERT INTO waiting (holder, vcpus, reserve, place, asked, priority) VALUES (?, ?, ?, (SELECT COALESCE(MAX(place), 0) + 1 FROM waiting), ?, ?)
-        ON CONFLICT (holder) DO UPDATE SET vcpus = excluded.vcpus, reserve = excluded.reserve, asked = excluded.asked, priority = excluded.priority`, holder, vcpus, reserve, now, priority);
-      await this.want(borrows, holds, asked, now);
+      await this.want(borrows, holder, now);
       // Holds below its priority, lowest and newest first, until it and those ahead of it fit; as `want` left them.
-      const after = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
-
-      await this.recall(after, { limit, candidates: belowOf(after, priority, jobOf(holder)), asked: { ...before, ...asked }, now });
+      this.recall({ limit, ...belowOf(priority, job), asks: throughOf(holder, priority, place), now });
 
       return null;
     }
 
-    const grants = (await this.ctx.storage.get<number>('grants')) ?? 0;
-    const granted = replaced?.granted ?? grants + 1;
-
-    this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
+    const granted = replaced?.granted ?? Number(this.sql.exec('SELECT COALESCE(MAX(granted), 0) + 1 AS n FROM holds').one()['n']);
     const borrowed = !within(charge, cap);
 
-    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed, renewed, priority, recallable } }, grants: Math.max(grants, granted) });
+    this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
+    this.sql.exec('INSERT OR REPLACE INTO holds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)', holder, job, vcpus, memory, reserve, reserveMemory, Math.max(now, deadlineAt) + LEASE_MS,
+      granted, Number(borrowed), priority, Number(recallable), Number(renewed));
 
     return borrowed ? 'borrowed' : 'held';
+  }
+
+  /** How many more containers of `vcpus` vCPUs each job `job` of `priority` could be granted now: the most the fleet
+   *  holds, less what the job holds, and what the other jobs keep that no recall for it would free, their holds not
+   *  below its priority or not recallable and their asks in line not below it. A job keeps no more of its containers
+   *  waiting for the fleet than this, and one at least (`ArmadaJob.wanted`), so a full fleet's line holds about one
+   *  container a job, not each one every job could use (2026-10-30: 690 waited for 12 jobs, each asking twice a minute). */
+  async room(job: string, vcpus: number, priority = 0, now = Date.now()): Promise<number> {
+    const limit = await this.limit(now);
+
+    const kept = this.charge(now, { where: 'job != ? AND recalled IS NULL AND (priority >= ? OR recallable = 0)', bindings: [job, priority] },
+      { where: 'job != ? AND priority >= ?', bindings: [job, priority] });
+
+    // What the job holds, and its reserve, which it keeps from the others while it holds any: its gang's next ranks
+    // are granted within it, whatever waits ahead.
+    const held = this.sql.exec<{ vcpus: number; memory: number; reserve: number; reserve_memory: number }>(`SELECT COALESCE(SUM(vcpus), 0) AS vcpus, COALESCE(SUM(memory), 0) AS memory,
+      COALESCE(MAX(reserve), 0) AS reserve, COALESCE(MAX(reserve_memory), 0) AS reserve_memory FROM holds WHERE job = ? AND until > ?`, job, now).one();
+
+    const each = roomOf(vcpus);
+    const fits = (free: number, reserved: number, one: number): number => one > 0 ? Math.max(free, reserved) / one : Infinity;
+
+    return Math.max(0, Math.floor(Math.min(fits(limit.vcpus - kept.vcpus - held.vcpus, held.reserve - held.vcpus, each.vcpus),
+      fits(limit.memory - kept.memory - held.memory, held.reserve_memory - held.memory, each.memory))));
   }
 
   /** Whether `holder` takes another task. Not once it is recalled, which is for good: for a holder of a higher priority
    *  (`acquire`), or as the fleet recalls its newest loans first whenever it holds more than it may now. */
   async renews(holder: string): Promise<boolean> {
     const now = Date.now();
-    const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
-    const held = (await this.recall(holds, { limit: await this.limit(now), candidates: loansOf(holds), now }))[holder];
 
-    return held !== undefined && held.recalled === undefined;
+    this.recall({ limit: await this.limit(now), ...LOANS, now });
+
+    return this.sql.exec('SELECT 1 AS n FROM holds WHERE holder = ? AND until > ? AND recalled IS NULL', holder, now).toArray().length > 0;
   }
 
   /** Reads the account while it lends, or a holder wants a loan: the most it holds until the next read is what it held,
@@ -260,7 +284,7 @@ export class ArmadaFleet extends ArmadaSingle {
    *  trade the same vCPUs back and forth. A read that fails leaves the last one to go stale. */
   override async alarm(): Promise<void> {
     const now = Date.now();
-    const lent = Object.values(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now)).some((hold) => hold.borrowed === true && hold.recalled === undefined);
+    const lent = this.sql.exec('SELECT 1 AS n FROM holds WHERE until > ? AND borrowed = 1 AND recalled IS NULL LIMIT 1', now).toArray().length > 0;
 
     if (!lent && ((await this.ctx.storage.get<number>('wanted')) ?? 0) <= now - WANT_MS) return;
 
@@ -272,15 +296,14 @@ export class ArmadaFleet extends ArmadaSingle {
       const account = await readAccount(reader);
       // Read after the account, and live as of then, as other calls and time may have changed them while it answered.
       const answered = Date.now();
-      const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), answered);
-      const charge = chargeOf(holds);
+      const charge = this.charge(answered, ALL, NONE);
 
       const lends = (held: number, total: number, others: number): number => Math.floor(held + (total * (1 - HEADROOM) - others - held) / 2);
 
       await this.ctx.storage.put('lending', {
         limit: { vcpus: lends(charge.vcpus, account.vcpus, account.others), memory: lends(charge.memory, account.memory, account.othersMemory) }, at: now,
       } satisfies Lending);
-      await this.recall(holds, { limit: await this.limit(answered), candidates: loansOf(holds), now: answered });
+      this.recall({ limit: await this.limit(answered), ...LOANS, now: answered });
     } catch (cause) {
       console.error(JSON.stringify({ fleet: 'reading the account', error: said({ cause }) }));
     }
@@ -320,24 +343,23 @@ export class ArmadaFleet extends ArmadaSingle {
    *  hold now (`held`), so a holder below it is refused rather than refused by the platform in turn, and the newest
    *  holds below its priority are recalled until it fits (`acquire`'s recall). */
   async crowded(holder: string, now = Date.now()): Promise<void> {
-    const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
-    const { [holder]: refused, ...rest } = holds;
+    const refused = this.sql.exec<{ job: string; vcpus: number; memory: number; reserve: number; reserve_memory: number; priority: number }>(
+      'SELECT job, vcpus, memory, reserve, reserve_memory, priority FROM holds WHERE holder = ? AND until > ?', holder, now).toArray()[0];
 
     if (refused === undefined) return;
-    const room = chargeOf(rest);
-    const priority = refused.priority ?? 0;
-    const reserve = refused.reserve ?? refused.vcpus;
+    this.sql.exec('DELETE FROM holds WHERE holder = ?', holder);
+    const room = this.charge(now, ALL, NONE);
 
-    await this.ctx.storage.put({ holds: rest, crowded: { room, until: now + WANT_MS } satisfies Crowded });
-    this.sql.exec(`INSERT INTO waiting (holder, vcpus, reserve, place, asked, priority) VALUES (?, ?, ?, (SELECT COALESCE(MIN(place), 1) - 1 FROM waiting), ?, ?)
-      ON CONFLICT (holder) DO UPDATE SET asked = excluded.asked`, holder, refused.vcpus, reserve, now, priority);
-    await this.recall(rest, { limit: room, candidates: belowOf(rest, priority, jobOf(holder)), asked: { [holder]: { vcpus: refused.vcpus, until: now, reserve } }, now });
+    await this.ctx.storage.put('crowded', { room, until: now + WANT_MS } satisfies Crowded);
+    this.sql.exec(`INSERT INTO waiting (holder, job, vcpus, memory, reserve, reserve_memory, place, asked, priority) VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MIN(place), 1) - 1 FROM waiting), ?, ?)
+      ON CONFLICT (holder) DO UPDATE SET asked = excluded.asked`, holder, refused.job, refused.vcpus, refused.memory, refused.reserve, refused.reserve_memory, now, refused.priority);
+    this.recall({ limit: room, ...belowOf(refused.priority, refused.job), asks: own(holder), now });
   }
 
-  /** The hold `asked` refused beside `holds`: one that borrows has the account read, where the fleet may lend; one that
-   *  may not, which would fit the cap once the loans end, has them recalled. Loans that are not what keeps it out stay:
-   *  recalling them would free nothing it could take. */
-  private async want(borrows: boolean, holds: Record<string, Hold>, asked: Record<string, Hold>, now: number): Promise<void> {
+  /** `holder`, refused, asks: one that borrows has the account read, where the fleet may lend; one that may not, which
+   *  would fit the cap once the loans end, has them recalled. Loans that are not what keeps it out stay: recalling them
+   *  would free nothing it could take. */
+  private async want(borrows: boolean, holder: string, now: number): Promise<void> {
     if (borrows) {
       if (this.reader() === null) return;
       await this.ctx.storage.put('wanted', now);
@@ -348,11 +370,11 @@ export class ArmadaFleet extends ArmadaSingle {
     }
 
     const cap = this.cap();
-    const unlent = Object.fromEntries(Object.entries({ ...holds, ...asked }).filter(([, hold]) => hold.borrowed !== true));
+    const lent = this.sql.exec('SELECT 1 AS n FROM holds WHERE until > ? AND borrowed = 1 LIMIT 1', now).toArray().length > 0;
 
-    if (!Object.values(holds).some((hold) => hold.borrowed === true) || !within(chargeOf(unlent), cap)) return;
+    if (!lent || !within(this.charge(now, { where: 'borrowed = 0', bindings: [] }, own(holder)), cap)) return;
     await this.ctx.storage.put('pressed', now);
-    await this.recall(holds, { limit: cap, candidates: loansOf(holds), asked, now });
+    this.recall({ limit: cap, ...LOANS, asks: own(holder), now });
   }
 
   /** Who reads the account for this deployment: none without the token `armada deploy` gives, which it gives empty
@@ -363,81 +385,76 @@ export class ArmadaFleet extends ArmadaSingle {
     return token === '' || account === undefined || name === undefined ? null : { token, account, name };
   }
 
-  /** `holds` with the `candidates` recalled `now`, in order, until what the rest will keep fits `limit`, with `asked` in its
-   *  holders' place: a recalled hold still runs its tasks for its grace, so it counts as gone already. A hold is recalled
-   *  whole, so the fleet may end a little under `limit`. */
-  private async recall(holds: Record<string, Hold>, { limit, candidates, asked = {}, now }: {
-    readonly limit: Room; readonly candidates: readonly string[]; readonly asked?: Record<string, Hold>; readonly now: number;
-  }): Promise<Record<string, Hold>> {
-    const recalled = { ...holds };
-    const kept = (): Room => chargeOf(Object.fromEntries(Object.entries({ ...recalled, ...asked }).filter(([, hold]) => hold.recalled === undefined)));
-    let changed = false;
+  /** What the live holds `kept` picks keep, with the asks `asks` picks in their holders' place, as `acquire` grants
+   *  them: each job what it holds or what it reserves, whichever is more, in vCPUs and in memory. Summed where the rows
+   *  are, so a call costs the same however many the fleet holds (2026-10-30: every hold kept in one value, read and
+   *  written whole by each call, overloaded the object at 465 holds and 690 waiters). */
+  private charge(now: number, kept: Where, asks: Where): Room {
+    const { vcpus, memory } = this.sql.exec<{ vcpus: number; memory: number }>(`SELECT COALESCE(SUM(v), 0) AS vcpus, COALESCE(SUM(m), 0) AS memory FROM (
+        SELECT MAX(SUM(vcpus), MAX(reserve)) AS v, MAX(SUM(memory), MAX(reserve_memory)) AS m FROM (
+          SELECT job, vcpus, memory, reserve, reserve_memory FROM holds WHERE until > ? AND (${kept.where}) AND holder NOT IN (SELECT holder FROM waiting WHERE ${asks.where})
+          UNION ALL SELECT job, vcpus, memory, reserve, reserve_memory FROM waiting WHERE ${asks.where}) GROUP BY job)`,
+    now, ...kept.bindings, ...asks.bindings, ...asks.bindings).one();
 
-    for (const holder of candidates) {
-      const hold = recalled[holder];
-
-      if (within(kept(), limit)) break;
-
-      if (hold === undefined) continue;
-      recalled[holder] = { ...hold, recalled: now };
-      changed = true;
-    }
-
-    if (changed) await this.ctx.storage.put('holds', recalled);
-
-    return recalled;
+    return { vcpus, memory };
   }
 
-  /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. A
-   *  holder kept that way has ended: it keeps only its own vCPUs, not its job's reserve, which is for holders still
-   *  to be granted. */
+  /** Recalls, `now`, the live holds `picked` picks, in `order`, until what the rest keep fits `limit` with the asks
+   *  `asks` picks in their holders' place: a recalled hold still runs its tasks for its grace, so it counts as gone
+   *  already. A hold is recalled whole, so the fleet may end a little under `limit`. */
+  private recall({ limit, picked, order, asks = NONE, now }: Recallable & { readonly limit: Room; readonly asks?: Where; readonly now: number }): void {
+    while (!within(this.charge(now, UNRECALLED, asks), limit)) {
+      const next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE until > ? AND recalled IS NULL AND (${picked.where}) ORDER BY ${order} LIMIT 1`,
+        now, ...picked.bindings).toArray()[0];
+
+      if (next === undefined) return;
+      this.sql.exec('UPDATE holds SET recalled = ? WHERE holder = ?', now, next.holder);
+    }
+  }
+
   /** `holder` still runs, as its vessel says each slice of its work: the time its container ends the tasks it runs by,
    *  RECALL_GRACE_MS after the fleet recalled it, or null while it runs on (#63, #66). A hold of a job with no deadline
    *  lasts LEASE_MS past `now` at least, so a hold whose release was lost ends as a deadline's does. */
   async beat(holder: string, now = Date.now()): Promise<number | null> {
-    const holds = await this.ctx.storage.get<Record<string, Hold>>('holds');
-    const held = holds?.[holder];
+    const held = this.sql.exec<{ recalled: number | null; renewed: number }>('SELECT recalled, renewed FROM holds WHERE holder = ?', holder).toArray()[0];
 
     if (held === undefined) return null;
 
-    if (held.renewed === true) await this.ctx.storage.put('holds', { ...holds, [holder]: { ...held, until: Math.max(held.until, now + LEASE_MS) } });
+    if (held.renewed === 1) this.sql.exec('UPDATE holds SET until = MAX(until, ?) WHERE holder = ?', now + LEASE_MS, holder);
 
-    return held.recalled === undefined ? null : held.recalled + RECALL_GRACE_MS;
+    return held.recalled === null ? null : held.recalled + RECALL_GRACE_MS;
   }
 
+  /** `holder`'s vCPUs back, now, or after `afterMs` for a container whose stop failed and that runs until then. A
+   *  holder kept that way has ended: it keeps only its own vCPUs, not its job's reserve, which is for holders still
+   *  to be granted, and no recall frees them. */
   async release(holder: string, afterMs = 0): Promise<void> {
-    const holds = { ...await this.ctx.storage.get<Record<string, Hold>>('holds') };
-    const held = holds[holder];
+    const now = Date.now();
 
     // A holder that ends waits for nothing.
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
 
     // A deadline's hold already ends once its container must have stopped; a renewed one ended only for want of renewal.
-    if (held !== undefined && afterMs > 0) holds[holder] = { vcpus: held.vcpus, until: held.renewed === true ? Date.now() + afterMs : Math.min(held.until, Date.now() + afterMs) };
-    else delete holds[holder];
-    await this.ctx.storage.put('holds', holds);
+    if (afterMs > 0) {
+      this.sql.exec(`UPDATE holds SET until = CASE WHEN renewed = 1 THEN ? ELSE MIN(until, ?) END, reserve = 0, reserve_memory = 0, borrowed = 0, priority = 0, recalled = NULL,
+        recallable = 0, renewed = 0 WHERE holder = ?`, now + afterMs, now + afterMs, holder);
+    } else {
+      this.sql.exec('DELETE FROM holds WHERE holder = ?', holder);
+    }
   }
 
   async used(): Promise<number> {
-    return Object.values(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), Date.now())).reduce((sum, hold) => sum + hold.vcpus, 0);
+    return Number(this.sql.exec('SELECT COALESCE(SUM(vcpus), 0) AS n FROM holds WHERE until > ?', Date.now()).one()['n']);
   }
 
   /** The cap and each job's live holds: a holder is `<job>/<vessel>`. */
   async shares(): Promise<Fleet> {
-    const jobs = new Map<string, { vcpus: number; containers: number }>();
+    const now = Date.now();
 
-    for (const [holder, hold] of Object.entries(this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), Date.now()))) {
-      const id = jobOf(holder);
-      const share = jobs.get(id) ?? { vcpus: 0, containers: 0 };
+    const jobs = this.sql.exec<{ id: string; vcpus: number; containers: number }>('SELECT job AS id, SUM(vcpus) AS vcpus, COUNT(*) AS containers FROM holds WHERE until > ? GROUP BY job ORDER BY vcpus DESC',
+      now).toArray();
 
-      jobs.set(id, { vcpus: share.vcpus + hold.vcpus, containers: share.containers + 1 });
-    }
-
-    return { cap: Number(this.env.FLEET_VCPUS), limit: (await this.limit(Date.now())).vcpus, jobs: [...jobs].map(([id, share]) => ({ id, ...share })).sort((left, right) => right.vcpus - left.vcpus) };
-  }
-
-  private live(holds: Record<string, Hold> | undefined, now: number): Record<string, Hold> {
-    return Object.fromEntries(Object.entries(holds ?? {}).filter(([, hold]) => hold.until > now));
+    return { cap: Number(this.env.FLEET_VCPUS), limit: (await this.limit(now)).vcpus, jobs };
   }
 
   /** Admits `job` unless `version` is drained, or this fleet or another deployment-wide object runs an interface other

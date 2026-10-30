@@ -2,6 +2,7 @@ import { describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { environmentKey, JOB_LEASE_SECONDS, JobSpecSchema, RecipeSchema, refusal, SIZES, type Host, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEnvironments, type Generation } from '../src/environments';
+import { ArmadaFleet } from '../src/fleet';
 import { ArmadaJob, type Claim } from '../src/job';
 import { ArmadaVessel, type VesselSpec } from '../src/vessel';
 import { listSchedule } from '../../src/dispatch';
@@ -566,50 +567,51 @@ describe('a vessel lost before it took a task', () => {
 });
 
 describe('a job whose containers start on hosts of another CPU than its own (#40, #48)', () => {
-  test('replaces each at no cost to its budget while others boot, and ends once so many in a row say no host has it', async () => {
+  // 2026-10-30: while the account was full, 64 of a job's 166 containers started on AMD 25/1, each replaced at no cost.
+  test('replaces eight of them, past which each costs its place, and ends once none is left', async () => {
     const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
-    const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const }, pool: 1, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } };
-    const misplace = async (open: ArmadaJob, begun: readonly string[]) => await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'its host is another', { misplaced: zen3 });
-    const { job: lucky, begun: luckyBegun } = await job(spec);
+    const cpu = { vendor: 'AuthenticAMD', family: 25, model: 17 };
+    const items = Array.from({ length: 4 }, (_, index) => ({ item: String(index), argv: ['true'] }));
+    const misplace = async (open: ArmadaJob, name: string) => await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
+    const { job: placed, begun } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 2, cpu });
 
-    // Thirty land on such hosts, one in every ten boots in between: past any budget for lost starts, which is the pool.
-    for (let misplaced = 1; misplaced <= 30; misplaced += 1) {
-      await misplace(lucky, luckyBegun);
+    // v1 boots on a host of its CPU; v2 and each of its replacements does not.
+    await placed.booted('v1', 1000);
 
-      if (misplaced % 10 === 0) await lucky.booted((luckyBegun.at(-1) ?? '').slice('j1/'.length), 1000);
-    }
+    for (let misplaced = 0; misplaced < 9; misplaced += 1) await misplace(placed, (begun.at(-1) ?? '').slice('j1/'.length));
+    const begunThen = begun.length;
+
+    // v1 runs every task, and the job ends with them.
+    for (const _ of items) await finish(placed, 'v1');
+    const { done, events } = await placed.events(0);
+    const runsOn = { begun: begunThen, done, exits: events.map(({ outcome }) => outcome.kind === 'exited' ? outcome.exitCode : outcome.kind) };
 
     // One CPU as a client before wire 11 sends it, and two as a list (#48).
-    const unlucky = await Promise.all([spec, { ...spec, cpu: [spec.cpu, { ...spec.cpu, family: 26 }] }].map(async (each) => {
-      const { job: open, begun } = await job(each);
+    const unplaced = await Promise.all([cpu, [cpu, { ...cpu, family: 26 }]].map(async (each) => {
+      const { job: open, begun: started } = await job({ recipe: {}, items, run: { kind: 'command' }, pool: 2, cpu: each });
+      const lost = new Set<string>();
 
-      while ((await open.events(0)).done !== true && begun.length < 100) await misplace(open, begun);
+      // The newest vessel not yet lost is, each time.
+      for (let name = started.at(-1); (await open.events(0)).done !== true && name !== undefined && lost.size < 100; name = started.findLast((one) => !lost.has(one))) {
+        lost.add(name);
+        await misplace(open, name.slice('j1/'.length));
+      }
+
       const [ended] = (await open.events(0)).events;
 
-      return { begun: begun.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail, capacity: ended?.outcome.capacity };
+      return { begun: started.length, kind: ended?.outcome.kind, tail: ended?.outcome.tail, capacity: ended?.outcome.capacity };
     }));
 
-    expect({ lucky: { done: (await lucky.events(0)).done, begun: luckyBegun.length }, unlucky }).toEqual({
-      lucky: { done: false, begun: 31 },
-      unlucky: [
-        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it', capacity: true },
-        { begun: 21, kind: 'failed', tail: '21 containers in a row started on hosts of another CPU than AuthenticAMD/25/17 or AuthenticAMD/26/17, the last on AMD EPYC 25/1 (x86-64-v3): no host this job reaches has it', capacity: true },
+    const tail = (cpus: string) => `its containers started on hosts of another CPU than ${cpus}, the last on AMD EPYC 25/1 (x86-64-v3): past 8 replaced, each cost a place in its pool of 2, and none is left`;
+
+    // v1 and v2, eight replacements, and the last two forfeit the places.
+    expect({ runsOn, unplaced }).toEqual({
+      runsOn: { begun: 10, done: true, exits: [0, 0, 0, 0] },
+      unplaced: [
+        { begun: 10, kind: 'failed', tail: tail('AuthenticAMD/25/17'), capacity: true },
+        { begun: 10, kind: 'failed', tail: tail('AuthenticAMD/25/17 or AuthenticAMD/26/17'), capacity: true },
       ],
     });
-  });
-
-  test('ends a task still running on a host of its CPU as cut short for want of capacity, not failed by its code', async () => {
-    const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
-    const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } });
-
-    await open.claim('v1');
-
-    while ((await open.events(0)).done !== true && begun.length < 100) {
-      await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'its host is another', { misplaced: zen3 });
-    }
-
-    expect((await open.events(0)).events.map(({ outcome }) => ({ index: outcome.index, vessel: outcome.vessel, capacity: outcome.capacity })))
-      .toEqual([{ index: 0, vessel: 'v1', capacity: true }, { index: 1, vessel: '', capacity: true }]);
   });
 });
 
@@ -705,7 +707,8 @@ describe('a job that ended', () => {
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
       ENVIRONMENTS: readyRegistry(),
       FLEET: namespace(() => ({
-        acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
+        acquire: async () => 'held', room: async () => Infinity, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, admits: async () => true,
+        admitJob: async () => true, open: async () => [],
         closed: async (id: string) => {
           if (refuse) throw new Error('the fleet is not answering');
           closed.push(id);
@@ -840,6 +843,74 @@ describe('a vessel still waiting for room', () => {
       begun: ['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4'], asked: { v2: true, v3: false, v4: false },
       states: { v1: 'working', v2: 'waiting', v3: 'done', v4: 'done' },
     });
+  });
+});
+
+describe('a job on a full fleet', () => {
+  // 2026-10-30: 690 vessels waited for 12 jobs on a fleet with room for 12, each asking the fleet twice a minute.
+  test('keeps as many vessels waiting as the fleet has room for it, and one while it has none', async () => {
+    const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '16' }));
+    const begun: string[] = [];
+    const items = Array.from({ length: 10 }, (_, index) => ({ item: String(index), argv: ['true'] }));
+
+    // Another job holds every container of the fleet.
+    for (const holder of ['x/v1', 'x/v2', 'x/v3', 'x/v4']) await fleet.acquire(holder, 4, { deadlineAt: Date.now() + 3_600_000 });
+
+    const open = new ArmadaJob(state().ctx, world({
+      FLEET: namespace(() => fleet),
+      VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
+      ENVIRONMENTS: readyRegistry(),
+    }));
+
+    await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items, run: { kind: 'command' }, pool: 10 }));
+    await open.alarm();
+    const full = [...begun];
+
+    // Two of its containers end, and the job grows into their room.
+    for (const holder of ['x/v1', 'x/v2']) await fleet.release(holder);
+    await open.alarm();
+    const freed = [...begun];
+
+    // The other job takes one back before either vessel is granted: the second leaves the line as it next asks.
+    await fleet.acquire('x/v5', 4, { deadlineAt: Date.now() + 3_600_000 });
+    await open.alarm();
+    const asked = { v1: await open.moved('v1', 'waiting'), v2: await open.moved('v2', 'waiting') };
+
+    expect({ full, freed, asked, begun }).toEqual({ full: ['j1/v1'], freed: ['j1/v1', 'j1/v2'], asked: { v1: true, v2: false }, begun: ['j1/v1', 'j1/v2'] });
+  });
+});
+
+describe('a job growing while the fleet answers', () => {
+  test('names each vessel once, though two of its calls grow while the fleet answers the room it has', async () => {
+    let answered = Promise.resolve();
+    const begun: string[] = [];
+    const items = (from: number) => Array.from({ length: 2 }, (_, index) => ({ item: String(from + index), argv: ['true'] }));
+
+    const open = new ArmadaJob(state().ctx, world({
+      FLEET: namespace(() => ({
+        opened: async () => undefined, closed: async () => undefined,
+        room: async () => {
+          await answered;
+
+          return Infinity;
+        },
+      })),
+      VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
+      ENVIRONMENTS: readyRegistry(),
+    }));
+
+    await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: items(0), open: true, run: { kind: 'command' }, pool: 8 }));
+    await open.alarm();
+    const slow = Promise.withResolvers<void>();
+
+    // Items come while its watchdog grows it, and the fleet answers both late.
+    answered = slow.promise;
+    const grown = Promise.all([open.add(items(2)), open.alarm()]);
+
+    slow.resolve();
+    await grown;
+
+    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4']);
   });
 });
 

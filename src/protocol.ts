@@ -397,7 +397,9 @@ export const JobSpecSchema = v.object({
    *  what is left, so a task too dear for now waits while cheaper ones run. Absent, only `pool` bounds the runs. */
   budget: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(1))),
   mode: v.optional(ModeSchema, 'efficient'),
-  /** The CPUs a container's host may have (`CpusSchema`). A container on another host is replaced before it takes a task. */
+  /** The CPUs a container's host may have (`CpusSchema`). A container on another host is replaced before it takes a task,
+   *  eight of a job's; past them each costs the job its place in the pool, as the platform places containers by region
+   *  alone, and the job runs on in the rest. */
   cpu: v.optional(CpusSchema),
   /** Which job's containers start first while the fleet is full: a higher one waits ahead of lower ones, and has their
    *  newest containers end until it fits: a task they still run past RECALL_GRACE_MS runs again later, at no cost to its

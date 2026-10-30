@@ -141,6 +141,69 @@ describe('the fleet', () => {
   });
 });
 
+describe('a fleet of many holds', () => {
+  // 2026-10-30: each call read and wrote every hold at once, 465 of them, while 690 vessels waited asking twice a minute,
+  // and the object answered that it was overloaded.
+  test('carries as much storage for each call however many containers it holds', async () => {
+    const carried = async (holds: number) => {
+      const stored = state();
+      const fleet = new ArmadaFleet(stored.ctx, world({ FLEET_VCPUS: String(4 * holds) }));
+
+      for (let at = 1; at <= holds; at++) await fleet.acquire(`a/v${String(at)}`, 4, { deadlineAt, renewed: true });
+      const costs: number[] = [];
+      let before = stored.carried();
+
+      const cost = (): void => {
+        costs.push(stored.carried() - before);
+        before = stored.carried();
+      };
+
+      // A beat, a renewal, a refusal while the fleet is full, a release, and the grant it makes room for.
+      await fleet.beat('a/v1');
+      cost();
+      await fleet.renews('a/v1');
+      cost();
+      await fleet.acquire('b/v1', 4, { deadlineAt });
+      cost();
+      await fleet.release('a/v2');
+      cost();
+      await fleet.acquire('b/v1', 4, { deadlineAt });
+      cost();
+
+      return costs;
+    };
+
+    expect(await carried(400)).toEqual(await carried(10));
+  });
+
+  test('tells a job how many more containers it could be granted: what its priority could recall, less what other jobs wait for', async () => {
+    const fleet = fleetOf(40);
+
+    // Of 40 vCPUs: a job of priority -1 holds 8, two of 0 hold 16 and 4, and one of 1 holds 12 and waits for 4 more,
+    // for which the newest hold below it is recalled.
+    for (const holder of ['low/v1', 'low/v2']) await fleet.acquire(holder, 4, { deadlineAt, priority: -1 });
+
+    for (const holder of ['level/v1', 'level/v2', 'level/v3', 'level/v4']) await fleet.acquire(holder, 4, { deadlineAt });
+    await fleet.acquire('own/v1', 4, { deadlineAt });
+    await fleet.acquire('high/v1', 12, { deadlineAt, priority: 1 });
+    const full = await fleet.acquire('high/v2', 4, { deadlineAt, priority: 1 });
+
+    // Of 0: 40, less the 16 of its level, the 16 above it and its own 4. Of -1: none. Of 1: all but the 16 its level
+    // keeps, for a new job, or past its own 12, for the job of 1 itself.
+    expect({ full, own: await fleet.room('own', 4), low: await fleet.room('low', 4, -1), top: await fleet.room('top', 4, 1), high: await fleet.room('high', 4, 1), small: await fleet.room('own', 2) })
+      .toEqual({ full: null, own: 1, low: 0, top: 6, high: 7, small: 2 });
+  });
+  test('leaves a gang that holds its reserve room for its other ranks, whatever waits in line', async () => {
+    const fleet = fleetOf(128);
+
+    // A gang of 32 medium ranks has its first granted, which reserves the whole fleet; another such gang waits.
+    const first = await fleet.acquire('g1/v1', 4, { reserve: 128, deadlineAt });
+    const other = await fleet.acquire('g2/v1', 4, { reserve: 128, deadlineAt });
+
+    expect({ first, other, room: await fleet.room('g1', 4) }).toEqual({ first: 'held', other: null, room: 31 });
+  });
+});
+
 describe('a fleet that lends what the account leaves idle', () => {
   const original = globalThis.fetch;
 
