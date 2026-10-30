@@ -130,7 +130,9 @@ export async function cancelOnInterrupt<T>(jobs: readonly Followed[], body: () =
     interruption.cancelling ??= cancel(signal);
   };
 
-  process.once('SIGINT', interrupted).once('SIGTERM', interrupted);
+  // Held until `body` ends: a second signal while the cancel is answered (`timeout` forwards its group's SIGTERM to
+  // the CLI under it) is the same interrupt, which `??=` keeps one, never the default that ends the CLI mid-cancel.
+  process.on('SIGINT', interrupted).on('SIGTERM', interrupted);
 
   try {
     const result = await body();
