@@ -842,6 +842,53 @@ describe('the CLI following a job', () => {
   });
 });
 
+describe('the CLI cancelling on an interrupt', () => {
+  test('a second interrupt while the cancel is answered ends nothing early: it exits 2 once the job is cancelled', async () => {
+    let polled: () => void = () => undefined;
+    const polling = new Promise<void>((resolve) => { polled = resolve; });
+    let answered = false;
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        if (pathname === '/jobs') return Response.json({ id: 'j1' });
+
+        if (pathname === '/jobs/j1/events') {
+          polled();
+
+          return Response.json({ events: [], done: false });
+        }
+
+        if (pathname === '/jobs/j1/cancel') {
+          await Bun.sleep(1_500);
+          answered = true;
+
+          return Response.json({ cancelled: 'j1' });
+        }
+
+        return Response.json({});
+      },
+    });
+
+    try {
+      // `timeout` forwards the SIGTERM its group took to the CLI under it (lint-gate.sh's), a second one.
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--times=1', '--', 'true'], {
+        env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+
+      await polling;
+      cli.kill('SIGTERM');
+      await Bun.sleep(200);
+      cli.kill('SIGTERM');
+      expect({ exit: await cli.exited, signal: cli.signalCode, answered }).toEqual({ exit: 2, signal: null, answered: true });
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
 describe('armada status', () => {
   test('prints one task\'s item, seconds and container after its job id, and refuses an index that is not one (#61)', async () => {
     const task = { job: 'j1', phase: 'done', index: 3, item: { files: ['tests/test_slow.py'] }, argv: ['pytest'], state: 'exited', attempt: 1, running: [], exitCode: 0, seconds: 412.5, vessel: 'v7' };
