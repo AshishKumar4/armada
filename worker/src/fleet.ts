@@ -257,11 +257,16 @@ export class ArmadaFleet extends ArmadaSingle {
     const kept = this.charge(now, { where: 'job != ? AND recalled IS NULL AND (priority >= ? OR recallable = 0)', bindings: [job, priority] },
       { where: 'job != ? AND priority >= ?', bindings: [job, priority] });
 
-    const held = this.sql.exec<{ vcpus: number; memory: number }>('SELECT COALESCE(SUM(vcpus), 0) AS vcpus, COALESCE(SUM(memory), 0) AS memory FROM holds WHERE job = ? AND until > ?', job, now).one();
-    const each = roomOf(vcpus);
-    const fits = (free: number, one: number): number => one > 0 ? free / one : Infinity;
+    // What the job holds, and its reserve, which it keeps from the others while it holds any: its gang's next ranks
+    // are granted within it, whatever waits ahead.
+    const held = this.sql.exec<{ vcpus: number; memory: number; reserve: number; reserve_memory: number }>(`SELECT COALESCE(SUM(vcpus), 0) AS vcpus, COALESCE(SUM(memory), 0) AS memory,
+      COALESCE(MAX(reserve), 0) AS reserve, COALESCE(MAX(reserve_memory), 0) AS reserve_memory FROM holds WHERE job = ? AND until > ?`, job, now).one();
 
-    return Math.max(0, Math.floor(Math.min(fits(limit.vcpus - kept.vcpus - held.vcpus, each.vcpus), fits(limit.memory - kept.memory - held.memory, each.memory))));
+    const each = roomOf(vcpus);
+    const fits = (free: number, reserved: number, one: number): number => one > 0 ? Math.max(free, reserved) / one : Infinity;
+
+    return Math.max(0, Math.floor(Math.min(fits(limit.vcpus - kept.vcpus - held.vcpus, held.reserve - held.vcpus, each.vcpus),
+      fits(limit.memory - kept.memory - held.memory, held.reserve_memory - held.memory, each.memory))));
   }
 
   /** Whether `holder` takes another task. Not once it is recalled, which is for good: for a holder of a higher priority

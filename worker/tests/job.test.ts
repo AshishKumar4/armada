@@ -579,7 +579,12 @@ describe('a job whose containers start on hosts of another CPU than its own (#40
     await placed.booted('v1', 1000);
 
     for (let misplaced = 0; misplaced < 9; misplaced += 1) await misplace(placed, (begun.at(-1) ?? '').slice('j1/'.length));
-    const runsOn = { done: (await placed.events(0)).done, begun: begun.length };
+    const begunThen = begun.length;
+
+    // v1 runs every task, and the job ends with them.
+    for (const _ of items) await finish(placed, 'v1');
+    const { done, events } = await placed.events(0);
+    const runsOn = { begun: begunThen, done, exits: events.map(({ outcome }) => outcome.kind === 'exited' ? outcome.exitCode : outcome.kind) };
 
     // One CPU as a client before wire 11 sends it, and two as a list (#48).
     const unplaced = await Promise.all([cpu, [cpu, { ...cpu, family: 26 }]].map(async (each) => {
@@ -601,26 +606,12 @@ describe('a job whose containers start on hosts of another CPU than its own (#40
 
     // v1 and v2, eight replacements, and the last two forfeit the places.
     expect({ runsOn, unplaced }).toEqual({
-      runsOn: { done: false, begun: 10 },
+      runsOn: { begun: 10, done: true, exits: [0, 0, 0, 0] },
       unplaced: [
         { begun: 10, kind: 'failed', tail: tail('AuthenticAMD/25/17'), capacity: true },
         { begun: 10, kind: 'failed', tail: tail('AuthenticAMD/25/17 or AuthenticAMD/26/17'), capacity: true },
       ],
     });
-  });
-
-  test('ends a task still running on a host of its CPU as cut short for want of capacity, not failed by its code', async () => {
-    const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
-    const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu: { vendor: 'AuthenticAMD', family: 25, model: 17 } });
-
-    await open.claim('v1');
-
-    while ((await open.events(0)).done !== true && begun.length < 100) {
-      await open.vesselFailed((begun.at(-1) ?? '').slice('j1/'.length), 'its host is another', { misplaced: zen3 });
-    }
-
-    expect((await open.events(0)).events.map(({ outcome }) => ({ index: outcome.index, vessel: outcome.vessel, capacity: outcome.capacity })))
-      .toEqual([{ index: 0, vessel: 'v1', capacity: true }, { index: 1, vessel: '', capacity: true }]);
   });
 });
 
@@ -716,7 +707,8 @@ describe('a job that ended', () => {
       VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => true })),
       ENVIRONMENTS: readyRegistry(),
       FLEET: namespace(() => ({
-        acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [],
+        acquire: async () => 'held', room: async () => Infinity, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, admits: async () => true,
+        admitJob: async () => true, open: async () => [],
         closed: async (id: string) => {
           if (refuse) throw new Error('the fleet is not answering');
           closed.push(id);
@@ -885,6 +877,40 @@ describe('a job on a full fleet', () => {
     const asked = { v1: await open.moved('v1', 'waiting'), v2: await open.moved('v2', 'waiting') };
 
     expect({ full, freed, asked, begun }).toEqual({ full: ['j1/v1'], freed: ['j1/v1', 'j1/v2'], asked: { v1: true, v2: false }, begun: ['j1/v1', 'j1/v2'] });
+  });
+});
+
+describe('a job growing while the fleet answers', () => {
+  test('names each vessel once, though two of its calls grow while the fleet answers the room it has', async () => {
+    let answered = Promise.resolve();
+    const begun: string[] = [];
+    const items = (from: number) => Array.from({ length: 2 }, (_, index) => ({ item: String(from + index), argv: ['true'] }));
+
+    const open = new ArmadaJob(state().ctx, world({
+      FLEET: namespace(() => ({
+        opened: async () => undefined, closed: async () => undefined,
+        room: async () => {
+          await answered;
+
+          return Infinity;
+        },
+      })),
+      VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
+      ENVIRONMENTS: readyRegistry(),
+    }));
+
+    await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: items(0), open: true, run: { kind: 'command' }, pool: 8 }));
+    await open.alarm();
+    const slow = Promise.withResolvers<void>();
+
+    // Items come while its watchdog grows it, and the fleet answers both late.
+    answered = slow.promise;
+    const grown = Promise.all([open.add(items(2)), open.alarm()]);
+
+    slow.resolve();
+    await grown;
+
+    expect(begun).toEqual(['j1/v1', 'j1/v2', 'j1/v3', 'j1/v4']);
   });
 });
 

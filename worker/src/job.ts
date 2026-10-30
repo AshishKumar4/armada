@@ -510,12 +510,17 @@ export class ArmadaJob extends DurableObject<Env> {
   /** Vessels for the tasks not yet done, up to the pool, beside those still alive. */
   private async grow(): Promise<void> {
     const spec = await this.spec();
+    const ready = async (): Promise<boolean> => (await this.ctx.storage.get<Generation>('environment')) !== undefined && (await this.ctx.storage.get<Phase>('phase')) === 'running';
+
+    if (spec === undefined || !(await ready())) return;
+    // Asked first: the fleet's answer lets other calls in, so the vessels are counted and named after it.
+    await this.askRoom(spec);
     const generation = await this.ctx.storage.get<Generation>('environment');
 
-    if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
+    if (generation === undefined || !(await ready())) return;
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ${ALIVE}`).one()['n']);
     const named = Number(this.sql.exec('SELECT COUNT(*) AS n FROM vessels').one()['n']);
-    const wanted = await this.wanted(spec, { asks: true }) - alive;
+    const wanted = await this.wanted(spec) - alive;
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => vesselName(named + index + 1));
 
     const widest = Number(this.sql.exec(WIDEST).one()['n']);
@@ -524,22 +529,27 @@ export class ArmadaJob extends DurableObject<Env> {
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
   }
 
+  /** The vessels granted, booting or working, but `besides`. */
+  private granted(besides = ''): number {
+    return Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working') AND name != ?`, besides).one()['n']);
+  }
+
+  /** The room the fleet could grant the job now (`ArmadaFleet.room`), read while it needs more vessels than it has
+   *  granted, and kept for `wanted`. */
+  private async askRoom(spec: Kept): Promise<void> {
+    if (await this.needed(spec) <= this.granted()) return;
+    const room = await this.env.FLEET.getByName(SINGLE).room((await this.ctx.storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
+
+    await this.ctx.storage.put('room', room);
+  }
+
   /** The vessels the job keeps at once: those its open tasks need (`needed`), and of them no more waiting for the fleet
-   *  than the fleet could grant it (`ArmadaFleet.room`), one at least, which asks for the rest as room comes free. Each
-   *  vessel waiting asks the fleet twice a minute, so a full fleet's line of every vessel each job could use overloaded
-   *  it (2026-10-30: 690 for 12 jobs). The room is read as the job grows (`asks`), and kept for its waiting vessels' own
-   *  asks between (`moved`), which count the vessels ahead of one `besides` it. */
-  private async wanted(spec: Kept, { asks = false, besides = '' }: { readonly asks?: boolean; readonly besides?: string }): Promise<number> {
-    const needed = await this.needed(spec);
-    const busy = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working') AND name != ?`, besides).one()['n']);
-
-    if (asks && needed > busy) {
-      const room = await this.env.FLEET.getByName(SINGLE).room((await this.ctx.storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
-
-      await this.ctx.storage.put('room', room);
-    }
-
-    return Math.min(needed, busy + Math.max(1, (await this.ctx.storage.get<number>('room')) ?? Infinity));
+   *  than the fleet could grant it when last asked (`askRoom`), one at least, which asks for the rest as room comes
+   *  free. Each vessel waiting asks the fleet twice a minute, so a full fleet's line of every vessel each job could use
+   *  overloaded it (2026-10-30: 690 for 12 jobs). A waiting vessel's own ask counts the vessels ahead of it, `besides`
+   *  it (`moved`). */
+  private async wanted(spec: Kept, besides = ''): Promise<number> {
+    return Math.min(await this.needed(spec), this.granted(besides) + Math.max(1, (await this.ctx.storage.get<number>('room')) ?? Infinity));
   }
 
   /** The most vessels the job may hold at once: its pool, less a place for each vessel it lost past its replacements
@@ -642,7 +652,7 @@ export class ArmadaJob extends DurableObject<Env> {
       const ahead = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE name != ? AND (state IN ('booting', 'working')
         OR (state = 'waiting' AND rowid < (SELECT rowid FROM vessels WHERE name = ?)))`, name, name).one()['n']);
 
-      if (ahead >= await this.wanted(spec, { besides: name })) {
+      if (ahead >= await this.wanted(spec, name)) {
         this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state IN ${ALIVE}`, Date.now(), name);
 
         return false;

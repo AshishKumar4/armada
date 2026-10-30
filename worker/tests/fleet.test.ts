@@ -193,6 +193,15 @@ describe('a fleet of many holds', () => {
     expect({ full, own: await fleet.room('own', 4), low: await fleet.room('low', 4, -1), top: await fleet.room('top', 4, 1), high: await fleet.room('high', 4, 1), small: await fleet.room('own', 2) })
       .toEqual({ full: null, own: 1, low: 0, top: 6, high: 7, small: 2 });
   });
+  test('leaves a gang that holds its reserve room for its other ranks, whatever waits in line', async () => {
+    const fleet = fleetOf(128);
+
+    // A gang of 32 medium ranks has its first granted, which reserves the whole fleet; another such gang waits.
+    const first = await fleet.acquire('g1/v1', 4, { reserve: 128, deadlineAt });
+    const other = await fleet.acquire('g2/v1', 4, { reserve: 128, deadlineAt });
+
+    expect({ first, other, room: await fleet.room('g1', 4) }).toEqual({ first: 'held', other: null, room: 31 });
+  });
 });
 
 describe('a fleet that lends what the account leaves idle', () => {
