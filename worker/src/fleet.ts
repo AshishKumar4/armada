@@ -1,6 +1,10 @@
 /**
- * ArmadaFleet: the vCPUs running at once across every job of this deployment, held under its own FLEET_VCPUS. A
- * container over the cap waits for capacity rather than being refused by the platform mid-job. A hold names its
+ * ArmadaFleet: the vCPUs and memory running at once across every job of this deployment, held under its own
+ * FLEET_VCPUS and FLEET_MEMORY_MIB: a container of each size holds both (`roomOf`), as the account limits both, and
+ * a medium one, 4 vCPU in 12 GiB, fills an account's memory before its vCPUs (2026-10-30: 3000 vCPU and 6 TiB held
+ * 512 of them, and a fleet that counted vCPUs alone granted 725). A container over the cap waits for capacity rather
+ * than being refused by the platform mid-job; one the platform refuses for the account's own room waits in the
+ * fleet's line all the same, and the fleet holds no more than it held then for WANT_MS (`crowded`). A hold names its
  * holder and lapses at its lease, so a holder that died returns it.
  *
  * Past the cap, it lends a job's containers what the rest of the account leaves idle, read from Cloudflare's API
@@ -15,7 +19,7 @@
  * interface. And it keeps the ids of the last RECENT jobs made, which the dashboard lists.
  */
 import * as v from 'valibot';
-import type { Fleet } from '../../src/protocol';
+import { SIZES, type Fleet } from '../../src/protocol';
 import { readAccount, type Reader } from '../../src/account';
 import { INACTIVITY_MS } from './container';
 import { ArmadaSingle, said, SINGLE, type Env } from './env';
@@ -46,10 +50,37 @@ export const RECALL_GRACE_MS = 60_000;
 /** The account's share left idle for other apps to start containers in, which then show in the next read. */
 const HEADROOM = 0.1;
 
+/** What holds take of the account: vCPUs, and memory in MiB. */
+export interface Room {
+  readonly vcpus: number;
+  readonly memory: number;
+}
+
+/** The room a container of `vcpus` vCPUs takes: its size's memory (SIZES), and for a count of vCPUs no size has, as a
+ *  gang's reserve is a sum, the memory of the smallest size with as many at its own memory per vCPU, past the largest
+ *  at its. */
+export function roomOf(vcpus: number): Room {
+  const sizes = Object.values(SIZES).toSorted((left, right) => left.vcpus - right.vcpus);
+  const size = sizes.find((each) => each.vcpus >= vcpus) ?? sizes[sizes.length - 1];
+
+  return { vcpus, memory: size === undefined ? 0 : vcpus * size.memoryGiB * 1024 / size.vcpus };
+}
+
+const within = (room: Room, limit: Room): boolean => room.vcpus <= limit.vcpus && room.memory <= limit.memory;
+
+const larger = (left: Room, right: Room): Room => ({ vcpus: Math.max(left.vcpus, right.vcpus), memory: Math.max(left.memory, right.memory) });
+
 /** A read of the account: the most the fleet holds until the next. */
 export interface Lending {
-  readonly limit: number;
+  readonly limit: Room;
   readonly at: number;
+}
+
+/** The platform refused a container for want of the account's room (`crowded`): the most the fleet holds until
+ *  `until`, what it held then. */
+interface Crowded {
+  readonly room: Room;
+  readonly until: number;
 }
 
 /** A grant: within the fleet's cap, or lent past it. */
@@ -97,7 +128,8 @@ export function grantOf(answer: Grant | boolean | null): Grant | null {
 }
 
 /** What `holds` keep together, as `acquire` grants them. */
-const chargeOf = (holds: Record<string, Hold>): number => [...needs(holds).values()].reduce((sum, need) => sum + need, 0);
+const chargeOf = (holds: Record<string, Hold>): Room => [...needs(holds).values()].reduce(
+  (sum, need) => ({ vcpus: sum.vcpus + need.vcpus, memory: sum.memory + need.memory }), { vcpus: 0, memory: 0 });
 
 /** The job of `holder`, which is `<job>/<vessel>`. */
 const jobOf = (holder: string): string => holder.slice(0, holder.lastIndexOf('/'));
@@ -114,18 +146,24 @@ const loansOf = (holds: Record<string, Hold>): string[] => newestOf(holds, (_hol
 const belowOf = (holds: Record<string, Hold>, priority: number, job: string): string[] => newestOf(holds, (holder, hold) => jobOf(holder) !== job && hold.recallable !== false && (hold.priority ?? 0) < priority)
   .sort((left, right) => (holds[left]?.priority ?? 0) - (holds[right]?.priority ?? 0));
 
-/** What each job of `holds` keeps from the others: what it holds, or what it reserves, whichever is more. */
-function needs(holds: Record<string, Hold>): Map<string, number> {
-  const held = new Map<string, { vcpus: number; reserve: number }>();
+/** What each job of `holds` keeps from the others: what it holds, or what it reserves, whichever is more, in vCPUs and
+ *  in memory, a reserve's memory its containers' (`roomOf` of each hold's own vCPUs, as many as the reserve holds). */
+function needs(holds: Record<string, Hold>): Map<string, Room> {
+  const held = new Map<string, { room: Room; reserve: Room }>();
 
   for (const [holder, hold] of Object.entries(holds)) {
     const job = jobOf(holder);
-    const sum = held.get(job) ?? { vcpus: 0, reserve: 0 };
+    const sum = held.get(job) ?? { room: { vcpus: 0, memory: 0 }, reserve: { vcpus: 0, memory: 0 } };
+    const own = roomOf(hold.vcpus);
+    const reserve = hold.reserve ?? 0;
 
-    held.set(job, { vcpus: sum.vcpus + hold.vcpus, reserve: Math.max(sum.reserve, hold.reserve ?? 0) });
+    held.set(job, {
+      room: { vcpus: sum.room.vcpus + own.vcpus, memory: sum.room.memory + own.memory },
+      reserve: larger(sum.reserve, { vcpus: reserve, memory: hold.vcpus > 0 ? own.memory * reserve / hold.vcpus : 0 }),
+    });
   }
 
-  return new Map([...held].map(([job, sum]) => [job, Math.max(sum.vcpus, sum.reserve)]));
+  return new Map([...held].map(([job, sum]) => [job, larger(sum.room, sum.reserve)]));
 }
 
 /** How long a drain holds unless it is asked again: longer than a deploy's install, the Worker upload and its
@@ -167,10 +205,10 @@ export class ArmadaFleet extends ArmadaSingle {
   }): Promise<Grant | null> {
     const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
     const { [holder]: replaced, ...others } = holds;
-    const cap = Number(this.env.FLEET_VCPUS);
+    const cap = this.cap();
     const asked = { [holder]: { vcpus, until: now, reserve } };
     const charge = chargeOf({ ...others, ...asked });
-    const limit = borrows ? await this.limit(now) : cap;
+    const limit = borrows ? await this.limit(now) : await this.held(cap, now);
 
     this.sql.exec('DELETE FROM waiting WHERE asked <= ?', now - WANT_MS);
     const place = this.sql.exec<{ place: number }>('SELECT place FROM waiting WHERE holder = ?', holder).toArray()[0]?.place ?? null;
@@ -182,9 +220,9 @@ export class ArmadaFleet extends ArmadaSingle {
     ).toArray().map((wait) => [wait.holder, { vcpus: wait.vcpus, until: now, reserve: wait.reserve }]));
 
     const ahead = { ...others, ...before };
-    const passes = replaced === undefined && chargeOf({ ...ahead, ...asked }) > Math.max(limit, chargeOf(ahead));
+    const passes = replaced === undefined && !within(chargeOf({ ...ahead, ...asked }), larger(limit, chargeOf(ahead)));
 
-    if (charge > limit || passes) {
+    if (!within(charge, limit) || passes) {
       this.sql.exec(`INSERT INTO waiting (holder, vcpus, reserve, place, asked, priority) VALUES (?, ?, ?, (SELECT COALESCE(MAX(place), 0) + 1 FROM waiting), ?, ?)
         ON CONFLICT (holder) DO UPDATE SET vcpus = excluded.vcpus, reserve = excluded.reserve, asked = excluded.asked, priority = excluded.priority`, holder, vcpus, reserve, now, priority);
       await this.want(borrows, holds, asked, now);
@@ -200,9 +238,11 @@ export class ArmadaFleet extends ArmadaSingle {
     const granted = replaced?.granted ?? grants + 1;
 
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
-    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed: charge > cap, renewed, priority, recallable } }, grants: Math.max(grants, granted) });
+    const borrowed = !within(charge, cap);
 
-    return charge > cap ? 'borrowed' : 'held';
+    await this.ctx.storage.put({ holds: { ...others, [holder]: { vcpus, until: Math.max(now, deadlineAt) + LEASE_MS, reserve, granted, borrowed, renewed, priority, recallable } }, grants: Math.max(grants, granted) });
+
+    return borrowed ? 'borrowed' : 'held';
   }
 
   /** Whether `holder` takes another task. Not once it is recalled, which is for good: for a holder of a higher priority
@@ -235,7 +275,11 @@ export class ArmadaFleet extends ArmadaSingle {
       const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), answered);
       const charge = chargeOf(holds);
 
-      await this.ctx.storage.put('lending', { limit: Math.floor(charge + (account.vcpus * (1 - HEADROOM) - account.others - charge) / 2), at: now } satisfies Lending);
+      const lends = (held: number, total: number, others: number): number => Math.floor(held + (total * (1 - HEADROOM) - others - held) / 2);
+
+      await this.ctx.storage.put('lending', {
+        limit: { vcpus: lends(charge.vcpus, account.vcpus, account.others), memory: lends(charge.memory, account.memory, account.othersMemory) }, at: now,
+      } satisfies Lending);
       await this.recall(holds, { limit: await this.limit(answered), candidates: loansOf(holds), now: answered });
     } catch (cause) {
       console.error(JSON.stringify({ fleet: 'reading the account', error: said({ cause }) }));
@@ -244,14 +288,50 @@ export class ArmadaFleet extends ArmadaSingle {
     await this.ctx.storage.setAlarm(now + SAMPLE_MS);
   }
 
+  /** The fleet's own cap: FLEET_VCPUS, and FLEET_MEMORY_MIB, which an earlier deploy did not give (none). */
+  private cap(): Room {
+    return { vcpus: Number(this.env.FLEET_VCPUS), memory: this.env.FLEET_MEMORY_MIB === undefined ? Infinity : Number(this.env.FLEET_MEMORY_MIB) };
+  }
+
+  /** `limit`, or less while the platform refuses containers for the account's room (`crowded`): what the fleet held
+   *  as it last refused one, for WANT_MS. */
+  private async held(limit: Room, now: number): Promise<Room> {
+    const crowded = await this.ctx.storage.get<Crowded>('crowded');
+
+    return crowded === undefined || crowded.until <= now ? limit
+      : { vcpus: Math.min(limit.vcpus, crowded.room.vcpus), memory: Math.min(limit.memory, crowded.room.memory) };
+  }
+
   /** The most the fleet holds now: its cap, or what its last read of the account lends up to, while that read is fresh
-   *  and no holder that may not borrow waits. */
-  private async limit(now: number): Promise<number> {
-    const cap = Number(this.env.FLEET_VCPUS);
+   *  and no holder that may not borrow waits; less while the account is crowded (`held`). */
+  private async limit(now: number): Promise<Room> {
+    const cap = this.cap();
     const lending = await this.ctx.storage.get<Lending>('lending');
     const pressed = ((await this.ctx.storage.get<number>('pressed')) ?? 0) > now - WANT_MS;
 
-    return this.reader() === null || lending === undefined || pressed || now - lending.at > SAMPLE_LIFE_MS ? cap : Math.max(cap, lending.limit);
+    const lends = this.reader() !== null && lending !== undefined && v.is(v.object({ vcpus: v.number(), memory: v.number() }), lending.limit) && !pressed
+      && now - lending.at <= SAMPLE_LIFE_MS;
+
+    return await this.held(lends ? larger(cap, lending.limit) : cap, now);
+  }
+
+  /** The platform refused `holder`'s container for want of the account's room, past what the fleet counts: its hold
+   *  goes, it waits in the fleet's line at its place, and until WANT_MS from now the fleet holds no more than the rest
+   *  hold now (`held`), so a holder below it is refused rather than refused by the platform in turn, and the newest
+   *  holds below its priority are recalled until it fits (`acquire`'s recall). */
+  async crowded(holder: string, now = Date.now()): Promise<void> {
+    const holds = this.live(await this.ctx.storage.get<Record<string, Hold>>('holds'), now);
+    const { [holder]: refused, ...rest } = holds;
+
+    if (refused === undefined) return;
+    const room = chargeOf(rest);
+    const priority = refused.priority ?? 0;
+    const reserve = refused.reserve ?? refused.vcpus;
+
+    await this.ctx.storage.put({ holds: rest, crowded: { room, until: now + WANT_MS } satisfies Crowded });
+    this.sql.exec(`INSERT INTO waiting (holder, vcpus, reserve, place, asked, priority) VALUES (?, ?, ?, (SELECT COALESCE(MIN(place), 1) - 1 FROM waiting), ?, ?)
+      ON CONFLICT (holder) DO UPDATE SET asked = excluded.asked`, holder, refused.vcpus, reserve, now, priority);
+    await this.recall(rest, { limit: room, candidates: belowOf(rest, priority, jobOf(holder)), asked: { [holder]: { vcpus: refused.vcpus, until: now, reserve } }, now });
   }
 
   /** The hold `asked` refused beside `holds`: one that borrows has the account read, where the fleet may lend; one that
@@ -267,10 +347,10 @@ export class ArmadaFleet extends ArmadaSingle {
       return;
     }
 
-    const cap = Number(this.env.FLEET_VCPUS);
+    const cap = this.cap();
     const unlent = Object.fromEntries(Object.entries({ ...holds, ...asked }).filter(([, hold]) => hold.borrowed !== true));
 
-    if (!Object.values(holds).some((hold) => hold.borrowed === true) || chargeOf(unlent) > cap) return;
+    if (!Object.values(holds).some((hold) => hold.borrowed === true) || !within(chargeOf(unlent), cap)) return;
     await this.ctx.storage.put('pressed', now);
     await this.recall(holds, { limit: cap, candidates: loansOf(holds), asked, now });
   }
@@ -287,16 +367,16 @@ export class ArmadaFleet extends ArmadaSingle {
    *  holders' place: a recalled hold still runs its tasks for its grace, so it counts as gone already. A hold is recalled
    *  whole, so the fleet may end a little under `limit`. */
   private async recall(holds: Record<string, Hold>, { limit, candidates, asked = {}, now }: {
-    readonly limit: number; readonly candidates: readonly string[]; readonly asked?: Record<string, Hold>; readonly now: number;
+    readonly limit: Room; readonly candidates: readonly string[]; readonly asked?: Record<string, Hold>; readonly now: number;
   }): Promise<Record<string, Hold>> {
     const recalled = { ...holds };
-    const kept = (): number => chargeOf(Object.fromEntries(Object.entries({ ...recalled, ...asked }).filter(([, hold]) => hold.recalled === undefined)));
+    const kept = (): Room => chargeOf(Object.fromEntries(Object.entries({ ...recalled, ...asked }).filter(([, hold]) => hold.recalled === undefined)));
     let changed = false;
 
     for (const holder of candidates) {
       const hold = recalled[holder];
 
-      if (kept() <= limit) break;
+      if (within(kept(), limit)) break;
 
       if (hold === undefined) continue;
       recalled[holder] = { ...hold, recalled: now };
@@ -353,7 +433,7 @@ export class ArmadaFleet extends ArmadaSingle {
       jobs.set(id, { vcpus: share.vcpus + hold.vcpus, containers: share.containers + 1 });
     }
 
-    return { cap: Number(this.env.FLEET_VCPUS), limit: await this.limit(Date.now()), jobs: [...jobs].map(([id, share]) => ({ id, ...share })).sort((left, right) => right.vcpus - left.vcpus) };
+    return { cap: Number(this.env.FLEET_VCPUS), limit: (await this.limit(Date.now())).vcpus, jobs: [...jobs].map(([id, share]) => ({ id, ...share })).sort((left, right) => right.vcpus - left.vcpus) };
   }
 
   private live(holds: Record<string, Hold> | undefined, now: number): Record<string, Hold> {

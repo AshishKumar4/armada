@@ -20,6 +20,8 @@ export interface Deployment {
   readonly dashboard: string;
   readonly bucket: string;
   readonly vcpus?: number | undefined;
+  /** The fleet's memory cap in MiB (FLEET_MEMORY_MIB): absent where the deploy could not read the account. */
+  readonly memoryMib?: number | undefined;
   readonly sha: string;
   /** The interface its Durable Objects call each other by (`contractOf`). */
   readonly contract: string;
@@ -27,14 +29,18 @@ export interface Deployment {
 
 /** `template`, a wrangler.jsonc, as `deployment`'s config, JSON. Its `$schema` is a path relative to the template, so
  *  it is left out. */
-export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, sha, contract }: Deployment): string {
+export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, memoryMib, sha, contract }: Deployment): string {
   const { $schema: _schema, ...parsed } = v.parse(v.looseObject({ ...TemplateSchema.entries, $schema: v.optional(v.string()) }), Bun.JSONC.parse(template));
+
+  // Its name and account also name its own container apps among the account's (`readAccount`); FLEET_MEMORY_MIB the
+  // fleet's memory, where the deploy read the account's.
+  const named = { ...parsed.vars, FLEET_VCPUS: vcpus === undefined ? parsed.vars.FLEET_VCPUS : String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account };
+  const vars = memoryMib === undefined ? named : { ...named, FLEET_MEMORY_MIB: String(memoryMib) };
 
   return JSON.stringify({
     ...parsed, name, account_id: account, main,
     assets: { ...parsed.assets, directory: dashboard },
-    // Its name and account also name its own container apps among the account's (`readAccount`).
-    vars: { ...parsed.vars, FLEET_VCPUS: vcpus === undefined ? parsed.vars.FLEET_VCPUS : String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account },
+    vars,
     r2_buckets: parsed.r2_buckets.map((each) => each.binding === 'ARTIFACTS' ? { ...each, bucket_name: bucket } : each),
   }, null, 2);
 }

@@ -294,13 +294,15 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + apart * (1 + Math.random() / 4));
   }
 
-  /** The account had no room for the container: its fleet's hold goes back, and it waits for room again, as for its
-   *  fleet's. Its boot counts the wait from its request to its next grant (`Boot.waitMs`), so the start it gave up is
-   *  no start of its own. */
+  /** The account had no room for the container: it waits in the fleet's line at its place, which holds no more than
+   *  it holds now for a while and recalls holds below its priority (`ArmadaFleet.crowded`), so a container below it is
+   *  not granted the room it waits for. Its boot counts the wait from its request to its next grant (`Boot.waitMs`), so
+   *  the start it gave up is no start of its own. */
   private async waitForRoom(spec: VesselSpec): Promise<void> {
     await this.ctx.storage.delete('restarts');
     await this.ctx.storage.put('state', 'waiting' satisfies State);
-    await letGo(this.ctx, this.env, { holder: this.holder(spec), inactivityMs: INACTIVITY_MS });
+    await letGo(this.ctx, this.env, { holder: undefined, inactivityMs: INACTIVITY_MS });
+    await this.env.FLEET.getByName(SINGLE).crowded(this.holder(spec));
 
     // Letting go let other calls in: a vessel stopped meanwhile stays stopped.
     if ((await this.ctx.storage.get<State>('state')) !== 'waiting') return;

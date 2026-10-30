@@ -28,6 +28,9 @@ export interface Env {
   readonly ARMADA_TOKEN: string;
   /** Concurrent vCPUs across every job of this deployment. */
   readonly FLEET_VCPUS: string;
+  /** Concurrent memory, in MiB, across every job of this deployment: `armada deploy` gives the account's memory in
+   *  FLEET_VCPUS's share of its vCPUs. An earlier deploy gave none, and its fleet counted vCPUs alone. */
+  readonly FLEET_MEMORY_MIB?: string;
   /** The commit `armada deploy` built this Worker from, written into the deployed vars. */
   readonly ARMADA_SHA?: string;
   /** The interface its Durable Objects call each other by (`contractOf`), written into the deployed vars. */

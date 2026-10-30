@@ -845,7 +845,8 @@ describe('a vessel\'s boot', () => {
     const stored = state(box);
 
     const vessel = new ArmadaVessel(stored.ctx, world({
-      FLEET: namespace(() => ({ acquire: async () => 'held', release, renews: async () => true, beat: async () => null })),
+      // The platform's refusal gives the hold back as the fleet's own crowding does (`ArmadaFleet.crowded`).
+      FLEET: namespace(() => ({ acquire: async () => 'held', release, crowded: release, renews: async () => true, beat: async () => null })),
       JOB: namespace(() => ({
         moved: async (_name: string, to: string) => {
           moved.push(to);

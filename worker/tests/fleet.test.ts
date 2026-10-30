@@ -157,7 +157,10 @@ describe('a fleet that lends what the account leaves idle', () => {
     globalThis.fetch = fakeFetch((request) => {
       if (request.headers.get('authorization') !== 'Bearer token') return Response.json({ success: false }, { status: 403 });
 
-      if (new URL(request.url).pathname === '/client/v4/accounts/acct/containers/me') return Response.json({ result: { limits: { total_vcpu: 100, vcpu_per_deployment: 4 } } });
+      if (new URL(request.url).pathname === '/client/v4/accounts/acct/containers/me') {
+        // Memory at a medium container's 3 GiB a vCPU, so the account's memory binds as its vCPUs do.
+        return Response.json({ result: { limits: { total_vcpu: 100, vcpu_per_deployment: 4, total_memory_mib: 100 * 3 * 1024, memory_mib_per_deployment: 12 * 1024 } } });
+      }
 
       return Response.json({
         result: [
