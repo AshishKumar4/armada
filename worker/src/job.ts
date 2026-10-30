@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
   type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -128,9 +128,32 @@ interface Attempt {
 
 /** Vessels lost under a task that a job replaces before it stops replacing them. One lost before it took any task
  *  was lost to its container's start, which says nothing of the job's tasks: those are replaced apart, as many as the
- *  job's pool and at least as many as these, and those that started on a host of another CPU than the job's apart
- *  again, as many as these (`vesselFailed`). */
+ *  job's pool and at least as many as these (`vesselFailed`). */
 const REPLACEMENTS = 8;
+
+/** How long a job holds back the place of a container that started on a host of another CPU than its own
+ *  (`JobSpec.cpu`) before it starts another there: this after the first in a row, twice as long after each next, up to
+ *  MISPLACED_MAX_MS. The platform places containers by region alone, and while the account is full it may place one
+ *  after another on such hosts (2026-10-30: 64 of a job's 166 starts on AMD 25/1, and every one of a job's 24 just
+ *  after a deploy), so a place refilled at once only churns, and a job that gave its places up ended for want of a
+ *  host it would have had minutes later. */
+const MISPLACED_MS = 30_000;
+
+/** The longest a job holds a misplaced container's place back (`MISPLACED_MS`). */
+const MISPLACED_MAX_MS = 8 * 60_000;
+
+/** A job's places held back after starts on hosts of another CPU (`MISPLACED_MS`): how many, and until when. */
+interface Held {
+  readonly places: number;
+  readonly until: number;
+}
+
+/** The places a job holds back after starts on hosts of another CPU than its own, none once their time is up. */
+async function heldBack(storage: DurableObjectStorage): Promise<number> {
+  const held = await storage.get<Held>('heldBack');
+
+  return held !== undefined && held.until > Date.now() ? held.places : 0;
+}
 
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
  *  tasks failed two of them, in which 24 of its 158 containers had stopped under their tasks. Only a loss of its own
@@ -559,7 +582,8 @@ export class ArmadaJob extends DurableObject<Env> {
   }
 
   /** The vessels the open tasks the budget runs (`admitted`) need at once, with a lane for each hedged copy, which runs
-   *  on another container than its first (a gang is never hedged), up to what the job may hold (`capacity`): one each
+   *  on another container than its first (a gang is never hedged), up to what the job may hold (`capacity`) less the
+   *  places it holds back after starts on another CPU (`heldBack`): one each
    *  (a gang's each rank) over the slots a fixed container carries; packing, as many as their estimates fill
    *  (`Placement.containers`). */
   private async needed(spec: Kept): Promise<number> {
@@ -569,7 +593,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const containers = packs(spec) ? this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged, only: admitted?.tasks ?? null })
       : Math.min(spec.pool, Math.ceil(((admitted?.ranks ?? Number(this.sql.exec(NEEDED).one()['n'])) + hedged) / spec.slots));
 
-    return Math.min(containers, await this.capacity(spec));
+    return Math.min(containers, await this.capacity(spec) - await heldBack(this.ctx.storage));
   }
 
   /** The open tasks a budget runs at once, and their ranks: those started, and the queued ones, heaviest first, whose
@@ -632,6 +656,8 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
    *  vessel). */
   async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
+    // A host of its CPU had room: the places held back start again now.
+    await this.ctx.storage.delete(['misplaced', 'heldBack']);
     this.sql.exec(`UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
@@ -1212,18 +1238,24 @@ export class ArmadaJob extends DurableObject<Env> {
     // A lost vessel no longer stays for a straggler, so a live one may.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
 
-    if (missing === undefined && live) {
-      // Its place is refilled from a budget: a lost start's apart from a loss under a task, and a start on a host of
-      // another CPU than the job's from one of its own, as the platform places containers by region alone, and while
-      // the account is full may place one after another on such hosts (2026-10-30: 64 of a job's 166 starts, on AMD
-      // 25/1). Past it, the job forfeits the place, and runs on with one vessel fewer (`grow`). Decided before anything
-      // below lets an alarm grow the pool, which would refill the place for nothing.
-      const lost = took ? 'replaced' : 'rebooted';
-      const budget = misplaced === undefined ? lost : 'misplaced';
-      const spent = (await this.ctx.storage.get<number>(budget)) ?? 0;
+    if (misplaced !== undefined && live) {
+      // One on a host of another CPU costs nothing of the job's: its place is held back for a while, longer after each
+      // such start in a row, then refilled (`heldBack`). Decided before anything below lets an alarm grow the pool.
+      const inRow = ((await this.ctx.storage.get<number>('misplaced')) ?? 0) + 1;
+      const now = Date.now();
+      const until = now + Math.min(MISPLACED_MS * 2 ** (inRow - 1), MISPLACED_MAX_MS);
+      const held = await this.ctx.storage.get<Held>('heldBack');
+      const places = held !== undefined && held.until > now ? held.places : 0;
+
+      await this.ctx.storage.put({ misplaced: inRow, heldBack: { places: places + 1, until } satisfies Held });
+    } else if (missing === undefined && live) {
+      // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
+      // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
+      // pool, which would refill the place for nothing.
+      const spent = (await this.ctx.storage.get<number>(took ? 'replaced' : 'rebooted')) ?? 0;
       const forfeited = (await this.ctx.storage.get<number>('forfeited')) ?? 0;
 
-      if (spent < (budget === 'rebooted' ? Math.max(REPLACEMENTS, spec.pool) : REPLACEMENTS)) await this.ctx.storage.put(budget, spent + 1);
+      if (spent < (took ? REPLACEMENTS : Math.max(REPLACEMENTS, spec.pool))) await this.ctx.storage.put(took ? 'replaced' : 'rebooted', spent + 1);
       else await this.ctx.storage.put('forfeited', forfeited + 1);
     }
 
@@ -1248,11 +1280,6 @@ export class ArmadaJob extends DurableObject<Env> {
       }
 
       await this.awaitEnvironment(spec);
-    }
-
-    if (misplaced !== undefined && spec.cpu !== undefined && live && (await this.capacity(spec)) <= 0) {
-      return await this.cancel(`its containers started on hosts of another CPU than ${cpuLabel(spec.cpu)}, the last on ${hostLabel(misplaced)}: past ${String(REPLACEMENTS)} replaced, `
-        + `each cost a place in its pool of ${String(spec.pool)}, and none is left`, 'lost', 'all');
     }
 
     await this.grow();
