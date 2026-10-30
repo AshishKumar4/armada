@@ -519,7 +519,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if (spec === undefined || generation === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return;
     const alive = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ${ALIVE}`).one()['n']);
     const named = Number(this.sql.exec('SELECT COUNT(*) AS n FROM vessels').one()['n']);
-    const wanted = await this.wanted(spec) - alive;
+    const wanted = await this.needed(spec) - alive;
     const names = Array.from({ length: Math.max(0, wanted) }, (_, index) => vesselName(named + index + 1));
 
     const widest = Number(this.sql.exec(WIDEST).one()['n']);
@@ -528,29 +528,24 @@ export class ArmadaJob extends DurableObject<Env> {
     await Promise.all(names.map(async (name) => await this.launch(spec, generation, name)));
   }
 
-  /** The vessels the job's open tasks want now: what they need (`needed`), with a lane for each hedged copy, which runs
-   *  on another container than its first (a gang is never hedged), up to what the job may hold (`capacity`). */
-  private async wanted(spec: Kept): Promise<number> {
-    const hedged = Math.min(spec.hedge, this.count(`${OPEN} AND json_type(item, '$.item.gang') IS NOT 'integer'`));
-
-    return Math.min(this.needed(spec, hedged), await this.capacity(spec));
-  }
-
   /** The most vessels the job may hold at once: its pool, less a place for each vessel it lost past its replacements
    *  (`vesselFailed`). */
   private async capacity(spec: Kept): Promise<number> {
     return spec.pool - ((await this.ctx.storage.get<number>('forfeited')) ?? 0);
   }
 
-  /** The containers the open tasks the budget runs (`admitted`), and `hedged` copies of them, need at once, up to the
-   *  pool: one each (a gang's each rank) over the slots a fixed container carries; packing, as many as their estimates
-   *  fill (`Placement.containers`). */
-  private needed(spec: Kept, hedged = 0): number {
+  /** The vessels the open tasks the budget runs (`admitted`) need at once, with a lane for each hedged copy, which runs
+   *  on another container than its first (a gang is never hedged), up to what the job may hold (`capacity`): one each
+   *  (a gang's each rank) over the slots a fixed container carries; packing, as many as their estimates fill
+   *  (`Placement.containers`). */
+  private async needed(spec: Kept): Promise<number> {
     const admitted = this.admitted(spec);
+    const hedged = Math.min(spec.hedge, this.count(`${OPEN} AND json_type(item, '$.item.gang') IS NOT 'integer'`));
 
-    if (packs(spec)) return this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged, only: admitted?.tasks ?? null });
+    const containers = packs(spec) ? this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged, only: admitted?.tasks ?? null })
+      : Math.min(spec.pool, Math.ceil(((admitted?.ranks ?? Number(this.sql.exec(NEEDED).one()['n'])) + hedged) / spec.slots));
 
-    return Math.min(spec.pool, Math.ceil(((admitted?.ranks ?? Number(this.sql.exec(NEEDED).one()['n'])) + hedged) / spec.slots));
+    return Math.min(containers, await this.capacity(spec));
   }
 
   /** The open tasks a budget runs at once, and their ranks: those started, and the queued ones, heaviest first, whose
@@ -619,33 +614,28 @@ export class ArmadaJob extends DurableObject<Env> {
 
   /** Vessel `name` waits for the fleet's capacity, or was granted it and boots: its watchdog bounds its silence by that
    *  (`SILENT_MS`). A word from a vessel that ended changes nothing. Whether the job still wants the vessel: not once
-   *  either has ended, which a vessel whose stop was lost learns here. */
+   *  either has ended, which a vessel whose stop was lost learns here; nor, while it waits, once the vessels ahead of it,
+   *  every one granted and those that waited before it, make what the open tasks need (`needed`). It then leaves the
+   *  fleet's line rather than take a grant, boot and find no task, its place ahead of other jobs' vessels held meanwhile
+   *  (12% of Dew's vessels over 6 h, 2026-10-30); one the queue needs again later is a new vessel, at the line's end. */
   async moved(name: string, state: 'waiting' | 'booting'): Promise<boolean> {
-    if ((await this.ctx.storage.get<Phase>('phase')) === 'done') return false;
+    const phase = await this.ctx.storage.get<Phase>('phase');
 
-    if (state === 'waiting' && await this.surplus(name)) {
-      this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state = 'waiting'`, Date.now(), name);
+    if (phase === 'done') return false;
+    const spec = await this.spec();
 
-      return false;
+    if (state === 'waiting' && phase === 'running' && spec !== undefined) {
+      const ahead = Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working')
+        OR (state = 'waiting' AND rowid < (SELECT rowid FROM vessels WHERE name = ?))`, name).one()['n']);
+
+      if (ahead >= await this.needed(spec)) {
+        this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state = 'waiting'`, Date.now(), name);
+
+        return false;
+      }
     }
 
     return this.sql.exec(`UPDATE vessels SET state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, state, Date.now(), name).toArray().length > 0;
-  }
-
-  /** Whether waiting vessel `name` is no longer wanted: the vessels ahead of it, every one granted and those that
-   *  waited before it, already make what the job's open tasks want (`wanted`). It then leaves the fleet's line
-   *  rather than take a grant, boot, and find no task, holding its place ahead of other jobs' vessels meanwhile (11% of
-   *  6 h of Dew's vessels, 2026-10-30). One the queue needs again later is a new vessel, at the line's end. */
-  private async surplus(name: string): Promise<boolean> {
-    const spec = await this.spec();
-
-    if (spec === undefined || (await this.ctx.storage.get<Phase>('phase')) !== 'running') return false;
-    const ahead = Number(this.sql.exec(
-      `SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working')
-         OR (state = 'waiting' AND rowid < (SELECT rowid FROM vessels WHERE name = ?))`, name,
-    ).one()['n']);
-
-    return ahead >= await this.wanted(spec);
   }
 
   /** Whether `name` still has a task assigned: a slotted vessel claims its next while the others run, so an empty
