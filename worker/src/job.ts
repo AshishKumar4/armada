@@ -25,8 +25,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
-  type Boot, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hex, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  type Boot, type Cpu, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
 import { runKey, said, SINGLE, statusToken, type Env } from './env';
@@ -142,10 +142,12 @@ const MISPLACED_MS = 30_000;
 /** The longest a job holds a misplaced container's place back (`MISPLACED_MS`). */
 const MISPLACED_MAX_MS = 8 * 60_000;
 
-/** A job's places held back after starts on hosts of another CPU (`MISPLACED_MS`): how many, and until when. */
+/** A job's places held back after starts on hosts of another CPU (`MISPLACED_MS`): how many, until when, and the host
+ *  the last of them started on. It stays, its time up, until a container boots on the job's CPU. */
 interface Held {
   readonly places: number;
   readonly until: number;
+  readonly host: Host;
 }
 
 /** The places a job holds back after starts on hosts of another CPU than its own, none once their time is up. */
@@ -153,6 +155,16 @@ async function heldBack(storage: DurableObjectStorage): Promise<number> {
   const held = await storage.get<Held>('heldBack');
 
   return held !== undefined && held.until > Date.now() ? held.places : 0;
+}
+
+/** Why a job of CPUs `cpu` held its places back, where it did when it ended: since a container last booted on its CPU,
+ *  its containers started on hosts of another (`heldBack`). */
+async function misplacedFor(storage: DurableObjectStorage, cpu: readonly Cpu[] | undefined): Promise<string> {
+  const held = await storage.get<Held>('heldBack');
+
+  if (held === undefined || cpu === undefined) return '';
+
+  return `, its containers starting on hosts of another CPU than ${cpuLabel(cpu)} since one last booted on its own, the last on ${hostLabel(held.host)}`;
 }
 
 /** A task the infrastructure failed this many times is reported failed, not queued again. At two, a Dew CI run of 224
@@ -351,7 +363,7 @@ export class ArmadaJob extends DurableObject<Env> {
     if (deadline !== null && Date.now() - ((await this.ctx.storage.get<number>('createdAt')) ?? 0) >= deadline * 1000) {
       // Its unplaced tasks ended for want of capacity where its containers still waited for the fleet; a running task
       // ran its code that long.
-      const waiting = this.waitingFor(spec);
+      const waiting = this.waitingFor(spec) + await misplacedFor(this.ctx.storage, spec.cpu);
 
       return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${waiting}`, 'lost', waiting === '' ? 'none' : 'unplaced');
     }
@@ -593,7 +605,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const containers = packs(spec) ? this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged, only: admitted?.tasks ?? null })
       : Math.min(spec.pool, Math.ceil(((admitted?.ranks ?? Number(this.sql.exec(NEEDED).one()['n'])) + hedged) / spec.slots));
 
-    return Math.min(containers, await this.capacity(spec) - await heldBack(this.ctx.storage));
+    return Math.max(0, Math.min(containers, await this.capacity(spec)) - await heldBack(this.ctx.storage));
   }
 
   /** The open tasks a budget runs at once, and their ranks: those started, and the queued ones, heaviest first, whose
@@ -656,8 +668,8 @@ export class ArmadaJob extends DurableObject<Env> {
   /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
    *  vessel). */
   async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
-    // A host of its CPU had room: the places held back start again now.
-    await this.ctx.storage.delete(['misplaced', 'heldBack']);
+    // A host of its CPU had room: the places held back start again at the next growth.
+    await this.ctx.storage.delete(['misplacedInRow', 'heldBack']);
     this.sql.exec(`UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
@@ -1241,13 +1253,13 @@ export class ArmadaJob extends DurableObject<Env> {
     if (misplaced !== undefined && live) {
       // One on a host of another CPU costs nothing of the job's: its place is held back for a while, longer after each
       // such start in a row, then refilled (`heldBack`). Decided before anything below lets an alarm grow the pool.
-      const inRow = ((await this.ctx.storage.get<number>('misplaced')) ?? 0) + 1;
+      const inRow = ((await this.ctx.storage.get<number>('misplacedInRow')) ?? 0) + 1;
       const now = Date.now();
       const until = now + Math.min(MISPLACED_MS * 2 ** (inRow - 1), MISPLACED_MAX_MS);
       const held = await this.ctx.storage.get<Held>('heldBack');
       const places = held !== undefined && held.until > now ? held.places : 0;
 
-      await this.ctx.storage.put({ misplaced: inRow, heldBack: { places: places + 1, until } satisfies Held });
+      await this.ctx.storage.put({ misplacedInRow: inRow, heldBack: { places: places + 1, until, host: misplaced } satisfies Held });
     } else if (missing === undefined && live) {
       // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
       // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
@@ -1373,8 +1385,12 @@ export class ArmadaJob extends DurableObject<Env> {
         `SELECT t.idx, t.started, t.item, (SELECT COUNT(*) FROM members m WHERE m.idx = t.idx) AS joined FROM tasks t WHERE t.state = 'forming'`,
       ).toArray();
 
+      // A rank whose place the job held back after a start on another CPU (`heldBack`) joins once its time is up: the
+      // bound counts from then.
+      const held = (await this.ctx.storage.get<Held>('heldBack'))?.until ?? 0;
+
       for (const { idx, started, item, joined } of forming) {
-        if (started === null || Date.now() - started < timeout * 1000) continue;
+        if (started === null || Date.now() - Math.max(started, held) < timeout * 1000) continue;
         const world = gangOf(v.parse(TaskSchema, JSON.parse(item)).item);
 
         await this.failGang(idx, 'GangFormDeadlineExceeded', `gang formed ${String(joined)} of ${String(world)} ranks within its ${String(timeout)} s start bound, with nothing of its job running to free a vessel for it`);

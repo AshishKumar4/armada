@@ -604,6 +604,83 @@ describe('a job whose containers start on hosts of another CPU than its own (#40
   });
 });
 
+describe('a job holding places back after starts on another CPU', () => {
+  const zen3: Host = { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'AMD EPYC', level: 3 };
+  const cpu = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+
+  test('holds back the place its one task needs, however large its pool, and an earlier budget is no streak', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const { job: open, begun, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 16, cpu });
+
+      // An earlier Worker's budget of such starts, spent.
+      await stored.ctx.storage.put('misplaced', 8);
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+      const held = begun.length;
+
+      setSystemTime(start + 31_000);
+      await open.alarm();
+
+      expect({ held, after: begun.length }).toEqual({ held: 1, after: 2 });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('lets a forming gang wait for the rank whose place it held back, its start bound counted from then', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const { job: open, begun } = await job({ ...gang(2), pool: 2, cpu, gangStartTimeout: 10 });
+
+      // v1 joins; v2 starts on another CPU, and its place waits 30 s, past the gang's 10 s bound.
+      expect(await open.claim('v1')).toEqual({ waitMs: 1000 });
+      await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 20_000);
+      await open.alarm();
+      const during = { events: (await open.events(0)).events.length, begun: begun.length };
+
+      setSystemTime(start + 31_000);
+      await open.alarm();
+      const after = { events: (await open.events(0)).events.length, begun: begun.length };
+
+      setSystemTime(start + 39_000);
+      await open.alarm();
+
+      expect({ during, after, still: (await open.events(0)).events.length }).toEqual({ during: { events: 0, begun: 2 }, after: { events: 0, begun: 3 }, still: 0 });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('says at its deadline that its places were held back for want of a host of its CPU', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1, cpu, deadline: 60 });
+
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 31_000);
+      await open.alarm();
+      await open.vesselFailed('v2', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 61_000);
+      await open.alarm();
+      const [ended] = (await open.events(0)).events;
+
+      expect({ kind: ended?.outcome.kind, capacity: ended?.outcome.capacity, tail: ended?.outcome.tail }).toEqual({
+        kind: 'failed', capacity: true,
+        tail: 'JobDeadlineExceeded: the job did not finish within 60 s, its containers starting on hosts of another CPU than AuthenticAMD/25/17 since one last booted on its own, the last on AMD EPYC 25/1 (x86-64-v3)',
+      });
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
 describe('a job past its replacements', () => {
   test('runs on in what is left of its pool: a vessel lost past them costs one place, never the places still free', async () => {
     const task = (item: string) => ({ item, argv: ['true'] });
