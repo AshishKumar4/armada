@@ -354,14 +354,18 @@ export function sharesFor(pool: number, slots: number, groups: readonly { readon
   // One job's gang past the pool is the Worker's to refuse, by name, as in a run of one environment.
   if (sized.length > 1 && need > pool) return { need };
   const shares = sized.map((job) => job.least);
+
   // Each job's rank for the next container: known, when it would finish on what it holds; else its tasks' count for
   // each container it would then hold.
   const rank = (at: number): number => {
     const job = sized[at];
     const held = shares[at] ?? 0;
 
-    return job === undefined ? 0 : known ? finishOn(job.queue, held * slots) : job.total / (held + 1);
+    if (job === undefined) return 0;
+
+    return known ? finishOn(job.queue, held * slots) : job.total / (held + 1);
   };
+
   const ranks = sized.map((_, at) => rank(at));
 
   for (let left = pool - shares.reduce((sum, each) => sum + each, 0); left > 0; left -= 1) {
