@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
-import { listSchedule } from './dispatch';
+import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
@@ -413,34 +413,17 @@ interface Sized {
   readonly ranks: number;
 }
 
-/** When tasks `queue`, longest first, finish on `pool` lanes: a task alone on the least loaded lane (`listSchedule`),
- *  a gang on its ranks' least loaded lanes at once, once the last of them is free (the Worker starts a gang's ranks
- *  together); a lane that runs one task finishes at its estimate, one that runs more `ESTIMATE_ERROR` past their sum,
- *  and a gang wider than the lanes never. */
+/** When tasks `queue`, longest first, finish on `pool` lanes (`listSchedule`, or `gangSchedule` where a gang's ranks
+ *  start together): a lane that runs one task finishes at its estimate, one that runs more `ESTIMATE_ERROR` past their
+ *  sum, and a gang wider than the lanes never. */
 function finishOn(queue: readonly Sized[], pool: number): number {
   if (queue.some(({ ranks }) => ranks > pool)) return Number.POSITIVE_INFINITY;
-  const finished = (loads: readonly number[], counts: readonly number[]) => Math.max(0, ...loads.map((load, lane) => (counts[lane] ?? 0) > 1 ? load * ESTIMATE_ERROR : load));
+  const releases = Array.from({ length: pool }, () => 0);
+  const { lanes, loads } = queue.every(({ ranks }) => ranks === 1)
+    ? listSchedule(queue.map(({ seconds }) => seconds), releases)
+    : gangSchedule(queue.map(({ seconds, ranks }) => ({ duration: seconds, ranks })), releases);
 
-  if (queue.every(({ ranks }) => ranks === 1)) {
-    const { lanes, loads } = listSchedule(queue.map(({ seconds }) => seconds), Array.from({ length: pool }, () => 0));
-
-    return finished(loads, lanes.map((tasks) => tasks.length));
-  }
-
-  const loads = Array.from({ length: pool }, () => 0);
-  const counts = Array.from({ length: pool }, () => 0);
-
-  for (const { seconds, ranks } of queue) {
-    const lanes = loads.map((load, lane) => ({ load, lane })).toSorted((left, right) => left.load - right.load || left.lane - right.lane).slice(0, ranks);
-    const start = Math.max(0, ...lanes.map(({ load }) => load));
-
-    for (const { lane } of lanes) {
-      loads[lane] = start + seconds;
-      counts[lane] = (counts[lane] ?? 0) + 1;
-    }
-  }
-
-  return finished(loads, counts);
+  return Math.max(0, ...loads.map((load, lane) => (lanes[lane]?.length ?? 0) > 1 ? load * ESTIMATE_ERROR : load));
 }
 
 /** Tasks of `estimates` seconds, a gang of `ranks` each (1 where none is given), longest first. */
