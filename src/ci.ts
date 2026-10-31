@@ -409,7 +409,7 @@ const ESTIMATE_ERROR = 1.25;
 
 /** A task's estimated seconds and its gang's ranks (1 for a task alone), which start together, a lane each. */
 interface Sized {
-  readonly seconds: number;
+  readonly duration: number;
   readonly ranks: number;
 }
 
@@ -418,17 +418,17 @@ interface Sized {
  *  sum, and a gang wider than the lanes never. */
 function finishOn(queue: readonly Sized[], pool: number): number {
   if (queue.some(({ ranks }) => ranks > pool)) return Number.POSITIVE_INFINITY;
+
   const releases = Array.from({ length: pool }, () => 0);
-  const { lanes, loads } = queue.every(({ ranks }) => ranks === 1)
-    ? listSchedule(queue.map(({ seconds }) => seconds), releases)
-    : gangSchedule(queue.map(({ seconds, ranks }) => ({ duration: seconds, ranks })), releases);
+
+  const { lanes, loads } = queue.every(({ ranks }) => ranks === 1) ? listSchedule(queue.map(({ duration }) => duration), releases) : gangSchedule(queue, releases);
 
   return Math.max(0, ...loads.map((load, lane) => (lanes[lane]?.length ?? 0) > 1 ? load * ESTIMATE_ERROR : load));
 }
 
 /** Tasks of `estimates` seconds, a gang of `ranks` each (1 where none is given), longest first. */
 function queueOf(estimates: readonly number[], ranks: readonly number[] = []): Sized[] {
-  return estimates.map((seconds, at) => ({ seconds, ranks: ranks[at] ?? 1 })).toSorted((left, right) => right.seconds - left.seconds);
+  return estimates.map((duration, at) => ({ duration, ranks: ranks[at] ?? 1 })).toSorted((left, right) => right.duration - left.duration);
 }
 
 /** The fewest lanes, up to `most`, that finish these tasks (each a gang of its `ranks`), queued longest first, as soon
