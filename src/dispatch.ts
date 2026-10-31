@@ -24,3 +24,23 @@ export function listSchedule(durations: readonly number[], releases: readonly nu
 
   return { lanes, loads, makespan: Math.max(0, ...loads) };
 }
+
+/** List scheduling of gangs: every task, in the given order, onto its `ranks` least loaded machines at once (ties: the
+ *  first ones), starting once the last of them is free, as the Worker starts a gang's ranks together; each machine
+ *  starting at its own release. A task of one rank lands as `listSchedule` would put it. */
+export function gangSchedule(tasks: readonly { readonly duration: number; readonly ranks: number }[], releases: readonly number[]): Schedule {
+  const lanes: number[][] = releases.map(() => []);
+  const loads = [...releases];
+
+  for (const [task, { duration, ranks }] of tasks.entries()) {
+    const chosen = loads.map((load, machine) => ({ load, machine })).toSorted((left, right) => left.load - right.load || left.machine - right.machine).slice(0, ranks);
+    const start = Math.max(0, ...chosen.map(({ load }) => load));
+
+    for (const { machine } of chosen) {
+      lanes[machine]?.push(task);
+      loads[machine] = start + duration;
+    }
+  }
+
+  return { lanes, loads, makespan: Math.max(0, ...loads) };
+}

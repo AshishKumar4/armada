@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
-import { listSchedule } from './dispatch';
+import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
@@ -331,9 +331,12 @@ export async function onCommit(armada: Armada, target: string): Promise<OnCommit
 }
 
 /** The containers each of a run's environments' task jobs runs on, all at once within the pool: each on at least its
- *  widest gang (and 1), and the rest of the pool given to them in proportion to their estimated seconds (their tasks'
- *  count where any has no estimate), D'Hondt, up to what each can use. One job gets the pool as `lanesFor` would. When
- *  more than one job's widest gangs together pass the pool, how many containers they need instead. */
+ *  widest gang (and 1), and the rest of the pool given, a container at a time up to what each can use, to the job
+ *  that would finish last (`finishOn` its lanes, a gang's ranks at once), so the run's last job finishes soonest:
+ *  shared by their seconds, a job of a few long tasks took one container beside a suite of many short ones and ran
+ *  them in turn past the suite's end (train 410's 8 large tasks, 9 minutes). Where any task has no estimate, the
+ *  rest goes in proportion to their tasks' count, D'Hondt. One job gets the pool as `lanesFor` would. When more than
+ *  one job's widest gangs together pass the pool, how many containers they need instead. */
 export function sharesFor(pool: number, slots: number, groups: readonly { readonly estimates: readonly (number | undefined)[]; readonly ranks: readonly number[] }[]): number[] | { readonly need: number } {
   const known = groups.every(({ estimates }) => estimates.every((estimate) => estimate !== undefined));
 
@@ -341,9 +344,9 @@ export function sharesFor(pool: number, slots: number, groups: readonly { readon
     const widest = Math.max(1, ...ranks);
     const least = Math.min(pool, widest);
     const total = ranks.reduce((sum, each) => sum + each, 0);
-    const weight = known ? estimates.reduce((sum: number, estimate, at) => sum + (estimate ?? 0) * (ranks[at] ?? 1), 0) : total;
+    const queue = queueOf(estimates.map((estimate) => estimate ?? 0), ranks);
 
-    return { widest, least, most: Math.max(least, Math.ceil(total / slots)), weight };
+    return { widest, least, most: Math.max(least, Math.ceil(total / slots)), total, queue };
   });
 
   const need = sized.reduce((sum, job) => sum + job.widest, 0);
@@ -352,16 +355,25 @@ export function sharesFor(pool: number, slots: number, groups: readonly { readon
   if (sized.length > 1 && need > pool) return { need };
   const shares = sized.map((job) => job.least);
 
-  for (let left = pool - shares.reduce((sum, each) => sum + each, 0); left > 0; left -= 1) {
-    // The next container goes to the job with the most weight for each container it would then hold.
-    const next = sized.reduce((best, job, at) => {
-      const held = shares[at] ?? job.least;
+  // Each job's rank for the next container: known, when it would finish on what it holds; else its tasks' count for
+  // each container it would then hold.
+  const rank = (at: number): number => {
+    const job = sized[at];
+    const held = shares[at] ?? 0;
 
-      return held < job.most && (best < 0 || job.weight / (held + 1) > (sized[best]?.weight ?? 0) / ((shares[best] ?? 0) + 1)) ? at : best;
-    }, -1);
+    if (job === undefined) return 0;
+
+    return known ? finishOn(job.queue, held * slots) : job.total / (held + 1);
+  };
+
+  const ranks = sized.map((_, at) => rank(at));
+
+  for (let left = pool - shares.reduce((sum, each) => sum + each, 0); left > 0; left -= 1) {
+    const next = sized.reduce((best, job, at) => (shares[at] ?? job.least) < job.most && (best < 0 || (ranks[at] ?? 0) > (ranks[best] ?? 0)) ? at : best, -1);
 
     if (next < 0) break;
     shares[next] = (shares[next] ?? 0) + 1;
+    ranks[next] = rank(next);
   }
 
   return shares;
@@ -395,20 +407,37 @@ function estimateOf(entry: PlanEntry, name: string, timings: Timings): number | 
  *  2026-10-04 to 2026-10-12). */
 const ESTIMATE_ERROR = 1.25;
 
-/** The fewest containers, up to `most`, that finish these tasks, queued longest first, as soon as `most` would. A
- *  container that runs one task finishes at its estimate; one that runs more, `ESTIMATE_ERROR` past their sum. */
-export function poolFor(estimates: readonly number[], most: number): number {
-  const queue = estimates.toSorted((left, right) => right - left);
+/** A task's estimated seconds and its gang's ranks (1 for a task alone), which start together, a lane each. */
+interface Sized {
+  readonly duration: number;
+  readonly ranks: number;
+}
 
-  const finish = (pool: number): number => {
-    const { lanes, loads } = listSchedule(queue, Array.from({ length: pool }, () => 0));
+/** When tasks `queue`, longest first, finish on `pool` lanes (`listSchedule`, or `gangSchedule` where a gang's ranks
+ *  start together): a lane that runs one task finishes at its estimate, one that runs more `ESTIMATE_ERROR` past their
+ *  sum, and a gang wider than the lanes never. */
+function finishOn(queue: readonly Sized[], pool: number): number {
+  if (queue.some(({ ranks }) => ranks > pool)) return Number.POSITIVE_INFINITY;
 
-    return Math.max(0, ...loads.map((load, machine) => (lanes[machine]?.length ?? 0) > 1 ? load * ESTIMATE_ERROR : load));
-  };
+  const releases = Array.from({ length: pool }, () => 0);
 
-  const soonest = finish(most);
+  const { lanes, loads } = queue.every(({ ranks }) => ranks === 1) ? listSchedule(queue.map(({ duration }) => duration), releases) : gangSchedule(queue, releases);
 
-  for (let pool = 1; pool < most; pool += 1) if (finish(pool) <= soonest) return pool;
+  return Math.max(0, ...loads.map((load, lane) => (lanes[lane]?.length ?? 0) > 1 ? load * ESTIMATE_ERROR : load));
+}
+
+/** Tasks of `estimates` seconds, a gang of `ranks` each (1 where none is given), longest first. */
+function queueOf(estimates: readonly number[], ranks: readonly number[] = []): Sized[] {
+  return estimates.map((duration, at) => ({ duration, ranks: ranks[at] ?? 1 })).toSorted((left, right) => right.duration - left.duration);
+}
+
+/** The fewest lanes, up to `most`, that finish these tasks (each a gang of its `ranks`), queued longest first, as soon
+ *  as `most` would (`finishOn`). */
+export function poolFor(estimates: readonly number[], most: number, ranks: readonly number[] = []): number {
+  const queue = queueOf(estimates, ranks);
+  const soonest = finishOn(queue, most);
+
+  for (let pool = 1; pool < most; pool += 1) if (finishOn(queue, pool) <= soonest) return pool;
 
   return most;
 }
@@ -421,7 +450,7 @@ export function lanesFor(estimates: readonly (number | undefined)[], weights: re
   const widest = Math.min(most, Math.max(0, ...weights));
 
   const lanes = estimates.every((estimate) => estimate !== undefined)
-    ? Math.max(widest, poolFor(estimates.flatMap((estimate, index) => Array<number>(weights[index] ?? 1).fill(estimate ?? 0)), most))
+    ? Math.max(widest, poolFor(estimates.map((estimate) => estimate ?? 0), most, weights))
     : most;
 
   return { lanes, pool: Math.max(widest, Math.ceil(lanes / slots)) };
