@@ -396,7 +396,10 @@ describe('a CI run\'s pool', () => {
       oneLong: lanesFor([500, ...Array.from({ length: 89 }, (_, index) => 20 + index % 40)], ones(90), 40, 4),
       unsized: lanesFor([undefined, 5], ones(2), 40, 4),
       gang: lanesFor([5, 5], [1, 4], 4, 1),
-    }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 2, pool: 1 }, gang: { lanes: 4, pool: 4 } });
+      // A gang's ranks start together: three 100 s gangs of two finish on four lanes as on five (250 s, a quarter
+      // over), but on three only one at a time (375 s), where as six lanes apart three seemed enough.
+      gangs: lanesFor([100, 100, 100], [2, 2, 2], 5, 1),
+    }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 2, pool: 1 }, gang: { lanes: 4, pool: 4 }, gangs: { lanes: 4, pool: 4 } });
   });
 
   test('shares the pool among a run\'s jobs so the last to finish finishes soonest, a few long tasks given their containers', () => {
@@ -408,8 +411,8 @@ describe('a CI run\'s pool', () => {
     expect(sharesFor(20, 1, [job(60, 100), job(8, 300)])).toEqual([12, 8]);
     // A job no container can shorten (one 900 s task) takes one, and the rest go where they shorten a job.
     expect(sharesFor(10, 1, [job(20, 100), job(1, 900)])).toEqual([9, 1]);
-    // Unknown estimates share by task count, as before.
-    expect(sharesFor(10, 1, [{ estimates: [undefined, 5, 5, 5], ranks: [1, 1, 1, 1] }, { estimates: [5], ranks: [1] }])).toEqual([4, 1]);
+    // Unknown estimates share by task count, as before: four tasks against two on four containers.
+    expect(sharesFor(4, 1, [{ estimates: [undefined, 5, 5, 5], ranks: [1, 1, 1, 1] }, { estimates: [1000, 1000], ranks: [1, 1] }])).toEqual([3, 1]);
   });
 
   test('refuses a job a container could not start: an argument or an item too long for Linux, or a slotted gang', () => {
