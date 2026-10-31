@@ -402,10 +402,10 @@ describe('a CI run\'s pool', () => {
   test('shares the pool among a run\'s jobs so the last to finish finishes soonest, a few long tasks given their containers', () => {
     const job = (count: number, seconds: number) => ({ estimates: Array.from({ length: count }, () => seconds), ranks: Array.from({ length: count }, () => 1) });
 
-    // 200 tasks of 100 s beside 8 of 200 s on 41 containers: four take the long ones two each (500 s, a quarter over),
-    // and 37 the rest (675 s); by their seconds alone the long ones had three (750 s), the run's last (train 410's
-    // large job ran its 8 tasks on one container, 9 minutes past the suite's end).
-    expect(sharesFor(41, 1, [job(200, 100), job(8, 200)])).toEqual([37, 4]);
+    // 60 tasks of 100 s beside 8 of 300 s on 20 containers: the long ones take one each (300 s) and 12 the rest, five
+    // each (625 s, a quarter over); by their seconds alone the long ones had five, two on three of them (750 s), the
+    // run's last (train 410's large job ran its 8 tasks on one container, 9 minutes past the suite's end).
+    expect(sharesFor(20, 1, [job(60, 100), job(8, 300)])).toEqual([12, 8]);
     // A job no container can shorten (one 900 s task) takes one, and the rest go where they shorten a job.
     expect(sharesFor(10, 1, [job(20, 100), job(1, 900)])).toEqual([9, 1]);
     // Unknown estimates share by task count, as before.
