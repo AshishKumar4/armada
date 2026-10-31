@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { extractTar, lanesFor, poolFor, remainingDeadline } from '../src/ci';
+import { extractTar, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { deploymentConfig } from '../src/deploy';
@@ -397,6 +397,19 @@ describe('a CI run\'s pool', () => {
       unsized: lanesFor([undefined, 5], ones(2), 40, 4),
       gang: lanesFor([5, 5], [1, 4], 4, 1),
     }).toEqual({ even: { lanes: 60, pool: 15 }, oneLong: { lanes: 10, pool: 3 }, unsized: { lanes: 2, pool: 1 }, gang: { lanes: 4, pool: 4 } });
+  });
+
+  test('shares the pool among a run\'s jobs so the last to finish finishes soonest, a few long tasks given their containers', () => {
+    const job = (count: number, seconds: number) => ({ estimates: Array.from({ length: count }, () => seconds), ranks: Array.from({ length: count }, () => 1) });
+
+    // 200 tasks of 100 s beside 8 of 200 s on 41 containers: four take the long ones two each (500 s, a quarter over),
+    // and 37 the rest (675 s); by their seconds alone the long ones had three (750 s), the run's last (train 410's
+    // large job ran its 8 tasks on one container, 9 minutes past the suite's end).
+    expect(sharesFor(41, 1, [job(200, 100), job(8, 200)])).toEqual([37, 4]);
+    // A job no container can shorten (one 900 s task) takes one, and the rest go where they shorten a job.
+    expect(sharesFor(10, 1, [job(20, 100), job(1, 900)])).toEqual([9, 1]);
+    // Unknown estimates share by task count, as before.
+    expect(sharesFor(10, 1, [{ estimates: [undefined, 5, 5, 5], ranks: [1, 1, 1, 1] }, { estimates: [5], ranks: [1] }])).toEqual([4, 1]);
   });
 
   test('refuses a job a container could not start: an argument or an item too long for Linux, or a slotted gang', () => {
