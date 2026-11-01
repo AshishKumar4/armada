@@ -747,6 +747,8 @@ export class ArmadaJob extends DurableObject<Env> {
     const own = {
       ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec),
       ARMADA_JOB_ID: id, ARMADA_VESSEL: name, ARMADA_STATUS_URL: `${origin}/status/${id}`, ARMADA_STATUS_TOKEN: await this.token,
+      // A fresh job's task runs in a container no other task ran in, and may rely on it (`JobSpec.fresh`).
+      ...spec.fresh ? { ARMADA_FRESH: '1' } : {},
     };
 
     const env = spec.deployToken ? { ...own, ARMADA_TOKEN: this.env.ARMADA_TOKEN } : own;
@@ -765,6 +767,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const abandoned = this.unfinished(name, slot)[0];
 
     if (abandoned !== undefined) throw new Error(`slot ${String(slot)} asked for another task before task ${String(abandoned.idx)} attempt ${String(abandoned.attempts)} ended`);
+
     // A fresh job's vessel runs one task and retires (`JobSpec.fresh`): one handed a run takes no other, so every run
     // starts in a container no other run touched. (One slot: it asks only once its run ended.)
     if (spec.fresh && this.ran(name)) {

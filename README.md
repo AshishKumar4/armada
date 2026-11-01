@@ -280,6 +280,7 @@ one word, and `` sh.raw`...` `` doesn't escape, for a script that is itself shel
 |---|---|
 | `pool` | The most containers the job runs on. |
 | `mode` | `efficient`, the default, packs tasks into containers by their recorded use. `fast` runs one a container. Packed tasks share the network, so tasks that bind a fixed port need `fast`. A client older than wire 9 can't name a mode, so its jobs run `fast`. |
+| `fresh` | Each task (each run of it: a retry, a copy) starts in a container no other task ran in, which retires once the task ends, and the task sees `ARMADA_FRESH=1`: for a task whose result must not depend on what an earlier one left in `/tmp`, the home or a process. It packs nothing, whatever `mode`, and holds one slot. A plan entry's `fresh: true` runs it in a fresh job of its own (`armada run`). |
 | `slots` | More than one runs exactly that many tasks at once in each container, each in its own slot with an even share of memory, and turns packing off. A gang can't run in slots. |
 | `budget` | The most the job's runs spend at once. Each run spends its item's `cost`, 1 unless the item says, a gang's each rank, until it ends; a container takes the heaviest queued item that fits what is left, so a dear item waits while cheaper ones run. Twenty calls to one model provider, shared by items that make one to six at once: `{ budget: 20 }` with each item's `cost` its calls (`--budget=20`). |
 | `cpu` | The CPU every container's host has, as `/proc/cpuinfo` names it: `{ vendor: 'AuthenticAMD', family: 25, model: 17 }` (`--cpu=AuthenticAMD/25/17`). A list takes any one of its CPUs (`--cpu=AuthenticAMD/25/17,AuthenticAMD/26/17`), to keep out a slow host. A container on another host is replaced before it takes a task, its place held back first: 30 s after the first such start in a row, twice as long after each next, up to 8 min, as the platform places containers by region alone; one that boots on a host of the job's CPU starts the rest at once. |
@@ -500,7 +501,7 @@ what open jobs use. A client and a Worker too far apart in version refuse each o
 
 ```
 armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--drain] [--keep=N]
-armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--budget=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--priority=N] [--inputs=<job,...>] [--timeout=S|none] [--deadline=S|none] [--output] [--artifacts=<dir>] [--speculative] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
+armada map [--env=<recipe.json> | --commit=<rev>] (--times=N | --items=<file|->) [--size=<size>] [--pool=N] [--slots=N] [--budget=N] [--mode=efficient|fast] [--cpu=<vendor/family/model>[,...]] [--priority=N] [--inputs=<job,...>] [--timeout=S|none] [--deadline=S|none] [--output] [--artifacts=<dir>] [--speculative] [--fresh] [--hedge=N] [--secrets=<A,B>] [--json] -- <command>
 armada run <commit|worktree> [--deadline=S] [--pool=N] [--priority=N] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
 armada verdict <commit|worktree> [--json]
 armada push

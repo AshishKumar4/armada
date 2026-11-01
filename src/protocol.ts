@@ -412,8 +412,8 @@ export const JobSpecSchema = v.object({
   speculative: v.optional(v.boolean(), false),
   /** Each task (each run of it: a retry, a straggler's or hedge's copy) starts in a container no other task ran in:
    *  its /tmp, /dev/shm, home and processes as the snapshot left them, and its container retires once the task ends.
-   *  For a task whose result must not depend on what an earlier one left behind (Dew's test records). Its containers
-   *  pack nothing, whatever `mode`, and hold one slot. */
+   *  For a task whose result must not depend on what an earlier one left behind (Dew's test records), which its
+   *  environment's ARMADA_FRESH=1 tells it. Its containers pack nothing, whatever `mode`, and hold one slot. */
   fresh: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
    *  container holds the job up no longer than the other copy takes. Only for tasks safe to repeat. */

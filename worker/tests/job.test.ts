@@ -174,8 +174,14 @@ describe('a fresh job', () => {
       run: { kind: 'command' }, pool: 2, fresh: true,
     });
 
-    // v1 runs one task; asked again, it retires, though tasks wait, and a new vessel takes the next.
-    await finish(open, 'v1');
+    // v1 runs one task, told so (ARMADA_FRESH); asked again, it retires, though tasks wait, and a new vessel takes the
+    // next.
+    const told = await open.claim('v1');
+
+    if (told === null || 'waitMs' in told) throw new Error('v1 got no task');
+    expect(told.env['ARMADA_FRESH']).toBe('1');
+    await open.accept('v1', told.index, 0, { slot: 0, attempt: told.attempt });
+    await open.complete('v1', { ...exited(told.index, 'v1'), attempt: told.attempt }, 1000);
     expect(await open.claim('v1')).toBeNull();
     await finish(open, 'v2');
     expect(await open.claim('v2')).toBeNull();
@@ -192,6 +198,7 @@ describe('a fresh job', () => {
       recipe: {}, items: [0, 1].map((index) => ({ item: { name: `t${String(index)}` }, argv: ['true'] })),
       run: { kind: 'command' }, pool: 2, mode: 'efficient', fresh: true,
     });
+
     const claim = await open.claim('v1');
 
     if (claim === null || 'waitMs' in claim) throw new Error('v1 got no task');
