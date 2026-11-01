@@ -22,6 +22,9 @@ export const PlanSchema = v.object({
     size: v.optional(SizeSchema),
     // The map tasks a judge waits on, by name: it runs once they have all passed, and reads their artifacts (#65).
     after: v.optional(v.array(v.string())),
+    // The entry's task starts in a container no other task ran in (`JobSpec.fresh`): it runs in a fresh job of its
+    // group's own.
+    fresh: v.optional(v.boolean()),
   }, JsonSchema)), v.minLength(1)),
 });
 

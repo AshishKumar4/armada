@@ -228,7 +228,7 @@ export function itemRefusal(item: Json): string | null {
  *  enough to start, a pushed task's carries none, every item fits its `ARMADA_ITEM`, a gang is a whole number of
  *  containers the pool holds, and under a `budget` every run of an item, each of its gang's ranks, spends a whole cost
  *  the budget holds at once. */
-export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], { pool, slots = 1, budget }: { readonly pool: number; readonly slots?: number; readonly budget?: number | undefined }): string | null {
+export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: readonly Task[], { pool, slots = 1, budget, fresh = false }: { readonly pool: number; readonly slots?: number; readonly budget?: number | undefined; readonly fresh?: boolean }): string | null {
   const odd = tasks.findIndex((task) => (task.argv === undefined) === (run.kind === 'command'));
 
   if (odd >= 0) return `item ${String(odd)} ${run.kind === 'command' ? 'has no argv for its command' : 'has an argv, which a pushed task takes none of'}`;
@@ -241,6 +241,8 @@ export function refusal(run: { readonly kind: 'command' | 'task' }, tasks: reado
 
     if (large !== null) return `item ${String(index)} ${large.slice('item '.length)}`;
   }
+
+  if (fresh && slots > 1) return 'a fresh job\'s container runs one task and retires: it holds one slot';
 
   if (slots > 1) {
     const ganged = tasks.findIndex((task) => gangOf(task.item) > 1);
@@ -408,6 +410,11 @@ export const JobSpecSchema = v.object({
   priority: v.optional(v.pipe(v.number(), v.integer()), 0),
   /** A straggling task may be run again by an idle container, first answer kept. Only for tasks safe to repeat. */
   speculative: v.optional(v.boolean(), false),
+  /** Each task (each run of it: a retry, a straggler's or hedge's copy) starts in a container no other task ran in:
+   *  its /tmp, /dev/shm, home and processes as the snapshot left them, and its container retires once the task ends.
+   *  For a task whose result must not depend on what an earlier one left behind (Dew's test records), which its
+   *  environment's ARMADA_FRESH=1 tells it. Its containers pack nothing, whatever `mode`, and hold one slot. */
+  fresh: v.optional(v.boolean(), false),
   /** The job's heaviest tasks, this many, each run twice from the start, first answer kept: a copy that drew a slow
    *  container holds the job up no longer than the other copy takes. Only for tasks safe to repeat. */
   hedge: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 0),
