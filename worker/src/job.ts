@@ -198,7 +198,7 @@ const STANDBY_MS = 60_000;
 
 /** Whether a job packs its tasks into its containers by their measured use: in `efficient` mode, unless it fixed its
  *  slots. */
-const packs = (spec: Pick<Kept, 'mode' | 'slots'>): boolean => spec.mode === 'efficient' && spec.slots === 1;
+const packs = (spec: Pick<Kept, 'mode' | 'slots' | 'fresh'>): boolean => spec.mode === 'efficient' && spec.slots === 1 && !spec.fresh;
 
 /** A gang rank's states before its vessel acknowledged its launch (`started`): its state says so, whichever Worker
  *  stored it. */
@@ -255,6 +255,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const vessels = this.sql.exec<{ name: string }>('PRAGMA table_info(vessels)').toArray().map((column) => column.name);
 
     if (!vessels.includes('boot')) this.sql.exec('ALTER TABLE vessels ADD COLUMN boot TEXT');
+
+    // Whether the vessel was ever handed a run (`ran`), which a fresh job's vessel takes once.
+    if (!vessels.includes('handed')) this.sql.exec('ALTER TABLE vessels ADD COLUMN handed INTEGER');
 
     // The widest gang the fleet holds room for while it holds the vessel (`VesselSpec.reserve`); null for an earlier
     // Worker's vessel, which takes any.
@@ -700,6 +703,12 @@ export class ArmadaJob extends DurableObject<Env> {
     return this.sql.exec(`UPDATE vessels SET state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, state, Date.now(), name).toArray().length > 0;
   }
 
+  /** Whether vessel `name` was ever handed a run (`claim`): a task's, a straggler's or hedge's copy, or a gang's rank,
+   *  ended or not. */
+  private ran(name: string): boolean {
+    return this.sql.exec<{ handed: number | null }>('SELECT handed FROM vessels WHERE name = ?', name).toArray()[0]?.handed === 1;
+  }
+
   /** Whether `name` still has a task assigned: a slotted vessel claims its next while the others run, so an empty
    *  queue retires it only once nothing of its runs. */
   private busy(name: string): boolean {
@@ -715,6 +724,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (claimed === null || 'waitMs' in claimed) return claimed;
     this.runs.began({ vessel: name, slot, index: claimed.index, attempt: claimed.attempt }, Date.now());
+    this.sql.exec('UPDATE vessels SET handed = 1 WHERE name = ?', name);
 
     if (claimed.duplicate) this.placement.copied(claimed.index, claimed.attempt);
 
@@ -755,6 +765,14 @@ export class ArmadaJob extends DurableObject<Env> {
     const abandoned = this.unfinished(name, slot)[0];
 
     if (abandoned !== undefined) throw new Error(`slot ${String(slot)} asked for another task before task ${String(abandoned.idx)} attempt ${String(abandoned.attempts)} ended`);
+    // A fresh job's vessel runs one task and retires (`JobSpec.fresh`): one handed a run takes no other, so every run
+    // starts in a container no other run touched. (One slot: it asks only once its run ended.)
+    if (spec.fresh && this.ran(name)) {
+      if (!this.busy(name)) this.beat(name, 'done');
+
+      return null;
+    }
+
     this.beat(name, 'working');
     // A vessel that claimed is no longer standing by for a straggler.
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);

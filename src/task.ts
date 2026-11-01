@@ -255,6 +255,8 @@ export interface TaskConfig<I, R, Out extends Output | undefined, Id = string, S
   readonly timeout?: number | null;
   /** Lets an idle container run a straggler again, the first answer kept. Only for tasks safe to repeat. */
   readonly speculative?: boolean;
+  /** Starts each task in a container no other task ran in, which retires once its task ends (`JobSpec.fresh`). */
+  readonly fresh?: boolean;
   /** Runs this many of a job's heaviest tasks twice from the start, the first answer kept. Only for tasks safe to repeat. */
   readonly hedge?: number;
   /** Runs a task again when it fails one of the named ways: an exit code, or an error its body threw, by name. */
@@ -290,7 +292,7 @@ export function task(config: Config): Task<Json, Answer<unknown, Output | undefi
 }
 
 /** A job's options of the task itself. */
-type TaskOptions = Pick<TaskConfig<never, never, undefined>, 'timeout' | 'speculative' | 'hedge' | 'retries' | 'secrets' | 'cache'>;
+type TaskOptions = Pick<TaskConfig<never, never, undefined>, 'timeout' | 'speculative' | 'fresh' | 'hedge' | 'retries' | 'secrets' | 'cache'>;
 
 /** A body's own answer, as its envelope brings it back or `.local` has it: JSON, or bytes. */
 type Delivered = { readonly value: Json } | { readonly bytes: Uint8Array };
@@ -432,7 +434,7 @@ abstract class Base<I extends Json, O> {
     const spec = {
       recipe: environment, commit, run, output, pool: options.pool, slots: options.slots, budget: options.budget, mode: options.mode, cpu: options.cpu === undefined ? undefined : [options.cpu].flat(), label: options.label, env: options.env, files: options.files, inputs: options.inputs === undefined ? undefined : [...options.inputs], tmpfs: options.tmpfs === undefined ? undefined : [...options.tmpfs],
       deadline: options.deadline, gangStartTimeout: options.gangStartTimeout, lease: options.lease, priority: options.priority,
-      timeout: this.options.timeout, speculative: this.options.speculative, hedge: this.options.hedge, retries: this.options.retries,
+      timeout: this.options.timeout, speculative: this.options.speculative, fresh: this.options.fresh, hedge: this.options.hedge, retries: this.options.retries,
       secrets: this.options.secrets === undefined ? undefined : [...this.options.secrets], cache: this.options.cache,
     };
 

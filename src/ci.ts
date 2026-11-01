@@ -656,9 +656,10 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   // The tasks first, then the judges; of each, the project's environment first, then each named one in the plan's order,
   // each size smallest first, by their entries' plan indexes: each runs in a task job of its own (#31, #64, #65).
-  const groups = [false, true].flatMap((judging) => [undefined, ...named].flatMap((name) => SIZE_NAMES.map((size) => ({
-    name, size, judging, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && entry.environment === name && sizes[index] === size ? [index] : []),
-  })))).filter((group) => group.indexes.length > 0);
+  // Entries marked fresh run in fresh jobs of their own (`JobSpec.fresh`), beside the rest.
+  const groups = [false, true].flatMap((judging) => [undefined, ...named].flatMap((name) => SIZE_NAMES.flatMap((size) => [false, true].map((fresh) => ({
+    name, size, judging, fresh, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
+  }))))).filter((group) => group.indexes.length > 0);
 
   // How a group is said: its environment's name, and its size where that is not the run's.
   const labelOf = ({ name, size }: { readonly name: string | undefined; readonly size: Size }): string => [name, size === base ? undefined : size].filter((word) => word !== undefined).join(', ');
@@ -727,11 +728,13 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   /** Group `at`'s task job of its plan indexes `indexes`, started on `share` containers within `within` seconds of the
    *  run's deadline, which bound its tasks' timeout; a judges' job with the map tasks' artifacts it reads (`more`). */
   const start = ({ at, indexes }: { readonly at: number; readonly indexes: readonly number[] }, share: number, within: number, more: { readonly inputs?: readonly string[]; readonly files?: Readonly<Record<string, string>> } = {}) => {
-    const group = { ...groups[at] ?? { name: undefined, size: base, judging: false }, indexes };
+    const group = { ...groups[at] ?? { name: undefined, size: base, judging: false, fresh: false }, indexes };
     const own = owns[at] ?? { environment, spec };
     const groupRanks = group.indexes.map((index) => ranks[index] ?? 1);
-    const most = Math.min(share * slots, groupRanks.reduce((sum, each) => sum + each, 0));
-    const { lanes, pool } = lanesFor(group.indexes.map((index) => estimates[index]), groupRanks, share, slots);
+    // A fresh job's container holds one slot (`JobSpec.fresh`).
+    const held = group.fresh ? 1 : slots;
+    const most = Math.min(share * held, groupRanks.reduce((sum, each) => sum + each, 0));
+    const { lanes, pool } = lanesFor(group.indexes.map((index) => estimates[index]), groupRanks, share, held);
     const local = argvOf(config.task.command.map(placed), own.spec.recipe);
     // A task's `{index}` is its plan index, as in a run of one environment, not its place in its environment's job.
     const argv = (item: Json, { index }: { readonly index: number }) => local(item, { index: group.indexes[index] ?? index });
@@ -744,8 +747,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       return entry.weight === undefined && estimate !== undefined ? { ...entry, weight: estimate } : entry;
     });
 
-    const taskOptions = { timeout: Math.min(config.task.timeout ?? within, within), speculative: config.task.speculative, hedge: config.task.hedge, secrets: taskSecrets };
-    const jobOptions = { ...options, deadline: within, pool, cpu: config.task.cpu, inputs: more.inputs, files: { ...options.files, ...more.files } };
+    const taskOptions = { timeout: Math.min(config.task.timeout ?? within, within), speculative: config.task.speculative, fresh: group.fresh, hedge: config.task.hedge, secrets: taskSecrets };
+    const jobOptions = { ...options, slots: held, deadline: within, pool, cpu: config.task.cpu, inputs: more.inputs, files: { ...options.files, ...more.files } };
     const job = config.task.verdict ? commandTask(own.spec.recipe, argv, { ...taskOptions, output: 'text' }).stream(entries, jobOptions) : commandTask(own.spec.recipe, argv, taskOptions).stream(entries, jobOptions);
 
     return { ...group, job, lanes, most, pool, tasks: entries.length };

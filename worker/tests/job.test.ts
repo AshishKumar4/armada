@@ -167,6 +167,40 @@ describe('the claim order', () => {
   });
 });
 
+describe('a fresh job', () => {
+  test('hands each container one task, retires it once that task ends, and starts another for the next', async () => {
+    const { job: open, begun } = await job({
+      recipe: {}, items: [0, 1, 2].map((index) => ({ item: { name: `t${String(index)}` }, argv: ['true'] })),
+      run: { kind: 'command' }, pool: 2, fresh: true,
+    });
+
+    // v1 runs one task; asked again, it retires, though tasks wait, and a new vessel takes the next.
+    await finish(open, 'v1');
+    expect(await open.claim('v1')).toBeNull();
+    await finish(open, 'v2');
+    expect(await open.claim('v2')).toBeNull();
+    await open.alarm();
+    const fresh = begun.filter((name) => name !== 'v1' && name !== 'v2').at(-1);
+
+    if (fresh === undefined) throw new Error('no vessel started for the third task');
+    await finish(open, fresh);
+    expect(await open.claim(fresh)).toBeNull();
+  });
+
+  test('packs nothing beside a task, whatever its mode, and refuses slots', async () => {
+    const { job: open } = await job({
+      recipe: {}, items: [0, 1].map((index) => ({ item: { name: `t${String(index)}` }, argv: ['true'] })),
+      run: { kind: 'command' }, pool: 2, mode: 'efficient', fresh: true,
+    });
+    const claim = await open.claim('v1');
+
+    if (claim === null || 'waitMs' in claim) throw new Error('v1 got no task');
+    // A second slot of the same container gets nothing while its task runs, and nothing after it.
+    expect(await open.claim('v1', 1)).toBeNull();
+    expect(refusal({ kind: 'command' }, [{ item: 1, argv: ['true'] }], { pool: 1, slots: 2, fresh: true })).toContain('one slot');
+  });
+});
+
 describe('a job with no deadline', () => {
   test('runs on past six hours while its client renews its lease, its vessels told of no limit, and ends once the client is gone', async () => {
     const task = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const }, lease: true };
