@@ -744,13 +744,12 @@ export class ArmadaJob extends DurableObject<Env> {
 
     this.token ??= statusToken(this.env.ARMADA_TOKEN, id);
 
-    const own: Record<string, string> = {
+    const own = {
       ...await this.ctx.storage.get<Record<string, string>>('env'), ...await this.secrets(spec),
       ARMADA_JOB_ID: id, ARMADA_VESSEL: name, ARMADA_STATUS_URL: `${origin}/status/${id}`, ARMADA_STATUS_TOKEN: await this.token,
+      // 1 where the task runs in a container no other task ran in, and may rely on it (`JobSpec.fresh`); else 0.
+      ARMADA_FRESH: spec.fresh ? '1' : '0',
     };
-
-    // A fresh job's task runs in a container no other task ran in, and may rely on it (`JobSpec.fresh`).
-    if (spec.fresh) own['ARMADA_FRESH'] = '1';
 
     const env = spec.deployToken ? { ...own, ARMADA_TOKEN: this.env.ARMADA_TOKEN } : own;
 
