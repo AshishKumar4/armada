@@ -938,6 +938,13 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
     if ('refused' in second) return second;
 
+    // A second judgement is the judge's answer, so one that still asks has none: what it asked for already ran for it.
+    for (const index of asking) {
+      const still = unjudged.has(index) ? [] : (verdicts.get(index) ?? []).filter((row) => row.more === true);
+
+      if (still.length > 0) unjudged.set(index, `its second judgement still asks for more, past its last map tasks: ${still.map(rowName).join(', ')}`);
+    }
+
     return { landed: [...landed, ...second.landed] };
   });
 
