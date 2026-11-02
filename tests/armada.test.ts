@@ -1468,7 +1468,9 @@ describe('armada run', () => {
       ...Array.from({ length: MAX_INPUT_JOBS + 1 }, (_, at) => [5 + at, [`j${String(at)}/0`]] as const),
     ]);
     const read = (index: number) => reads.get(index) ?? [];
+
     const chunks = judgeChunks([...reads.keys()], read);
+
     const within = (chunk: readonly number[]) => {
       const taken = new Set(chunk.flatMap(read));
 
