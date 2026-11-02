@@ -1470,7 +1470,8 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, jobs, rows: rows.map(({ name, exitCode }) => [name, exitCode]), why: rows.find(({ name }) => name === 'k')?.output, recorded }).toEqual({
       exit: 1, recorded: { a: 1, b: 1, plain: 1, j: 1 },
-      jobs: [{ items: ['a', 'b', 'c', 'plain'], inputs: undefined, after: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks/1'], after: { j: ['/armada/inputs/tasks/0', '/armada/inputs/tasks/1'] } }],
+      jobs: [{ items: ['plain'], inputs: undefined, after: undefined }, { items: ['a', 'b', 'c'], inputs: undefined, after: undefined },
+        { items: ['j'], inputs: ['tasks-2/0', 'tasks-2/1'], after: { j: ['/armada/inputs/tasks-2/0', '/armada/inputs/tasks-2/1'] } }],
       rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
     });
   });
@@ -1510,8 +1511,8 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, jobs, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({
       exit: 0,
-      jobs: [{ items: ['a', 'c', 'plain'], inputs: undefined }, { items: ['j', 'k'], inputs: ['tasks/0', 'tasks/1'] },
-        { items: ['b'], inputs: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks-3/0'] }],
+      jobs: [{ items: ['plain'], inputs: undefined }, { items: ['a', 'c'], inputs: undefined }, { items: ['j', 'k'], inputs: ['tasks-2/0', 'tasks-2/1'] },
+        { items: ['b'], inputs: undefined }, { items: ['j'], inputs: ['tasks-2/0', 'tasks-4/0'] }],
       rows: [['plain', 0], ['j', 0], ['k', 0]],
     });
   });
@@ -1584,6 +1585,31 @@ describe('armada run', () => {
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
 
     expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({ exit: 0, rows: [['slow', 0], ['j', 0]] });
+  }, 30_000);
+
+  // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
+  test('a judges\' job begun beside the first wave\'s tail takes the pool\'s rest', async () => {
+    const maps = ['a', 'c', 'e', 'g'];
+    const plan: Json = { include: [...maps.map((name) => ({ name })), { name: 'slow1' }, { name: 'slow2' }, { name: 'slow3' }, ...['j', 'k', 'l', 'm'].map((name, at) => ({ name, after: [maps[at] ?? ''] }))] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // The slow tasks run until the judges' job exists.
+    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item).startsWith('slow') && !created.some((items) => items.some((each) => nameOf(each) === 'j'));
+    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
+    const ran = await run(['--json', '--deadline=10', '--pool=4'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws, draws, draws] });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    const pools = Object.fromEntries(ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), pool: v.number() }), body))
+      .map(({ items, pool }) => [items.map(({ item }) => nameOf(item)).join(' '), pool]));
+    const slow = pools['slow1 slow2 slow3'] ?? 0;
+    const judging = pools['j k l m'] ?? 0;
+
+    expect({ exit: ran.exit, held: slow + judging <= 4, judging: judging > 0 }).toEqual({ exit: 0, held: true, judging: true });
   }, 30_000);
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
