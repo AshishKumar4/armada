@@ -28,6 +28,9 @@ const TIMINGS_FILE = 'timings.json';
 /** The file under `{files}` where each judge of a judges' job finds the map tasks' artifacts it reads, by its name (#65). */
 const AFTER_FILE = 'after.json';
 
+/** The tasks' archives a run fetches at once, once its jobs have ended. */
+const ARCHIVES_AT_ONCE = 16;
+
 /** A plan run on this machine: the checkout and commit it runs in, its command, the run's target and timings, and the
  *  config's env. */
 interface LocalPlan {
@@ -162,6 +165,21 @@ export function argvOf(template: readonly string[], recipe: Recipe): (item: Json
   const fixed = { out: OUT_PATH, files: FILES_DIR, inputs: INPUTS_DIR, artifacts: ARTIFACTS_PATH, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
 
   return (item, { index }) => template.map((word) => fill(word, { ...itemValues(item, index), ...fixed }));
+}
+
+/** `work` over each of `items`, at most `most` at once: its answers, in `items`' order. */
+async function atOnce<I, A>(items: readonly I[], most: number, work: (item: I) => Promise<A>): Promise<A[]> {
+  const answers: A[] = [];
+  // One queue every lane takes its next item from.
+  const queue = items.entries();
+
+  const lane = async (): Promise<void> => {
+    for (const [at, item] of queue) answers[at] = await work(item);
+  };
+
+  await Promise.all(Array.from({ length: Math.min(most, items.length) }, lane));
+
+  return answers;
 }
 
 /** How a followed job is said: each task's name, the words for its outcome, and where each line goes. */
@@ -760,12 +778,9 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   const verdicts = new Map<number, VerdictRow[] | null>();
   // The tasks that reported rows of their own: an entry that names none owns those, whatever their names (`keep`).
   const wrote = new Set<number>();
-  // Each task's artifacts beside the report, under the task's plan index and name, since two tasks may share a name; a
-  // row names one as its evidence.
-  const kept = new Map<number, { readonly dir: string; readonly paths: ReadonlySet<string> }>();
 
-  /** A started job followed to its end: its results, by their plan indexes, and its tasks' artifacts kept. */
-  const followed = async ({ job, id, indexes }: { readonly job: Job<Json, string | null>; readonly id: string; readonly indexes: readonly number[] }) => {
+  /** A started job followed to its end: its results, by their plan indexes. */
+  const followed = async ({ job, indexes }: { readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }) => {
     const indexOf = (local: number): number => indexes[local] ?? local;
 
     const say = async (result: Result<Json, string | null>): Promise<string> => {
@@ -790,17 +805,6 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     };
 
     const results = await follow(job, began, { name: (local) => nameOf(indexOf(local)), say, note });
-
-    for (const result of results) {
-      if (result.kind === 'lost' || result.kind === 'cancelled' || result.meta.artifacts !== true) continue;
-      const archive = await job.artifacts(result.index);
-
-      if (archive === null) continue;
-      const index = indexOf(result.index);
-      const dir = join(REPORTS, `${config.name}-${id}`, `${String(index)}-${nameOf(index)}`);
-
-      kept.set(index, { dir, paths: new Set(extractTar(archive, dir)) });
-    }
 
     return results.map((result) => ({ ...result, index: indexOf(result.index) }));
   };
@@ -893,6 +897,27 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   if ('refused' in tasked) return await ungraded(`a task job did not start, so the run's task jobs were cancelled: ${tasked.refused}`);
   const results = tasked.landed;
+  const resultOf = new Map(results.map((result) => [result.index, result]));
+
+  // Each task's artifacts beside the report, under the task's plan index and name, since two tasks may share a name; a
+  // row names one as its evidence. Fetched once every job has ended, ARCHIVES_AT_ONCE at a time: a judges' job takes
+  // its map tasks' artifacts from the runner (`inputs`), so none waits on these (fetched one at a time before the
+  // judges' job, Dew's train 459 held it 2 minutes for 284 archives).
+  const archived = jobs.flatMap(({ job, id, indexes }) => indexes.flatMap((index, local) => {
+    const result = resultOf.get(index);
+
+    return result === undefined || result.kind === 'lost' || result.kind === 'cancelled' || result.meta.artifacts !== true ? [] : [{ job, id, index, local }];
+  }));
+
+  // Each archive extracted as it arrives, so no more than ARCHIVES_AT_ONCE are held in memory at once.
+  const extracted = await atOnce(archived, ARCHIVES_AT_ONCE, async ({ job, id, index, local }) => {
+    const archive = await job.artifacts(local);
+    const dir = join(REPORTS, `${config.name}-${id}`, `${String(index)}-${nameOf(index)}`);
+
+    return archive === null ? [] : [[index, { dir, paths: new Set(extractTar(archive, dir)) }] as const];
+  });
+
+  const kept = new Map(extracted.flat());
 
   const statuses = await Promise.all(jobs.map(async ({ job }) => await job.status()));
   const [first] = jobs;

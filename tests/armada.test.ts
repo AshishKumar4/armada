@@ -1024,6 +1024,8 @@ interface Runner {
   readonly timingsRefused?: boolean;
   /** What a task of this item used, which its outcome says. */
   readonly usage?: (item: Json) => { readonly cpuSeconds: number; readonly peakMemory: number };
+  /** How long each task's artifacts archive takes to answer. */
+  readonly archiveMs?: number;
 }
 
 /** The host most containers ran on (2026-10-13). */
@@ -1033,7 +1035,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage, archiveMs = 0 } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -1044,6 +1046,9 @@ describe('armada run', () => {
     const cancelled: string[] = [];
     // Each task job's items, by its id: the first is `tasks`, the next `tasks-2` and on.
     const tasked = new Map<string, Json[]>();
+    // In order, each task job's creation and each archive asked for, and the most archives asked for at once.
+    const order: string[] = [];
+    const archiving = { now: 0, most: 0 };
     const outcome = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: true, host: ZEN4 };
 
     /** What job `id` lands, the one description its events and its status both read: each task's exit code. The plan
@@ -1099,6 +1104,7 @@ describe('armada run', () => {
           const id = tasked.size === 0 ? 'tasks' : `tasks-${String(tasked.size + 1)}`;
 
           tasked.set(id, items.map(({ item }) => item));
+          order.push(`job ${id}`);
 
           return Response.json({ id });
         }
@@ -1128,7 +1134,15 @@ describe('armada run', () => {
 
         const archive = /^\/jobs\/[^/]+\/tasks\/(\d+)\/artifacts$/u.exec(pathname)?.[1];
 
-        if (archive !== undefined) return new Response(artifacts?.[Number(archive)]);
+        if (archive !== undefined) {
+          order.push(`archive ${job}`);
+          archiving.now += 1;
+          archiving.most = Math.max(archiving.most, archiving.now);
+          await Bun.sleep(archiveMs);
+          archiving.now -= 1;
+
+          return new Response(artifacts?.[Number(archive)]);
+        }
 
         if (pathname === '/jobs/plan/tasks/0/output') {
           if (planDelayMs > 0) await Bun.sleep(planDelayMs);
@@ -1173,7 +1187,7 @@ describe('armada run', () => {
       const directories = report === '' ? {} : v.parse(v.looseObject({ artifacts: v.optional(v.record(v.string(), v.string()), {}) }), JSON.parse(report)).artifacts;
       const evidence = Object.fromEntries(Object.entries(directories).map(([index, dir]) => [index, { dir, files: Object.fromEntries(readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), 'utf8')])) }]));
 
-      return { exit, stdout, stderr, commands, bodies, timed, seen, cancelled, report, evidence };
+      return { exit, stdout, stderr, commands, bodies, timed, seen, cancelled, report, evidence, order, archiving };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -1442,6 +1456,28 @@ describe('armada run', () => {
       jobs: [{ items: ['a', 'b', 'c', 'plain'], inputs: undefined, after: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks/1'], after: { j: ['/armada/inputs/tasks/0', '/armada/inputs/tasks/1'] } }],
       rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
     });
+  });
+
+  // Dew's train 459: the run fetched 284 tasks' archives one at a time before its judges' job, two minutes the judges
+  // waited on for nothing, as a judges' job takes its map tasks' artifacts from the runner.
+  test('a judges\' job starts before any archive is fetched, and the archives come several at once, at most 16, each kept as its task\'s', async () => {
+    const maps = Array.from({ length: 20 }, (_, at) => `m${String(at)}`);
+    const plan: Json = { include: [...maps.map((name) => ({ name })), { name: 'plain' }, { name: 'j', after: maps }] };
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    const archives = maps.map((name) => {
+      writeFileSync(join(drawn, 'draws.json'), JSON.stringify(name));
+
+      return Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+    });
+
+    const ran = await run([], plan, {}, { taskConfig: { verdict: false }, exitOf: () => 0, artifacts: [...archives, archives[0] ?? new Uint8Array()], archiveMs: 20 });
+
+    rmSync(drawn, { recursive: true, force: true });
+    const kept = Object.fromEntries(Object.entries(ran.evidence).map(([index, { files }]) => [index, files['draws.json']]));
+
+    expect({ exit: ran.exit, judged: ran.order.indexOf('job tasks-2') < ran.order.indexOf('archive tasks'), atOnce: ran.archiving.most > 1 && ran.archiving.most <= 16, kept: kept['7'] })
+      .toEqual({ exit: 0, judged: true, atOnce: true, kept: JSON.stringify('m7') });
   });
 
   test('a CI deadline passed before the task jobs could start leaves the run ungraded, with its report and its --json object (#37)', async () => {
