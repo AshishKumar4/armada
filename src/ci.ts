@@ -909,14 +909,15 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     return result === undefined || result.kind === 'lost' || result.kind === 'cancelled' || result.meta.artifacts !== true ? [] : [{ job, id, index, local }];
   }));
 
-  const archives = await atOnce(archived, ARCHIVES_AT_ONCE, async ({ job, local }) => await job.artifacts(local));
-
-  const kept = new Map(archived.flatMap(({ id, index }, at) => {
-    const archive = archives[at];
+  // Each archive extracted as it arrives, so no more than ARCHIVES_AT_ONCE are held in memory at once.
+  const extracted = await atOnce(archived, ARCHIVES_AT_ONCE, async ({ job, id, index, local }) => {
+    const archive = await job.artifacts(local);
     const dir = join(REPORTS, `${config.name}-${id}`, `${String(index)}-${nameOf(index)}`);
 
-    return archive === null || archive === undefined ? [] : [[index, { dir, paths: new Set(extractTar(archive, dir)) }] as const];
-  }));
+    return archive === null ? [] : [[index, { dir, paths: new Set(extractTar(archive, dir)) }] as const];
+  });
+
+  const kept = new Map(extracted.flat());
 
   const statuses = await Promise.all(jobs.map(async ({ job }) => await job.status()));
   const [first] = jobs;
