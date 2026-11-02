@@ -1007,6 +1007,10 @@ interface Runner {
   readonly files?: Readonly<Record<string, string>>;
   /** Each task job then lands every one of its tasks, exiting with this for its item. */
   readonly exitOf?: (item: Json) => number;
+  /** The verdict each task of this item writes in the job of this id, read as its output. */
+  readonly verdictOf?: (item: Json, job: string) => Json;
+  /** Whether the task of this item in the job of this id is lost, its container gone quiet, rather than exited. */
+  readonly lostOf?: (item: Json, job: string) => boolean;
   /** How a task job's task of this item ended beside others before it landed alone; undefined for one that did not. */
   readonly aloneOf?: (item: Json) => string | undefined;
   /** The base the runner resolves the environment's pack against, by how many times it was asked before: the root
@@ -1035,7 +1039,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage, archiveMs = 0 } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, verdictOf, lostOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage, archiveMs = 0 } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -1123,7 +1127,8 @@ describe('armada run', () => {
             events: exitsOf(job).map((exitCode, index) => {
               const item = items[index];
               const used = item === undefined ? undefined : usage?.(item);
-              const landed = { ...outcome, index, exitCode, artifacts: archives, ...used };
+              const exited = { ...outcome, index, exitCode, artifacts: archives, ...used };
+              const landed = item !== undefined && lostOf?.(item, job) === true ? { ...exited, kind: 'failed', reason: 'lost', exitCode: -1, tail: 'the container went quiet', output: false } : exited;
               const aloneAfter = item === undefined ? undefined : aloneOf?.(item);
 
               return { seq: index + 1, outcome: aloneAfter === undefined ? landed : { ...landed, aloneAfter } };
@@ -1149,6 +1154,11 @@ describe('armada run', () => {
 
           return new Response(JSON.stringify(plan));
         }
+
+        const output = /^\/jobs\/([^/]+)\/tasks\/(\d+)\/output$/u.exec(pathname);
+        const outputItem = output === null ? undefined : tasked.get(output[1] ?? '')?.[Number(output[2])];
+
+        if (verdictOf !== undefined && output !== null && outputItem !== undefined) return new Response(JSON.stringify(verdictOf(outputItem, output[1] ?? '')));
 
         if (pathname === '/jobs/tasks/tasks/0/output') return new Response(JSON.stringify(verdict));
 
@@ -1456,6 +1466,94 @@ describe('armada run', () => {
       jobs: [{ items: ['a', 'b', 'c', 'plain'], inputs: undefined, after: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks/1'], after: { j: ['/armada/inputs/tasks/0', '/armada/inputs/tasks/1'] } }],
       rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
     });
+  });
+
+  // Dew's check-1 sites, 2026-11-02: a site's second-stage draws were drawn every run, and read only by a judge whose
+  // first stage found something, 327 of its 407 map tasks a Python drawn for nothing.
+  test('a judge\'s later map tasks run only where its first judgement asks for them, and it judges again over them all', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b', later: true }, { name: 'c' }, { name: 'd', later: true }, { name: 'plain' }, { name: 'j', after: ['a', 'b'] }, { name: 'k', after: ['c', 'd'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+    // j's first judgement asks for its later draws; k's passes on its first.
+    const judged = new Set<string>();
+
+    const verdictOf = (item: Json): Json => {
+      const name = nameOf(item);
+      const again = judged.has(name);
+      const row: Json = name === 'j' && !again ? { name, exitCode: 1, more: true, output: 'its second stage' } : { name, exitCode: 0 };
+
+      judged.add(name);
+
+      return { rows: [row] };
+    };
+
+    const ran = await run(['--json'], plan, {}, { exitOf: (item) => nameOf(item) === 'j' && !judged.has('j') ? 1 : 0, verdictOf, artifacts: Array.from({ length: 5 }, () => draws) });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    const jobs = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())) }), body))
+      .filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
+      .map(({ items, inputs }) => ({ items: items.map(({ item }) => nameOf(item)), inputs }));
+
+    if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, jobs, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({
+      exit: 0,
+      jobs: [{ items: ['a', 'c', 'plain'], inputs: undefined }, { items: ['j', 'k'], inputs: ['tasks/0', 'tasks/1'] },
+        { items: ['b'], inputs: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks-3/0'] }],
+      rows: [['plain', 0], ['j', 0], ['k', 0]],
+    });
+  });
+
+  // A judge's second judgement is its answer, so one that still asks has none: its later map tasks already ran for it.
+  test('a judge whose second judgement still asks for more is red, saying so, whatever its rows\' exits', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b', later: true }, { name: 'j', after: ['a', 'b'] }, { name: 'k', after: [] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // j asks both times, its second row green; k, with no later map task, asks both times too.
+    const verdictOf = (item: Json): Json => {
+      const name = nameOf(item);
+
+      return { rows: [{ name, exitCode: 0, more: name === 'j' || name === 'k', output: 'its second stage' }] };
+    };
+
+    const ran = await run(['--json'], plan, {}, { exitOf: () => 0, verdictOf, artifacts: Array.from({ length: 2 }, () => draws) });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.optional(v.string()) })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode, output }) => [name, exitCode, output?.includes('still asks') ?? false]) }).toEqual({
+      exit: 1,
+      rows: [['j', 1, true], ['k', 1, true]],
+    });
+  });
+
+  // A judge's first judgement is no answer once it asked for more: a second that never landed leaves the run ungraded.
+  test('a judge whose second judgement is lost leaves the run ungraded, its first judgement\'s ask no answer', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b', later: true }, { name: 'j', after: ['a', 'b'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // j's first judgement, the second task job, asks for b; its second, the fourth, is lost.
+    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 1, more: true, output: 'its second stage' }] });
+    const ran = await run([], plan, {}, { exitOf: () => 0, verdictOf, lostOf: (item, job) => nameOf(item) === 'j' && job === 'tasks-4', artifacts: Array.from({ length: 2 }, () => draws) });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    expect({ exit: ran.exit, graded: reportOf(ran.report).graded }).toEqual({ exit: 2, graded: 'not graded' });
   });
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and

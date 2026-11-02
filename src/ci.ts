@@ -658,6 +658,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // A judge waits on the map tasks its entry names (`after`), runs once they have all passed, and reads their artifacts.
   // It alone is graded: the map tasks count only as its inputs (#65).
   const judges = new Set(plan.include.flatMap((entry, index) => entry.after === undefined ? [] : [index]));
+  // The map tasks run only where their judge asks for them (`later`).
+  const later = new Set(plan.include.flatMap((entry, index) => entry.later === true && !judges.has(index) ? [index] : []));
   const mapsOf = plan.include.map((entry) => (entry.after ?? []).flatMap((name) => names.flatMap((each, index) => each === name && !judges.has(index) ? [index] : [])));
   const waiting = plan.include.flatMap((entry, index) => (entry.after ?? []).filter((name) => !names.some((each, at) => each === name && !judges.has(at))).map((name) => `${nameOf(index)} on ${name}`));
 
@@ -675,9 +677,10 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // The tasks first, then the judges; of each, the project's environment first, then each named one in the plan's order,
   // each size smallest first, by their entries' plan indexes: each runs in a task job of its own (#31, #64, #65).
   // Entries marked fresh run in fresh jobs of their own (`JobSpec.fresh`), beside the rest.
-  const groups = [false, true].flatMap((judging) => [undefined, ...named].flatMap((name) => SIZE_NAMES.flatMap((size) => [false, true].map((fresh) => ({
-    name, size, judging, fresh, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
-  }))))).filter((group) => group.indexes.length > 0);
+  // Later map tasks are groups of their own, which run only as far as their judges ask for them.
+  const groups = [false, true].flatMap((judging) => (judging ? [false] : [false, true]).flatMap((asked) => [undefined, ...named].flatMap((name) => SIZE_NAMES.flatMap((size) => [false, true].map((fresh) => ({
+    name, size, judging, later: asked, fresh, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && later.has(index) === asked && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
+  })))))).filter((group) => group.indexes.length > 0);
 
   // How a group is said: its environment's name, and its size where that is not the run's.
   const labelOf = ({ name, size }: { readonly name: string | undefined; readonly size: Size }): string => [name, size === base ? undefined : size].filter((word) => word !== undefined).join(', ');
@@ -730,7 +733,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   // Each wave's jobs, one for each environment and size, run at once, so none of them waits on another's end, deadline or
   // cancel.
-  for (const wave of [false, true].map((judging) => groups.filter((group) => group.judging === judging))) {
+  for (const wave of [groups.filter((group) => !group.judging && !group.later), groups.filter((group) => group.judging), groups.filter((group) => group.later)]) {
     const shares = sharesOf(wave);
 
     if ('need' in shares) {
@@ -746,7 +749,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   /** Group `at`'s task job of its plan indexes `indexes`, started on `share` containers within `within` seconds of the
    *  run's deadline, which bound its tasks' timeout; a judges' job with the map tasks' artifacts it reads (`more`). */
   const start = ({ at, indexes }: { readonly at: number; readonly indexes: readonly number[] }, share: number, within: number, more: { readonly inputs?: readonly string[]; readonly files?: Readonly<Record<string, string>> } = {}) => {
-    const group = { ...groups[at] ?? { name: undefined, size: base, judging: false, fresh: false }, indexes };
+    const group = { ...groups[at] ?? { name: undefined, size: base, judging: false, later: false, fresh: false }, indexes };
     const own = owns[at] ?? { environment, spec };
     const groupRanks = group.indexes.map((index) => ranks[index] ?? 1);
     // A fresh job's container holds one slot (`JobSpec.fresh`).
@@ -854,50 +857,103 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   const unjudged = new Map<number, string>();
 
   const tasked = await cancelOnInterrupt(started, async () => {
-    const mapped = await wave(groups.flatMap((group, at) => group.judging ? [] : [{ at, indexes: group.indexes }]), left);
+    const mapped = await wave(groups.flatMap((group, at) => group.judging || group.later ? [] : [{ at, indexes: group.indexes }]), left);
 
     if ('refused' in mapped || judges.size === 0) return mapped;
-    // Each map task's run, as a judge's inputs name it: its job, and its place in that job.
-    const runOf = new Map(jobs.flatMap(({ id, indexes }) => indexes.map((index, local) => [index, `${id}/${String(local)}`] as const)));
-    const resultOf = new Map(mapped.landed.map((result) => [result.index, result]));
+    let landed = mapped.landed;
 
-    for (const index of judges) {
-      const failed = (mapsOf[index] ?? []).flatMap((map) => {
-        const result = resultOf.get(map);
+    /** `asked` judges (all where undefined) judged over their map tasks that ran, those of `maps` in `among` (its first
+     *  judgement its map tasks but the later ones, its second all of them): each judges' job takes the artifacts its
+     *  judges read, and names where each judge finds its own; a judge whose map tasks did not all pass fails, saying
+     *  which. A group whose judges together read more runs or jobs than one job takes (MAX_INPUT_RUNS, MAX_INPUT_JOBS) is
+     *  cut into several judges' jobs in its order, each within them, all in the one wave (Dew's base/kernels,
+     *  2026-11-02: 1,050 map tasks); a judge that alone reads more is a job of its own, which its creation refuses by
+     *  name. */
+    const judgedOver = async (asked: ReadonlySet<number> | undefined, among: (map: number) => boolean) => {
+      // Each map task's run, as a judge's inputs name it: its job, and its place in that job.
+      const runOf = new Map(jobs.flatMap(({ id, indexes }) => indexes.map((index, local) => [index, `${id}/${String(local)}`] as const)));
+      const resultOf = new Map(landed.map((result) => [result.index, result]));
+      const mine = (index: number) => (mapsOf[index] ?? []).filter(among);
 
-        return result?.kind === 'ok' ? [] : [`${nameOf(map)} ${result === undefined ? 'never ran' : exitWord(result)}`];
+      for (const index of judges) {
+        if (asked !== undefined && !asked.has(index)) continue;
+
+        const failed = mine(index).flatMap((map) => {
+          const result = resultOf.get(map);
+
+          return result?.kind === 'ok' ? [] : [`${nameOf(map)} ${result === undefined ? 'never ran' : exitWord(result)}`];
+        });
+
+        if (failed.length > 0) unjudged.set(index, `its map tasks did not all pass: ${failed.join(', ')}`);
+      }
+
+      const read = (index: number) => mine(index).flatMap((map) => {
+        const run = runOf.get(map);
+
+        return run === undefined || resultOf.get(map)?.meta.artifacts !== true ? [] : [run];
       });
 
-      if (failed.length > 0) unjudged.set(index, `its map tasks did not all pass: ${failed.join(', ')}`);
+      const judging = groups.flatMap((group, at) => (group.judging ? judgeChunks(group.indexes.filter((index) => !unjudged.has(index) && (asked?.has(index) ?? true)), read) : []).map((indexes) => {
+        const after = Object.fromEntries(indexes.map((index) => [nameOf(index), read(index).map((run) => `${INPUTS_DIR}/${run}`)]));
+
+        return { at, indexes, more: { inputs: [...new Set(indexes.flatMap(read))], files: { [AFTER_FILE]: JSON.stringify(after) } } };
+      }));
+
+      if (judging.length === 0) return null;
+      const remaining = remainingDeadline(deadlineAt);
+
+      return remaining === null ? { refused: PASSED('judges\' jobs') } : await wave(judging, remaining);
+    };
+
+    const first = await judgedOver(undefined, (map) => !later.has(map));
+
+    if (first === null) return { landed };
+
+    if ('refused' in first) return first;
+    landed = [...landed, ...first.landed];
+    // The judges whose first judgement asks for their later map tasks (a row's `more`): those run, then each judges
+    // again over all its map tasks, that judgement its answer.
+    const asking = new Set([...judges].filter((index) => !unjudged.has(index) && (verdicts.get(index) ?? []).some((row) => row.more === true)));
+    const wanted = new Set([...asking].flatMap((index) => (mapsOf[index] ?? []).filter((map) => later.has(map))));
+
+    if (wanted.size > 0) {
+      const remaining = remainingDeadline(deadlineAt);
+
+      if (remaining === null) return { refused: PASSED('later map tasks\' jobs') };
+
+      const drawnLater = await wave(groups.flatMap((group, at) => {
+        const indexes = group.later ? group.indexes.filter((index) => wanted.has(index)) : [];
+
+        return indexes.length === 0 ? [] : [{ at, indexes }];
+      }), remaining);
+
+      if ('refused' in drawnLater) return drawnLater;
+      landed = [...landed, ...drawnLater.landed];
     }
 
-    const read = (index: number) => (mapsOf[index] ?? []).flatMap((map) => {
-      const run = runOf.get(map);
+    if (asking.size === 0) return { landed };
 
-      return run === undefined || resultOf.get(map)?.meta.artifacts !== true ? [] : [run];
-    });
+    // A first judgement that asked is no answer: the second's rows are, or none where it never landed.
+    for (const index of asking) verdicts.delete(index);
+    const second = await judgedOver(asking, () => true);
 
-    // Each judges' job takes the artifacts its judges read, and names where each judge finds its own. A group whose
-    // judges together read more runs or jobs than one job takes (MAX_INPUT_RUNS, MAX_INPUT_JOBS) is cut into several
-    // judges' jobs in its order, each within them, all in the one wave (Dew's base/kernels, 2026-11-02: 1,050 map
-    // tasks); a judge that alone reads more is a job of its own, which its creation refuses by name.
-    const judging = groups.flatMap((group, at) => (group.judging ? judgeChunks(group.indexes.filter((index) => !unjudged.has(index)), read) : []).map((indexes) => {
-      const after = Object.fromEntries(indexes.map((index) => [nameOf(index), read(index).map((run) => `${INPUTS_DIR}/${run}`)]));
+    if (second === null) return { landed };
 
-      return { at, indexes, more: { inputs: [...new Set(indexes.flatMap(read))], files: { [AFTER_FILE]: JSON.stringify(after) } } };
-    }));
+    if ('refused' in second) return second;
 
-    if (judging.length === 0) return mapped;
-    const remaining = remainingDeadline(deadlineAt);
+    // A second judgement is the judge's answer, so one that still asks has none: what it asked for already ran for it.
+    for (const index of asking) {
+      const still = unjudged.has(index) ? [] : (verdicts.get(index) ?? []).filter((row) => row.more === true);
 
-    if (remaining === null) return { refused: PASSED('judges\' jobs') };
-    const judged = await wave(judging, remaining);
+      if (still.length > 0) unjudged.set(index, `its second judgement still asks for more, past its last map tasks: ${still.map(rowName).join(', ')}`);
+    }
 
-    return 'refused' in judged ? judged : { landed: [...mapped.landed, ...judged.landed] };
+    return { landed: [...landed, ...second.landed] };
   });
 
   if ('refused' in tasked) return await ungraded(`a task job did not start, so the run's task jobs were cancelled: ${tasked.refused}`);
-  const results = tasked.landed;
+  // A judge that judged again answers with its last judgement.
+  const results = [...new Map(tasked.landed.map((result) => [result.index, result])).values()];
   const resultOf = new Map(results.map((result) => [result.index, result]));
 
   // Each task's artifacts beside the report, under the task's plan index and name, since two tasks may share a name; a
