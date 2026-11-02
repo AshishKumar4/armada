@@ -851,14 +851,20 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
    *  one did not start, the others then cancelled. */
   const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
     let shares = sharesOf(groupsOf);
+    let bounded: number | null = within;
 
+    // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within what is left of
+    // the run's deadline (#37), or not at all.
     if ('need' in shares && tail.size > 0) {
       await tailEnded;
       shares = sharesOf(groupsOf);
+      bounded = remainingDeadline(deadlineAt);
     }
 
     if (stopped !== null) return { refused: stopped };
-    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, within, each.more));
+
+    if (bounded === null) return { refused: PASSED('task jobs') };
+    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, Math.min(within, bounded), each.more));
 
     started.push(...starting.map(({ job }) => job));
     const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
