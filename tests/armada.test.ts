@@ -3,12 +3,12 @@ import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { extractTar, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
+import { extractTar, judgeChunks, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { deploymentConfig } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
@@ -1456,6 +1456,29 @@ describe('armada run', () => {
       jobs: [{ items: ['a', 'b', 'c', 'plain'], inputs: undefined, after: undefined }, { items: ['j'], inputs: ['tasks/0', 'tasks/1'], after: { j: ['/armada/inputs/tasks/0', '/armada/inputs/tasks/1'] } }],
       rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
     });
+  });
+
+  // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
+  // the plan refused the run.
+  test('judges whose map tasks together pass the inputs a job takes are cut into judges\' jobs, each within them', () => {
+    const runs = (job: string, from: number, count: number) => Array.from({ length: count }, (_, at) => `${job}/${String(from + at)}`);
+    const reads = new Map<number, readonly string[]>([
+      [0, runs('a', 0, 600)], [1, runs('a', 600, 300)], [2, runs('a', 900, 200)], [3, runs('a', 0, 50)],
+      [4, runs('b', 0, MAX_INPUT_RUNS + 5)],
+      ...Array.from({ length: MAX_INPUT_JOBS + 1 }, (_, at) => [5 + at, [`j${String(at)}/0`]] as const),
+    ]);
+    const read = (index: number) => reads.get(index) ?? [];
+    const chunks = judgeChunks([...reads.keys()], read);
+    const within = (chunk: readonly number[]) => {
+      const taken = new Set(chunk.flatMap(read));
+
+      return taken.size <= MAX_INPUT_RUNS && new Set([...taken].map((run) => run.split('/')[0])).size <= MAX_INPUT_JOBS;
+    };
+
+    // Each judge once, in order; every job within the limits but one judge that alone reads more, a job of its own.
+    expect(chunks.flat()).toEqual([...reads.keys()]);
+    expect(chunks.map((chunk) => chunk.length === 1 && chunk[0] === 4 ? true : within(chunk))).toEqual(chunks.map(() => true));
+    expect(chunks.slice(0, 3)).toEqual([[0, 1], [2, 3], [4]]);
   });
 
   // Dew's train 459: the run fetched 284 tasks' archives one at a time before its judges' job, two minutes the judges
