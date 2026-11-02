@@ -932,6 +932,9 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     }
 
     if (asking.size === 0) return { landed };
+
+    // A first judgement that asked is no answer: the second's rows are, or none where it never landed.
+    for (const index of asking) verdicts.delete(index);
     const second = await judgedOver(asking, () => true);
 
     if (second === null) return { landed };
