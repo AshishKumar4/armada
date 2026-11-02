@@ -116,6 +116,7 @@ async function run(lost: number, {
   }, (argv, body) => { if (argv[3] === 'pipe-in') piped.set(argv[4] ?? '', body); }));
 
   const job = {
+    onItsCpu: async () => undefined,
     booted: async () => undefined,
     moved: async () => true,
     claim: task.next,

@@ -157,6 +157,12 @@ async function heldBack(storage: DurableObjectStorage): Promise<number> {
   return held !== undefined && held.until > Date.now() ? held.places : 0;
 }
 
+/** How long a job of named CPUs (`JobSpec.cpu`) waits, with no container working, for one to start on a host of
+ *  them before it ends (`CpuUnavailable`): the platform places containers by region alone, so a pin no host meets
+ *  is only waited on (2026-11-02: a lane's probes pinned to AMD 26/17 waited 16 minutes and more while every start
+ *  landed on 25/17). */
+const PIN_WAIT_MS = MISPLACED_MAX_MS;
+
 /** Why a job of CPUs `cpu` held its places back, where it did when it ended: since a container last booted on its CPU,
  *  its containers started on hosts of another (`heldBack`). */
 async function misplacedFor(storage: DurableObjectStorage, cpu: readonly Cpu[] | undefined): Promise<string> {
@@ -371,6 +377,14 @@ export class ArmadaJob extends DurableObject<Env> {
       return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${waiting}`, 'lost', waiting === '' ? 'none' : 'unplaced');
     }
 
+    // A pin no host met for PIN_WAIT_MS, while no container of the job works, ends it rather than waits on it.
+    const since = await this.ctx.storage.get<number>('misplacedSince');
+    const held = await this.ctx.storage.get<Held>('heldBack');
+
+    if (spec.cpu !== undefined && since !== undefined && held !== undefined && Date.now() - since >= PIN_WAIT_MS && this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length === 0) {
+      return await this.cancel(`CpuUnavailable: no container of the job started on a host of ${cpuLabel(spec.cpu)} in ${String(PIN_WAIT_MS / 60_000)} min, the platform placing containers by region alone; the last started on ${hostLabel(held.host)}`, 'lost', 'unplaced');
+    }
+
     // A client that follows the job renews its lease while it lives (#50); one made, and not since renewed, counts from
     // then. It is silent only while the object could hear it: a watchdog later than a renewal past its due found the
     // object not running, as a storage failure that reset it and hung its next instance for minutes left it, and the
@@ -416,8 +430,12 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const formed = this.sql.exec<{ since: number | null }>(`SELECT MIN(COALESCE(t.started, ?)) AS since FROM tasks t WHERE ${LAUNCHING}`, began).one().since;
 
+    // A pin no host met ends the job at PIN_WAIT_MS from the first misplaced start (`alarm`), once.
+    const since = spec.cpu === undefined ? undefined : await this.ctx.storage.get<number>('misplacedSince');
+    const pinned = since === undefined || since + PIN_WAIT_MS <= now ? Infinity : since + PIN_WAIT_MS;
+
     const next = Math.min(now + WATCHDOG_MS, spec.deadline === null ? Infinity : created + spec.deadline * 1000,
-      formed === null ? Infinity : formed + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000,
+      formed === null ? Infinity : formed + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000, pinned,
       sooner ? (await this.ctx.storage.getAlarm()) ?? Infinity : Infinity);
 
     await this.ctx.storage.setAlarm(Math.max(now, next));
@@ -668,11 +686,20 @@ export class ArmadaJob extends DurableObject<Env> {
     else this.sql.exec('UPDATE vessels SET beat = ?, state = ? WHERE name = ?', Date.now(), state, name);
   }
 
+  /** A vessel's container started on a host of the job's CPU (`JobSpec.cpu`), before its setup: that CPU had room,
+   *  so the places held back start again at the next growth, and the job waits on its pin no longer
+   *  (`PIN_WAIT_MS`). */
+  async onItsCpu(name: string): Promise<void> {
+    if (this.sql.exec(`SELECT 1 AS n FROM vessels WHERE name = ? AND state IN ${ALIVE}`, name).toArray().length > 0) {
+      await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince']);
+    }
+  }
+
   /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
    *  vessel). */
   async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
     // A host of its CPU had room: the places held back start again at the next growth.
-    await this.ctx.storage.delete(['misplacedInRow', 'heldBack']);
+    await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince']);
     this.sql.exec(`UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
@@ -1284,7 +1311,10 @@ export class ArmadaJob extends DurableObject<Env> {
       // from the latest hold's end (`watchGangs`).
       const heldUntil = Math.max(until, (await this.ctx.storage.get<number>('heldUntil')) ?? 0);
 
-      await this.ctx.storage.put({ misplacedInRow: inRow, heldBack: { places: places + 1, until, host: misplaced } satisfies Held, heldUntil });
+      // The first such start since one last booted on its CPU, from which the job waits PIN_WAIT_MS at most.
+      const since = (await this.ctx.storage.get<number>('misplacedSince')) ?? now;
+
+      await this.ctx.storage.put({ misplacedInRow: inRow, heldBack: { places: places + 1, until, host: misplaced } satisfies Held, heldUntil, misplacedSince: since });
     } else if (missing === undefined && live) {
       // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
       // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
