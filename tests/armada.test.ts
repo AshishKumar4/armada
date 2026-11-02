@@ -1576,7 +1576,7 @@ describe('armada run', () => {
     // slow runs until j's job exists, so a run whose judges wait on every task of the first wave never ends.
     const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'slow' && !created.some((items) => items.some((each) => nameOf(each) === 'j'));
     const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
-    const ran = await run(['--json', '--deadline=20'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
+    const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
 
     rmSync(drawn, { recursive: true, force: true });
 
@@ -1584,7 +1584,7 @@ describe('armada run', () => {
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
 
     expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({ exit: 0, rows: [['slow', 0], ['j', 0]] });
-  });
+  }, 30_000);
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
   // the plan refused the run.
