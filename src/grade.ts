@@ -22,6 +22,9 @@ export const PlanSchema = v.object({
     size: v.optional(SizeSchema),
     // The map tasks a judge waits on, by name: it runs once they have all passed, and reads their artifacts (#65).
     after: v.optional(v.array(v.string())),
+    // A map task its judge asks for only once its first judgement says it needs more (a row's `more`): it runs then,
+    // and the judge judges again over all its map tasks; otherwise it never runs.
+    later: v.optional(v.boolean()),
     // The entry's task starts in a container no other task ran in (`JobSpec.fresh`): it runs in a fresh job of its
     // group's own.
     fresh: v.optional(v.boolean()),
@@ -46,6 +49,9 @@ const VerdictRowSchema = v.looseObject({
   problem: v.optional(v.string()),
   /** How its task ended beside other tasks before it ran again alone and reported this row (`Outcome.aloneAfter`). */
   aloneAfter: v.optional(v.string()),
+  /** A judge's: its judgement needs its later map tasks (`later`), which then run, and it judges again over all its map
+   *  tasks, that row replacing this one. */
+  more: v.optional(v.boolean()),
   /** The host its task ran on. */
   host: v.optional(HostSchema),
 });
