@@ -1506,6 +1506,34 @@ describe('armada run', () => {
     });
   });
 
+  // A judge's second judgement is its answer, so one that still asks has none: its later map tasks already ran for it.
+  test('a judge whose second judgement still asks for more is red, saying so, whatever its rows\' exits', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b', later: true }, { name: 'j', after: ['a', 'b'] }, { name: 'k', after: [] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+    // j asks both times, its second row green; k, with no later map task, asks both times too.
+    const verdictOf = (item: Json): Json => {
+      const name = nameOf(item);
+
+      return { rows: [{ name, exitCode: 0, more: name === 'j' || name === 'k', output: 'its second stage' }] };
+    };
+
+    const ran = await run(['--json'], plan, {}, { verdictOf, artifacts: Array.from({ length: 2 }, () => draws) });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.optional(v.string()) })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode, output }) => [name, exitCode, output?.includes('still asks') ?? false]) }).toEqual({
+      exit: 1,
+      rows: [['j', 1, true], ['k', 1, true]],
+    });
+  });
+
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
   // the plan refused the run.
   test('judges whose map tasks together pass the inputs a job takes are cut into judges\' jobs, each within them', () => {
