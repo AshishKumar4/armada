@@ -1463,8 +1463,8 @@ describe('armada run', () => {
   test('a judges\' job starts before any archive is fetched, and the archives come several at once, at most 16, each kept as its task\'s', async () => {
     const maps = Array.from({ length: 20 }, (_, at) => `m${String(at)}`);
     const plan: Json = { include: [...maps.map((name) => ({ name })), { name: 'plain' }, { name: 'j', after: maps }] };
-    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
     const archives = maps.map((name) => {
       writeFileSync(join(drawn, 'draws.json'), JSON.stringify(name));
 
