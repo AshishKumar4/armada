@@ -1514,6 +1514,7 @@ describe('armada run', () => {
 
     writeFileSync(join(drawn, 'draws.json'), '[]');
     const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
     // j asks both times, its second row green; k, with no later map task, asks both times too.
     const verdictOf = (item: Json): Json => {
       const name = nameOf(item);
