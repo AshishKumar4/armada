@@ -1613,6 +1613,30 @@ describe('armada run', () => {
     expect({ exit: ran.exit, held: slow + judging <= 4, judging: judging > 0 }).toEqual({ exit: 0, held: true, judging: true });
   }, 30_000);
 
+  // A wave that waits on the first wave's tail for room starts within what is left of the run's deadline then, not what
+  // was left when it was asked for (#37).
+  test('a judges\' job that waits on the first wave\'s tail for room starts within the deadline left after it', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'c' }, { name: 'slow1' }, { name: 'slow2' }, { name: 'slow3' }, { name: 'j', after: ['a'], size: 'large' }, { name: 'k', after: ['c'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // The slow tasks hold two of the pool's three containers for 5 of the run's 8 s; the two judges' jobs need two.
+    const from = Date.now();
+    const heldOf = (item: Json) => nameOf(item).startsWith('slow') && Date.now() - from < 5_000;
+    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
+    const ran = await run(['--json', '--deadline=8', '--pool=3'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws, draws] });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    const judging = ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), deadline: v.number() }), body))
+      .filter(({ items }) => items.some(({ item }) => ['j', 'k'].includes(nameOf(item))));
+
+    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline <= 3) }).toEqual({ jobs: 2, within: true });
+  }, 30_000);
+
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
   // the plan refused the run.
   test('judges whose map tasks together pass the inputs a job takes are cut into judges\' jobs, each within them', () => {
