@@ -370,6 +370,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     const host = hostOf((await must(container, 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
 
     if (spec.cpu !== undefined && !hasCpu(host, spec.cpu)) throw new Misplaced(host, spec.cpu);
+
+    // On its CPU before its setup, which may take minutes: its job waits on its pin no longer.
+    if (spec.cpu !== undefined) await this.env.JOB.getByName(spec.jobId).onItsCpu(spec.name);
     await this.ctx.storage.put('host', host);
 
     await must(container, 'the tmpfs mounts', ['/bin/sh', '-c', mounts(spec.tmpfs)], { ms: EXEC_MS });

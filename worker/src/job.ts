@@ -430,8 +430,12 @@ export class ArmadaJob extends DurableObject<Env> {
 
     const formed = this.sql.exec<{ since: number | null }>(`SELECT MIN(COALESCE(t.started, ?)) AS since FROM tasks t WHERE ${LAUNCHING}`, began).one().since;
 
+    // A pin no host met ends the job at PIN_WAIT_MS from the first misplaced start (`alarm`), once.
+    const since = spec.cpu === undefined ? undefined : await this.ctx.storage.get<number>('misplacedSince');
+    const pinned = since === undefined || since + PIN_WAIT_MS <= now ? Infinity : since + PIN_WAIT_MS;
+
     const next = Math.min(now + WATCHDOG_MS, spec.deadline === null ? Infinity : created + spec.deadline * 1000,
-      formed === null ? Infinity : formed + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000,
+      formed === null ? Infinity : formed + (spec.gangStartTimeout ?? GANG_START_SECONDS) * 1000, pinned,
       sooner ? (await this.ctx.storage.getAlarm()) ?? Infinity : Infinity);
 
     await this.ctx.storage.setAlarm(Math.max(now, next));
@@ -680,6 +684,15 @@ export class ArmadaJob extends DurableObject<Env> {
   private beat(name: string, state?: VesselRow['state']): void {
     if (state === undefined) this.sql.exec('UPDATE vessels SET beat = ? WHERE name = ?', Date.now(), name);
     else this.sql.exec('UPDATE vessels SET beat = ?, state = ? WHERE name = ?', Date.now(), state, name);
+  }
+
+  /** A vessel's container started on a host of the job's CPU (`JobSpec.cpu`), before its setup: that CPU had room,
+   *  so the places held back start again at the next growth, and the job waits on its pin no longer
+   *  (`PIN_WAIT_MS`). */
+  async onItsCpu(name: string): Promise<void> {
+    if (this.sql.exec(`SELECT 1 AS n FROM vessels WHERE name = ? AND state IN ${ALIVE}`, name).toArray().length > 0) {
+      await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince']);
+    }
   }
 
   /** A vessel is up: how long its container took to answer, and its boot by phase (absent from an earlier Worker's
