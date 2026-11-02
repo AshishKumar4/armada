@@ -42,6 +42,7 @@ async function running({
     ENVIRONMENTS: readyRegistry(),
     FLEET: namespace(() => fleet),
     JOB: namespace(() => ({
+      onItsCpu: open.onItsCpu.bind(open),
       booted: open.booted.bind(open),
       moved: open.moved.bind(open),
       claim: async (name: string, slot: number) => {
