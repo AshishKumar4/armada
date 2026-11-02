@@ -849,7 +849,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   /** A wave's jobs, each a group's `indexes` given `more`, started at once within `within` seconds: those started, or why
    *  one did not start, the others then cancelled. */
-  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number) => {
+  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
     let shares = sharesOf(groupsOf);
 
     if ('need' in shares && tail.size > 0) {
@@ -1009,11 +1009,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const launched = await launch(first, left);
 
     if ('refused' in launched) return launched;
-    const placed = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
+    const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
 
-    for (const { each, drawing } of placed) if (!drawing) tail.set(each.id, each.pool);
+    for (const { each, drawing } of firstJobs) if (!drawing) tail.set(each.id, each.pool);
 
-    const tailLanded = Promise.all(placed.filter(({ drawing }) => !drawing).map(async ({ each }) => {
+    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => {
       try {
         return await ending(each);
       } finally {
@@ -1021,9 +1021,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       }
     }));
 
-    tailEnded = tailLanded.catch(() => undefined);
+    // Settled either way: a wave waiting on it starts once the tail's jobs end, or finds the run stopped.
+    tailEnded = Promise.allSettled([tailLanded]);
+
     const judged = (async () => {
-      const drawnLanded = (await Promise.all(placed.filter(({ drawing }) => drawing).map(async ({ each }) => await ending(each)))).flat();
+      const drawnLanded = (await Promise.all(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await ending(each)))).flat();
       const part = await judgesPart(drawnLanded);
 
       return 'refused' in part ? part : { landed: [...drawnLanded, ...part.landed] };

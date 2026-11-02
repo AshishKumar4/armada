@@ -1606,6 +1606,7 @@ describe('armada run', () => {
 
     const pools = Object.fromEntries(ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), pool: v.number() }), body))
       .map(({ items, pool }) => [items.map(({ item }) => nameOf(item)).join(' '), pool]));
+
     const slow = pools['slow1 slow2 slow3'] ?? 0;
     const judging = pools['j k l m'] ?? 0;
 
