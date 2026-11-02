@@ -729,17 +729,27 @@ describe('a job holding places back after starts on another CPU', () => {
         setSystemTime(start);
         const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu });
 
-        if (boots) await open.booted('v1', 1000);
+        // v1 boots on a host of its CPU first, where it does, and runs a task throughout.
+        const running = boots ? await open.booted('v1', 1000).then(async () => await open.claim('v1')) : null;
+
+        const working = async () => {
+          if (running !== null && !('waitMs' in running)) await open.still('v1', running.index, 0, running.attempt);
+        };
+
         for (const [at, name] of [[0, 'v2'], [31_000, 'v3'], [92_000, 'v4'], [213_000, 'v5'], [454_000, 'v6']] as const) {
           setSystemTime(start + at);
+          await working();
           await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
           await open.alarm();
         }
+
         setSystemTime(start + 8 * 60_000 - 1_000);
+        await working();
         await open.alarm();
         const before = (await open.events(0)).events.length;
 
         setSystemTime(start + 8 * 60_000 + 1_000);
+        await working();
         await open.alarm();
         const ended = (await open.events(0)).events;
 
