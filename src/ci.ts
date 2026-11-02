@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -871,20 +871,21 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       if (failed.length > 0) unjudged.set(index, `its map tasks did not all pass: ${failed.join(', ')}`);
     }
 
-    // Each judges' job takes the artifacts its judges read, and names where each judge finds its own.
-    const judging = groups.flatMap((group, at) => {
-      const indexes = group.judging ? group.indexes.filter((index) => !unjudged.has(index)) : [];
+    const read = (index: number) => (mapsOf[index] ?? []).flatMap((map) => {
+      const run = runOf.get(map);
 
-      const read = (index: number) => (mapsOf[index] ?? []).flatMap((map) => {
-        const run = runOf.get(map);
+      return run === undefined || resultOf.get(map)?.meta.artifacts !== true ? [] : [run];
+    });
 
-        return run === undefined || resultOf.get(map)?.meta.artifacts !== true ? [] : [run];
-      });
-
+    // Each judges' job takes the artifacts its judges read, and names where each judge finds its own. A group whose
+    // judges together read more runs or jobs than one job takes (MAX_INPUT_RUNS, MAX_INPUT_JOBS) is cut into several
+    // judges' jobs in its order, each within them, all in the one wave (Dew's base/kernels, 2026-11-02: 1,050 map
+    // tasks); a judge that alone reads more is a job of its own, which its creation refuses by name.
+    const judging = groups.flatMap((group, at) => (group.judging ? judgeChunks(group.indexes.filter((index) => !unjudged.has(index)), read) : []).map((indexes) => {
       const after = Object.fromEntries(indexes.map((index) => [nameOf(index), read(index).map((run) => `${INPUTS_DIR}/${run}`)]));
 
-      return indexes.length === 0 ? [] : [{ at, indexes, more: { inputs: [...new Set(indexes.flatMap(read))], files: { [AFTER_FILE]: JSON.stringify(after) } } }];
-    });
+      return { at, indexes, more: { inputs: [...new Set(indexes.flatMap(read))], files: { [AFTER_FILE]: JSON.stringify(after) } } };
+    }));
 
     if (judging.length === 0) return mapped;
     const remaining = remainingDeadline(deadlineAt);
@@ -1025,4 +1026,29 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   note(`report: ${report}`);
 
   return { ...ran, problems, rows: graded.rows };
+}
+
+
+/** `indexes` (judges, in their order) cut into runs of consecutive judges, each a judges' job whose judges together read
+ *  (`read`: each judge's map runs, `job/index`) at most MAX_INPUT_RUNS runs of at most MAX_INPUT_JOBS jobs; a judge that
+ *  alone reads more is a run of its own. */
+export function judgeChunks(indexes: readonly number[], read: (index: number) => readonly string[]): number[][] {
+  const chunks: number[][] = [];
+  let runs = new Set<string>();
+
+  for (const index of indexes) {
+    const more = new Set([...runs, ...read(index)]);
+    const jobs = new Set([...more].map((run) => run.split('/')[0]));
+    const last = chunks.at(-1);
+
+    if (last !== undefined && last.length > 0 && (more.size > MAX_INPUT_RUNS || jobs.size > MAX_INPUT_JOBS)) {
+      chunks.push([index]);
+      runs = new Set(read(index));
+    } else {
+      if (last === undefined) chunks.push([index]); else last.push(index);
+      runs = more;
+    }
+  }
+
+  return chunks;
 }
