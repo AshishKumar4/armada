@@ -1521,7 +1521,7 @@ describe('armada run', () => {
       return { rows: [{ name, exitCode: 0, more: name === 'j' || name === 'k', output: 'its second stage' }] };
     };
 
-    const ran = await run(['--json'], plan, {}, { verdictOf, artifacts: Array.from({ length: 2 }, () => draws) });
+    const ran = await run(['--json'], plan, {}, { exitOf: () => 0, verdictOf, artifacts: Array.from({ length: 2 }, () => draws) });
 
     rmSync(drawn, { recursive: true, force: true });
 
