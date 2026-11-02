@@ -1462,6 +1462,7 @@ describe('armada run', () => {
   // the plan refused the run.
   test('judges whose map tasks together pass the inputs a job takes are cut into judges\' jobs, each within them', () => {
     const runs = (job: string, from: number, count: number) => Array.from({ length: count }, (_, at) => `${job}/${String(from + at)}`);
+
     const reads = new Map<number, readonly string[]>([
       [0, runs('a', 0, 600)], [1, runs('a', 600, 300)], [2, runs('a', 900, 200)], [3, runs('a', 0, 50)],
       [4, runs('b', 0, MAX_INPUT_RUNS + 5)],
