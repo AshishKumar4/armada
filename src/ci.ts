@@ -782,8 +782,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // The tasks that reported rows of their own: an entry that names none owns those, whatever their names (`keep`).
   const wrote = new Set<number>();
 
-  /** A started job followed to its end: its results, by their plan indexes. */
-  const followed = async ({ job, indexes }: { readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }) => {
+  /** A started job followed to its end: its results, by their plan indexes, each told to `heard` as it lands. */
+  const followed = async ({ job, indexes }: { readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }, heard?: (result: Result<Json, string | null>) => void) => {
     const indexOf = (local: number): number => indexes[local] ?? local;
 
     const say = async (result: Result<Json, string | null>): Promise<string> => {
@@ -807,7 +807,15 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       return reds.length === 0 ? exitWord(result) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
     };
 
-    const results = await follow(job, began, { name: (local) => nameOf(indexOf(local)), say, note });
+    const told = async (result: Result<Json, string | null>) => {
+      const said = await say(result);
+
+      heard?.({ ...result, index: indexOf(result.index) });
+
+      return said;
+    };
+
+    const results = await follow(job, began, { name: (local) => nameOf(indexOf(local)), say: told, note });
 
     return results.map((result) => ({ ...result, index: indexOf(result.index) }));
   };
@@ -817,8 +825,9 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   const jobs: { readonly name: string | undefined; readonly size: Size; readonly id: string; readonly job: Job<Json, string | null>; readonly indexes: readonly number[] }[] = [];
 
   /** A wave's jobs, each a group's `indexes` given `more`, started at once within `within` seconds, and followed to their
-   *  ends: their results, by their plan indexes; or why one did not start, the others then cancelled. */
-  const wave = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number) => {
+   *  ends: their results, by their plan indexes, each told to `heard` as it lands; or why one did not start, the others
+   *  then cancelled. */
+  const wave = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number, heard?: (result: Result<Json, string | null>) => void) => {
     const shares = sharesOf(groupsOf);
     const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, within, each.more));
 
@@ -844,7 +853,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     }
 
     try {
-      return { landed: (await Promise.all(these.map(followed))).flat() };
+      return { landed: (await Promise.all(these.map(async (each) => await followed(each, heard)))).flat() };
     } catch (cause) {
       // A job that could not be followed to its end leaves the run without an answer: none of its jobs runs on for it.
       await cancelEach(started, 'a task job could not be followed');
@@ -856,11 +865,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // Why each judge whose map tasks did not all pass fails, by its plan index.
   const unjudged = new Map<number, string>();
 
-  const tasked = await cancelOnInterrupt(started, async () => {
-    const mapped = await wave(groups.flatMap((group, at) => group.judging || group.later ? [] : [{ at, indexes: group.indexes }]), left);
-
-    if ('refused' in mapped || judges.size === 0) return mapped;
-    let landed = mapped.landed;
+  /** The judges' part of a run, its first wave's results `heard` once its map tasks have all landed: each judge's
+   *  judgements, its later map tasks between them where it asks for them; every result it read and landed, or why one
+   *  of its jobs did not start. */
+  const judging = async (heard: readonly Result<Json, string | null>[]) => {
+    let landed = [...heard];
 
     /** `asked` judges (all where undefined) judged over their map tasks that ran, those of `maps` in `among` (its first
      *  judgement its map tasks but the later ones, its second all of them): each judges' job takes the artifacts its
@@ -949,6 +958,49 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     }
 
     return { landed: [...landed, ...second.landed] };
+  };
+
+  const tasked = await cancelOnInterrupt(started, async () => {
+    const first = groups.flatMap((group, at) => group.judging || group.later ? [] : [{ at, indexes: group.indexes }]);
+    // The judges begin once the first wave's map tasks have all landed, while its other tasks run on: one long task
+    // (Dew's train 484, 2026-11-02: a 28-minute test file) held every check-1 judge to its run's last 475 s, one ran
+    // past them, and the run had no verdict. Their jobs then take their shares of the pool beside the first wave's
+    // last tasks. A run with no map task to wait on judges after its first wave, as its judges' inputs are none.
+    const drawn = new Set([...maps].filter((map) => !later.has(map)));
+
+    if (judges.size === 0 || drawn.size === 0) {
+      const mapped = await wave(first, left);
+
+      return 'refused' in mapped || judges.size === 0 ? mapped : await judging(mapped.landed);
+    }
+
+    const heard: Result<Json, string | null>[] = [];
+    const landedMaps = new Set<number>();
+    let drawnAll = (): void => undefined;
+    const allDrawn = new Promise<null>((resolve) => { drawnAll = () => { resolve(null); }; });
+
+    const firstWave = wave(first, left, (result) => {
+      heard.push(result);
+
+      if (drawn.has(result.index)) landedMaps.add(result.index);
+
+      if (landedMaps.size === drawn.size) drawnAll();
+    });
+
+    const ended = await Promise.race([firstWave, allDrawn]);
+
+    // A first wave whose job did not start ends before any map task lands.
+    if (ended !== null && 'refused' in ended) return ended;
+    const judged = await judging(heard);
+    const rest = await firstWave;
+
+    if ('refused' in rest) return rest;
+
+    if ('refused' in judged) return judged;
+
+    // The first wave's results, then the judges' part's, which read those of its map tasks again: each task answers
+    // with its last.
+    return { landed: [...rest.landed, ...judged.landed] };
   });
 
   if ('refused' in tasked) return await ungraded(`a task job did not start, so the run's task jobs were cancelled: ${tasked.refused}`);
