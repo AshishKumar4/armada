@@ -868,7 +868,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   /** The judges' part of a run, its first wave's results `heard` once its map tasks have all landed: each judge's
    *  judgements, its later map tasks between them where it asks for them; every result it read and landed, or why one
    *  of its jobs did not start. */
-  const judging = async (heard: readonly Result<Json, string | null>[]) => {
+  const judgesPart = async (heard: readonly Result<Json, string | null>[]) => {
     let landed = [...heard];
 
     /** `asked` judges (all where undefined) judged over their map tasks that ran, those of `maps` in `among` (its first
@@ -971,7 +971,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     if (judges.size === 0 || drawn.size === 0) {
       const mapped = await wave(first, left);
 
-      return 'refused' in mapped || judges.size === 0 ? mapped : await judging(mapped.landed);
+      return 'refused' in mapped || judges.size === 0 ? mapped : await judgesPart(mapped.landed);
     }
 
     const heard: Result<Json, string | null>[] = [];
@@ -991,7 +991,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
     // A first wave whose job did not start ends before any map task lands.
     if (ended !== null && 'refused' in ended) return ended;
-    const judged = await judging(heard);
+    const judged = await judgesPart(heard);
     const rest = await firstWave;
 
     if ('refused' in rest) return rest;
