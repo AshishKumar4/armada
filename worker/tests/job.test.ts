@@ -716,6 +716,45 @@ describe('a job holding places back after starts on another CPU', () => {
     }
   });
 
+  // 2026-11-02: a lane's probes pinned to AMD 26/17 waited 16 minutes and more while every start landed on 25/17,
+  // and the platform places containers by region alone: a pin no host met for MISPLACED_MAX_MS ends its job, which
+  // says so, rather than waiting on it; one whose container works on its CPU is not ended.
+  test('ends, saying why, where no container started on a host of its CPU for 8 minutes and none works', async () => {
+    const start = Date.now();
+
+    try {
+      const outcomes = [];
+
+      for (const boots of [false, true]) {
+        setSystemTime(start);
+        const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu });
+
+        if (boots) await open.booted('v1', 1000);
+        for (const [at, name] of [[0, 'v2'], [31_000, 'v3'], [92_000, 'v4'], [213_000, 'v5'], [454_000, 'v6']] as const) {
+          setSystemTime(start + at);
+          await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
+          await open.alarm();
+        }
+        setSystemTime(start + 8 * 60_000 - 1_000);
+        await open.alarm();
+        const before = (await open.events(0)).events.length;
+
+        setSystemTime(start + 8 * 60_000 + 1_000);
+        await open.alarm();
+        const ended = (await open.events(0)).events;
+
+        outcomes.push({ before, ended: ended.length, kind: ended[0]?.outcome.kind, capacity: ended[0]?.outcome.capacity, tail: ended[0]?.outcome.tail });
+      }
+
+      expect(outcomes).toEqual([
+        { before: 0, ended: 2, kind: 'failed', capacity: true, tail: 'CpuUnavailable: no container of the job started on a host of AuthenticAMD/25/17 in 8 min, the platform placing containers by region alone; the last started on AMD EPYC 25/1 (x86-64-v3)' },
+        { before: 0, ended: 0, kind: undefined, capacity: undefined, tail: undefined },
+      ]);
+    } finally {
+      setSystemTime();
+    }
+  });
+
   test('says at its deadline that its places were held back for want of a host of its CPU', async () => {
     const start = Date.now();
 
