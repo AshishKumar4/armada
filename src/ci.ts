@@ -847,18 +847,24 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     }
   };
 
-  /** A wave's jobs, each a group's `indexes` given `more`, started at once within `within` seconds: those started, or why
-   *  one did not start, the others then cancelled. */
-  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
+  /** A wave's jobs (`what`), each a group's `indexes` given `more`, started at once within `within` seconds: those
+   *  started, or why one did not start, the others then cancelled. */
+  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
     let shares = sharesOf(groupsOf);
+    let bounded: number | null = within;
 
+    // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within what is left of
+    // the run's deadline (#37), or not at all.
     if ('need' in shares && tail.size > 0) {
       await tailEnded;
       shares = sharesOf(groupsOf);
+      bounded = remainingDeadline(deadlineAt);
     }
 
     if (stopped !== null) return { refused: stopped };
-    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, within, each.more));
+
+    if (bounded === null) return { refused: PASSED(what) };
+    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, Math.min(within, bounded), each.more));
 
     started.push(...starting.map(({ job }) => job));
     const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
@@ -942,7 +948,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       if (judging.length === 0) return null;
       const remaining = remainingDeadline(deadlineAt);
 
-      return remaining === null ? { refused: PASSED('judges\' jobs') } : await wave(judging, remaining);
+      return remaining === null ? { refused: PASSED('judges\' jobs') } : await wave(judging, remaining, 'judges\' jobs');
     };
 
     const first = await judgedOver(undefined, (map) => !later.has(map));
@@ -965,7 +971,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
         const indexes = group.later ? group.indexes.filter((index) => wanted.has(index)) : [];
 
         return indexes.length === 0 ? [] : [{ at, indexes }];
-      }), remaining);
+      }), remaining, 'later map tasks\' jobs');
 
       if ('refused' in drawnLater) return drawnLater;
       landed = [...landed, ...drawnLater.landed];
@@ -995,7 +1001,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const first = groups.flatMap((group, at) => group.judging || group.later ? [] : [{ at, indexes: group.indexes, drawing: group.drawing }]);
 
     if (judges.size === 0 || !first.some(({ drawing }) => drawing)) {
-      const mapped = await wave(first, left);
+      const mapped = await wave(first, left, 'task jobs');
 
       if ('refused' in mapped || judges.size === 0) return mapped;
       const judged = await judgesPart(mapped.landed);
@@ -1006,7 +1012,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     // The first wave's map tasks in jobs of their own (`grouped`): its judges begin as those jobs end, while its other
     // tasks run on, the pool's rest theirs (`tail`). One long task (Dew's train 484, 2026-11-02: a 28-minute test
     // file) held every check-1 judge to its run's last 475 s; one ran past them, and the run had no verdict.
-    const launched = await launch(first, left);
+    const launched = await launch(first, left, 'task jobs');
 
     if ('refused' in launched) return launched;
     const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
