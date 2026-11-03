@@ -676,14 +676,14 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   const containers = Math.min(config.pool, bound ?? config.pool);
   // The containers the jobs that run beside a wave hold, by job id: the first wave's tail (`tasked`) and each site's
-  // map tasks' jobs; and those the waves begun since hold (`held`), counted as each starts, before it is created, so
+  // map tasks' jobs; and those the waves begun since hold (`holding`), counted as each starts, before it is created, so
   // sites' waves begun at once share the pool's rest rather than each taking it whole. The rest is a starting wave's.
   const tail = new Map<string, number>();
-  let held = 0;
+  let holding = 0;
 
   /** The containers each of `wave`'s jobs takes, all at once within the pool, less what the first wave's tail holds, or
    *  how many they need for it. */
-  const sharesOf = (wave: readonly { readonly indexes: readonly number[] }[]) => sharesFor(containers - held - [...tail.values()].reduce((sum, each) => sum + each, 0), slots, wave.map(({ indexes }) => ({
+  const sharesOf = (wave: readonly { readonly indexes: readonly number[] }[]) => sharesFor(containers - holding - [...tail.values()].reduce((sum, each) => sum + each, 0), slots, wave.map(({ indexes }) => ({
     estimates: indexes.map((index) => estimates[index]), ranks: indexes.map((index) => ranks[index] ?? 1),
   })));
 
@@ -719,10 +719,10 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // which the Worker admits from an ended job alone, so their own jobs end as they land, however long the first
   // wave's other tasks run.
   // A group of no site's map tasks: every site's judges wait on it where it draws.
-  const noSite: number | undefined = undefined;
+  const noSite = (): number | undefined => undefined;
 
   const grouped = (split: 'sites' | 'one' | 'none') => [false, true].flatMap((judging) => (judging ? [{ asked: false, drawing: false }] : [{ asked: false, drawing: false }, { asked: false, drawing: true }, { asked: true, drawing: false }]).flatMap(({ asked, drawing }) => [undefined, ...named].flatMap((name) => SIZE_NAMES.flatMap((size) => [false, true].map((fresh) => ({
-    name, size, judging, later: asked, drawing, fresh, site: noSite, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && later.has(index) === asked && (split !== 'none' && drawn.has(index)) === drawing && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
+    name, size, judging, later: asked, drawing, fresh, site: noSite(), indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && later.has(index) === asked && (split !== 'none' && drawn.has(index)) === drawing && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
   })))))).flatMap((group) => group.drawing && split === 'sites'
     ? sites.map(({ site }) => ({ ...group, site, indexes: group.indexes.filter((index) => siteOfMap.get(index) === site) }))
     : [group]).filter((group) => group.indexes.length > 0);
@@ -731,7 +731,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // Each site's map tasks a job of its own where the pool holds them all beside the rest, else all sites' in one, else
   // none apart.
   const fits = (split: Parameters<typeof grouped>[0]) => !('need' in sharesOf(firstOf(grouped(split))));
-  const groups = grouped(fits('sites') ? 'sites' : fits('one') ? 'one' : 'none');
+  const splitting = (['sites', 'one'] as const).find((split) => fits(split)) ?? 'none';
+  const groups = grouped(splitting);
 
   // How a group is said: its environment's name, and its size where that is not the run's.
   const labelOf = ({ name, size }: { readonly name: string | undefined; readonly size: Size }): string => [name, size === base ? undefined : size].filter((word) => word !== undefined).join(', ');
@@ -903,14 +904,14 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, Math.min(within, bounded), each.more));
     const taken = starting.reduce((sum, { pool }) => sum + pool, 0);
 
-    held += taken;
+    holding += taken;
     started.push(...starting.map(({ job }) => job));
     const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
     const refused = created.find((each) => each.status === 'rejected');
 
     // A job that did not start leaves the run ungraded, and the others, started with it and not yet followed, end.
     if (refused !== undefined) {
-      held -= taken;
+      holding -= taken;
       stopped ??= 'a task job did not start';
       await cancelEach(started, stopped);
 
@@ -937,11 +938,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
     if ('refused' in launched) return launched;
 
-    // Its containers held from the pool while it runs (`held`), so a site's wave starting beside it takes only the rest.
+    // Its containers held from the pool while it runs (`holding`), so a site's wave starting beside it takes only the rest.
     try {
       return { landed: (await Promise.all(launched.these.map(ending))).flat() };
     } finally {
-      held -= launched.taken;
+      holding -= launched.taken;
     }
   };
 
@@ -1060,7 +1061,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
     if ('refused' in launched) return launched;
     // The first wave's jobs are held by job id (`tail`), each given back as it ends.
-    held -= launched.taken;
+    holding -= launched.taken;
     const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true, site: groups[first[place]?.at ?? -1]?.site }));
 
     for (const { each } of firstJobs) tail.set(each.id, each.pool);
