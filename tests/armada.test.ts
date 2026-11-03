@@ -1134,7 +1134,8 @@ describe('armada run', () => {
 
           const items = tasked.get(job) ?? [];
           const created = [...tasked.values()];
-          const held = (item: Json | undefined) => item !== undefined && heldOf?.(item, created) === true;
+          // A cancelled job's tasks end, held or not, as a cancel ends a job's tasks.
+          const held = (item: Json | undefined) => item !== undefined && !cancelled.includes(job) && heldOf?.(item, created) === true;
 
           return Response.json({
             events: exitsOf(job).flatMap((exitCode, index) => {
@@ -1612,6 +1613,25 @@ describe('armada run', () => {
     expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort((one, two) => String(one[0]).localeCompare(String(two[0]))) }).toEqual({ exit: 0, rows: expected });
   }, 30_000);
 
+
+  // #86's contract, per site: a part that fails stops every other's jobs.
+  test('a site\'s judges\' job that does not start leaves the run ungraded, every other site\'s jobs cancelled', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'slow' }, { name: 'ja', after: ['a'] }, { name: 'js', after: ['slow'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // js's map task runs on; ja's judges' job, the run's third, is refused as it is created.
+    const heldOf = (item: Json) => nameOf(item) === 'slow';
+    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
+    const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, refuse: 3, artifacts: [draws, draws] });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    expect({ exit: ran.exit, graded: reportOf(ran.report).graded, cancelled: ran.cancelled.includes('tasks-2') }).toEqual({ exit: 2, graded: 'not graded', cancelled: true });
+  }, 30_000);
 
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
   test('a judges\' job begun beside the first wave\'s tail takes the pool\'s rest', async () => {

@@ -1085,11 +1085,20 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const drawnEnded = new Map(firstJobs.filter(({ drawing }) => drawing).map(({ each }) => [each.id, returned(each)]));
 
     const judged = (async () => {
+      // A site that throws stops every other site's jobs and the tail's, as a part that cannot be followed does
+      // (`ending`); one whose job did not start has stopped them already (`launch`).
       const parts = await Promise.all(sites.map(async ({ site, judges: judgesOfSite }) => {
-        const mine = firstJobs.filter((job) => job.drawing && (job.site === undefined || job.site === site));
-        const drawnLanded = (await Promise.all(mine.map(async ({ each }) => await drawnEnded.get(each.id) ?? []))).flat();
+        try {
+          const mine = firstJobs.filter((job) => job.drawing && (job.site === undefined || job.site === site));
+          const drawnLanded = (await Promise.all(mine.map(async ({ each }) => await drawnEnded.get(each.id) ?? []))).flat();
 
-        return await judgesPart(drawnLanded, judgesOfSite);
+          return await judgesPart(drawnLanded, judgesOfSite);
+        } catch (cause) {
+          stopped ??= 'a site\'s judges could not be followed';
+          await cancelEach(started, stopped);
+
+          throw cause;
+        }
       }));
 
       const refused = parts.find((part) => 'refused' in part);
