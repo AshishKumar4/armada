@@ -1080,6 +1080,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
         tail.delete(each.id);
       }
     })()]));
+
     const judged = (async () => {
       const parts = await Promise.all(sites.map(async ({ site, judges: judgesOfSite }) => {
         const mine = firstJobs.filter((job) => job.drawing && (job.site === undefined || job.site === site));
@@ -1087,6 +1088,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
         return await judgesPart(drawnLanded, judgesOfSite);
       }));
+
       const refused = parts.find((part) => 'refused' in part);
 
       if (refused !== undefined) return refused;
