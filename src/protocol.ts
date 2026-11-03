@@ -872,3 +872,30 @@ export function median(values: readonly number[]): number {
 export function medians(history: Readonly<Record<string, readonly number[]>>): Record<string, number> {
   return Object.fromEntries(Object.entries(history).map(([key, values]) => [key, median(values)]));
 }
+
+/** `work` over each of `items`, at most `most` at once: its answers, in `items`' order. Where one fails, no lane
+ *  takes another item, and that failure is the answer. */
+export async function atOnce<I, A>(items: readonly I[], most: number, work: (item: I) => Promise<A>): Promise<A[]> {
+  const answers: A[] = [];
+  // One queue every lane takes its next item from.
+  const queue = items.entries();
+  let failed = false;
+
+  const lane = async (): Promise<void> => {
+    for (const [at, item] of queue) {
+      try {
+        answers[at] = await work(item);
+      } catch (cause) {
+        failed = true;
+
+        throw cause;
+      }
+
+      if (failed) return;
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(most, items.length) }, lane));
+
+  return answers;
+}

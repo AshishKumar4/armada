@@ -141,6 +141,7 @@ async function run(lost: number, {
 
   // A pushed task's bundle, and other jobs' artifacts, which its container takes in at boot.
   const artifacts = bucket(new Map([...marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};'] as const], ...held.map((key) => [key, `the archive at ${key}`] as const)]));
+
   if (reading !== undefined) {
     const get = artifacts.get.bind(artifacts);
 
@@ -150,6 +151,7 @@ async function run(lost: number, {
       return await get(key);
     };
   }
+
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts, FLEET: namespace(() => fleet) }));
 
   await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu, timeout, deadlineAt, inputs });
@@ -290,12 +292,14 @@ describe('a vessel whose job takes other jobs\' artifacts (#59)', () => {
     // judges' waves 265 s for some 1,000 archives (Dew's train 533), where their judging took 70 s.
     const many = Array.from({ length: 100 }, (_, index) => ({ job: shards, index, key: `jobs/${shards}/tasks/${String(index)}/v1.1/artifacts.tar.gz` }));
     const reads = { now: 0, most: 0 };
+
     const reading = async () => {
       reads.now += 1;
       reads.most = Math.max(reads.most, reads.now);
       await Bun.sleep(1);
       reads.now -= 1;
     };
+
     const taken = await run(0, { inputs: many, held: many.map((input) => input.key), reading });
 
     expect({ exits: taken.exits, piped: [...taken.piped.keys()].filter((path) => path.startsWith(INPUTS_DIR)).toSorted(), most: reads.most })
