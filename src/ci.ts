@@ -850,7 +850,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       // A row that asks for its judge's later map tasks (`more`) is no red: its judge judges again over them.
       const reds = rows.filter((row) => row.exitCode !== 0 && row.more !== true).map(rowName);
       const asks = rows.filter((row) => row.more === true).map(rowName);
-      const listed = (named: readonly string[]) => `${String(named.length)} of ${String(rows.length)} rows (${named.slice(0, 3).join(', ')}${named.length > 3 ? ', …' : ''})`;
+      const listed = (rowNames: readonly string[]) => `${String(rowNames.length)} of ${String(rows.length)} rows (${rowNames.slice(0, 3).join(', ')}${rowNames.length > 3 ? ', …' : ''})`;
 
       if (reds.length > 0) return `RED: ${listed(reds)}`;
 

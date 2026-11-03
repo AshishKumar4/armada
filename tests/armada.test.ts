@@ -12,6 +12,14 @@ import { environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
+/** A judges' job's input (`tasks-N/i`) by the name of the map task it is, job N's item i of `bodies`, the jobs as the
+ *  run created them. */
+const inputName = (bodies: readonly { readonly items: readonly { readonly item: Json }[] }[], input: string): string => {
+  const [, job, at] = /tasks-(\d+)\/(\d+)$/.exec(input) ?? [];
+
+  return v.parse(v.object({ name: v.string() }), bodies[Number(job)]?.items[Number(at)]?.item ?? { name: '' }).name;
+};
+
 describe('a task\'s command', () => {
   test('fills from the item: a string as itself, an object\'s scalar keys, its JSON as {item}', () => {
     const object = { row: 'bun test a.test.ts', weight: 12.5, nested: { no: true } };
@@ -1461,15 +1469,10 @@ describe('armada run', () => {
     rmSync(drawn, { recursive: true, force: true });
 
     const bodies = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())), files: v.optional(v.record(v.string(), v.string())) }), body));
-    // An input (`tasks-N/i`) by the map task it is: each site's map tasks run in jobs of their own, in no set order.
-    const inputOf = (input: string) => {
-      const [, job, at] = /tasks-(\d+)\/(\d+)$/.exec(input) ?? [];
 
-      return nameOf(bodies[Number(job)]?.items[Number(at)]?.item ?? {});
-    };
     const jobs = bodies.filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
-      .map(({ items, inputs, files }) => ({ items: items.map(({ item }) => nameOf(item)), inputs: inputs?.map(inputOf),
-        after: files?.['after.json'] === undefined ? undefined : Object.fromEntries(Object.entries(v.parse(v.record(v.string(), v.array(v.string())), JSON.parse(files['after.json']))).map(([name, read]) => [name, read.map(inputOf)])) }));
+      .map(({ items, inputs, files }) => ({ items: items.map(({ item }) => nameOf(item)), inputs: inputs?.map((input) => inputName(bodies, input)),
+        after: files?.['after.json'] === undefined ? undefined : Object.fromEntries(Object.entries(v.parse(v.record(v.string(), v.array(v.string())), JSON.parse(files['after.json']))).map(([name, read]) => [name, read.map((input) => inputName(bodies, input))])) }));
 
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.string() })) }), JSON.parse(ran.stdout));
 
@@ -1511,14 +1514,9 @@ describe('armada run', () => {
     rmSync(drawn, { recursive: true, force: true });
 
     const bodies = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())) }), body));
-    // An input (`tasks-N/i`) by the map task it is: each site judges as its own map tasks land, in no set order.
-    const inputOf = (input: string) => {
-      const [, job, at] = /tasks-(\d+)\/(\d+)$/.exec(input) ?? [];
 
-      return nameOf(bodies[Number(job)]?.items[Number(at)]?.item ?? {});
-    };
     const jobs = bodies.filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
-      .map(({ items, inputs }) => ({ items: items.map(({ item }) => nameOf(item)), inputs: inputs?.map(inputOf) }))
+      .map(({ items, inputs }) => ({ items: items.map(({ item }) => nameOf(item)), inputs: inputs?.map((input) => inputName(bodies, input)) }))
       .sort((one, two) => JSON.stringify(one).localeCompare(JSON.stringify(two)));
 
     if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
@@ -1585,16 +1583,24 @@ describe('armada run', () => {
 
   // Dew's train 484, 2026-11-02: a 28-minute test file held the first wave, its check-1 judges began at 37:05 of a
   // 45-minute deadline, and one ran past it, leaving the run without a verdict.
-  test('a judge begins once its map tasks have landed, while a long task of the first wave runs on', async () => {
-    const plan: Json = { include: [{ name: 'a' }, { name: 'slow' }, { name: 'j', after: ['a'] }] };
+  // A judge begins as its own map tasks land, while the first wave's tail runs on (Dew's train 484, 2026-11-02) or
+  // another site's map task does (Dew's giant train, 2026-11-03: one site's 23-minute map task held every judge).
+  const starts: { readonly name: string; readonly plan: Json; readonly until: string; readonly rows: (string | number)[][] }[] = [
+    { name: 'a judge begins once its map tasks have landed, while a long task of the first wave runs on',
+      plan: { include: [{ name: 'a' }, { name: 'slow' }, { name: 'j', after: ['a'] }] }, until: 'j', rows: [['j', 0], ['slow', 0]] },
+    { name: 'a site\'s judge begins once its own map tasks have landed, while another site\'s map task runs on',
+      plan: { include: [{ name: 'a' }, { name: 'slow' }, { name: 'ja', after: ['a'] }, { name: 'js', after: ['slow'] }] }, until: 'ja', rows: [['ja', 0], ['js', 0]] },
+  ];
+
+  test.each(starts)('$name', async ({ plan, until, rows: expected }) => {
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
 
     writeFileSync(join(drawn, 'draws.json'), '[]');
     const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
 
-    // slow runs until j's job exists, so a run whose judges wait on every task of the first wave never ends.
-    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'slow' && !created.some((items) => items.some((each) => nameOf(each) === 'j'));
+    // slow runs until the judge's job named `until` exists, so a run whose judges wait on it never ends.
+    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'slow' && !created.some((items) => items.some((each) => nameOf(each) === until));
     const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
     const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
 
@@ -1603,31 +1609,9 @@ describe('armada run', () => {
     if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
 
-    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({ exit: 0, rows: [['slow', 0], ['j', 0]] });
+    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort((one, two) => String(one[0]).localeCompare(String(two[0]))) }).toEqual({ exit: 0, rows: expected });
   }, 30_000);
 
-  // Dew's giant train, 2026-11-03: one site's 23-minute map task held every other site's judges.
-  test('a site\'s judge begins once its own map tasks have landed, while another site\'s map task runs on', async () => {
-    const plan: Json = { include: [{ name: 'a' }, { name: 'slow' }, { name: 'ja', after: ['a'] }, { name: 'js', after: ['slow'] }] };
-    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
-    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
-
-    writeFileSync(join(drawn, 'draws.json'), '[]');
-    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
-
-    // slow, js's map task, runs until ja's judges' job exists, so a run whose judges wait on every site's map tasks
-    // never ends.
-    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'slow' && !created.some((items) => items.some((each) => nameOf(each) === 'ja'));
-    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
-    const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
-
-    rmSync(drawn, { recursive: true, force: true });
-
-    if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
-    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
-
-    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort((one, two) => String(one[0]).localeCompare(String(two[0]))) }).toEqual({ exit: 0, rows: [['ja', 0], ['js', 0]] });
-  }, 30_000);
 
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
   test('a judges\' job begun beside the first wave\'s tail takes the pool\'s rest', async () => {
