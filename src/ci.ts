@@ -694,6 +694,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // A site's drawn map tasks are jobs of their own, so its judges begin as those end, however long another site's
   // map tasks run (Dew's giant train, 2026-11-03: one site's 23-minute map task held every check-1 judge).
   const siteOf = new Map([...judges].map((index) => [index, index]));
+
   const root = (index: number): number => {
     const parent = siteOf.get(index) ?? index;
 
@@ -717,8 +718,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // tasks are too where the pool holds their jobs beside the rest (`split`): a judge reads its map tasks' artifacts,
   // which the Worker admits from an ended job alone, so their own jobs end as they land, however long the first
   // wave's other tasks run.
+  // A group of no site's map tasks: every site's judges wait on it where it draws.
+  const noSite: number | undefined = undefined;
+
   const grouped = (split: 'sites' | 'one' | 'none') => [false, true].flatMap((judging) => (judging ? [{ asked: false, drawing: false }] : [{ asked: false, drawing: false }, { asked: false, drawing: true }, { asked: true, drawing: false }]).flatMap(({ asked, drawing }) => [undefined, ...named].flatMap((name) => SIZE_NAMES.flatMap((size) => [false, true].map((fresh) => ({
-    name, size, judging, later: asked, drawing, fresh, site: undefined as number | undefined, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && later.has(index) === asked && (split !== 'none' && drawn.has(index)) === drawing && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
+    name, size, judging, later: asked, drawing, fresh, site: noSite, indexes: plan.include.flatMap((entry, index) => judges.has(index) === judging && later.has(index) === asked && (split !== 'none' && drawn.has(index)) === drawing && entry.environment === name && sizes[index] === size && (entry.fresh === true) === fresh ? [index] : []),
   })))))).flatMap((group) => group.drawing && split === 'sites'
     ? sites.map(({ site }) => ({ ...group, site, indexes: group.indexes.filter((index) => siteOfMap.get(index) === site) }))
     : [group]).filter((group) => group.indexes.length > 0);
