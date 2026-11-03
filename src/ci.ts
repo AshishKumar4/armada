@@ -689,6 +689,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   // The first wave's map tasks: each site's judges begin once its own have landed.
   const drawn = new Set([...maps].filter((map) => !later.has(map)));
+
   // Each judge's site: judges that read one another's map tasks judge together, the lowest's plan index the site's.
   // A site's drawn map tasks are jobs of their own, so its judges begin as those end, however long another site's
   // map tasks run (Dew's giant train, 2026-11-03: one site's 23-minute map task held every check-1 judge).
@@ -1060,26 +1061,23 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
     for (const { each } of firstJobs) tail.set(each.id, each.pool);
 
-    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => {
+    /** A first-wave job followed to its end once, its containers back to the pool as it ends. */
+    const returned = async (each: (typeof firstJobs)[number]['each']) => {
       try {
         return await ending(each);
       } finally {
         tail.delete(each.id);
       }
-    }));
+    };
+
+    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => await returned(each)));
 
     // Settled either way: a wave waiting on it starts once the tail's jobs end, or finds the run stopped.
     tailEnded = Promise.allSettled([tailLanded]);
 
-    // Each drawn map tasks' job followed once, its containers back to the pool as it ends; each site's judges begin as
-    // its own jobs end (all sites' one where they share it), beside every other site's.
-    const drawnEnded = new Map(firstJobs.filter(({ drawing }) => drawing).map(({ each }) => [each.id, (async () => {
-      try {
-        return await ending(each);
-      } finally {
-        tail.delete(each.id);
-      }
-    })()]));
+    // Each drawn map tasks' job followed once; each site's judges begin as its own jobs end (all sites' one where they
+    // share it), beside every other site's.
+    const drawnEnded = new Map(firstJobs.filter(({ drawing }) => drawing).map(({ each }) => [each.id, returned(each)]));
 
     const judged = (async () => {
       const parts = await Promise.all(sites.map(async ({ site, judges: judgesOfSite }) => {
