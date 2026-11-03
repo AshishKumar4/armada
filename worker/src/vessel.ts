@@ -173,6 +173,10 @@ const TAIL_LINES = 40;
 /** The most of a log's end the tail is read from, so a log of one huge line costs its outcome only this. */
 export const TAIL_BYTES = 16 * 1024;
 
+/** The most of its job's inputs a container takes in at once: a judges' job's container takes every archive its
+ *  judges read, some 1,000 of them, which one read at a time held each of a run's judges' waves 265 s. */
+export const INPUTS_AT_ONCE = 32;
+
 /** The last `TAIL_LINES` lines of the log in `dir`, read from its last `TAIL_BYTES` bytes at most. */
 export const tailOf = (dir: string): string => `tail -c ${String(TAIL_BYTES)} ${dir}/log 2>/dev/null | tail -n ${String(TAIL_LINES)} || true`;
 
