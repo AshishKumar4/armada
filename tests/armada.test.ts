@@ -1460,9 +1460,16 @@ describe('armada run', () => {
 
     rmSync(drawn, { recursive: true, force: true });
 
-    const jobs = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())), files: v.optional(v.record(v.string(), v.string())) }), body))
-      .filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
-      .map(({ items, inputs, files }) => ({ items: items.map(({ item }) => nameOf(item)), inputs, after: files?.['after.json'] === undefined ? undefined : JSON.parse(files['after.json']) }));
+    const bodies = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())), files: v.optional(v.record(v.string(), v.string())) }), body));
+    // An input (`tasks-N/i`) by the map task it is: each site's map tasks run in jobs of their own, in no set order.
+    const inputOf = (input: string) => {
+      const [, job, at] = /tasks-(\d+)\/(\d+)$/.exec(input) ?? [];
+
+      return nameOf(bodies[Number(job)]?.items[Number(at)]?.item ?? {});
+    };
+    const jobs = bodies.filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
+      .map(({ items, inputs, files }) => ({ items: items.map(({ item }) => nameOf(item)), inputs: inputs?.map(inputOf),
+        after: files?.['after.json'] === undefined ? undefined : Object.fromEntries(Object.entries(v.parse(v.record(v.string(), v.array(v.string())), JSON.parse(files['after.json']))).map(([name, read]) => [name, read.map(inputOf)])) }));
 
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.string() })) }), JSON.parse(ran.stdout));
 
@@ -1470,8 +1477,9 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, jobs, rows: rows.map(({ name, exitCode }) => [name, exitCode]), why: rows.find(({ name }) => name === 'k')?.output, recorded }).toEqual({
       exit: 1, recorded: { a: 1, b: 1, plain: 1, j: 1 },
-      jobs: [{ items: ['plain'], inputs: undefined, after: undefined }, { items: ['a', 'b', 'c'], inputs: undefined, after: undefined },
-        { items: ['j'], inputs: ['tasks-2/0', 'tasks-2/1'], after: { j: ['/armada/inputs/tasks-2/0', '/armada/inputs/tasks-2/1'] } }],
+      // Each site's map tasks a job of its own, j's and k's; k's judge has none, its map task red.
+      jobs: [{ items: ['plain'], inputs: undefined, after: undefined }, { items: ['a', 'b'], inputs: undefined, after: undefined },
+        { items: ['c'], inputs: undefined, after: undefined }, { items: ['j'], inputs: ['a', 'b'], after: { j: ['a', 'b'] } }],
       rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
     });
   });
@@ -1502,17 +1510,24 @@ describe('armada run', () => {
 
     rmSync(drawn, { recursive: true, force: true });
 
-    const jobs = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())) }), body))
-      .filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
-      .map(({ items, inputs }) => ({ items: items.map(({ item }) => nameOf(item)), inputs }));
+    const bodies = ran.bodies.map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), inputs: v.optional(v.array(v.string())) }), body));
+    // An input (`tasks-N/i`) by the map task it is: each site judges as its own map tasks land, in no set order.
+    const inputOf = (input: string) => {
+      const [, job, at] = /tasks-(\d+)\/(\d+)$/.exec(input) ?? [];
+
+      return nameOf(bodies[Number(job)]?.items[Number(at)]?.item ?? {});
+    };
+    const jobs = bodies.filter(({ items }) => items.length > 0 && JSON.stringify(items[0]?.item) !== '{}')
+      .map(({ items, inputs }) => ({ items: items.map(({ item }) => nameOf(item)), inputs: inputs?.map(inputOf) }))
+      .sort((one, two) => JSON.stringify(one).localeCompare(JSON.stringify(two)));
 
     if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
 
     expect({ exit: ran.exit, jobs, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({
       exit: 0,
-      jobs: [{ items: ['plain'], inputs: undefined }, { items: ['a', 'c'], inputs: undefined }, { items: ['j', 'k'], inputs: ['tasks-2/0', 'tasks-2/1'] },
-        { items: ['b'], inputs: undefined }, { items: ['j'], inputs: ['tasks-2/0', 'tasks-4/0'] }],
+      jobs: [{ items: ['a'], inputs: undefined }, { items: ['b'], inputs: undefined }, { items: ['c'], inputs: undefined },
+        { items: ['j'], inputs: ['a', 'b'] }, { items: ['j'], inputs: ['a'] }, { items: ['k'], inputs: ['c'] }, { items: ['plain'], inputs: undefined }],
       rows: [['plain', 0], ['j', 0], ['k', 0]],
     });
     // Its first judgement's line says it asked, never RED (Dew, 2026-11-03: five check-1 sites read red mid-run).
@@ -1591,6 +1606,29 @@ describe('armada run', () => {
     expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({ exit: 0, rows: [['slow', 0], ['j', 0]] });
   }, 30_000);
 
+  // Dew's giant train, 2026-11-03: one site's 23-minute map task held every other site's judges.
+  test('a site\'s judge begins once its own map tasks have landed, while another site\'s map task runs on', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'slow' }, { name: 'ja', after: ['a'] }, { name: 'js', after: ['slow'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // slow, js's map task, runs until ja's judges' job exists, so a run whose judges wait on every site's map tasks
+    // never ends.
+    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'slow' && !created.some((items) => items.some((each) => nameOf(each) === 'ja'));
+    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
+    const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort() }).toEqual({ exit: 0, rows: [['ja', 0], ['js', 0]] });
+  }, 30_000);
+
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
   test('a judges\' job begun beside the first wave\'s tail takes the pool\'s rest', async () => {
     const maps = ['a', 'c', 'e', 'g'];
@@ -1612,7 +1650,7 @@ describe('armada run', () => {
       .map(({ items, pool }) => [items.map(({ item }) => nameOf(item)).join(' '), pool]));
 
     const slow = pools['slow1 slow2 slow3'] ?? 0;
-    const judging = pools['j k l m'] ?? 0;
+    const judging = ['j', 'k', 'l', 'm'].reduce((sum, name) => sum + (pools[name] ?? 0), 0);
 
     expect({ exit: ran.exit, held: slow + judging <= 4, judging: judging > 0 }).toEqual({ exit: 0, held: true, judging: true });
   }, 30_000);
@@ -1620,7 +1658,8 @@ describe('armada run', () => {
   // A wave that waits on the first wave's tail for room starts within what is left of the run's deadline then, not what
   // was left when it was asked for (#37).
   test('a judges\' job that waits on the first wave\'s tail for room starts within the deadline left after it', async () => {
-    const plan: Json = { include: [{ name: 'a' }, { name: 'c' }, { name: 'slow1' }, { name: 'slow2' }, { name: 'slow3' }, { name: 'j', after: ['a'], size: 'large' }, { name: 'k', after: ['c'] }] };
+    // j and k read map task a both, so they judge as one site, its judges' jobs one wave.
+    const plan: Json = { include: [{ name: 'a' }, { name: 'c' }, { name: 'slow1' }, { name: 'slow2' }, { name: 'slow3' }, { name: 'j', after: ['a'], size: 'large' }, { name: 'k', after: ['a', 'c'] }] };
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
 
