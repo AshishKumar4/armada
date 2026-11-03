@@ -14,7 +14,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -165,21 +165,6 @@ export function argvOf(template: readonly string[], recipe: Recipe): (item: Json
   const fixed = { out: OUT_PATH, files: FILES_DIR, inputs: INPUTS_DIR, artifacts: ARTIFACTS_PATH, workdir: workdirOf(recipe), commit: recipe.commit?.sha ?? '' };
 
   return (item, { index }) => template.map((word) => fill(word, { ...itemValues(item, index), ...fixed }));
-}
-
-/** `work` over each of `items`, at most `most` at once: its answers, in `items`' order. */
-async function atOnce<I, A>(items: readonly I[], most: number, work: (item: I) => Promise<A>): Promise<A[]> {
-  const answers: A[] = [];
-  // One queue every lane takes its next item from.
-  const queue = items.entries();
-
-  const lane = async (): Promise<void> => {
-    for (const [at, item] of queue) answers[at] = await work(item);
-  };
-
-  await Promise.all(Array.from({ length: Math.min(most, items.length) }, lane));
-
-  return answers;
 }
 
 /** How a followed job is said: each task's name, the words for its outcome, and where each line goes. */
@@ -818,7 +803,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       // A row that asks for its judge's later map tasks (`more`) is no red: its judge judges again over them.
       const reds = rows.filter((row) => row.exitCode !== 0 && row.more !== true).map(rowName);
       const asks = rows.filter((row) => row.more === true).map(rowName);
-      const listed = (names: readonly string[]) => `${String(names.length)} of ${String(rows.length)} rows (${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''})`;
+      const listed = (shown: readonly string[]) => `${String(shown.length)} of ${String(rows.length)} rows (${shown.slice(0, 3).join(', ')}${shown.length > 3 ? ', …' : ''})`;
 
       if (reds.length > 0) return `RED: ${listed(reds)}`;
 

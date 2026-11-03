@@ -10,7 +10,7 @@
  * the WebSockets the other ranks' relays open to it (`fetch`), each to a connection into its container's relay.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
+import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
   AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, unpackInputs, usageFrom, usageOf, waitOn,
 } from './container';
@@ -172,6 +172,10 @@ const TAIL_LINES = 40;
 
 /** The most of a log's end the tail is read from, so a log of one huge line costs its outcome only this. */
 export const TAIL_BYTES = 16 * 1024;
+
+/** The most of its job's inputs a container takes in at once: a judges' job's container takes every archive its
+ *  judges read, some 1,000 of them, which one read at a time held each of a run's judges' waves 265 s. */
+export const INPUTS_AT_ONCE = 32;
 
 /** The last `TAIL_LINES` lines of the log in `dir`, read from its last `TAIL_BYTES` bytes at most. */
 export const tailOf = (dir: string): string => `tail -c ${String(TAIL_BYTES)} ${dir}/log 2>/dev/null | tail -n ${String(TAIL_LINES)} || true`;
@@ -392,13 +396,13 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     for (const [name, text] of Object.entries(spec.files)) await pipeIn(container, text, `${STATE}/files/${name}`);
 
-    // Once a container: its tasks, and the slots that pack them, read them where they are.
-    for (const input of spec.inputs ?? []) {
+    // Once a container: its tasks, and the slots that pack them, read them where they are; INPUTS_AT_ONCE at a time.
+    await atOnce(spec.inputs ?? [], INPUTS_AT_ONCE, async (input) => {
       const archive = await this.env.ARTIFACTS.get(input.key);
 
       if (archive === null) throw new Error(`the artifacts of task ${String(input.index)} of job ${input.job} are not in R2: a job's artifacts expire 7 days after they are written`);
       await pipeIn(container, archive.body, `${INPUTS_DIR}/${input.job}/${String(input.index)}.tar.gz`);
-    }
+    });
 
     if ((spec.inputs ?? []).length > 0) await must(container, 'unpacking the inputs', ['/bin/sh', '-c', unpackInputs(INPUTS_DIR), 'unpack-inputs'], { ms: EXEC_MS });
 

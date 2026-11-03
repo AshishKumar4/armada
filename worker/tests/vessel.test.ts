@@ -7,7 +7,7 @@ import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED,
 import { ArmadaFleet } from '../src/fleet';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_HEADER, RELAY_LOG } from '../src/relay';
-import { ArmadaVessel, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
+import { ArmadaVessel, INPUTS_AT_ONCE, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bundleKey, runKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
 
@@ -61,16 +61,18 @@ interface Run {
   readonly pending?: number;
   readonly timeout?: number | null;
   readonly deadlineAt?: number | null;
-  /** Other jobs' artifacts its job takes, and which of them R2 holds, by key. */
+  /** Other jobs' artifacts its job takes, and which of them R2 holds, by key; and what each read of R2 waits
+   *  on before it answers. */
   readonly inputs?: VesselSpec['inputs'];
   readonly held?: readonly string[];
+  readonly reading?: (key: string) => Promise<void>;
 }
 
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
   fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
-  inputs, held = [],
+  inputs, held = [], reading,
 }: Run = {}) {
   const completed: Outcome[] = [];
   const failed: string[] = [];
@@ -139,6 +141,17 @@ async function run(lost: number, {
 
   // A pushed task's bundle, and other jobs' artifacts, which its container takes in at boot.
   const artifacts = bucket(new Map([...marker === undefined ? [] : [[bundleKey('d'.repeat(64)), 'export {};'] as const], ...held.map((key) => [key, `the archive at ${key}`] as const)]));
+
+  if (reading !== undefined) {
+    const get = artifacts.get.bind(artifacts);
+
+    artifacts.get = async (key: string) => {
+      await reading(key);
+
+      return await get(key);
+    };
+  }
+
   const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job), ARTIFACTS: artifacts, FLEET: namespace(() => fleet) }));
 
   await vessel.begin({ ...spec, output: out !== undefined, bundle: marker === undefined ? null : 'd'.repeat(64), cpu, timeout, deadlineAt, inputs });
@@ -272,6 +285,25 @@ describe('a vessel whose job takes other jobs\' artifacts (#59)', () => {
       exits: [0], piped: inputs.map((input) => [`${INPUTS_DIR}/${shards}/${String(input.index)}.tar.gz`, `the archive at ${input.key}`]), before: true,
       missing: [[], [`the artifacts of task 2 of job ${shards} are not in R2: a job's artifacts expire 7 days after they are written`]],
     });
+  });
+
+  test('takes them in INPUTS_AT_ONCE at a time, not one after another, every one of them', async () => {
+    // A judges' job's container takes every archive its judges read: one read at a time held each of a run's
+    // judges' waves 265 s for some 1,000 archives (Dew's train 533), where their judging took 70 s.
+    const many = Array.from({ length: 100 }, (_, index) => ({ job: shards, index, key: `jobs/${shards}/tasks/${String(index)}/v1.1/artifacts.tar.gz` }));
+    const reads = { now: 0, most: 0 };
+
+    const reading = async () => {
+      reads.now += 1;
+      reads.most = Math.max(reads.most, reads.now);
+      await Bun.sleep(1);
+      reads.now -= 1;
+    };
+
+    const taken = await run(0, { inputs: many, held: many.map((input) => input.key), reading });
+
+    expect({ exits: taken.exits, piped: [...taken.piped.keys()].filter((path) => path.startsWith(INPUTS_DIR)).toSorted(), most: reads.most })
+      .toEqual({ exits: [0], piped: many.map((input) => `${INPUTS_DIR}/${shards}/${String(input.index)}.tar.gz`).toSorted(), most: INPUTS_AT_ONCE });
   });
 
   test('has each archive unpacked into its own directory, read-only to its tasks, and the archive gone', async () => {
