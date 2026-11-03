@@ -815,9 +815,14 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       verdicts.set(index, rows);
 
       if (rows === null) return `${exitWord(result)}, with no verdict it can be graded by`;
-      const reds = rows.filter((row) => row.exitCode !== 0).map(rowName);
+      // A row that asks for its judge's later map tasks (`more`) is no red: its judge judges again over them.
+      const reds = rows.filter((row) => row.exitCode !== 0 && row.more !== true).map(rowName);
+      const asks = rows.filter((row) => row.more === true).map(rowName);
+      const listed = (names: readonly string[]) => `${String(names.length)} of ${String(rows.length)} rows (${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''})`;
 
-      return reds.length === 0 ? exitWord(result) : `RED: ${String(reds.length)} of ${String(rows.length)} rows (${reds.slice(0, 3).join(', ')}${reds.length > 3 ? ', …' : ''})`;
+      if (reds.length > 0) return `RED: ${listed(reds)}`;
+
+      return asks.length === 0 ? exitWord(result) : `asks for its later map tasks: ${listed(asks)}`;
     };
 
     const results = await follow(job, began, { name: (local) => nameOf(indexOf(local)), say, note });

@@ -1515,6 +1515,10 @@ describe('armada run', () => {
         { items: ['b'], inputs: undefined }, { items: ['j'], inputs: ['tasks-2/0', 'tasks-4/0'] }],
       rows: [['plain', 0], ['j', 0], ['k', 0]],
     });
+    // Its first judgement's line says it asked, never RED (Dew, 2026-11-03: five check-1 sites read red mid-run).
+    const said = ran.stderr.split('\n').filter((line) => /\sj\s/.test(line));
+    expect(said.some((line) => line.includes('asks for its later map tasks: 1 of 1 rows (j)'))).toBe(true);
+    expect(said.some((line) => line.includes('RED'))).toBe(false);
   });
 
   // A judge's second judgement is its answer, so one that still asks has none: its later map tasks already ran for it.
