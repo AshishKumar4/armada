@@ -463,6 +463,8 @@ export const OutcomeSchema = v.object({
   value: v.optional(v.string()),
   /** Whether the task's artifacts directory was stored, at `/jobs/<id>/tasks/<index>/artifacts`, a tar.gz. */
   artifacts: v.optional(v.boolean()),
+  /** Why a task that ran to its exit kept no artifacts though its directory held some: its packer's exit and what it said. */
+  artifactsLost: v.optional(v.string()),
   /** A pushed task's answer, as its runner says: `value` is an envelope with the body's value or error, `command` the
    *  file the body's command wrote. */
   answer: v.optional(v.picklist(['value', 'command'])),

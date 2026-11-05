@@ -720,13 +720,16 @@ export class ArmadaVessel extends DurableObject<Env> {
     // What it used is a measurement, never a reason to lose the task.
     const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, isolated ? slotRoot(slot) : undefined)]) ?? '');
 
-    await must(container, 'packing the artifacts', ['/bin/sh', '-c', `if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts .; fi`], { ms: EXEC_MS });
+    // The task ran to its exit, which its job has accepted: a packer that fails loses its artifacts, said on its outcome
+    // with how much they held, never the run, which ran again would end the same way.
+    const packing = await run(container, ['/bin/sh', '-c', `if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/artifacts.tar.gz -C ${dir}/artifacts . || { code=$?; echo "the artifacts directory holds $(du -sb ${dir}/artifacts | cut -f1) bytes" >&2; rm -f ${dir}/artifacts.tar.gz; exit $code; }; fi`], { ms: EXEC_MS });
+    const artifactsLost = packing.exitCode === 0 ? undefined : `packing the artifacts exited ${String(packing.exitCode)}: ${failureTail(packing.stdout, packing.stderr)}`;
     // Raw bytes: an output file may be an image or an archive, which a text decode would corrupt.
     const kept = { vessel: spec.name, attempt };
     const out = spec.output || spec.bundle !== null ? await this.store(`${dir}/out`, runKey(spec.jobId, index, kept, 'output'), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
-    const packed = rank === 0 ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
+    const packed = rank === 0 && artifactsLost === undefined ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer; a runner that
     // ended before it said leaves no file. The answer is no measurement: a read the platform lost loses the run.
     const marker = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS })).stdout.trim();
@@ -734,7 +737,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
 
     return {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, error, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
       host: await this.ctx.storage.get<Host>('host'),
     };
   }

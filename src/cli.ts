@@ -261,6 +261,8 @@ async function map(): Promise<number> {
       if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, value: result.ok ? result.value : undefined, error: result.kind === 'error' ? result.error : undefined, artifacts: kept }));
       else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
 
+      if (result.meta.artifactsLost !== undefined) console.error(`task ${String(result.index)} kept no artifacts: ${result.meta.artifactsLost}`);
+
       if (result.kind === 'lost' || result.kind === 'cancelled') worst = 2;
       else if (result.kind !== 'ok' && worst === 0) worst = 1;
     }
