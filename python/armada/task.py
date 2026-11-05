@@ -96,6 +96,8 @@ class Meta:
     peak_memory: int | None = None
     cpu_seconds: float | None = None
     artifacts: bool = False
+    # Why its artifacts were not kept though it left some: their packer's failure.
+    artifacts_lost: str | None = None
     cached: bool = False
     oom_killed: bool = False
     disk_bytes: int | None = None
@@ -340,7 +342,7 @@ class Job(Generic[In, Out]):
             seconds=outcome.number("seconds"), attempt=outcome.whole("attempt"), container=outcome.text("vessel"),
             exit_code=outcome.whole("exitCode"), tail=outcome.text("tail"),
             peak_memory=outcome.optional_whole("peakMemory"), cpu_seconds=outcome.optional_number("cpuSeconds"),
-            artifacts=outcome.flag("artifacts"), cached=outcome.flag("cached"),
+            artifacts=outcome.flag("artifacts"), artifacts_lost=outcome.optional_text("artifactsLost"), cached=outcome.flag("cached"),
             oom_killed=outcome.flag("oomKilled"), disk_bytes=outcome.optional_whole("diskBytes"),
             alone_after=outcome.optional_text("aloneAfter"),
             host=Host.of(outcome.optional_object("host")),
