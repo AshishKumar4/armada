@@ -641,19 +641,20 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 
   /** The container on `claim`'s gang's network as its rank, its relay dialling the gang's hubs for the task's attempt
-   *  (`ArmadaHub`), or off any gang's for a task that is none's. */
+   *  (`ArmadaHub`), or off any gang's for a task that is none's. The relay is written on every join, not only a vessel's
+   *  first: one that stays in gangs would keep the relay an older deployment of the Worker wrote, and the ranks of a
+   *  gang would not all run one (`Link`). The setup restarts the relay from the file. */
   private async network(container: Container, claim: Claim): Promise<void> {
     const { gang } = claim;
-    const ganged = await this.ctx.storage.get<boolean>('ganged');
 
     if (gang === undefined) {
-      if (ganged === true) await must(container, 'leaving the gang', ['/bin/sh', '-c', GANG_DOWN], { ms: EXEC_MS });
+      if (await this.ctx.storage.get<boolean>('ganged') === true) await must(container, 'leaving the gang', ['/bin/sh', '-c', GANG_DOWN], { ms: EXEC_MS });
       await this.ctx.storage.delete('ganged');
 
       return;
     }
 
-    if (ganged === undefined) await pipeIn(container, RELAY_PY, RELAY);
+    await pipeIn(container, RELAY_PY, RELAY);
     await must(container, 'joining the gang', ['/bin/sh', '-c', GANG_UP, 'gang', String(gang.rank), String(gang.vessels.length), gang.origin, gang.job, gang.token,
       String(claim.index), String(claim.attempt)], { ms: EXEC_MS });
     await this.ctx.storage.put('ganged', true);

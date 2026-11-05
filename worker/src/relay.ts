@@ -295,12 +295,8 @@ class Link:
     took. Done once both streams ended and each was counted; the inbound end then says 'f', which the outbound end
     waits for (settle).
 
-    'f' is new, and no end asks which relay the other is. The two ends of a link run one deployment's relay.py, since
-    the file is written into a container when its vessel joins a gang (vessel.ts, network) from the Worker that
-    deploys the gang, unless a vessel that stays in gangs keeps an older one across a deploy of the Worker. Then an
-    outbound end with 'f' and an inbound end without it end the link whole: the outbound end sees its carrier close
-    as the inbound end finishes, opens again and is told 'g'. An outbound end without 'f' fails on one it reads
-    before it has finished, its link's thread ending with the program's connection, which has all it will get."""
+    'f' needs no negotiation: every rank of a gang runs one relay, the Worker's that deploys the gang, which each vessel
+    writes into its container as it joins the gang (vessel.ts, network)."""
 
     def __init__(self, local, name, carrier, reopen=None, held=None):
         self.local, self.name, self.carrier, self.reopen = local, name, None, reopen or self.handed

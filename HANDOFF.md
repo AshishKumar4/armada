@@ -37,7 +37,8 @@
     the next socket made. It holds one TLS context for the process, and a link's keepalive ends with the link. A link
     ends at its inbound end when it is done, which says `f` as it goes; its outbound end, the only one that opens
     another WebSocket, ends on `f`, or on `g` when the `f` was lost, so a final count lost with a carrier is sent again
-    on the next, not waited for by the inbound end for `RELAY_GRACE`.
+    on the next, not waited for by the inbound end for `RELAY_GRACE`. A vessel writes the relay into its container on
+    every gang it joins (`network`, vessel.ts), not only its first, so every rank of a gang runs one.
     `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of a gang's
     attempt, which pairs the relays' sockets and passes their messages, only over sockets that are open
     (`getWebSockets` lists one closing until its close event). It does no storage operation, so no vessel's storage,
