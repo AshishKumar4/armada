@@ -26,7 +26,8 @@
       { "name": "TASKS", "class_name": "ArmadaTasks" },
       { "name": "SECRETS", "class_name": "ArmadaSecrets" },
       { "name": "WEBHOOKS", "class_name": "ArmadaWebhooks" },
-      { "name": "ESTIMATES", "class_name": "ArmadaEstimates" }
+      { "name": "ESTIMATES", "class_name": "ArmadaEstimates" },
+      { "name": "HUB", "class_name": "ArmadaHub" }
     ]
   },
   "migrations": [
@@ -34,7 +35,9 @@
     { "tag": "v2", "new_sqlite_classes": ["ArmadaTasks"] },
     { "tag": "v3", "new_sqlite_classes": ["ArmadaSecrets"] },
     { "tag": "v4", "new_sqlite_classes": ["ArmadaWebhooks"] },
-    { "tag": "v5", "new_sqlite_classes": ["ArmadaEstimates"] }
+    { "tag": "v5", "new_sqlite_classes": ["ArmadaEstimates"] },
+    // A gang's hub keeps nothing in storage (hub.ts); its class is SQLite-backed as every class here is.
+    { "tag": "v6", "new_sqlite_classes": ["ArmadaHub"] }
   ],
   // The dashboard (worker/dashboard), built here by `armada deploy` (src/dashboard.ts) and served under /ui/ before the
   // Worker runs; every other path runs the Worker.

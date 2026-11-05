@@ -1,6 +1,6 @@
 /**
  * armada's Worker. A job maps a command or a function over items on a pool of containers started from an environment
- * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote, but `/relay`,
+ * snapshot. The SDK (`src/sdk.ts`) is its client, and every route takes the bearer the deploy wrote, but `/hub`,
  * which a gang's containers reach each other through with the gang's own token (`relay.ts`).
  */
 import * as v from 'valibot';
@@ -14,10 +14,13 @@ import { driverSpec, eventOf } from './hooks';
 import type { ArmadaFleet } from './fleet';
 import { fleetRefusal, VESSEL_NAME, type ArmadaJob } from './job';
 import type { Input } from './vessel';
+import { opening } from './relay';
 
 export { ArmadaJob } from './job';
 
 export { ArmadaVessel } from './vessel';
+
+export { ArmadaHub } from './hub';
 
 export { ArmadaEnvironments, ArmadaPreparer } from './environments';
 
@@ -718,12 +721,33 @@ async function drive(request: Request, env: Env, { project, config, payload }: {
   return Response.json({ started: created });
 }
 
-/** `/relay/<job>/<vessel>?port=n`: a gang rank's relay, reaching the rank `vessel` runs. No container holds the
- *  deployment's bearer, so the relay presents its gang's token instead, which the vessel checks. */
-async function relayed(request: Request, env: Env, [job, vessel]: readonly string[]): Promise<Response> {
-  if (job === undefined || vessel === undefined || !JOB_ID.test(job) || !VESSEL_NAME.test(vessel)) return notFound();
+/** `/hub/<job>/<index>/<attempt>/<rank>/{control,link}`: a gang rank's end of its gang's network (`ArmadaHub`), which
+ *  the gang's relays dial out to. No container holds the deployment's bearer, so a relay presents its gang's token
+ *  instead, which the hub checks. Each open is on the log when it arrives, before the hub is awaited, and when it is
+ *  answered or fails, with how long the hub took: one the hub never answers shows as an arrival with no end. */
+async function hubbed(request: Request, env: Env, [job, index, attempt, rank, kind, ...extra]: readonly string[]): Promise<Response> {
+  const numbered = [index, attempt, rank].every((part) => part !== undefined && /^(?:0|[1-9]\d*)$/u.test(part));
 
-  return await env.VESSEL.getByName(`${job}/${vessel}`).fetch(request);
+  if (job === undefined || !JOB_ID.test(job) || !numbered || (kind !== 'control' && kind !== 'link') || extra.length > 0) return notFound();
+  const name = `${job}/${String(index)}/${String(attempt)}/${String(rank)}`;
+  const open = { hub: name, ...opening(new URL(request.url), kind) };
+  const started = Date.now();
+
+  console.log(JSON.stringify({ ...open, phase: 'arrived' }));
+
+  try {
+    const answer = await env.HUB.getByName(name).fetch(request);
+    const answered = JSON.stringify({ ...open, phase: 'answered', status: answer.status, ms: Date.now() - started });
+
+    if (answer.status < 400) console.log(answered);
+    else console.error(answered);
+
+    return answer;
+  } catch (cause) {
+    console.error(JSON.stringify({ ...open, phase: 'failed', error: said({ cause }), ms: Date.now() - started }));
+
+    throw cause;
+  }
 }
 
 /** `GET /status/<job>/<index>`: a task's status, outside the bearer, read with its job's status token alone, which each
@@ -749,7 +773,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const [first, ...rest] = new URL(request.url).pathname.split('/').filter((segment) => segment !== '');
 
-    if (first === 'relay') return await relayed(request, env, rest);
+    if (first === 'hub') return await hubbed(request, env, rest);
 
     if (first === 'status') return await statused(request, env, rest);
 

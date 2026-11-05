@@ -28,7 +28,13 @@
   - `fleet.ts`: the deployment's vCPU cap. Vessels and preparers both hold their containers' vCPUs in it.
   - `tasks.ts`: pushed task ids and every hold on a bundle (the ids, and each open job's pin). Its alarm alone deletes
     a bundle nothing holds.
-  - `relay.ts`, `secrets.ts`, `timings.ts`.
+  - `relay.ts`: a gang's network. Each container runs a relay (`RELAY_PY`) that dials out to
+    `/hub/<job>/<index>/<attempt>/<rank>`, bounds each open as a whole (`RELAY_OPEN`) and logs every failed one,
+    whatever it was, with its stage and duration. `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of
+    a gang's attempt, which pairs the relays' sockets and passes their messages. It does no storage operation, so no
+    vessel's storage, which stalls and resets, is on a link's path (Dew 1401). A gang attempt's token is derived from
+    the bearer (`gangToken`), so the hub checks it with no read.
+  - `secrets.ts`, `timings.ts`.
 - `worker/dashboard/`: the dashboard. `armada deploy` builds it into the Worker's assets.
 - `python/`: the Python SDK. `lean/`: the scheduler proofs.
 - `tools/oxlint/anti-slop/`: Kinu's lint rules, vendored. `upstream.json` names the commit.
