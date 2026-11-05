@@ -866,6 +866,7 @@ describe('the CLI mapping over a commit', () => {
     // The commit's parent, at which the commit's environment at its run's size, medium, is ready.
     let parent = '';
     const jobs: { base: string | undefined; size: string; shared: boolean }[] = [];
+    const resolved: string[] = [];
 
     const server = Bun.serve({
       port: 0,
@@ -876,6 +877,8 @@ describe('the CLI mapping over a commit', () => {
 
         if (pathname === '/environments/resolve') {
           const { recipe } = v.parse(v.object({ recipe: RecipeSchema }), await request.json());
+
+          resolved.push(recipe.size);
 
           return Response.json({ key: await environmentKey(recipe), base: recipe.size === 'medium' ? parent : 'root' });
         }
@@ -920,8 +923,8 @@ describe('the CLI mapping over a commit', () => {
       const exit = await cli.exited;
 
       // A small environment is not the medium one, which alone is ready, so its job packs from the root: a pack against
-      // the medium one's commit is refused by the Worker as packed against a gone environment.
-      expect({ exit, jobs }).toEqual({ exit: 0, jobs: [{ base: 'root', size: 'small', shared: false }] });
+      // the medium one's commit is refused by the Worker as packed against a gone environment. It resolves that one alone.
+      expect({ exit, jobs, resolved }).toEqual({ exit: 0, jobs: [{ base: 'root', size: 'small', shared: false }], resolved: ['small'] });
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
