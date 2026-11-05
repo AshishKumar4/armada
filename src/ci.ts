@@ -293,13 +293,13 @@ function sizeOf(config: Config, timings: Timings): Size {
   return timings.usage === null || timings.usage === undefined ? 'medium' : fitSize(timings.usage);
 }
 
-/** A commit and its `.armada.json`: its environment at `size`, else at its run's size, its job fields, and the upload of
- *  its pack, which sends nothing when the runner has it. */
-async function commitOf(armada: Armada, target: string, size?: Size) {
+/** A commit and its `.armada.json`: its environment at `sized`, else at its run's size, its job fields, and the upload
+ *  of its pack, which sends nothing when the runner has it. */
+async function commitOf(armada: Armada, target: string, sized?: Size) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
-  const base = size ?? sizeOf(config, timings);
+  const base = sized ?? sizeOf(config, timings);
   const of = async (name: string | undefined, size = base) => await prepared(armada, { repo, sha, config, size, name });
 
   return { sha, repo, config, timings, base, of, ...await of(undefined) };
