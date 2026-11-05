@@ -135,6 +135,8 @@ WINDOW, ACK, GRACE, KEEPALIVE, BUDGET, SILENCE = ${String(RELAY_WINDOW)}, ${Stri
 RANK, ORIGIN, JOB, TOKEN, INDEX, ATTEMPT = int(sys.argv[1]), urlsplit(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 OWN = "127.0.1.%d" % (RANK + 1)
 LINKS, LINKED = {}, threading.Lock()
+# One context for every open: each holds a copy of the trust roots, and a process opens a link's WebSocket often.
+TLS_CONTEXT = ssl.create_default_context()
 
 
 def left(deadline):
@@ -236,7 +238,7 @@ def dialled(rank, kind, query, deadline):
         if secure:
             stage = "tls"
             sock.settimeout(left(deadline))
-            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+            sock = TLS_CONTEXT.wrap_socket(sock, server_hostname=host)
         stage = "upgrade"
         key = base64.b64encode(os.urandom(16)).decode()
         sock.settimeout(left(deadline))
@@ -299,6 +301,7 @@ class Link:
         self.kept, self.incoming = collections.deque(), collections.deque()
         self.ended = self.peer_ended = None
         self.over = self.delivered = self.cancelled = False
+        self.finished = threading.Event()
         if held is not None:
             held(self)
         self.attach(carrier)
@@ -488,6 +491,7 @@ class Link:
             self.over = True
             carrier, pending, self.pending = self.carrier, self.pending, None
             self.changed.notify_all()
+        self.finished.set()
         for each in (carrier, pending):
             if each is not None:
                 each.close()
@@ -500,9 +504,9 @@ class Link:
 
     def keepalive(self):
         """Pings an idle WebSocket, which Cloudflare closes after 100 s without data: a collective library's
-        connections sit idle between collectives, for a compilation, say."""
-        while not self.over:
-            time.sleep(KEEPALIVE)
+        connections sit idle between collectives, for a compilation, say. Woken when the link ends: a thread asleep
+        holds the link, and its sockets, until it wakes."""
+        while not self.finished.wait(KEEPALIVE):
             carrier = self.carrier
             try:
                 if carrier is not None:

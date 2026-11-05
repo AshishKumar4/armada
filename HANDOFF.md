@@ -32,7 +32,10 @@
     `/hub/<job>/<index>/<attempt>/<rank>`, bounds each open as a whole (`RELAY_OPEN`) and logs every failed one,
     whatever it was, with its stage and duration. Its control socket sends a heartbeat every 30 s, which the hub says
     back, and a relay that has heard nothing on it for `RELAY_SILENCE` (75 s) closes it and opens another: a blackholed
-    connection carries no FIN or RST. `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of a gang's
+    connection carries no FIN or RST. A relay closes a WebSocket's socket only once no thread is in a read or a write
+    of it (`Frames.close`): OpenSSL keeps the descriptor's number through a read, and a closed socket's number goes to
+    the next socket made. It holds one TLS context for the process, and a link's keepalive ends with the link.
+    `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of a gang's
     attempt, which pairs the relays' sockets and passes their messages, only over sockets that are open
     (`getWebSockets` lists one closing until its close event). It does no storage operation, so no vessel's storage,
     which stalls and resets, is on a link's path (Dew 1401). A gang attempt's token is derived from the bearer
