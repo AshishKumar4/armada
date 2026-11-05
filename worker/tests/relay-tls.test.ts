@@ -19,6 +19,7 @@ const ChurnSchema = v.object({
   errors: v.array(v.string()),
   contexts: v.object({ peak: v.number(), end: v.number() }),
   links: v.number(),
+  threads: v.record(v.string(), v.number()),
 });
 
 const BlockedSchema = v.object({ stalled: v.boolean(), closed: v.boolean(), gone: v.boolean(), read: v.boolean(), write: v.boolean() });
@@ -80,9 +81,11 @@ async function drive(mode: 'churn' | 'blocked', args: readonly string[], pki: Au
 
 /** `workers` threads each making `cycles` links through the relay and a hub that pairs them as `ArmadaHub` does and
  *  serves TLS under the temporary CA. */
-async function churn(workers: number, cycles: number) {
+async function churn(workers: number, cycles: number, losing?: 'count' | 'confirmation') {
   return await withAuthority(async (pki, scratch) => {
     const hub = new BunSockets();
+    // The links whose word `losing` names the hub has lost: the first of each, with the carrier it came on.
+    const lost = new Set<string>();
 
     const server = Bun.serve<Opened>({
       port: 0,
@@ -96,6 +99,16 @@ async function churn(workers: number, cycles: number) {
         },
         message(ws, message) {
           const bytes = message instanceof Uint8Array ? message : null;
+          // The outbound end's count of the far end's bytes it took, which is its last for an echo this small, or the inbound
+          // end's 'f': no count is sent before the stream ends, and a new carrier's starts at 0.
+          const word = losing !== undefined && bytes === null && (losing === 'count' ? !ws.data.accept && /^a[1-9]/u.test(String(message)) : ws.data.accept && message === 'f');
+
+          if (word && !lost.has(ws.data.link)) {
+            lost.add(ws.data.link);
+            ws.terminate();
+
+            return;
+          }
 
           passed(hub, ws, bytes === null ? String(message) : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
         },
@@ -109,7 +122,7 @@ async function churn(workers: number, cycles: number) {
     try {
       const { out, err, code } = await drive('churn', [`https://127.0.0.1:${String(server.port)}`, String(workers), String(cycles)], pki, scratch);
 
-      return { ...v.parse(ChurnSchema, JSON.parse(out)), err, code };
+      return { ...v.parse(ChurnSchema, JSON.parse(out)), err, code, lost: lost.size };
     } finally {
       await server.stop(true);
     }
@@ -143,8 +156,26 @@ describe('a relay\'s links over TLS', () => {
   }, 60_000);
 
   test('lets go of each link once it has ended, not when its keepalive next wakes', async () => {
-    const { links } = await churn(8, 10);
+    const { links, threads } = await churn(8, 10);
 
-    expect(links).toBe(0);
+    expect({ links, threads }).toEqual({ links: 0, threads: {} });
+  }, 60_000);
+
+  // The count each end sends last, of the far end's stream it took, can go with its carrier. The outbound end finished
+  // without knowing it arrived and opened no more, and the inbound end, which only the outbound end can reach, waited
+  // out the grace (240 s) for a carrier: with its link, its program's connection and its threads.
+  test('ends both ends of a link whose last count is lost with its carrier, not the inbound end after its grace', async () => {
+    const { counts, errors, lost, links, threads } = await churn(8, 10, 'count');
+
+    expect({ counts, errors, lost, links, threads }).toEqual({ counts: { ok: 80 }, errors: [], lost: 80, links: 0, threads: {} });
+  }, 60_000);
+
+  // The inbound end says 'f' as it finishes and goes: the outbound end, its carrier gone with it, opens again and is told
+  // that no such link is held.
+  test('ends both ends of a link whose confirmation is lost with its carrier', async () => {
+    const { counts, errors, lost, links, threads, err } = await churn(8, 10, 'confirmation');
+
+    expect({ counts, errors, lost, links, threads, told: err.includes('the far end holds no such link') })
+      .toEqual({ counts: { ok: 80 }, errors: [], lost: 80, links: 0, threads: {}, told: true });
   }, 60_000);
 });

@@ -6,8 +6,9 @@ origin (a TLS WebSocket server the test serves). Each of `workers` threads makes
 fails: a program's connection to an echo server on rank 0's address goes out through the relay's `carry`, sends a
 pattern of its own and reads it back whole, then closes, by a reset one time in three and by a half-close the rest,
 and the next link opens at once, on whatever descriptor the last one gave up. Then it says how many echoes came back
-whole and what the rest were, the TLS contexts the process held (the most at any 50 ms, and at the end) and the links
-it still holds once every one has ended: a link's own threads end with it, and nothing else may keep it.
+whole and what the rest were, the TLS contexts the process held (the most at any 50 ms, and at the end), and the links
+and the threads it still holds once every one has ended: a link's own threads end with it, and nothing else may keep
+them.
 
 blocked <cert> <key>: one carrier over TLS to a hub that never reads and never speaks, a thread blocked in its read and
 another in its write (the hub's window full), closed from two threads at once. Then it says whether both threads left
@@ -43,7 +44,8 @@ def contexts():
 
 def churn(origin, workers, cycles):
     relay = load(origin)
-    threading.Thread(target=relay["control"], daemon=True).start()
+    control = threading.Thread(target=relay["control"], daemon=True)
+    control.start()
     echo = socket.create_server((relay["OWN"], 0))
 
     def answer(conn):
@@ -58,7 +60,8 @@ def churn(origin, workers, cycles):
         while True:
             threading.Thread(target=answer, args=(echo.accept()[0],), daemon=True).start()
 
-    threading.Thread(target=serve, daemon=True).start()
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
     counts, errors, lock = {}, [], threading.Lock()
 
     def cycle(worker):
@@ -101,20 +104,32 @@ def churn(origin, workers, cycles):
         while not sampled.wait(0.05):
             peak[0] = max(peak[0], contexts())
 
-    threading.Thread(target=sample, daemon=True).start()
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(cycle, range(workers)))
     sampled.set()
+    sampler.join()
 
     def held():
         gc.collect()
         return sum(isinstance(each, relay["Link"]) for each in gc.get_objects())
 
+    def lingering():
+        """How many threads this process has of each target (a thread is named for it), beside its own main one, the
+        relay's control socket's (and its heartbeat's) and the echo server's accept loop: a link's own, and the echo
+        server's for each connection the relay holds open to it."""
+        idle = (threading.main_thread(), control, server)
+        names = [each.name.partition("(")[2].rstrip(")") or each.name for each in threading.enumerate() if each not in idle]
+
+        return {name: names.count(name) for name in set(names) if name != "heartbeat"}
+
     # A link's last thread may still be winding down when its program has its end; what remains after that holds it.
     deadline = time.monotonic() + 5
-    while held() and time.monotonic() < deadline:
+    while (held() or lingering()) and time.monotonic() < deadline:
         time.sleep(0.05)
-    print(json.dumps({"counts": counts, "errors": errors, "contexts": {"peak": peak[0], "end": contexts()}, "links": held()}), flush=True)
+    print(json.dumps({"counts": counts, "errors": errors, "contexts": {"peak": peak[0], "end": contexts()}, "links": held(),
+                      "threads": lingering()}), flush=True)
 
 
 def blocked(cert, key):
