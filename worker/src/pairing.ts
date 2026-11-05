@@ -19,7 +19,7 @@ export type Part = Readonly<v.InferOutput<typeof PartSchema>>;
 
 /** What the pairing needs of where its sockets live: the Durable Object's hibernatable WebSockets, or a test's. */
 export interface Sockets<S> {
-  /** Every open socket with `tag`. */
+  /** Every open socket with `tag`: not one closing, which a platform's registry lists until its close event. */
   tagged(tag: string): S[];
   part(socket: S): Part;
   /** Takes `socket` with `part` under `tags`. */
@@ -84,18 +84,17 @@ function partner<S>(sockets: Sockets<S>, socket: S): S | undefined {
 }
 
 /** A message on a socket: an end's, passed to the other end of its pair. One before its pairing breaks the
- *  handshake, which neither end does, and closes it. */
+ *  handshake, which neither end does, and closes it; one whose pair is gone (closing, or closed) closes as `gone` does
+ *  the other end of a pair. */
 export function passed<S>(sockets: Sockets<S>, socket: S, message: string | ArrayBuffer): void {
-  if (sockets.part(socket).role === 'control') return;
+  const part = sockets.part(socket);
+
+  if (part.role === 'control') return;
   const other = partner(sockets, socket);
 
-  if (other === undefined) {
-    sockets.close(socket, 4409, 'a message before its pair');
-
-    return;
-  }
-
-  sockets.send(other, message);
+  if (other !== undefined) sockets.send(other, message);
+  else if (part.pair == null) sockets.close(socket, 4409, 'a message before its pair');
+  else sockets.close(socket, 1000, 'the other end of its pair went');
 }
 
 /** A socket gone: the other of its pair goes too, so each end takes the next its relay makes. */

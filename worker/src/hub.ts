@@ -24,8 +24,10 @@ import { LINK_ID, opening, RELAY_HEADER } from './relay';
 class Hibernating implements Sockets<WebSocket> {
   constructor(private readonly ctx: DurableObjectState) {}
 
+  /** Each open socket with `tag`. `getWebSockets` also lists one closing, until its close event: closed by this hub
+   *  (a replaced open) it would still be found waiting, and paired with its replacement's end left unready. */
   tagged(tag: string): WebSocket[] {
-    return this.ctx.getWebSockets(tag);
+    return this.ctx.getWebSockets(tag).filter((socket) => socket.readyState === WebSocket.READY_STATE_OPEN);
   }
 
   part(socket: WebSocket): Part {
