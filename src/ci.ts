@@ -324,13 +324,15 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
   return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, commit, () => packOf(repo, sha, base, config.history)) };
 }
 
-/** A commit's job fields, its pack uploaded. */
-export async function onCommit(armada: Armada, target: string): Promise<OnCommit> {
+/** A commit's job fields at `size`, else at its run's size, its pack uploaded against that environment's base: a job
+ *  resized after its environment was resolved packs against another environment's base, which its own never had. */
+export async function onCommit(armada: Armada, target: string, size?: Size): Promise<OnCommit> {
   const commit = await commitOf(armada, target);
+  const own = size === undefined ? commit : await commit.of(undefined, size);
 
-  await commit.upload();
+  await own.upload();
 
-  return commit.spec;
+  return own.spec;
 }
 
 /** The containers each of a run's environments' task jobs runs on, all at once within the pool: each on at least its
