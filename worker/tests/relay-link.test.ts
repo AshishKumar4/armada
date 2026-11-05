@@ -3,8 +3,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { STATE } from '../src/container';
-import { accepted, controlled, gone, opened, passed, type Part, type Sockets } from '../src/pairing';
+import { gone, passed } from '../src/pairing';
 import { GANG_UP, RELAY_HEADER, RELAY_PY } from '../src/relay';
+import { admit, BunSockets, opening, type Opened } from './relay-hub';
 
 /** Both ends of a link in one relay.py process, as two ranks' relays: its control socket at its hub (`control`), an
  *  echo server on rank 0's address, and a program whose connection to the echo goes out through `carry`.
@@ -90,65 +91,6 @@ while data := program.recv(1 << 20):
 print(size, got.hexdigest() == hashlib.sha256(block * (total // len(block))).hexdigest(), flush=True)
 `;
 
-/** What a hub's socket is in the harness: a control socket, or one end of a link. */
-interface Opened {
-  readonly kind: string;
-  readonly link: string;
-  readonly port: number;
-  readonly resume: boolean;
-  readonly accept: boolean;
-}
-
-/** What the harness's hub asks of a socket Bun serves: its data, to send, to close, and to drop without a Close. */
-interface Served {
-  readonly data: Opened;
-  send(message: string | ArrayBuffer): void;
-  close(code?: number, reason?: string): void;
-  terminate(): void;
-}
-
-/** The hub's sockets as Bun holds them: each one's part and tags beside it, as a hub's attachments keep them. */
-class BunSockets implements Sockets<Served> {
-  private readonly held = new Map<Served, { part: Part; readonly tags: readonly string[]; closed: boolean }>();
-
-  tagged(tag: string): Served[] {
-    return [...this.held].filter(([, held]) => !held.closed && held.tags.includes(tag)).map(([socket]) => socket);
-  }
-
-  part(socket: Served): Part {
-    const held = this.held.get(socket);
-
-    if (held === undefined) throw new Error('a socket the hub never took');
-
-    return held.part;
-  }
-
-  take(socket: Served, part: Part, tags: readonly string[]): void {
-    this.held.set(socket, { part, tags, closed: false });
-  }
-
-  mark(socket: Served, part: Part): void {
-    const held = this.held.get(socket);
-
-    if (held !== undefined) held.part = part;
-  }
-
-  send(socket: Served, message: string | ArrayBuffer): void {
-    socket.send(message);
-  }
-
-  close(socket: Served, code: number, reason: string): void {
-    this.gone(socket);
-    socket.close(code, reason);
-  }
-
-  gone(socket: Served): void {
-    const held = this.held.get(socket);
-
-    if (held !== undefined) held.closed = true;
-  }
-}
-
 /** A rank's hub over Bun's WebSockets, pairing as `ArmadaHub` does (`hub.ts`). Each time `dropAfter` more of a link's
  *  outbound bytes arrive, one end of its pair drops without a Close frame, the opening end's and then the other's in
  *  turn, as the network or a restarted hub drops them. `lost` resets the program's connection as `reset` does, and
@@ -165,28 +107,23 @@ async function run(total: number, port: string, dropAfter: number, sending: 'all
   const server = Bun.serve<Opened>({
     port: 0,
     fetch(request, bun) {
-      const url = new URL(request.url);
-      const kind = url.pathname.split('/')[6] ?? '';
-      const link = url.searchParams.get('id') ?? '';
-      const [accept, resume] = [url.searchParams.has('accept'), url.searchParams.has('resume')];
+      const data = opening(request);
 
-      if (kind === 'link' && !accept) {
-        if (resume && Date.now() < outageUntil) {
+      if (data.kind === 'link' && !data.accept) {
+        if (data.resume && Date.now() < outageUntil) {
           asked.push('refused');
 
           return new Response('the hub is coming back', { status: 503 });
         }
 
-        asked.push(resume ? 'resume' : 'open');
+        asked.push(data.resume ? 'resume' : 'open');
       }
 
-      return bun.upgrade(request, { data: { kind, link, port: Number(url.searchParams.get('port')), resume, accept } }) ? undefined : new Response('no', { status: 400 });
+      return bun.upgrade(request, { data }) ? undefined : new Response('no', { status: 400 });
     },
     websocket: {
       open(ws) {
-        if (ws.data.kind === 'control') controlled(hub, ws);
-        else if (ws.data.accept) accepted(hub, ws, ws.data.link);
-        else opened(hub, ws, ws.data);
+        admit(hub, ws);
       },
       message(ws, message) {
         if (sending === 'lost' && message === 'g' && drops === 0) {
