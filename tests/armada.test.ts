@@ -8,7 +8,7 @@ import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { deploymentConfig } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
@@ -262,7 +262,7 @@ describe('a task\'s stored artifacts', () => {
 });
 
 describe('a deploy', () => {
-  const health = (protocol: number, oldest?: number, driver = 2, contract = 'this'): Health => ({ ok: true, driver, protocol, oldest, vcpus: 0, jobs: 0, contract });
+  const health = (protocol: number, oldest?: number, driver = DRIVER, contract = 'this'): Health => ({ ok: true, driver, protocol, oldest, vcpus: 0, jobs: 0, contract });
 
   test('reads the oldest wire a Worker serves: said, else 3 since protocol 4, else only its own', () => {
     expect([servedFloor(health(7, 5)), servedFloor(health(6)), servedFloor(health(4)), servedFloor(health(2))]).toEqual([5, 3, 3, 2]);
@@ -280,9 +280,12 @@ describe('a deploy', () => {
       mustDrain(health(PROTOCOL - 1, 3, 1), false, 'this'),
       // Serves every client this one does, but its objects call each other by another interface, or one it does not
       // say: armada-dew3's redeploy of 2026-10-12, taken over, lost its fleet's holds to the old objects.
-      mustDrain(health(PROTOCOL - 1, 3, 2, 'earlier'), false, 'this'),
+      mustDrain(health(PROTOCOL - 1, 3, DRIVER, 'earlier'), false, 'this'),
       mustDrain({ ...health(PROTOCOL - 1, 3), contract: undefined }, false, 'this'),
-    ]).toEqual([true, true, true, true, false, false, false, true, true, true]);
+      // Driver 2 wrote its containers' relay without 'f' (RELAY_PY, which the contract's fingerprint does not cover), and
+      // its Durable Objects keep running for minutes after a takeover, so a gang's next join could mix old and new vessels.
+      mustDrain(health(PROTOCOL, 3, 2), false, 'this'),
+    ]).toEqual([true, true, true, true, false, false, false, true, true, true, true]);
   });
 
   test('fingerprints the interface its Durable Objects call each other by and the shapes they store, with only Bun installed: the same for a comment or a method\'s body, another for a public method\'s arguments or a stored field', () => {
