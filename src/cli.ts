@@ -208,15 +208,17 @@ async function map(): Promise<number> {
   const armada = connect();
   const began = Date.now();
   const target = option('commit');
-  const size = option('size');
-  const where = target === undefined ? { recipe: recipe(recipeFrom(option('env'))).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target);
-  const base = size === undefined ? where.recipe : { ...where.recipe, size: v.parse(SizeSchema, size) };
-  const argv = argvOf(rest, base);
+  const given = option('size');
+  const size = given === undefined ? undefined : v.parse(SizeSchema, given);
+  const file = recipe(recipeFrom(option('env')));
+  // A commit's environment is resolved at the size the job runs at, as its pack's base is that environment's.
+  const where = target === undefined ? { recipe: (size === undefined ? file : file.size(size)).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target, size);
+  const argv = argvOf(rest, where.recipe);
   const taskOptions = { speculative: flag('speculative'), fresh: flag('fresh'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const mode = option('mode');
   const options = { armada, pool: whole('pool'), slots: whole('slots'), budget: whole('budget'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), priority: whole('priority', -Infinity), inputs: option('inputs')?.split(',').filter(Boolean), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
-  const job = flag('output') ? commandTask(base, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(base, argv, taskOptions).stream(all, options);
+  const job = flag('output') ? commandTask(where.recipe, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(where.recipe, argv, taskOptions).stream(all, options);
   // An interrupt while the job is made cancels it once it is.
   const id = await cancelOnInterrupt([job], async () => await job.id);
   let worst = 0;
@@ -258,6 +260,8 @@ async function map(): Promise<number> {
       // JSON leaves out what a result does not have: a value, an error, artifacts kept.
       if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, value: result.ok ? result.value : undefined, error: result.kind === 'error' ? result.error : undefined, artifacts: kept }));
       else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
+
+      if (result.meta.artifactsLost !== undefined) console.error(`task ${String(result.index)} kept no artifacts: ${result.meta.artifactsLost}`);
 
       if (result.kind === 'lost' || result.kind === 'cancelled') worst = 2;
       else if (result.kind !== 'ok' && worst === 0) worst = 1;

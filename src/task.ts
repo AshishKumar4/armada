@@ -171,6 +171,8 @@ export interface Meta {
   readonly host?: Host;
   /** Whether the task's artifacts directory was kept; `job.artifacts(index)` reads it. */
   readonly artifacts: boolean;
+  /** Why its artifacts were not kept though it left some: their packer's failure. */
+  readonly artifactsLost?: string;
   /** Answered from the task's cache, with nothing run. */
   readonly cached: boolean;
 }
@@ -867,7 +869,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     const item = await this.itemOf(id, outcome.index);
 
     const meta: Meta = {
-      seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true,
+      seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true, artifactsLost: outcome.artifactsLost,
       peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes, aloneAfter: outcome.aloneAfter, host: outcome.host,
     };
 

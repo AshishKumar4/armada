@@ -13,7 +13,7 @@
 - `src/`: the client.
   - `cli.ts`, `sdk.ts`, `task.ts`. A task's `output` checks each answer when it lands and types it.
   - `ci.ts` (`armada run`), `dispatch.ts` (`listSchedule`), `dashboard.ts` (`armada dashboard`).
-  - `protocol.ts`: `PROTOCOL` 9, `OLDEST_CLIENT` 3, `DRIVER` 2, `PACKER` 3. A repository recipe's environment is keyed
+  - `protocol.ts`: `PROTOCOL` 9, `OLDEST_CLIENT` 3, `DRIVER` 3, `PACKER` 3. A repository recipe's environment is keyed
     by the client's packer, so a client never builds on an environment an earlier one prepared (#34).
 - `worker/src/`:
   - `job.ts`: one Durable Object per job. It owns the queue, vessels, slots, gangs, stragglers and retries.
@@ -28,7 +28,23 @@
   - `fleet.ts`: the deployment's vCPU cap. Vessels and preparers both hold their containers' vCPUs in it.
   - `tasks.ts`: pushed task ids and every hold on a bundle (the ids, and each open job's pin). Its alarm alone deletes
     a bundle nothing holds.
-  - `relay.ts`, `secrets.ts`, `timings.ts`.
+  - `relay.ts`: a gang's network. Each container runs a relay (`RELAY_PY`) that dials out to
+    `/hub/<job>/<index>/<attempt>/<rank>`, bounds each open as a whole (`RELAY_OPEN`) and logs every failed one,
+    whatever it was, with its stage and duration. Its control socket sends a heartbeat every 30 s, which the hub says
+    back, and a relay that has heard nothing on it for `RELAY_SILENCE` (75 s) closes it and opens another: a blackholed
+    connection carries no FIN or RST. A relay closes a WebSocket's socket only once no thread is in a read or a write
+    of it (`Frames.close`): OpenSSL keeps the descriptor's number through a read, and a closed socket's number goes to
+    the next socket made. It holds one TLS context for the process, and a link's keepalive ends with the link. A link
+    ends at its inbound end when it is done, which says `f` as it goes; its outbound end, the only one that opens
+    another WebSocket, ends on `f`, or on `g` when the `f` was lost, so a final count lost with a carrier is sent again
+    on the next, not waited for by the inbound end for `RELAY_GRACE`. A vessel writes the relay into its container on
+    every gang it joins (`network`, vessel.ts), not only its first, so every rank of a gang runs one.
+    `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of a gang's
+    attempt, which pairs the relays' sockets and passes their messages, only over sockets that are open
+    (`getWebSockets` lists one closing until its close event). It does no storage operation, so no vessel's storage,
+    which stalls and resets, is on a link's path (Dew 1401). A gang attempt's token is derived from the bearer
+    (`gangToken`), so the hub checks it with no read.
+  - `secrets.ts`, `timings.ts`.
 - `worker/dashboard/`: the dashboard. `armada deploy` builds it into the Worker's assets.
 - `python/`: the Python SDK. `lean/`: the scheduler proofs.
 - `tools/oxlint/anti-slop/`: Kinu's lint rules, vendored. `upstream.json` names the commit.
@@ -87,6 +103,17 @@
     code (measured on armada-ci2: 296 s). armada-dew8 runs wire 14. A newer client gets 426 from an older Worker:
     redeploy the Worker before a project moves its client pin to `main`. Borrowing past the cap needs
     `ARMADA_ACCOUNT_TOKEN` at a deploy.
+  - The relay hub (Dew 1401) changes the contract: `ArmadaVessel` loses its `fetch` and WebSocket handlers, and `ArmadaHub`
+    (migration `v6`, binding `HUB`) is new. The next `armada deploy` of it to a deployment therefore drains first
+    (`mustDrain`, `src/cli.ts`): the deployed Worker takes no new job, the deploy polls every 15 s for its open jobs to
+    end and installs when none is left, and the fleet refuses new jobs for about 5 min after, while the
+    deployment-wide objects still run the old code. Don't skip it: a gang running under the old Worker has containers
+    whose relay dials `/relay/<job>/<vessel>`, a route the new Worker no longer serves, so a takeover would cut every
+    link of every running gang. A deployed Worker too old to drain says so (`drain`), and its running jobs end with the
+    deploy. The head also bumps `DRIVER` to 3, for the relay's `f` and its rewrite on every gang join: the contract's
+    fingerprint does not cover `RELAY_PY`, so without it a deploy of this head would take over a Worker on driver 2, whose
+    objects run for minutes and write the old relay beside the new. The next deploy therefore drains on both the contract
+    and the driver. The bump also rebuilds every environment once, as every environment key holds the driver.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every

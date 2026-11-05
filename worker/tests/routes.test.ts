@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, PROTOCOL, TaskStatusSchema } from '../../src/protocol';
 import { runKey, taskKey } from '../src/env';
@@ -210,25 +210,77 @@ describe('a job an earlier Worker made', () => {
   });
 });
 
-describe('a gang rank\'s relay', () => {
-  test('reaches any vessel its job names, however many the job started, an earlier Worker\'s replacements too, and nothing else', async () => {
+describe('a gang rank\'s hub', () => {
+  test('reaches the hub of the rank, task and attempt it names, its control socket or a link\'s, and nothing else', async () => {
     const reached: string[] = [];
 
     const env = world({
       ARMADA_TOKEN: TOKEN,
-      VESSEL: namespace((name: string) => ({
+      HUB: namespace((name: string) => ({
         fetch: async () => {
           reached.push(name);
 
-          return new Response('relayed');
+          return new Response('hubbed');
         },
       })),
     });
 
     const id = '20261011120000-0123abcd';
-    const ask = async (vessel: string) => (await worker.fetch(new Request(`https://armada.test/relay/${id}/${vessel}?port=1`), env)).status;
+    const ask = async (path: string) => (await worker.fetch(new Request(`https://armada.test/hub/${id}/${path}`), env)).status;
 
-    expect({ statuses: [await ask('v1'), await ask('v10000'), await ask('r12'), await ask('x1'), await ask('v'), await ask('v01')], reached })
-      .toEqual({ statuses: [200, 200, 200, 404, 404, 404], reached: [`${id}/v1`, `${id}/v10000`, `${id}/r12`] });
+    const statuses = [await ask('3/1/2/control'), await ask('3/1/0/link?id=0123456789abcdef&port=1'), await ask('3/1/2/other'),
+      await ask('x/1/2/control'), await ask('3/1/control'), await ask('3/1/2/control/more'), await ask('03/1/2/control'), await ask('3/1/2/control')];
+
+    expect({ statuses, reached }).toEqual({ statuses: [200, 200, 404, 404, 404, 404, 404, 200], reached: [`${id}/3/1/2`, `${id}/3/1/0`, `${id}/3/1/2`] });
+  });
+
+  test('logs each open when it arrives, before its hub answers, and its status and duration when it does or fails', async () => {
+    const id = '20261011120000-0123abcd';
+    const logged: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation((line: string) => { logged.push(line); });
+    const error = spyOn(console, 'error').mockImplementation((line: string) => { logged.push(line); });
+
+    const env = world({
+      ARMADA_TOKEN: TOKEN,
+      HUB: namespace(() => ({
+        fetch: async (request: Request) => {
+          if (request.url.includes('/control')) return new Response('hubbed');
+
+          if (request.url.includes('accept')) throw new Error('Durable Object reset because its code was updated');
+
+          return new Response('forbidden', { status: 403 });
+        },
+      })),
+    });
+
+    try {
+      const link = '0123456789abcdef';
+      const ask = async (path: string) => await worker.fetch(new Request(`https://armada.test/hub/${id}/${path}`, { headers: { 'armada-relay': 'secret' } }), env);
+
+      await ask('3/1/2/control?from=2&n=1');
+      await ask(`3/1/0/link?id=${link}&port=1&from=2&n=4`);
+      await expect(ask(`3/1/1/link?id=${link}&accept=1&from=1`)).rejects.toThrow('Durable Object reset because its code was updated');
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+    }
+
+    // Each line as it parsed, its duration said only to have been taken.
+    const lines = logged.map((line) => {
+      const { ms, ...rest } = v.parse(v.looseObject({ ms: v.optional(v.number()) }), JSON.parse(line));
+
+      return ms === undefined ? rest : { ...rest, ms: 'taken' };
+    });
+
+    expect(lines).toEqual([
+      { hub: `${id}/3/1/2`, open: 'control', from: '2', n: '1', phase: 'arrived' },
+      { hub: `${id}/3/1/2`, open: 'control', from: '2', n: '1', phase: 'answered', status: 200, ms: 'taken' },
+      { hub: `${id}/3/1/0`, open: 'link', id: '0123456789abcdef', port: '1', from: '2', n: '4', phase: 'arrived' },
+      { hub: `${id}/3/1/0`, open: 'link', id: '0123456789abcdef', port: '1', from: '2', n: '4', phase: 'answered', status: 403, ms: 'taken' },
+      { hub: `${id}/3/1/1`, open: 'accept', id: '0123456789abcdef', from: '1', phase: 'arrived' },
+      { hub: `${id}/3/1/1`, open: 'accept', id: '0123456789abcdef', from: '1', phase: 'failed', error: 'Durable Object reset because its code was updated', ms: 'taken' },
+    ]);
+    // What the relay presents is never logged.
+    expect(logged.join('\n')).not.toContain('secret');
   });
 });

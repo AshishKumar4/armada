@@ -21,8 +21,11 @@ export const PROTOCOL_HEADER = 'armada-protocol';
 export const DEPLOYMENT_HEADER = 'armada-deployment';
 
 /** The driver's version: bump when what the Worker installs or runs in a container changes. It is in every
- *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it. */
-export const DRIVER = 2;
+ *  environment key, so a fix to the runner's own layer rebuilds every environment that predates it, and a deploy
+ *  drains a deployed Worker of another (`mustDrain`). The relay a gang's containers run (`RELAY_PY`) is such a change,
+ *  and the contract's fingerprint does not cover it: a deploy that took over a Worker with the relay it replaces would
+ *  let that Worker's objects, which run for minutes, write the old relay beside the new. 3: the relay's 'f'. */
+export const DRIVER = 3;
 
 /** The container sizes, smallest first, each a Cloudflare instance type, or for `large` the resources a start names.
  *  Cloudflare's largest type is 4 vCPU and 12 GiB, and an account may start up to 8 vCPU in its 12 GiB (started on
@@ -463,6 +466,8 @@ export const OutcomeSchema = v.object({
   value: v.optional(v.string()),
   /** Whether the task's artifacts directory was stored, at `/jobs/<id>/tasks/<index>/artifacts`, a tar.gz. */
   artifacts: v.optional(v.boolean()),
+  /** Why a task that ran to its exit kept no artifacts though its directory held some: its packer's exit and what it said. */
+  artifactsLost: v.optional(v.string()),
   /** A pushed task's answer, as its runner says: `value` is an envelope with the body's value or error, `command` the
    *  file the body's command wrote. */
   answer: v.optional(v.picklist(['value', 'command'])),
