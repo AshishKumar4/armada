@@ -1,79 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import * as v from 'valibot';
 import { gangToken } from '../src/env';
 import { ArmadaHub } from '../src/hub';
-import { PartSchema, type Part } from '../src/pairing';
 import { RELAY_HEADER } from '../src/relay';
 import { ArmadaVessel } from '../src/vessel';
 import worker from '../src/worker';
 import { container, namespace, state, world } from './harness';
+import { deliver, heard, hubContext, Pair, platform, type Socket } from './hibernation';
 
 const JOB = '20261011120000-0123abcd';
 
 const TOKEN = 't'.repeat(32);
-
-/** What a hub's socket was told: each message, and how it was closed. */
-interface Told {
-  readonly sent: (string | ArrayBuffer | ArrayBufferView)[];
-  closed?: readonly [number, string];
-}
-
-const told = new WeakMap<Partial<WebSocket>, Told>();
-
-/** A socket as a Durable Object holds one: open until closed, keeping its attachment and what it was told. */
-function peer(): Partial<WebSocket> {
-  const heard: Told = { sent: [] };
-  let attachment: Part | undefined;
-  let readyState = 1;
-
-  const socket: Partial<WebSocket> = {
-    get readyState() {
-      return readyState;
-    },
-    send: (message) => { heard.sent.push(message); },
-    close: (code, reason) => {
-      readyState = 3;
-      heard.closed ??= [code ?? 1005, reason ?? ''];
-    },
-    serializeAttachment: (value) => { attachment = v.parse(PartSchema, value); },
-    deserializeAttachment: () => structuredClone(attachment),
-  };
-
-  told.set(socket, heard);
-
-  return socket;
-}
-
-/** The two ends a hub's upgrade makes: the first is the relay's, the second the hub's. */
-class Pair {
-  static readonly made: Pair[] = [];
-
-  readonly 0 = peer();
-
-  readonly 1 = peer();
-
-  constructor() {
-    Pair.made.push(this);
-  }
-}
-
-/** A hub's Durable Object state with nothing in storage but the platform's WebSocket registry: any call into its
- *  storage is counted and waits forever, as a stalled one does. */
-function hubState(touched: string[]) {
-  const registry = new Map<Partial<WebSocket>, readonly string[]>();
-  const { ctx } = state();
-
-  for (const method of ['get', 'put', 'delete', 'list', 'setAlarm', 'getAlarm', 'deleteAlarm'] as const) {
-    Object.assign(ctx.storage, { [method]: async () => { touched.push(method); await new Promise<never>(() => undefined); } });
-  }
-
-  Object.assign(ctx, {
-    acceptWebSocket: (socket: Partial<WebSocket>, tags: readonly string[]) => { registry.set(socket, tags); },
-    getWebSockets: (tag: string) => [...registry].filter(([socket, tags]) => socket.readyState === 1 && tags.includes(tag)).map(([socket]) => socket),
-  });
-
-  return ctx;
-}
 
 /** Relay opens to a gang's ranks through the Worker's route, one hub per rank, beside a rank's vessel whose lifecycle
  *  storage can be made to answer nothing, as 2026-10-23's did for minutes. The platform's WebSocket pair and its
@@ -83,11 +19,7 @@ async function gang() {
   const touched: string[] = [];
   const reachedVessels: string[] = [];
   const held = Promise.withResolvers<void>();
-  const saved = Object.getOwnPropertyDescriptor(globalThis, 'WebSocketPair');
-  const constants = Object.getOwnPropertyDescriptors(WebSocket);
-
-  Object.assign(globalThis, { WebSocketPair: Pair });
-  Object.assign(WebSocket, { READY_STATE_OPEN: 1, READY_STATE_CONNECTING: 0 });
+  const unplatform = platform();
 
   const vesselState = state(container(() => ({ exitCode: 0, stdout: '' })));
   const { storage } = vesselState.ctx;
@@ -112,7 +44,7 @@ async function gang() {
   const env = world({
     ARMADA_TOKEN: TOKEN,
     HUB: namespace((name: string) => {
-      const hub = hubs.get(name) ?? new ArmadaHub(hubState(touched), env);
+      const hub = hubs.get(name) ?? new ArmadaHub(hubContext(touched), env);
 
       hubs.set(name, hub);
 
@@ -139,36 +71,21 @@ async function gang() {
       return { status: answer.status, socket: Pair.made.slice(before)[0]?.[1] };
     },
     /** A relay's message on its socket to `rank`'s hub, delivered as the runtime does. */
-    send: async (rank: number, socket: Partial<WebSocket> | undefined, message: string | ArrayBuffer) => {
+    send: async (rank: number, socket: Socket | undefined, message: string | ArrayBuffer) => {
       const hub = hubs.get(`${JOB}/3/1/${String(rank)}`);
 
-      if (socket === undefined || hub === undefined) throw new Error('no such socket');
-      // SAFETY: a socket here was constructed by `peer` above, which defines the only members the hub calls on a
-      // WebSocket: readyState, send, close and the attachments.
-      await hub.webSocketMessage(socket as WebSocket, message);
+      if (hub === undefined) throw new Error('no such hub');
+      await deliver(hub, socket, message);
     },
     /** From now, every read and write of the rank's vessel waits for `release`. */
     stall: () => { stalled = true; },
     release: () => { held.resolve(); },
     restore: () => {
       held.resolve();
-      Pair.made.length = 0;
-
-      if (saved === undefined) Reflect.deleteProperty(globalThis, 'WebSocketPair');
-      else Object.defineProperty(globalThis, 'WebSocketPair', saved);
-
-      for (const name of ['READY_STATE_OPEN', 'READY_STATE_CONNECTING']) {
-        const descriptor = constants[name];
-
-        if (descriptor === undefined) Reflect.deleteProperty(WebSocket, name);
-        else Object.defineProperty(WebSocket, name, descriptor);
-      }
+      unplatform();
     },
   };
 }
-
-/** What `socket` was sent. */
-const heard = (socket: Partial<WebSocket> | undefined) => socket === undefined ? undefined : told.get(socket)?.sent;
 
 describe('a relay upgrade under vessel pressure (Dew ledger 1401)', () => {
   test('answers and pairs a new link, and carries an existing link\'s traffic, while the vessel\'s lifecycle storage is stalled', async () => {

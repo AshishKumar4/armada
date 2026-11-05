@@ -4,6 +4,7 @@ import { ArmadaHub } from '../src/hub';
 import { accepted, controlled, gone, opened, passed, type Part, type Sockets } from '../src/pairing';
 import { RELAY_HEADER } from '../src/relay';
 import { state, world } from './harness';
+import { closure, deliver, heard, hubContext, Pair, platform, sever } from './hibernation';
 
 /** A socket as the hub's pairing sees it: what was sent to it, and how it was closed. */
 class Fake {
@@ -170,6 +171,64 @@ describe('a rank\'s hub', () => {
     } finally {
       log.mockRestore();
       error.mockRestore();
+    }
+  });
+});
+
+/** The hub as its Durable Object runs it: `ask` is a relay's upgrade, answered with the hub's end of its WebSocket,
+ *  which the platform's registry lists closing, after `close`, until its close event (`settle`). */
+async function listing() {
+  const unplatform = platform();
+  const env = world({ ARMADA_TOKEN: 't'.repeat(32) });
+  const touched: string[] = [];
+  const hub = new ArmadaHub(hubContext(touched), env);
+  const token = await gangToken(env.ARMADA_TOKEN, 'job', 3, 1);
+
+  return {
+    hub, touched, unplatform,
+    ask: async (path: string) => {
+      const before = Pair.made.length;
+
+      const answer = await hub.fetch(new Request(`https://armada.example/hub/job/3/1/0/${path}`, { headers: { [RELAY_HEADER]: token, upgrade: 'websocket' } }));
+
+      return { status: answer.status, socket: Pair.made.slice(before)[0]?.[1] };
+    },
+  };
+}
+
+describe('a rank\'s hub over the platform\'s sockets, which list one closing until its close event', () => {
+  test('pairs the rank\'s end with the open that replaced an earlier one, which is closing, not with that one', async () => {
+    const { ask, touched, unplatform } = await listing();
+
+    try {
+      const control = await ask('control');
+      const first = await ask(`link?id=${LINK}&port=9000`);
+      const second = await ask(`link?id=${LINK}&port=9000&resume=1`);
+      const end = await ask(`link?id=${LINK}&accept=1`);
+
+      // The replaced open is closed and told nothing; its replacement is the one paired, and each end told so.
+      expect({ control: heard(control.socket), first: [heard(first.socket), closure(first.socket)], second: heard(second.socket), end: heard(end.socket), storage: touched })
+        .toEqual({
+          control: [`o ${LINK} 9000 0`, `o ${LINK} 9000 1`], first: [[], [1000, 'a newer open of its link']], second: ['r'], end: ['r'], storage: [],
+        });
+    } finally {
+      unplatform();
+    }
+  });
+
+  test('closes an end whose pair is closing when it sends, as the pair\'s own close does, not as a message before its pair', async () => {
+    const { ask, hub, unplatform } = await listing();
+
+    try {
+      const out = await ask(`link?id=${LINK}&port=9000`);
+      const end = await ask(`link?id=${LINK}&accept=1`);
+
+      sever(out.socket, 1006, 'the network dropped it');
+      await deliver(hub, end.socket, 'a0');
+
+      expect({ end: closure(end.socket), told: heard(end.socket) }).toEqual({ end: [1000, 'the other end of its pair went'], told: ['r'] });
+    } finally {
+      unplatform();
     }
   });
 });
