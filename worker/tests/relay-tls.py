@@ -6,13 +6,15 @@ origin (a TLS WebSocket server the test serves). Each of `workers` threads makes
 fails: a program's connection to an echo server on rank 0's address goes out through the relay's `carry`, sends a
 pattern of its own and reads it back whole, then closes, by a reset one time in three and by a half-close the rest,
 and the next link opens at once, on whatever descriptor the last one gave up. Then it says how many echoes came back
-whole and what the rest were.
+whole and what the rest were, the TLS contexts the process held (the most at any 50 ms, and at the end) and the links
+it still holds once every one has ended: a link's own threads end with it, and nothing else may keep it.
 
 blocked <cert> <key>: one carrier over TLS to a hub that never reads and never speaks, a thread blocked in its read and
 another in its write (the hub's window full), closed from two threads at once. Then it says whether both threads left
 and the close returned."""
 import base64
 import concurrent.futures
+import gc
 import hashlib
 import json
 import socket
@@ -32,6 +34,11 @@ def load(origin):
     relay = {"__name__": "relay"}
     exec(source, relay)
     return relay
+
+
+def contexts():
+    """The TLS contexts this process holds, however they were made: each is a copy of its trust roots."""
+    return sum(isinstance(each, ssl.SSLContext) for each in gc.get_objects())
 
 
 def churn(origin, workers, cycles):
@@ -88,10 +95,26 @@ def churn(origin, workers, cycles):
                 # One failed link is the finding; the rest of a broken relay's would each wait out its program's timeout.
                 return
 
-    started = time.monotonic()
+    peak, sampled = [contexts()], threading.Event()
+
+    def sample():
+        while not sampled.wait(0.05):
+            peak[0] = max(peak[0], contexts())
+
+    threading.Thread(target=sample, daemon=True).start()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(cycle, range(workers)))
-    print(json.dumps({"counts": counts, "errors": errors, "seconds": time.monotonic() - started}), flush=True)
+    sampled.set()
+
+    def held():
+        gc.collect()
+        return sum(isinstance(each, relay["Link"]) for each in gc.get_objects())
+
+    # A link's last thread may still be winding down when its program has its end; what remains after that holds it.
+    deadline = time.monotonic() + 5
+    while held() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    print(json.dumps({"counts": counts, "errors": errors, "contexts": {"peak": peak[0], "end": contexts()}, "links": held()}), flush=True)
 
 
 def blocked(cert, key):

@@ -17,6 +17,8 @@ const DRIVER = join(import.meta.dir, 'relay-tls.py');
 const ChurnSchema = v.object({
   counts: v.record(v.string(), v.number()),
   errors: v.array(v.string()),
+  contexts: v.object({ peak: v.number(), end: v.number() }),
+  links: v.number(),
 });
 
 const BlockedSchema = v.object({ stalled: v.boolean(), closed: v.boolean(), gone: v.boolean(), read: v.boolean(), write: v.boolean() });
@@ -130,5 +132,19 @@ describe('a relay\'s links over TLS', () => {
 
     // The hub never reads: the write has filled its window and every buffer, and the read waits for a word.
     expect({ code, ...v.parse(BlockedSchema, JSON.parse(out)) }).toEqual({ code: 0, stalled: true, closed: true, gone: true, read: true, write: true });
+  }, 60_000);
+
+  // Every open made a TLS context of its own, a copy of the trust roots held until its socket went, which a link's
+  // keepalive kept for its whole 30 s sleep after the link had ended.
+  test('holds one TLS context, however many links it opens', async () => {
+    const { contexts } = await churn(8, 10);
+
+    expect(contexts).toEqual({ peak: 1, end: 1 });
+  }, 60_000);
+
+  test('lets go of each link once it has ended, not when its keepalive next wakes', async () => {
+    const { links } = await churn(8, 10);
+
+    expect(links).toBe(0);
   }, 60_000);
 });
