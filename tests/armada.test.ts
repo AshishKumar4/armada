@@ -858,6 +858,76 @@ describe('the CLI following a job', () => {
   });
 });
 
+describe('the CLI mapping over a commit', () => {
+  test('at another size than its run\'s, packs against the base its own environment resolves to', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-map-size-'));
+    const repo = join(scratch, 'repo');
+    const green = { index: 0, kind: 'exited', exitCode: 0, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false };
+    // The commit's parent, at which the commit's environment at its run's size, medium, is ready.
+    let parent = '';
+    const jobs: { base: string | undefined; size: string; shared: boolean }[] = [];
+
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        if (pathname === '/timings/proj') return Response.json({ rows: {}, files: {} });
+
+        if (pathname === '/environments/resolve') {
+          const { recipe } = v.parse(v.object({ recipe: RecipeSchema }), await request.json());
+
+          return Response.json({ key: await environmentKey(recipe), base: recipe.size === 'medium' ? parent : 'root' });
+        }
+
+        if (pathname === '/jobs') {
+          const { recipe, commit } = v.parse(JobSpecSchema, await request.json());
+
+          // Whether the job's environment is the medium one, whose snapshot a size of the same disk would share.
+          jobs.push({ base: commit?.base, size: recipe.size, shared: await environmentKey(recipe) === await environmentKey({ ...recipe, size: 'medium' }) });
+
+          return Response.json({ id: 'j1' });
+        }
+
+        if (pathname === '/jobs/j1/events') return Response.json({ events: [{ seq: 1, outcome: green }], done: true });
+
+        if (pathname === '/jobs/j1') {
+          return Response.json({
+            id: 'j1', label: '', phase: 'done', key: 'k', createdAt: 0, startedAt: 0, finishedAt: 1, vessels: [], problems: [], environment: null,
+            tasks: { total: 1, queued: 0, running: 0, exited: 1, red: 0, failed: 0 },
+          });
+        }
+
+        return request.method === 'HEAD' ? new Response(null) : Response.json({ ok: true });
+      },
+    });
+
+    try {
+      mkdirSync(repo);
+      git(repo, 'init', '-q');
+      writeFileSync(join(repo, '.armada.json'), JSON.stringify({ name: 'proj', environment: {}, plan: { command: ['plan'] }, task: { command: ['task'] } }));
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'one');
+      parent = git(repo, 'rev-parse', 'HEAD').trim();
+      writeFileSync(join(repo, 'two'), '');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'two');
+
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--commit=HEAD', '--size=small', '--times=1', '--', 'true'], {
+        cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
+      });
+      const exit = await cli.exited;
+
+      // A small environment is not the medium one, which alone is ready, so its job packs from the root: a pack against
+      // the medium one's commit is refused by the Worker as packed against a gone environment.
+      expect({ exit, jobs }).toEqual({ exit: 0, jobs: [{ base: 'root', size: 'small', shared: false }] });
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('the CLI cancelling on an interrupt', () => {
   test('a second interrupt while the cancel is answered ends nothing early: it exits 2 once the job is cancelled', async () => {
     let polled: () => void = () => undefined;
