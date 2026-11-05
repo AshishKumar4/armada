@@ -6,7 +6,7 @@ import { INPUTS_DIR, type Boot, type Cpu, type Host, type Outcome } from '../../
 import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED, TASK_GROUP, unpackInputs, usageOf } from '../src/container';
 import { ArmadaFleet } from '../src/fleet';
 import type { Claim, Gang } from '../src/job';
-import { GANG_DOWN, GANG_UP, RELAY_LOG } from '../src/relay';
+import { GANG_DOWN, GANG_UP, RELAY_LOG, RELAY_PY } from '../src/relay';
 import { ArmadaVessel, INPUTS_AT_ONCE, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bundleKey, runKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
@@ -616,6 +616,45 @@ describe('a task that names secrets', () => {
   });
 });
 
+/** A vessel given `claims`, run through its first alarm, which ends waiting for its gang, and its next, which runs the
+ *  tasks: what it did in its container, in order (a relay written, `up` with its arguments, `down`, a launch), and each
+ *  relay it was given. */
+async function joined(claims: (Claim | { readonly waitMs: number } | null)[]) {
+  const ran: string[][] = [];
+  const written: string[] = [];
+
+  const stored = state(container((argv) => {
+    ran.push([...argv]);
+
+    return { exitCode: 0, stdout: argv[3] === 'wait' ? '0\n' : '' };
+  }, (argv, body) => {
+    if (argv[4] === '/armada/relay.py') written.push(body);
+  }));
+
+  const job = {
+    booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+    accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
+  };
+
+  const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job) }));
+
+  await vessel.begin(spec);
+  await vessel.alarm();
+  await vessel.alarm();
+
+  const steps = ran.flatMap((argv) => {
+    if (argv[2] === GANG_UP) return [['up', ...argv.slice(3)]];
+
+    if (argv[2] === GANG_DOWN) return [['down']];
+
+    if (argv[3] === 'launch') return [['launch']];
+
+    return argv[4] === '/armada/relay.py' ? [['relay written']] : [];
+  });
+
+  return { steps, written };
+}
+
 describe('a gang rank', () => {
   test('acknowledges its exact attempt only after the launch and current task are stored, and kills a refused late launch', async () => {
     const gang = { rank: 0, job: 'job', vessels: ['v1', 'v2'], origin: 'https://armada.example', token: 't'.repeat(48) };
@@ -630,42 +669,27 @@ describe('a gang rank', () => {
   });
 
   test('waits for its gang, joins its network as its rank before it launches, and leaves it before a task of no gang', async () => {
-    const ran: string[][] = [];
     const gang = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: 'https://armada.example', token: 't'.repeat(48) };
 
-    const claims: (Claim | { readonly waitMs: number } | null)[] = [{ waitMs: 1 }, { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang },
-      { index: 1, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }, null];
-
-    const stored = state(container((argv) => {
-      ran.push([...argv]);
-
-      return { exitCode: 0, stdout: argv[3] === 'wait' ? '0\n' : '' };
-    }));
-
-    const job = {
-      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
-      accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
-    };
-
-    const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => job) }));
-
-    await vessel.begin(spec);
-    // The first alarm ends waiting for the gang; the next runs both tasks.
-    await vessel.alarm();
-    await vessel.alarm();
-
-    const steps = ran.flatMap((argv) => {
-      if (argv[2] === GANG_UP) return [['up', ...argv.slice(3)]];
-
-      if (argv[2] === GANG_DOWN) return [['down']];
-
-      if (argv[3] === 'launch') return [['launch']];
-
-      return argv[4] === '/armada/relay.py' ? [['relay written']] : [];
-    });
+    const { steps } = await joined([{ waitMs: 1 }, { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang },
+      { index: 1, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }, null]);
 
     // The relay dials the hubs of the task's attempt, task 0's first.
     expect(steps).toEqual([['relay written'], ['up', 'gang', '1', '2', 'https://armada.example', 'job', 't'.repeat(48), '0', '1'], ['launch'], ['down'], ['launch']]);
+  });
+
+  // A vessel that stays in gangs kept the relay its first gang wrote across a deploy of the Worker, so the ranks of a
+  // later gang did not all run one relay.
+  test('writes the Worker\'s relay again as it joins each gang, not only its first', async () => {
+    const first = { rank: 1, job: 'job', vessels: ['v2', 'v1'], origin: 'https://armada.example', token: 'a'.repeat(48) };
+
+    const { steps, written } = await joined([{ waitMs: 1 }, { index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang: first },
+      { index: 1, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang: { ...first, token: 'b'.repeat(48) } }, null]);
+
+    // Each gang's relay is written just before its setup, which restarts the relay from the file; the vessel never left a gang between.
+    expect(steps).toEqual([['relay written'], ['up', 'gang', '1', '2', 'https://armada.example', 'job', 'a'.repeat(48), '0', '1'], ['launch'],
+      ['relay written'], ['up', 'gang', '1', '2', 'https://armada.example', 'job', 'b'.repeat(48), '1', '1'], ['launch']]);
+    expect(written).toEqual([RELAY_PY, RELAY_PY]);
   });
 
   test('keeps its log, the relay\'s appended, when its gang ends without its answer: refused, or stopped while it ran, and says it stopped', async () => {
