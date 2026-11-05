@@ -122,6 +122,21 @@ describe('a rank\'s hub', () => {
     });
   });
 
+  test('says a control socket\'s heartbeat back to it alone, and takes no other message of it', () => {
+    const hub = new Registry();
+    const [control, out, end] = [new Fake('control'), new Fake('out'), new Fake('in')];
+
+    controlled(hub, control);
+    opened(hub, out, { link: LINK, port: 9000, resume: false });
+    accepted(hub, end, LINK);
+    passed(hub, control, 'p');
+    passed(hub, control, 'x');
+    passed(hub, out, 'p');
+
+    // A link's own message is its other end's, whatever it says.
+    expect({ control: control.sent.slice(1), closed: control.closed, end: end.sent }).toEqual({ control: ['p'], closed: undefined, end: ['r', 'p'] });
+  });
+
   test('closes the other end of a pair when one goes, so each takes the next its relay makes', () => {
     const hub = new Registry();
     const [out, end] = [new Fake('out'), new Fake('in')];

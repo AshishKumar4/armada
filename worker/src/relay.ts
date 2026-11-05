@@ -43,6 +43,12 @@ export const RELAY_GRACE = SILENT_MS.working / 1000;
  *  again on a new connection, each said in the relay's log, instead of held for RELAY_GRACE. */
 export const RELAY_OPEN = 20;
 
+/** The most, in seconds, a relay's control socket hears nothing from its hub, not even its heartbeat's answer (sent every
+ *  30 s), before it is closed and opened again: a connection that stopped carrying traffic carries no FIN or RST to say
+ *  so, and its hub would go on telling it opens nothing takes up. Two heartbeats may be lost, and a third's answer
+ *  late. */
+export const RELAY_SILENCE = 75;
+
 /** A link's id: the relay names each connection it carries, and opens another WebSocket under it after a drop. */
 export const LINK_ID = /^[0-9a-f]{16}$/u;
 
@@ -125,7 +131,7 @@ export const RELAY_PY = String.raw`import base64, collections, hashlib, os, sock
 from urllib.parse import urlsplit
 
 OUT = ${String(RELAY_OUT)}
-WINDOW, ACK, GRACE, KEEPALIVE, BUDGET = ${String(RELAY_WINDOW)}, ${String(RELAY_ACK)}, ${String(RELAY_GRACE)}, 30, ${String(RELAY_OPEN)}
+WINDOW, ACK, GRACE, KEEPALIVE, BUDGET, SILENCE = ${String(RELAY_WINDOW)}, ${String(RELAY_ACK)}, ${String(RELAY_GRACE)}, 30, ${String(RELAY_OPEN)}, ${String(RELAY_SILENCE)}
 RANK, ORIGIN, JOB, TOKEN, INDEX, ATTEMPT = int(sys.argv[1]), urlsplit(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 OWN = "127.0.1.%d" % (RANK + 1)
 LINKS, LINKED = {}, threading.Lock()
@@ -576,7 +582,8 @@ def control():
     """This rank's control socket at its hub, kept open: each open of a link to this rank it says
     ('o <link> <port> <0|1>') is taken up (accept). One that goes is said and opened again; the hub keeps the opens
     waiting meanwhile, so a far relay's open outlives it. Every open of it is bounded as a link's is, and every failed
-    one said."""
+    one said. A socket that carries nothing either way, with no FIN or RST to say so, is found by its heartbeat
+    (heartbeat): one that hears nothing for SILENCE seconds is closed and opened again."""
     opens = failed = 0
     while True:
         opens += 1
@@ -588,11 +595,13 @@ def control():
                              % (time.strftime("%H:%M:%S"), opens, status.decode(errors="replace"), stage, time.monotonic() - started))
             time.sleep(0.5)
             continue
-        carrier.ws.settimeout(None)
+        # Each read waits SILENCE for a byte: the hub's answer to a heartbeat, or an open it says, or a ping, ends it.
+        carrier.ws.settimeout(SILENCE)
         if failed:
             sys.stderr.write("%s control: open %d came back after %d failed\n" % (time.strftime("%H:%M:%S"), opens, failed))
             failed = 0
-        threading.Thread(target=pinged, args=(carrier,), daemon=True).start()
+        beating = threading.Event()
+        threading.Thread(target=heartbeat, args=(carrier, beating), daemon=True).start()
         try:
             while True:
                 text, data = carrier.take()
@@ -600,17 +609,24 @@ def control():
                     _, link, port, resume = data.decode().split()
                     threading.Thread(target=guarded, args=(accept, link, int(port), resume == "1"), daemon=True).start()
         except (EOFError, OSError) as error:
-            sys.stderr.write("%s control: %r; opening it again\n" % (time.strftime("%H:%M:%S"), error))
+            if isinstance(error, socket.timeout):
+                sys.stderr.write("%s control: silent for %g s, not even its heartbeat answered; opening it again\n" % (time.strftime("%H:%M:%S"), SILENCE))
+            else:
+                sys.stderr.write("%s control: %r; opening it again\n" % (time.strftime("%H:%M:%S"), error))
+        finally:
+            beating.set()
             carrier.close()
 
 
-def pinged(carrier):
-    """Pings an idle control socket, which Cloudflare closes after 100 s without data, until it goes."""
-    while True:
-        time.sleep(KEEPALIVE)
+def heartbeat(carrier, over):
+    """Says 'p' on a control socket every KEEPALIVE seconds, which its hub says back: the socket is never idle for
+    Cloudflare, which closes one after 100 s without data, and what is said back is what control's SILENCE waits for.
+    Until the socket goes, which sets over."""
+    while not over.wait(KEEPALIVE):
         try:
-            carrier.ping()
-        except OSError:
+            with carrier.lock:
+                carrier.put(True, b"p")
+        except (OSError, ValueError):
             return
 
 

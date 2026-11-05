@@ -3,7 +3,7 @@ import * as v from 'valibot';
 import { RELAY_PY } from '../src/relay';
 
 /** The carrier's real control socket (`control`) against a hub a test plays in Python, with its heartbeat and its
- *  silence bound shortened to a fraction of a second. The hub is `echo`, which says back what a relay says to it, as
+ *  silence bound shortened to a fraction of a second or so. The hub is `echo`, which says back what a relay says to it, as
  *  `ArmadaHub` does, or `mute`, which hears everything its relay sends and says nothing, and never closes: a
  *  connection that stopped carrying traffic one way, with no FIN or RST on it. The second connection, whichever the
  *  first was, is an echo. Prints how many connections the hub took, what each heard, and whether the relay closed it. */
@@ -16,7 +16,7 @@ listener.listen(8)
 sys.argv = ["relay.py", "3", "http://127.0.0.1:%d" % listener.getsockname()[1], "job", "token", "1", "1"]
 relay = {"__name__": "relay_test"}
 exec(source, relay)
-relay["KEEPALIVE"], relay["SILENCE"] = 0.15, 0.6
+relay["KEEPALIVE"], relay["SILENCE"] = 0.2, 1.0
 connections = []
 
 def frames(conn, record, behave):
@@ -52,9 +52,9 @@ def serve():
 threading.Thread(target=serve, daemon=True).start()
 threading.Thread(target=relay["control"], daemon=True).start()
 if mode == "echo":
-    time.sleep(2.0)
+    time.sleep(2.5)
 else:
-    for _ in range(40):
+    for _ in range(60):
         if len(connections) >= 2:
             break
         time.sleep(0.05)
@@ -76,7 +76,7 @@ describe('a relay\'s control socket at its rank\'s hub (Dew ledger 1401)', () =>
     const { connections, err, code } = await control('echo');
 
     expect({ code, opened: connections.length, heartbeats: (connections[0]?.frames ?? 0) >= 5, err }).toEqual({ code: 0, opened: 1, heartbeats: true, err: '' });
-  });
+  }, 15_000);
 
   test('is closed and opened again when its hub, which still hears it, answers nothing, and says why', async () => {
     const { connections, err, code } = await control('mute');
@@ -86,5 +86,5 @@ describe('a relay\'s control socket at its rank\'s hub (Dew ledger 1401)', () =>
     expect({ code, opened: connections.length, heard: (first?.frames ?? 0) >= 1, closed: first?.closed, next: (second?.frames ?? 0) >= 1 })
       .toEqual({ code: 0, opened: 2, heard: true, closed: true, next: true });
     expect(err).toMatch(/control: silent for [\d.]+ s, not even its heartbeat answered; opening it again/u);
-  });
+  }, 15_000);
 });

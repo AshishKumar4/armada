@@ -85,11 +85,17 @@ function partner<S>(sockets: Sockets<S>, socket: S): S | undefined {
 
 /** A message on a socket: an end's, passed to the other end of its pair. One before its pairing breaks the
  *  handshake, which neither end does, and closes it; one whose pair is gone (closing, or closed) closes as `gone` does
- *  the other end of a pair. */
+ *  the other end of a pair. A control socket says only its heartbeat, 'p', which is said back: the relay that sent it
+ *  hears this hub's code answer, or closes the socket and opens another (`control` in relay.py). */
 export function passed<S>(sockets: Sockets<S>, socket: S, message: string | ArrayBuffer): void {
   const part = sockets.part(socket);
 
-  if (part.role === 'control') return;
+  if (part.role === 'control') {
+    if (message === 'p') sockets.send(socket, 'p');
+
+    return;
+  }
+
   const other = partner(sockets, socket);
 
   if (other !== undefined) sockets.send(other, message);
