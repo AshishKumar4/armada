@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from armada import Armada, Connection, Context, RequestError, SchemaError, ShellError, out_file, sh, task
 from armada.push import PushError, bundle_tasks, find_project
-from armada.task import Envelope, RemoteError, _Value
+from armada.task import Envelope, Job, RemoteError, Submission, _Value
 from armada.wire import PROTOCOL, Fields
 
 
@@ -344,6 +344,40 @@ class TestClient(unittest.TestCase):
             self.assertEqual(armada.output("j", 0), b'{"n": 4}')
             with self.assertRaises(RequestError):
                 armada.status("absent-but-not-404")
+        finally:
+            server.shutdown()
+
+    def test_a_result_says_why_its_artifacts_were_not_kept_and_an_older_outcome_says_nothing(self) -> None:
+        exited = {"kind": "exited", "exitCode": 0, "seconds": 1, "vessel": "v1", "attempt": 1, "tail": "", "output": False}
+        events = [{"seq": 1, "outcome": {**exited, "index": 0, "artifactsLost": "packing the artifacts exited 137: Killed"}},
+                  {"seq": 2, "outcome": {**exited, "index": 1}}]
+
+        class Fake(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args: object) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                payload = json.dumps({"events": events, "done": True}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        @task(id="kept")
+        def kept(n: int, ctx: Context) -> None:
+            return None
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Fake)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            armada = Armada(Connection(f"http://127.0.0.1:{server.server_port}", "tok"))
+            submission: Submission[int] = Submission(armada)
+            submission.sent = [0, 1]
+            submission.resolve("j")
+            results = list(Job(armada, kept, submission))
+            self.assertEqual([result.meta.artifacts_lost for result in results],
+                             ["packing the artifacts exited 137: Killed", None])
         finally:
             server.shutdown()
 
