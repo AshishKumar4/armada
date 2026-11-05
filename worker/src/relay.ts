@@ -167,10 +167,11 @@ def close(sock):
 
 class Frames:
     """A WebSocket to a rank's hub, which a link or a control socket goes over: text and binary messages, pings
-    answered."""
+    answered. Its reads go one at a time under self.reading and its writes under self.lock, so that close can wait out
+    whichever is in progress. The locks are taken in that order: take writes a pong, under self.lock, while it reads."""
 
     def __init__(self, ws):
-        self.ws, self.lock = ws, threading.Lock()
+        self.ws, self.lock, self.reading, self.closing = ws, threading.Lock(), threading.Lock(), threading.Lock()
 
     def put(self, text, data, opcode=None):
         """One message, under the caller's hold of self.lock."""
@@ -186,29 +187,41 @@ class Frames:
     def take(self, deadline=None):
         """The next message, (text, data), its fragments joined, by deadline if there is one; EOFError or
         ConnectionError once the WebSocket is gone."""
-        text, parts = False, []
-        while True:
-            head, length = exact(self.ws, 2, deadline)
-            n = length & 0x7F
-            n = struct.unpack("!H", exact(self.ws, 2, deadline))[0] if n == 126 else struct.unpack("!Q", exact(self.ws, 8, deadline))[0] if n == 127 else n
-            data, opcode = exact(self.ws, n, deadline), head & 0x0F
-            if opcode in (0, 1, 2):
-                text = opcode == 1 if opcode else text
-                parts.append(data)
-                if head & 0x80:
-                    return text, b"".join(parts)
-            elif opcode == 9:
-                with self.lock:
-                    self.put(False, data, 10)
-            elif opcode == 8:
-                code = struct.unpack("!H", data[:2])[0] if len(data) >= 2 else 1005
-                raise ConnectionError("closed %d %s" % (code, data[2:].decode(errors="replace")))
+        with self.reading:
+            text, parts = False, []
+            while True:
+                head, length = exact(self.ws, 2, deadline)
+                n = length & 0x7F
+                n = struct.unpack("!H", exact(self.ws, 2, deadline))[0] if n == 126 else struct.unpack("!Q", exact(self.ws, 8, deadline))[0] if n == 127 else n
+                data, opcode = exact(self.ws, n, deadline), head & 0x0F
+                if opcode in (0, 1, 2):
+                    text = opcode == 1 if opcode else text
+                    parts.append(data)
+                    if head & 0x80:
+                        return text, b"".join(parts)
+                elif opcode == 9:
+                    with self.lock:
+                        self.put(False, data, 10)
+                elif opcode == 8:
+                    code = struct.unpack("!H", data[:2])[0] if len(data) >= 2 else 1005
+                    raise ConnectionError("closed %d %s" % (code, data[2:].decode(errors="replace")))
 
     def close(self):
-        try:
-            self.ws.close()
-        except OSError:
-            pass
+        """Closes the socket once no thread is in a read or a write of it, which this wakes. A socket closed under
+        one gives its descriptor's number to the next socket made, and OpenSSL's read or write in progress goes on using
+        the number (it takes a record in more than one call): it takes the next socket's bytes and writes its own TLS
+        alert into it. SSLSocket.shutdown would clear the SSL state under that thread; the socket's own does not. Waits
+        for self.reading and self.lock, so no thread holding either may call it: take and put never do, and every
+        caller closes after them. One closer at a time, so no shutdown reaches a descriptor another closer gave up."""
+        with self.closing:
+            try:
+                socket.socket.shutdown(self.ws, socket.SHUT_RDWR)
+            except OSError:
+                # The socket can be gone already: ENOTCONN once the far end has reset or closed it, EBADF once an earlier
+                # close of it came to its end.
+                pass
+            with self.reading, self.lock:
+                self.ws.close()
 
 
 def dialled(rank, kind, query, deadline):
@@ -560,8 +573,10 @@ def accept(link, port, resume):
             raise ConnectionError("the link is gone")
         local = socket.create_connection((OWN, port))
     except OSError:
-        carrier.put(True, b"g")
-        carrier.close()
+        try:
+            carrier.put(True, b"g")
+        finally:
+            carrier.close()
         return
     local.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
