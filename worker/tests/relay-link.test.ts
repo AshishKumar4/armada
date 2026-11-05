@@ -12,7 +12,7 @@ import { GANG_UP, RELAY_HEADER, RELAY_PY } from '../src/relay';
  *  how much came back and whether it was the pattern. With `hold`, it sends one byte and keeps its side open, as a
  *  client waiting for a server's greeting does, reading for 20 s at most. */
 const RELAYS = String.raw`
-import hashlib, socket, sys, threading
+import hashlib, socket, struct, sys, threading
 total, port, origin, mode, source = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.stdin.read()
 hold = mode == "hold"
 sys.argv = ["relay.py", "0", origin, "20261008000000-00000000", "token", "0", "1"]
@@ -45,6 +45,16 @@ threading.Thread(target=lambda: [threading.Thread(target=answer, args=(echo.acce
                                  for _ in iter(int, 1)], daemon=True).start()
 # A server that sends until its connection goes, whatever it is sent: a feed, say.
 feed = socket.create_server((OWN, 0))
+# The relay's own socket to the feed resets on its full close (SO_LINGER 0), so the feed's blocked write ends at
+# once: an ordinary close can leave a peer that only writes in CLOSE_WAIT, its send buffer full and probing a zero
+# window, so its write never raises though both ends of the link have closed. A half-close (SHUT_WR) lingers not.
+connect = socket.create_connection
+def connected(address, *args, **kwargs):
+    conn = connect(address, *args, **kwargs)
+    if address[1] == feed.getsockname()[1]:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    return conn
+socket.create_connection = connected
 def stream(conn):
     try:
         while True:
