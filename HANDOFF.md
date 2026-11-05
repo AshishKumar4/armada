@@ -13,7 +13,7 @@
 - `src/`: the client.
   - `cli.ts`, `sdk.ts`, `task.ts`. A task's `output` checks each answer when it lands and types it.
   - `ci.ts` (`armada run`), `dispatch.ts` (`listSchedule`), `dashboard.ts` (`armada dashboard`).
-  - `protocol.ts`: `PROTOCOL` 9, `OLDEST_CLIENT` 3, `DRIVER` 2, `PACKER` 3. A repository recipe's environment is keyed
+  - `protocol.ts`: `PROTOCOL` 9, `OLDEST_CLIENT` 3, `DRIVER` 3, `PACKER` 3. A repository recipe's environment is keyed
     by the client's packer, so a client never builds on an environment an earlier one prepared (#34).
 - `worker/src/`:
   - `job.ts`: one Durable Object per job. It owns the queue, vessels, slots, gangs, stragglers and retries.
@@ -110,7 +110,10 @@
     deployment-wide objects still run the old code. Don't skip it: a gang running under the old Worker has containers
     whose relay dials `/relay/<job>/<vessel>`, a route the new Worker no longer serves, so a takeover would cut every
     link of every running gang. A deployed Worker too old to drain says so (`drain`), and its running jobs end with the
-    deploy.
+    deploy. The head also bumps `DRIVER` to 3, for the relay's `f` and its rewrite on every gang join: the contract's
+    fingerprint does not cover `RELAY_PY`, so without it a deploy of this head would take over a Worker on driver 2, whose
+    objects run for minutes and write the old relay beside the new. The next deploy therefore drains on both the contract
+    and the driver. The bump also rebuilds every environment once, as every environment key holds the driver.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every
