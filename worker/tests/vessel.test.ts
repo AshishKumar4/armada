@@ -47,6 +47,8 @@ interface Run {
   readonly stopping?: string;
   readonly launched?: number;
   readonly packed?: boolean;
+  /** What packing its artifacts gives, where it does not pack them. */
+  readonly pack?: { readonly exitCode: number; readonly stdout: string };
   readonly gang?: Gang;
   readonly startAllowed?: boolean;
   /** For a pushed task: what reading its runner's answer marker gives. */
@@ -70,7 +72,7 @@ interface Run {
 
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
-  argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, gang, startAllowed = true, marker, tasks = 1,
+  argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, pack, gang, startAllowed = true, marker, tasks = 1,
   fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
   inputs, held = [], reading,
 }: Run = {}) {
@@ -96,6 +98,8 @@ async function run(lost: number, {
     if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
 
     if (argv[2] === CPU_INFO) return { exitCode: 0, stdout: cpuinfo };
+
+    if (pack !== undefined && (argv[2] ?? '').includes('tar -czf')) return pack;
 
     if (argv[0] === 'stat' && argv[3] === '/armada/task/artifacts.tar.gz') return packed ? { exitCode: 0, stdout: String(ARCHIVE.byteLength) } : { exitCode: 1, stdout: '' };
 
@@ -537,6 +541,17 @@ describe('a task\'s artifacts', () => {
 
     expect([kept.completed[0]?.artifacts, kept.stored.get(key), empty.completed[0]?.artifacts, empty.stored.has(key)])
       .toEqual([true, ARCHIVE, undefined, false]);
+  });
+
+  test('that fail to pack are said on its outcome, which is kept: the task is never run again for them', async () => {
+    const unpacked = await run(0, { packed: true, pack: { exitCode: 137, stdout: 'the artifacts directory holds 7340032000 bytes\n' } });
+
+    expect({
+      completed: unpacked.completed.map(({ exitCode, artifacts, artifactsLost }) => ({ exitCode, artifacts, artifactsLost })), failed: unpacked.failed,
+      stored: unpacked.stored.has(runKey(spec.jobId, 0, { vessel: spec.name, attempt: 1 }, 'artifacts')),
+    }).toEqual({
+      completed: [{ exitCode: 0, artifacts: undefined, artifactsLost: 'packing the artifacts exited 137: the artifacts directory holds 7340032000 bytes\n' }], failed: [], stored: false,
+    });
   });
 
   test('of a gang are its rank 0\'s only: rank 1 stores nothing and says none', async () => {
