@@ -916,6 +916,7 @@ describe('the CLI mapping over a commit', () => {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--commit=HEAD', '--size=small', '--times=1', '--', 'true'], {
         cwd: repo, env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
+
       const exit = await cli.exited;
 
       // A small environment is not the medium one, which alone is ready, so its job packs from the root: a pack against
