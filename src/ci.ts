@@ -293,13 +293,13 @@ function sizeOf(config: Config, timings: Timings): Size {
   return timings.usage === null || timings.usage === undefined ? 'medium' : fitSize(timings.usage);
 }
 
-/** A commit and its `.armada.json`: its environment, its job fields, and the upload of its pack, which sends nothing
- *  when the runner has it. */
-async function commitOf(armada: Armada, target: string) {
+/** A commit and its `.armada.json`: its environment at `size`, else at its run's size, its job fields, and the upload of
+ *  its pack, which sends nothing when the runner has it. */
+async function commitOf(armada: Armada, target: string, size?: Size) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
-  const base = sizeOf(config, timings);
+  const base = size ?? sizeOf(config, timings);
   const of = async (name: string | undefined, size = base) => await prepared(armada, { repo, sha, config, size, name });
 
   return { sha, repo, config, timings, base, of, ...await of(undefined) };
@@ -329,12 +329,11 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
 /** A commit's job fields at `size`, else at its run's size, its pack uploaded against that environment's base: a job
  *  resized after its environment was resolved packs against another environment's base, which its own never had. */
 export async function onCommit(armada: Armada, target: string, size?: Size): Promise<OnCommit> {
-  const commit = await commitOf(armada, target);
-  const own = size === undefined ? commit : await commit.of(undefined, size);
+  const commit = await commitOf(armada, target, size);
 
-  await own.upload();
+  await commit.upload();
 
-  return own.spec;
+  return commit.spec;
 }
 
 /** The containers each of a run's environments' task jobs runs on, all at once within the pool: each on at least its
