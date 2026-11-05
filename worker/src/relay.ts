@@ -292,7 +292,15 @@ class Link:
     ends its stream with 'e<n>'; 'g' says the far end holds no such link. When what carries the link goes, the
     outbound end opens another WebSocket under the link's id (reopen) and the inbound end takes the next one its own
     relay dials for it (handover); each then sends what the other has not counted and drops what it already
-    took. Done once both streams ended and each was counted."""
+    took. Done once both streams ended and each was counted; the inbound end then says 'f', which the outbound end
+    waits for (settle).
+
+    'f' is new, and no end asks which relay the other is. The two ends of a link run one deployment's relay.py, since
+    the file is written into a container when its vessel joins a gang (vessel.ts, network) from the Worker that
+    deploys the gang, unless a vessel that stays in gangs keeps an older one across a deploy of the Worker. Then an
+    outbound end with 'f' and an inbound end without it end the link whole: the outbound end sees its carrier close
+    as the inbound end finishes, opens again and is told 'g'. An outbound end without 'f' fails on one it reads
+    before it has finished, its link's thread ending with the program's connection, which has all it will get."""
 
     def __init__(self, local, name, carrier, reopen=None, held=None):
         self.local, self.name, self.carrier, self.reopen = local, name, None, reopen or self.handed
@@ -301,6 +309,8 @@ class Link:
         self.kept, self.incoming = collections.deque(), collections.deque()
         self.ended = self.peer_ended = None
         self.over = self.delivered = self.cancelled = False
+        # Only the end that dialled opens another WebSocket (reopen); see settle.
+        self.outbound, self.confirmed = reopen is not None, False
         self.finished = threading.Event()
         if held is not None:
             held(self)
@@ -391,6 +401,10 @@ class Link:
                             self.incoming.append(data[8 + self.taken - offset:])
                             self.changed.notify_all()
                         self.taken = offset + len(data) - 8
+                elif data == b"f":
+                    with self.changed:
+                        self.confirmed = True
+                    self.settle()
                 elif data == b"g":
                     self.log("the far end holds no such link")
                     # Said back, unless this end said it first: the far end's cancellation then knows it arrived.
@@ -481,9 +495,18 @@ class Link:
         self.send(carrier, True, b"g")
 
     def settle(self):
+        """Finishes the link once this end is done: its stream ended and counted, the far end's delivered. The inbound
+        end is done then, and says 'f' as it goes. The outbound end, the only one that opens another WebSocket, is
+        done once 'f' has come too: the count it last sent (the far end's stream, taken) may have been lost with its
+        carrier, and the inbound end, which cannot ask for it, waits for GRACE for a carrier no one will open. While
+        this end waits for 'f' a lost count is sent again with the next carrier (attach). If 'f' is lost, the next
+        open finds no link, and 'g' ends it."""
         with self.changed:
-            done = self.ended is not None and self.acked >= self.ended and self.delivered
-        if done:
+            done = self.ended is not None and self.acked >= self.ended and self.delivered and not self.over
+            confirmed = self.confirmed or not self.outbound
+        if done and confirmed:
+            if not self.outbound:
+                self.send(self.carrier, True, b"f")
             self.finish()
 
     def finish(self):

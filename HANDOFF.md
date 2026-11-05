@@ -34,7 +34,10 @@
     back, and a relay that has heard nothing on it for `RELAY_SILENCE` (75 s) closes it and opens another: a blackholed
     connection carries no FIN or RST. A relay closes a WebSocket's socket only once no thread is in a read or a write
     of it (`Frames.close`): OpenSSL keeps the descriptor's number through a read, and a closed socket's number goes to
-    the next socket made. It holds one TLS context for the process, and a link's keepalive ends with the link.
+    the next socket made. It holds one TLS context for the process, and a link's keepalive ends with the link. A link
+    ends at its inbound end when it is done, which says `f` as it goes; its outbound end, the only one that opens
+    another WebSocket, ends on `f`, or on `g` when the `f` was lost, so a final count lost with a carrier is sent again
+    on the next, not waited for by the inbound end for `RELAY_GRACE`.
     `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of a gang's
     attempt, which pairs the relays' sockets and passes their messages, only over sockets that are open
     (`getWebSockets` lists one closing until its close event). It does no storage operation, so no vessel's storage,
