@@ -30,10 +30,13 @@
     a bundle nothing holds.
   - `relay.ts`: a gang's network. Each container runs a relay (`RELAY_PY`) that dials out to
     `/hub/<job>/<index>/<attempt>/<rank>`, bounds each open as a whole (`RELAY_OPEN`) and logs every failed one,
-    whatever it was, with its stage and duration. `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of
-    a gang's attempt, which pairs the relays' sockets and passes their messages. It does no storage operation, so no
-    vessel's storage, which stalls and resets, is on a link's path (Dew 1401). A gang attempt's token is derived from
-    the bearer (`gangToken`), so the hub checks it with no read.
+    whatever it was, with its stage and duration. Its control socket sends a heartbeat every 30 s, which the hub says
+    back, and a relay that has heard nothing on it for `RELAY_SILENCE` (75 s) closes it and opens another: a blackholed
+    connection carries no FIN or RST. `hub.ts` and `pairing.ts`: the hub, one Durable Object per rank of a gang's
+    attempt, which pairs the relays' sockets and passes their messages, only over sockets that are open
+    (`getWebSockets` lists one closing until its close event). It does no storage operation, so no vessel's storage,
+    which stalls and resets, is on a link's path (Dew 1401). A gang attempt's token is derived from the bearer
+    (`gangToken`), so the hub checks it with no read.
   - `secrets.ts`, `timings.ts`.
 - `worker/dashboard/`: the dashboard. `armada deploy` builds it into the Worker's assets.
 - `python/`: the Python SDK. `lean/`: the scheduler proofs.
@@ -93,6 +96,14 @@
     code (measured on armada-ci2: 296 s). armada-dew8 runs wire 14. A newer client gets 426 from an older Worker:
     redeploy the Worker before a project moves its client pin to `main`. Borrowing past the cap needs
     `ARMADA_ACCOUNT_TOKEN` at a deploy.
+  - The relay hub (Dew 1401) changes the contract: `ArmadaVessel` loses its `fetch` and WebSocket handlers, and `ArmadaHub`
+    (migration `v6`, binding `HUB`) is new. The next `armada deploy` of it to a deployment therefore drains first
+    (`mustDrain`, `src/cli.ts`): the deployed Worker takes no new job, the deploy polls every 15 s for its open jobs to
+    end and installs when none is left, and the fleet refuses new jobs for about 5 min after, while the
+    deployment-wide objects still run the old code. Don't skip it: a gang running under the old Worker has containers
+    whose relay dials `/relay/<job>/<vessel>`, a route the new Worker no longer serves, so a takeover would cut every
+    link of every running gang. A deployed Worker too old to drain says so (`drain`), and its running jobs end with the
+    deploy.
   - A client older than wire 9 can't name a mode, so its jobs run one task a container (`fast`). Nimbus's
     `.armada.json` sets `NIMBUS_TEST_CGROUP=/sys/fs/cgroup/armada/task`, a path only `fast` has: a packed task runs in
     `task-<slot>`. On 2026-10-14 nimbus-armada-v2, redeployed from `d9cde3f`, packed Nimbus's wire-7 jobs, and every
