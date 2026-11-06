@@ -204,6 +204,18 @@ ${memoryBytes === undefined ? '' : `echo ${String(memoryBytes)} > ${group}/memor
 `}for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done`;
 }
 
+
+/** Where a recalled task's kept artifacts wait for its next attempt in slot `slot` (`ArmadaVessel.launch`, #4544). */
+export const resumeArchive = (slot: number): string => `${STATE}/resume/${String(slot)}.tar.gz`;
+
+/** As root, before a task starts in `dir`: the artifacts its recalled attempt kept (`resumeArchive`), unpacked into
+ *  `dir`/resume, which the task reads as ARMADA_RESUME; nothing where none waits. */
+function resumed(dir: string, slot: number): string {
+  const archive = resumeArchive(slot);
+
+  return String.raw`if [ -f ${archive} ]; then mkdir -p ${dir}/resume; tar -xzf ${archive} -C ${dir}/resume; rm -f ${archive}; fi`;
+}
+
 /** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
  *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
  *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
@@ -213,7 +225,8 @@ export function launchTask(workdir: string, cpus: number): string {
 ${groupSetup(TASK_GROUP, { cpus })}
 rm -rf ${TASK}
 mkdir -p ${TASK} ${ARTIFACTS_PATH}
-chown ci:ci ${TASK} ${ARTIFACTS_PATH}
+${resumed(TASK, 0)}
+chown -R ci:ci ${TASK}
 cd ${workdir}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${TASK_GROUP}/runner/cgroup.procs && exec "$@"' launch ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/log 2>&1; echo $? > ${TASK}/exit' armada "$@" </dev/null >/dev/null 2>&1 &`;
 }
@@ -236,6 +249,7 @@ export function launchSlot(workdir: string, slot: number, limits: { readonly cpu
 ${groupSetup(group, limits)}
 rm -rf ${root}
 mkdir -p ${dir} ${dir}/artifacts ${root}/upper ${root}/work ${root}/home-upper ${root}/home-work
+${resumed(dir, slot)}
 chown -R ci:ci ${root}
 setsid env --default-signal=INT,QUIT sh -c 'echo $$ > ${group}/runner/cgroup.procs
 "$@" 2>${root}/launch.err || true

@@ -69,6 +69,11 @@ export async function packKey(project: string, { sha, base, packer, shallow = []
  *  after, for the jobs still running it (`sweepBundles`). */
 export const bundleKey = (digest: string): string => `code/${digest}.mjs`;
 
+/** The R2 key of the artifacts task `index` of `job` left when the fleet recalled its container while it ran: its next
+ *  attempt starts with them (ARMADA_RESUME), so a task that keeps its progress there goes on from it, not from zero
+ *  (#4544). Replaced by each later recall, and deleted once the task's answer is kept. */
+export const resumeKey = (job: string, index: number): string => `jobs/${job}/tasks/${String(index)}/resume.tar.gz`;
+
 /** Each of a task's stored files, by the name its route has. */
 const LEAVES = { output: 'output', log: 'log.gz', artifacts: 'artifacts.tar.gz' } as const;
 

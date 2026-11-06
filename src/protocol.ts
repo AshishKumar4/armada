@@ -137,6 +137,8 @@ export const ANSWER_PATH = '/armada/task/answer';
 
 /** The directory whose contents a task keeps as its artifacts: a tar.gz in R2 once it finishes. */
 export const ARTIFACTS_PATH = '/armada/task/artifacts';
+/** Where a task finds the artifacts its recalled attempt kept (ARMADA_RESUME), when it was recalled while it ran. */
+export const RESUME_PATH = '/armada/task/resume';
 
 export const Digest = v.pipe(v.string(), v.regex(/^[0-9a-f]{64}$/u));
 

@@ -10,11 +10,11 @@
  * container's relay dials the gang's hubs (`ArmadaHub`), so no link passes through this object or waits on its storage.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
+import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, RESUME_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
-  AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, unpackInputs, usageFrom, usageOf, waitOn,
+  AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, resumeArchive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, unpackInputs, usageFrom, usageOf, waitOn,
 } from './container';
-import { bundleKey, packKey, runKey, said, SINGLE, textOf, type Env } from './env';
+import { bundleKey, packKey, resumeKey, runKey, said, SINGLE, textOf, type Env } from './env';
 import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
 import type { Claim } from './job';
 import { GANG_DOWN, GANG_UP, RELAY, RELAY_LOG, RELAY_PY } from './relay';
@@ -529,7 +529,13 @@ export class ArmadaVessel extends DurableObject<Env> {
         continue;
       }
 
-      if (graced) return 'preempted';
+      if (graced) {
+        // A task the recall ends keeps what it wrote to its artifacts for its next attempt (`resumeKey`, #4544): a
+        // gang's ranks start again together, so a gang keeps none.
+        if (current.claim.gang === undefined) await this.kept(spec, container, dir, current.claim.index);
+
+        return 'preempted';
+      }
 
       if (!(await job.still(spec.name, current.claim.index, slot, current.claim.attempt))) await this.stopTask(spec, slot, current);
     }
@@ -605,8 +611,21 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** One claim launched into `slot`: the values its secrets started with kept for the log's mask, its gang's
    *  network joined (a plain task leaves any), the launch detached. A slotted launch recreates the slot's root where
    *  the file lives, so the keeping goes last there; a plain one keeps today's order. */
+  /** What a running task wrote to its artifacts, kept as its resume (`resumeKey`) for its next attempt: none where it
+   *  wrote nothing. A failure to keep it loses only the head start, never the task. */
+  private async kept(spec: SlotSpec, container: Container, dir: string, index: number): Promise<void> {
+    const packing = await this.optional(container, 'packing the resume', ['/bin/sh', '-c', `if [ -n "$(find ${dir}/artifacts -mindepth 1 -print -quit 2>/dev/null)" ]; then tar -czf ${dir}/resume.tar.gz -C ${dir}/artifacts . && echo packed; fi`]);
+
+    if (packing?.trim() !== 'packed') return;
+    await this.store(`${dir}/resume.tar.gz`, resumeKey(spec.jobId, index), { contentType: 'application/gzip' });
+  }
+
   private async launch(spec: SlotSpec, container: Container, claim: Claim, slot: number): Promise<void> {
     const layout = layoutOf(spec, slot);
+    // The artifacts its recalled attempt kept, where it was recalled (`kept`): unpacked as its task dir is made.
+    const resume = claim.gang === undefined ? await this.env.ARTIFACTS.get(resumeKey(spec.jobId, claim.index)) : null;
+
+    if (resume !== null) await pipeIn(container, resume.body, resumeArchive(slot));
 
     const keep = async () => {
       // The values the task gets are the ones its log is masked with, kept as root in the container: a secret set
@@ -620,7 +639,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.network(container, claim);
     const argv = argvOf(slot);
     // A slot's task gets its slot's cgroup, so its group reads and caps reach the slot's, not the single task group.
-    const env = { ...claim.env, ARMADA_CGROUP: layout.group };
+    const env = { ...claim.env, ARMADA_CGROUP: layout.group, ...(resume !== null ? { ARMADA_RESUME: RESUME_PATH } : {}) };
     // Names a shell can export go in the file; any other stays in the exec, as before.
     const exported = Object.fromEntries(Object.entries(env).filter(([name]) => SHELL_NAME.test(name)));
     const rest = Object.fromEntries(Object.entries(env).filter(([name]) => !SHELL_NAME.test(name)));
@@ -731,6 +750,8 @@ export class ArmadaVessel extends DurableObject<Env> {
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 && artifactsLost === undefined ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
+    // Its answer kept, a resume its earlier attempt left has served (`kept`).
+    if (current.claim.gang === undefined) await this.env.ARTIFACTS.delete(resumeKey(spec.jobId, index));
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer; a runner that
     // ended before it said leaves no file. The answer is no measurement: a read the platform lost loses the run.
     const marker = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS })).stdout.trim();
