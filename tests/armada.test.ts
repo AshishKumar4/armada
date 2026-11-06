@@ -612,6 +612,57 @@ describe('a failed request', () => {
   });
 });
 
+describe('a request the Worker refuses while it is redeployed', () => {
+  test('is asked again until the deploy is done, said once, and a gateway\'s 503 page still fails it', async () => {
+    const drain = 'armada is being redeployed and takes no new job until that is done; run again in a few minutes';
+    let asked = 0;
+
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const { pathname } = new URL(request.url);
+
+        if (pathname === '/jobs') {
+          asked += 1;
+          const body = await request.text();
+
+          // The drain refuses the first two, and the deploy is done for the third, which carries the same body.
+          return asked <= 2 ? Response.json({ error: drain }, { status: 503 }) : Response.json({ id: `job of ${body}` });
+        }
+
+        return new Response('<html><head><title>Service Unavailable</title></head></html>', { status: 503, headers: { 'content-type': 'text/html' } });
+      },
+    });
+
+    const said: string[] = [];
+    const error = console.error;
+
+    console.error = (...words: unknown[]) => {
+      said.push(words.map(String).join(' '));
+    };
+
+    try {
+      const armada = new Armada({ url: server.url.href, token: 't', account: 'a' });
+      const created = await armada.post('/jobs', { label: 'train' });
+      let gateway = '';
+
+      try {
+        await armada.call('/environments/resolve', { method: 'POST' });
+      } catch (cause) {
+        gateway = String(errorOf({ cause }));
+      }
+
+      expect({ created, asked, said, gateway }).toEqual({
+        created: { id: 'job of {"label":"train"}' }, asked: 3, said: [`POST /jobs: ${drain}; asked again until the deploy is done`],
+        gateway: 'RequestError: POST /environments/resolve: 503 from the Worker (it may still be deploying): Service Unavailable',
+      });
+    } finally {
+      console.error = error;
+      await server.stop(true);
+    }
+  });
+});
+
 describe('packing a commit', () => {
   test('a clone without the environment\'s commit packs from the root, and that pack checks out where the environment is', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-pack-'));
