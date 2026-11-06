@@ -1,8 +1,8 @@
 // A project names the armada deployment its CI runs on in its `.armada.json`, so a run from its checkout reaches that
 // deployment with no ARMADA_CONNECTION exported by every hook and script that calls armada; a connection named to the
 // run still comes first, and a project that names none reaches the machine's default, as before.
-import { expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { afterAll, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,9 +14,17 @@ interface ProjectFile {
   readonly deployment?: string;
 }
 
+/** Each machine's home, removed once the file's cases end, so no run leaves one in the temporary directory. */
+const homes: string[] = [];
+
+afterAll(() => {
+  for (const home of homes) rmSync(home, { recursive: true, force: true });
+});
+
 /** A machine whose home holds the connections `deployed` names, and a project under it whose `.armada.json` is `project`. */
 function machine(deployed: readonly string[], project: ProjectFile) {
   const home = mkdtempSync(join(tmpdir(), 'armada-connect-'));
+  homes.push(home);
   const config = join(home, '.config', 'armada');
   const checkout = join(home, 'work', 'kinu');
 
