@@ -51,6 +51,17 @@ function deployment(fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '1
 
 const spec = { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' as const } };
 
+/** What `env`'s Worker answers a job submitted now, `admitted` or its status and error, asked past the client, which
+ *  asks a refusal for a redeploy again until the deploy is done. */
+async function submitted(env: Env): Promise<string> {
+  const request = new Request('https://armada.test/jobs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'armada-protocol': String(PROTOCOL) }, body: JSON.stringify(spec) });
+  const answer = await worker.fetch(request, env);
+
+  return answer.ok ? 'admitted' : `${String(answer.status)} ${v.parse(v.object({ error: v.string() }), await answer.json()).error}`;
+}
+
+const DRAINED = '503 armada is being redeployed and takes no new job until that is done; run again in a few minutes';
+
 /** Job `id`'s outcomes so far, each its reason and tail. */
 async function reasons(armada: Armada, id: string) {
   return (await armada.events(id, 0)).events.map(({ outcome }) => [outcome.reason, outcome.tail]);
@@ -106,20 +117,34 @@ describe('a client and a Worker', () => {
 });
 
 describe('a drained version', () => {
-  test('takes no new job while its open ones finish, and the version deployed after it takes jobs at once', async () => {
-    const { armada, fleet } = deployment();
+  test('takes no new job while its open ones finish, and the version deployed after it takes jobs at once, the one a client kept asking among them', async () => {
+    const { armada, fleet, env } = deployment();
     const first = await armada.create(spec);
     const open = await armada.drain();
-    const refused = await settled(armada.create(spec), 'admitted');
+    const refused = await submitted(env);
+    const said: string[] = [];
+    const error = console.error;
 
-    await armada.cancel(first);
-    const after = (await armada.health()).jobs;
-    const next = deployment(fleet, 'b');
-    const admitted = await settled(next.armada.create(spec), 'admitted');
+    console.error = (...words: unknown[]) => {
+      said.push(words.map(String).join(' '));
+    };
 
-    expect({ open, refused, after, admitted }).toEqual({
-      open: 1, refused: 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes', after: 0, admitted: 'admitted',
-    });
+    try {
+      // Submitted during the drain, it waits for the deploy, said once, and the next version makes it.
+      const waiting = settled(armada.create(spec), 'admitted');
+
+      await armada.cancel(first);
+      const after = (await armada.health()).jobs;
+      const next = deployment(fleet, 'b');
+      const admitted = await settled(next.armada.create(spec), 'admitted');
+
+      expect({ open, refused, after, admitted, waited: await waiting, said, jobs: await fleet.jobs() }).toEqual({
+        open: 1, refused: DRAINED, after: 0, admitted: 'admitted', waited: 'admitted',
+        said: [`POST /jobs: ${DRAINED.slice('503 '.length)}; asked again until the deploy is done`], jobs: 2,
+      });
+    } finally {
+      console.error = error;
+    }
   });
 
   test('admits the next version\'s first job once the fleet and each other deployment-wide object run its interface', async () => {
@@ -129,26 +154,25 @@ describe('a drained version', () => {
     const single = (object: 'environments' | 'webhooks') => namespace(() => running[object] === 'none' ? {} : { contract: () => running[object] });
     const singles = { ENVIRONMENTS: single('environments'), SECRETS: single('environments'), TASKS: single('environments'), WEBHOOKS: single('webhooks') };
     const fleet = namespace(() => new ArmadaFleet(storage.ctx, world({ FLEET_VCPUS: '100', ARMADA_CONTRACT: running.fleet, ...singles })));
-    const { armada } = deployment(undefined, 'b', { ARMADA_CONTRACT: 'later', FLEET: fleet });
+    const { armada, env } = deployment(undefined, 'b', { ARMADA_CONTRACT: 'later', FLEET: fleet });
     const answers: string[] = [];
 
     for (const replaced of ['fleet', 'environments', 'webhooks'] as const) {
-      answers.push(await settled(armada.create(spec), 'admitted'));
+      answers.push(await submitted(env));
       running[replaced] = 'later';
     }
 
     answers.push(await settled(armada.create(spec), 'admitted'));
-    const refused = 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes';
 
-    expect(answers).toEqual([refused, refused, refused, 'admitted']);
+    expect(answers).toEqual([DRAINED, DRAINED, DRAINED, 'admitted']);
   });
 
   test('refuses a job as being redeployed while its fleet still runs code that lacks the method the Worker calls', async () => {
-    const { armada } = deployment(undefined, 'b', {
+    const { env } = deployment(undefined, 'b', {
       FLEET: namespace(() => ({ admitJob: async () => { throw new TypeError('The RPC receiver does not implement the method "admitJob".'); } })),
     });
 
-    expect(await settled(armada.create(spec), 'admitted')).toBe('RequestError: POST /jobs: 503 armada is being redeployed and its objects still run the earlier code; run again in a few minutes (The RPC receiver does not implement the method "admitJob".)');
+    expect(await submitted(env)).toBe('503 armada is being redeployed and its objects still run the earlier code; run again in a few minutes (The RPC receiver does not implement the method "admitJob".)');
   });
 
   test('admits no job whose objects answered their interface only after it drained', async () => {
@@ -236,17 +260,17 @@ describe('a drained version', () => {
   });
 
   test('lapses by itself when the deploy that drained it stops asking, as one killed mid-deploy does', async () => {
-    const { armada } = deployment();
+    const { armada, env } = deployment();
 
     await armada.drain();
-    const refused = await settled(armada.create(spec), 'admitted');
+    const refused = await submitted(env);
 
     setSystemTime(new Date(Date.now() + DRAIN_MS + 1000));
 
     try {
       const admitted = await settled(armada.create(spec), 'admitted');
 
-      expect({ refused, admitted }).toEqual({ refused: 'RequestError: POST /jobs: 503 armada is being redeployed and takes no new job until that is done; run again in a few minutes', admitted: 'admitted' });
+      expect({ refused, admitted }).toEqual({ refused: DRAINED, admitted: 'admitted' });
     } finally {
       setSystemTime();
     }
