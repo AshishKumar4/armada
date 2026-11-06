@@ -14,6 +14,9 @@ export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 /** How often a read is asked of a runner whose gateway failed to answer it (`Armada.call`). */
 export const READ_ATTEMPTS = 5;
 
+/** The longest a request the Worker refused while it is redeployed waits before it is asked again (`Armada.call`). */
+export const REDEPLOY_WAIT_MS = 15_000;
+
 /** The largest pack, in bytes, sent in one request; a Worker takes 100 MB, and R2 wants every part but the last alike. */
 export const PACK_PART = 64 * 1024 * 1024;
 
@@ -102,6 +105,30 @@ async function failureOf(response: Response): Promise<string> {
   return `${String(response.status)} from the Worker (it may still be deploying)${line === '' ? '' : `: ${line}`}`;
 }
 
+/** What the Worker says of a 503 of its own (its JSON error, not a gateway's page), which it answers only while it is
+ *  redeployed, a drain admitting no job or its objects still on the earlier code, having made nothing of the request;
+ *  null for any other answer. */
+async function redeploying(response: Response): Promise<string | null> {
+  if (response.status !== 503) return null;
+  const said = v.safeParse(v.object({ error: v.string() }), jsonOf(await response.clone().text()));
+
+  return said.success ? said.output.error : null;
+}
+
+/** The answer of `send`, asked again while the Worker refuses it for a redeploy (`redeploying`), a second apart more
+ *  each time up to REDEPLOY_WAIT_MS, the refusal said once under `request`'s name. */
+async function deployed(request: string, send: () => Promise<Response>): Promise<Response> {
+  for (let refusals = 1; ; refusals += 1) {
+    const sent = await send();
+    const refused = await redeploying(sent);
+
+    if (refused === null) return sent;
+
+    if (refusals === 1) console.error(`${request}: ${refused}; asked again until the deploy is done`);
+    await Bun.sleep(Math.min(refusals * 1000, REDEPLOY_WAIT_MS));
+  }
+}
+
 /** The first version of the wire whose Worker drains. */
 const FIRST_DRAIN = 2;
 
@@ -123,7 +150,11 @@ export class Armada {
   /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, the Worker's own 500, or a
    *  dropped connection, is asked again, up to READ_ATTEMPTS times a second apart more each time: the Worker answers it
    *  again unchanged, and a `run` that polls for half an hour should not end on one. A Durable Object the runtime
-   *  restarted throws once under a read ("Worker threw exception"), and the next read is answered. */
+   *  restarted throws once under a read ("Worker threw exception"), and the next read is answered. Any request the
+   *  Worker refuses while it is redeployed (`redeploying`), which made nothing of it, is asked again until the deploy is
+   *  done, a second apart more each time up to REDEPLOY_WAIT_MS, said once: a job submitted during a deploy's drain
+   *  starts after it, never fails on it (Main, 2026-11-06: a drain refused every lane's run). The deploy bounds that
+   *  wait: its drain lasts while its open jobs finish, each within its deadline, and lapses if the deploy dies. */
   async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
@@ -136,7 +167,7 @@ export class Armada {
       let sent: Response;
 
       try {
-        sent = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers });
+        sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }));
       } catch (cause) {
         // A connection that dropped is asked again, as a gateway's failure is.
         if (attempt >= attempts) throw cause;
