@@ -5,7 +5,7 @@
  * alone. It answers with the class's estimate, which it alone computes, at its revision.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { canonical, sha256, SIZES, type JobSpec, type Size, type Task } from '../../src/protocol';
+import { canonical, keyOf, sha256, SIZES, type JobSpec, type Size, type Task } from '../../src/protocol';
 import type { Env } from './env';
 
 /** What a task used, or is expected to use: its cores (CPU seconds over wall seconds), its peak memory and its disk, in
@@ -73,9 +73,11 @@ export function classOf(spec: Pick<JobSpec, 'run'>, task: Task, key: string): st
   return `command ${JSON.stringify((task.argv ?? []).slice(0, 2))} ${key}`;
 }
 
-/** An item's key in its class: its item and argv, whatever their keys' order. */
+/** An item's key in its class: the key its item states (`keyOf`), else its item and argv, whatever their keys' order. */
 export async function itemKey(task: Task): Promise<string> {
-  return await sha256(canonical({ item: task.item, argv: task.argv === undefined ? null : [...task.argv] }));
+  const stated = keyOf(task.item);
+
+  return await sha256(canonical(stated === null ? { item: task.item, argv: task.argv === undefined ? null : [...task.argv] } : { key: stated }));
 }
 
 /** The memory every task of a container holds together, at most: the cgroup over all of them is capped at it, so a

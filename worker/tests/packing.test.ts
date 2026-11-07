@@ -219,6 +219,24 @@ describe('an efficient job', () => {
       .toEqual({ packed: [0, 1, null], record: [null, 2 * GIB], next: [['v1', 'v2'], [0, 1, null]] });
   });
 
+  // Dew's CI re-cuts its plan each run: a task's name and weight are new each time, so no item record ever matched and
+  // every task packed on its class's estimate, about a quarter of each container's CPU used (2026-11-07).
+  test('reads a task\'s own record by the key its item states, its name, weight and argv new in each job', async () => {
+    const made = await learned(SMALL);
+    const first = await packing([{ key: 'tests/test_serving.py#3/80', name: '3.12-17', weight: 5 }], made);
+
+    await claimed(first.job, 'v1');
+    // Alone, it held 9 GiB: no task of the class's 2 GiB fits beside it in 85% of 11.5 GiB.
+    await land(first.job, 'v1', ran(0, 'v1', 0, { peakMemory: 9 * GIB }));
+    await first.job.alarm();
+    const next = (key: Record<string, string>) => packing([{ ...key, name: '3.12-940', weight: 7 }, { name: 'c' }, { name: 'd' }], made);
+    const keyed = await next({ key: 'tests/test_serving.py#3/80' });
+    const unkeyed = await next({});
+
+    expect({ keyed: [await slotsOf(keyed.job, 'v1', 3), keyed.begun], unkeyed: [await slotsOf(unkeyed.job, 'v1', 4), unkeyed.begun] })
+      .toEqual({ keyed: [[0, null, null], ['v1', 'v2']], unkeyed: [[0, 1, 2, null], ['v1']] });
+  });
+
   test('delivers each run\'s use once, though two sends carry it at once', async () => {
     const made = stores();
 

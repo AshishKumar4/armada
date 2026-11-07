@@ -814,6 +814,15 @@ export function costOf(item: Json): number {
   return v.is(v.number(), cost) ? cost : Number.NaN;
 }
 
+/** The identity an item's recorded use is kept under (`itemKey`): an object's `key`, which a job states for work that
+ *  recurs under another item and argv (Dew's CI re-cuts its plan each run, each task's name and weight new), else null,
+ *  its item and argv being its identity. */
+export function keyOf(item: Json): string | null {
+  const keyed = v.safeParse(v.looseObject({ key: v.pipe(v.string(), v.minLength(1)) }), item);
+
+  return keyed.success ? keyed.output.key : null;
+}
+
 /** An item's weight for longest-first dispatch: an object's finite `weight`, else 0. */
 export function weightOf(item: Json): number {
   const weighed = v.safeParse(v.looseObject({ weight: v.pipe(v.number(), v.finite()) }), item);
