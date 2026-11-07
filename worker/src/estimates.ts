@@ -5,7 +5,8 @@
  * alone. It answers with the class's estimate, which it alone computes, at its revision.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { canonical, keyOf, sha256, SIZES, type JobSpec, type Size, type Task } from '../../src/protocol';
+import * as v from 'valibot';
+import { canonical, sha256, SIZES, type Json, type JobSpec, type Size, type Task } from '../../src/protocol';
 import type { Env } from './env';
 
 /** What a task used, or is expected to use: its cores (CPU seconds over wall seconds), its peak memory and its disk, in
@@ -71,6 +72,15 @@ export function classOf(spec: Pick<JobSpec, 'run'>, task: Task, key: string): st
   if (spec.run.kind === 'task') return `task ${spec.run.id} ${key}`;
 
   return `command ${JSON.stringify((task.argv ?? []).slice(0, 2))} ${key}`;
+}
+
+/** The identity an item's recorded use is kept under (`itemKey`): an object's `key`, which a job states for work that
+ *  recurs under another item and argv (Dew's CI re-cuts its plan each run, each task's name and weight new), else null,
+ *  its item and argv being its identity. Read here alone, as the Worker's own: no client or object reads it. */
+function keyOf(item: Json): string | null {
+  const keyed = v.safeParse(v.looseObject({ key: v.pipe(v.string(), v.minLength(1)) }), item);
+
+  return keyed.success ? keyed.output.key : null;
 }
 
 /** An item's key in its class: the key its item states (`keyOf`), else its item and argv, whatever their keys' order. */
