@@ -639,7 +639,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.network(container, claim);
     const argv = argvOf(slot);
     // A slot's task gets its slot's cgroup, so its group reads and caps reach the slot's, not the single task group.
-    const env = { ...claim.env, ARMADA_CGROUP: layout.group, ...(resume !== null ? { ARMADA_RESUME: RESUME_PATH } : {}) };
+    const env: typeof claim.env & { ARMADA_CGROUP: string; ARMADA_RESUME?: string } = { ...claim.env, ARMADA_CGROUP: layout.group };
+
+    if (resume !== null) env.ARMADA_RESUME = RESUME_PATH;
     // Names a shell can export go in the file; any other stays in the exec, as before.
     const exported = Object.fromEntries(Object.entries(env).filter(([name]) => SHELL_NAME.test(name)));
     const rest = Object.fromEntries(Object.entries(env).filter(([name]) => !SHELL_NAME.test(name)));
@@ -750,6 +752,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 && artifactsLost === undefined ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
+
     // Its answer kept, a resume its earlier attempt left has served (`kept`).
     if (current.claim.gang === undefined) await this.env.ARTIFACTS.delete(resumeKey(spec.jobId, index));
     // A pushed task's runner says whether its out file is the body's envelope or its command's answer; a runner that
