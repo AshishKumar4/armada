@@ -223,6 +223,9 @@ describe('an efficient job', () => {
   // every task packed on its class's estimate, about a quarter of each container's CPU used (2026-11-07).
   test('reads a task\'s own record by the key its item states, its name, weight and argv new in each job', async () => {
     const made = await learned(SMALL);
+
+    // Enough of the class's runs that one more of 9 GiB leaves its 95th percentile at 2 GiB.
+    await made.store(CLASS)?.record(Array.from({ length: 4 * MIN_SAMPLES }, (_, at) => ({ ...SMALL, run: `more/${String(at)}/1/v1`, item: `more-${String(at)}`, beside: false })));
     const first = await packing([{ key: 'tests/test_serving.py#3/80', name: '3.12-17', weight: 5 }], made);
 
     await claimed(first.job, 'v1');
