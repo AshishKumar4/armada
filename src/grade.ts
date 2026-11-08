@@ -54,6 +54,9 @@ const VerdictRowSchema = v.looseObject({
   more: v.optional(v.boolean()),
   /** The host its task ran on. */
   host: v.optional(HostSchema),
+  /** How the row ended, in its task's word: `deadline` where the task ran out of its time with the row unfinished,
+   *  its seconds then the least it needs. */
+  kind: v.optional(v.string()),
 });
 
 export type VerdictRow = v.InferOutput<typeof VerdictRowSchema>;

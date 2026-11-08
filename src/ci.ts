@@ -3,7 +3,8 @@
  * commit is packed into R2 (its history from the root the first time its environment is prepared, otherwise only what
  * it adds). One task runs the project's plan command, which prints the tasks; a second job maps the task command over
  * them, longest first, on a pool of containers that each pull task after task. Every task's verdict file is graded
- * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the green rows' timings
+ * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the green rows' timings, a row
+ * its deadline cut short timed at the least it needs
  * stored on the runner. Exits 0 when every planned row ran once and passed, 1 when one was red, 2 when not graded.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -1113,6 +1114,10 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   for (const problem of problems) note(`problem: ${problem}`);
 
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
+  // A row its task's deadline cut short took at least its seconds: they weigh it in the next plan, as a green row's do,
+  // so a task that ran out of time is cut finer next time, not packed again as the test times it ran under were (Dew,
+  // 2026-11-07: groups of base/kernels' files ran past their deadline run after run, timed at another branch's times).
+  const outOfTime = graded.rows.filter((row) => row.kind === 'deadline' && row.cached === undefined);
 
   // The most one task of each size used, the run's own with its plan's, which sizes the next run (`sizeOf`); and what
   // each task used, by its name, which sizes it in the next run under auto (#64).
@@ -1142,7 +1147,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       const mapped = results.flatMap((result) => maps.has(result.index) && result.kind === 'ok' ? [[nameOf(result.index), result.meta.seconds] as const] : []);
 
       await armada.post(`/timings/${config.name}`, {
-        rows: Object.fromEntries([...mapped, ...green.map((row) => [rowName(row), row.seconds] as const)]), files: graded.files, usage, tasks,
+        rows: Object.fromEntries([...mapped, ...[...green, ...outOfTime].map((row) => [rowName(row), row.seconds] as const)]), files: graded.files, usage, tasks,
         keep: { rows: [...new Set([...planned, ...graded.rows.map(rowName), ...unowned ? Object.keys(timings.rows) : []])], files, tasks: [...new Set(names)] },
       });
     } catch (cause) {
