@@ -1,5 +1,6 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { dlopen, FFIType } from 'bun:ffi';
+import { appendFileSync, chmodSync, closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
@@ -1860,16 +1861,26 @@ describe('armada run', () => {
       .toEqual({ exit: 0, graded: 'pass', said: true, records: ['other-20261001000001-00000001.json', 'proj-20261001000004-00000004.json', 'proj-tasks.json'] });
   });
 
-  test('leaves the pruning to an armada that holds the lock, and takes the lock of a process that has died', async () => {
+  test('leaves the pruning to an armada that holds the lock, and takes the lock a process that has died left', async () => {
     const plan: Json = { include: [{ name: 'a', rows: ['x'] }] };
     const verdict = { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] };
     const old = [['proj-20261001000003-00000003', 20, 'fail']] as const;
-    const dead = Bun.spawn(['true'], { env: scratchEnv() });
+    const libc = dlopen(process.platform === 'darwin' ? 'libc.dylib' : 'libc.so.6', { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+    let held = -1;
 
-    await dead.exited;
-    // This process is alive, and holds the lock.
-    const busy = await run([], plan, verdict, { seeded: earlier(old, `${String(process.pid)}\n`) });
-    const stale = await run([], plan, verdict, { seeded: earlier(old, `${String(dead.pid)}\n`) });
+    // This process holds the lock (flock's, which the kernel lets go of when its holder exits) while the run ends.
+    const holding = (home: string): void => {
+      earlier(old, '')(home);
+      held = openSync(join(home, '.local', 'state', 'armada', 'retention.lock'), 'a');
+      libc.symbols.flock(held, 2);
+    };
+
+    const busy = await run([], plan, verdict, { seeded: holding });
+
+    closeSync(held);
+
+    // A lock file a process that died left, its lock gone with it.
+    const stale = await run([], plan, verdict, { seeded: earlier(old, '12345\n') });
 
     expect({ busy: [busy.exit, busy.records], stale: [stale.exit, stale.records] }).toEqual({
       busy: [0, ['proj-20261001000003-00000003.json', 'proj-tasks.json']],

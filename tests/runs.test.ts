@@ -192,9 +192,9 @@ describe('armada runs prune', () => {
       const pruned = await armada(home, 'runs', 'prune', '--days=0', '--gb=0', '--dry-run');
 
       expect({
-        exit: pruned.exit, removed: removedIn(pruned.out), said: pruned.out.includes('would remove 5 of 13 run records') && !pruned.out.includes('removed '),
+        exit: pruned.exit, removed: removedIn(pruned.out), said: pruned.out.includes('would remove 5 of 12 run records') && !pruned.out.includes('removed '),
         listing: listing(home), holds: readFileSync(join(stateOf(home), 'holds'), 'utf8'), state: readdirSync(stateOf(home)).toSorted(),
-      }).toEqual({ exit: 0, removed: removed.toSorted(), said: true, listing: before, holds: held, state: ['holds', 'runs'] });
+      }).toEqual({ exit: 0, removed: removed.toSorted(), said: true, listing: before, holds: held, state: ['holds', 'retention.lock', 'runs'] });
     });
   });
 
@@ -343,7 +343,7 @@ describe('armada runs hold and release', () => {
         second: [0, `${app(1)}\nreceipt-x\n${app(2)}\n`, true],
         released: [0, `released ${app(1)}`, `receipt-x\n${app(2)}\n`], unheld: [0, `${app(7)} was not held`, `receipt-x\n${app(2)}\n`],
         invalid: [2, true, `receipt-x\n${app(2)}\n`],
-        state: ['holds', 'runs'],
+        state: ['holds', 'retention.lock', 'runs'],
       });
     });
   });
