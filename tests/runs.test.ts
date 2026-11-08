@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scratchEnv } from './fakes';
@@ -35,14 +35,17 @@ interface Seeding {
   readonly bytes?: number;
   /** The names of other records' directories that its report lists as artifacts. */
   readonly lists?: readonly string[];
+  /** The ids of its run's jobs, in a run of several environments: its own first. */
+  readonly jobs?: readonly string[];
 }
 
 /** A report as `writeReport` (src/ci.ts) writes it, key for key. */
-function reportText(kind: Kind, artifacts: Readonly<Record<string, string>>): string {
+function reportText(kind: Kind, artifacts: Readonly<Record<string, string>>, jobs: readonly string[]): string {
   const head = { sha: 'a'.repeat(40), planJob: 'local', job: 'j' };
   const red = kind === 'fail' || kind === 'legacy-fail';
   const rows = [{ name: 'unit', exitCode: red ? 1 : 0, seconds: 1, output: '' }];
-  const tail = { status: { id: 'j', phase: 'done' }, summary: null, problems: kind === 'not graded' ? ['a row was short'] : [], artifacts, verdicts: { sha: head.sha, part: 'all', rows } };
+  const each = jobs.length === 0 ? undefined : jobs.map((job, at) => ({ environment: `env-${String(at)}`, size: 'medium', job, status: { id: job, phase: 'done' } }));
+  const tail = { status: { id: 'j', phase: 'done' }, summary: null, problems: kind === 'not graded' ? ['a row was short'] : [], artifacts, jobs: each, verdicts: { sha: head.sha, part: 'all', rows } };
 
   if (kind === 'legacy-pass' || kind === 'legacy-fail') return JSON.stringify({ ...head, ...tail }, null, 2);
 
@@ -50,7 +53,7 @@ function reportText(kind: Kind, artifacts: Readonly<Record<string, string>>): st
 }
 
 /** Record `name` in `home`, last changed `days` ago. */
-function seed(home: string, name: string, days: number, { kind = 'fail', bytes = 10_000, lists = [] }: Seeding = {}): void {
+function seed(home: string, name: string, days: number, { kind = 'fail', bytes = 10_000, lists = [], jobs = [] }: Seeding = {}): void {
   const runs = runsOf(home);
   const when = (Date.now() - days * DAY_MS) / 1000;
   const directory = bytes > 0 || kind === 'orphan';
@@ -59,7 +62,7 @@ function seed(home: string, name: string, days: number, { kind = 'fail', bytes =
 
   mkdirSync(runs, { recursive: true });
 
-  if (kind !== 'orphan') writeFileSync(join(runs, `${name}.json`), reportText(kind, artifacts));
+  if (kind !== 'orphan') writeFileSync(join(runs, `${name}.json`), reportText(kind, artifacts, jobs));
 
   if (directory) {
     mkdirSync(join(runs, name, '0-task'), { recursive: true });
@@ -172,7 +175,7 @@ describe('armada runs prune', () => {
 
         outcomes.push({
           exit: pruned.exit, listed: listing(home), removed: removedIn(pruned.out), kept: [...filesOf(kept), ...directoryOnly].toSorted(), gone: removed.toSorted(),
-          summary: /^removed 5 of 13 run records/mu.test(pruned.out),
+          summary: /^removed 5 of 12 run records/mu.test(pruned.out),
         });
       });
     }
@@ -235,7 +238,7 @@ describe('armada runs prune', () => {
     });
   });
 
-  test('breaks a lock a dead process left, and prunes that run at once wait for one another', async () => {
+  test('takes the lock whatever file a dead process left, and prunes that run at once wait for one another', async () => {
     await inHome(async (home) => {
       const app = (n: number) => `app-${id(n)}`;
       const dead = Bun.spawn(['true'], { env: scratchEnv() });
@@ -254,7 +257,55 @@ describe('armada runs prune', () => {
         removed: both.map(({ out }) => removedIn(out).length).toSorted((left, right) => left - right),
         left: listing(home),
         state: readdirSync(stateOf(home)).toSorted(),
-      }).toEqual({ held: [0, `${app(1)}\n`], exits: [0, 0], removed: [0, 30], left: [], state: ['holds', 'runs'] });
+      }).toEqual({ held: [0, `${app(1)}\n`], exits: [0, 0], removed: [0, 30], left: [], state: ['holds', 'retention.lock', 'runs'] });
+    });
+  });
+});
+
+describe('armada runs prune, a record whole', () => {
+  test('removes a run of several environments with every job\'s directory, never one directory of it alone', async () => {
+    await inHome(async (home) => {
+      const multi = (n: number) => `multi-${id(n)}`;
+
+      // A run of two jobs: its report and its own directory, and its second job's directory, a day older, which a
+      // prune removing the oldest first by directory would take alone, leaving the report naming evidence that is gone.
+      seed(home, multi(1), 30, { bytes: 1_000_000, jobs: [id(1), id(2)] });
+      seed(home, multi(2), 30.0001, { kind: 'orphan', bytes: 1_000_000 });
+      seed(home, `other-${id(3)}`, 20, { bytes: 1_000_000 });
+      const pruned = await armada(home, 'runs', 'prune', '--days=100000', '--gb=0.0025');
+
+      expect([pruned.exit, removedIn(pruned.out), listing(home)]).toEqual([0, [multi(1)], filesOf([`other-${id(3)}`])]);
+    });
+  });
+
+  test('keeps a directory a run is extracting into however old, and a dead run\'s marker goes', async () => {
+    await inHome(async (home) => {
+      const active = join(stateOf(home), 'active');
+      const dead = Bun.spawn(['true'], { env: scratchEnv() });
+
+      await dead.exited;
+      seed(home, `live-${id(1)}`, 30, { kind: 'orphan' });
+      seed(home, `gone-${id(2)}`, 30, { kind: 'orphan' });
+      mkdirSync(active, { recursive: true });
+      writeFileSync(join(active, `${String(process.pid)}-1`), JSON.stringify([`live-${id(1)}`]));
+      writeFileSync(join(active, `${String(dead.pid)}-1`), JSON.stringify([`gone-${id(2)}`]));
+      const pruned = await armada(home, 'runs', 'prune', '--days=0');
+
+      expect([pruned.exit, listing(home), readdirSync(active)]).toEqual([0, [`live-${id(1)}`], [`${String(process.pid)}-1`]]);
+    });
+  });
+
+  test('counts a file hard-linked under several names once', async () => {
+    await inHome(async (home) => {
+      const name = `linked-${id(1)}`;
+
+      seed(home, name, 30, { bytes: 1_000_000 });
+      linkSync(join(runsOf(home), name, '0-task', 'blob'), join(runsOf(home), name, '0-task', 'again'));
+      linkSync(join(runsOf(home), name, '0-task', 'blob'), join(runsOf(home), name, '0-task', 'once-more'));
+      utimesSync(join(runsOf(home), name), (Date.now() - 30 * DAY_MS) / 1000, (Date.now() - 30 * DAY_MS) / 1000);
+      const pruned = await armada(home, 'runs', 'prune', '--days=100000', '--gb=0.0015');
+
+      expect([pruned.exit, removedIn(pruned.out)]).toEqual([0, []]);
     });
   });
 });
