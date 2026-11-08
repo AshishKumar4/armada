@@ -55,8 +55,10 @@ const VerdictRowSchema = v.looseObject({
   /** The host its task ran on. */
   host: v.optional(HostSchema),
   /** How the row ended, in its task's word: `deadline` where the task ran out of its time with the row unfinished,
-   *  its seconds then the least it needs. */
+   *  its seconds then the least it needs (`timedShort`). */
   kind: v.optional(v.string()),
+  /** Where the task ran out of its time (`kind`), that its file never started: the row has no seconds to time it by. */
+  unobserved: v.optional(v.boolean()),
 });
 
 export type VerdictRow = v.InferOutput<typeof VerdictRowSchema>;
@@ -70,6 +72,11 @@ export function greenOf(rows: readonly VerdictRow[]): string {
 }
 
 export const VerdictFileSchema = v.looseObject({ rows: v.array(VerdictRowSchema) });
+
+/** Whether a row's task ran out of its time with the row's file running or done, so its seconds are the least it needs
+ *  and the next plan weighs it by them, as by a green row's: not a row it never started (`unobserved`), which has none,
+ *  nor one the run graded a problem or whose proof was reused. */
+export const timedShort = (row: VerdictRow): boolean => row.kind === 'deadline' && row.unobserved !== true && row.cached === undefined && row.problem === undefined;
 
 export const rowName = (row: VerdictRow): string => row.name ?? row.run ?? '';
 
@@ -144,7 +151,9 @@ type Flag = (problem: string, row?: VerdictRow) => void;
 
 /** Each file's seconds in a run: the sum of the timings its rows report for it, so a file a plan splits over several
  *  rows is timed whole. A file of a red row, of a row whose proof was reused, or of a row no task reported (`missing`)
- *  is left out, whether the row timed it or only its plan entry declared it: its other rows hold only part of its time. */
+ *  is left out, whether the row timed it or only its plan entry declared it: its other rows hold only part of its time.
+ *  A row its task's deadline cut short (`timedShort`) is no such red row: its timings are the least its files took, which
+ *  weigh them in the next plan, so the plan cuts them finer. */
 function fileTimings(rows: readonly { readonly row: VerdictRow; readonly declared: readonly string[] }[], missing: readonly string[]): Record<string, number> {
   const files: Record<string, number> = {};
   const partial = new Set(missing);
@@ -152,7 +161,7 @@ function fileTimings(rows: readonly { readonly row: VerdictRow; readonly declare
   for (const { row, declared } of rows) {
     const timed = Object.entries(row.timings ?? {});
 
-    if (row.exitCode !== 0 || row.cached !== undefined) for (const file of [...declared, ...timed.map(([each]) => each)]) partial.add(file);
+    if ((row.exitCode !== 0 && !timedShort(row)) || row.cached !== undefined) for (const file of [...declared, ...timed.map(([each]) => each)]) partial.add(file);
 
     for (const [file, seconds] of timed) files[file] = (files[file] ?? 0) + seconds;
   }

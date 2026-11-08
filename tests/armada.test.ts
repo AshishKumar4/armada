@@ -1559,7 +1559,7 @@ describe('armada run', () => {
     const ran = await run([], plan, { rows: [
       { name: 'x', exitCode: 1, seconds: 351, kind: 'deadline', timings: { 'x.py': 351 } },
       { name: 'g1', exitCode: 1, seconds: 300, kind: 'deadline', timings: { 'g.py': 300 } },
-      { name: 'g2', exitCode: 1, seconds: 0, kind: 'deadline', unobserved: true, timings: {} },
+      { name: 'g2', exitCode: 1, seconds: 0, kind: 'deadline', unobserved: true, timings: { 'g.py': 0 } },
       { name: 'y', exitCode: 1, seconds: 2, timings: { 'y.py': 2 } },
       { name: 'z', exitCode: 0, seconds: 5, timings: { 'z.py': 5 } }] });
 

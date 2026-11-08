@@ -3,9 +3,9 @@
  * commit is packed into R2 (its history from the root the first time its environment is prepared, otherwise only what
  * it adds). One task runs the project's plan command, which prints the tasks; a second job maps the task command over
  * them, longest first, on a pool of containers that each pull task after task. Every task's verdict file is graded
- * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the green rows' timings, a row
- * its deadline cut short timed at the least it needs
- * stored on the runner. Exits 0 when every planned row ran once and passed, 1 when one was red, 2 when not graded.
+ * (`grade.ts`), every red row printed with its output's tail, and the collected verdict and the timings of the green
+ * rows, and of the rows its tasks' deadlines cut short (`timedShort`), stored on the runner. Exits 0 when every planned
+ * row ran once and passed, 1 when one was red, 2 when not graded.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -14,7 +14,7 @@ import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
-import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
+import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, timedShort, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
@@ -1114,10 +1114,12 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   for (const problem of problems) note(`problem: ${problem}`);
 
   const green = graded.rows.filter((row) => row.exitCode === 0 && row.cached === undefined);
-  // A row its task's deadline cut short took at least its seconds: they weigh it in the next plan, as a green row's do,
-  // so a task that ran out of time is cut finer next time, not packed again as the test times it ran under were (Dew,
-  // 2026-11-07: groups of base/kernels' files ran past their deadline run after run, timed at another branch's times).
-  const outOfTime = graded.rows.filter((row) => row.kind === 'deadline' && row.cached === undefined);
+  // A row its task's deadline cut short took at least its seconds (`timedShort`): they weigh it in the next plan, as a
+  // green row's do, in its row timings and in the file timings the plan packs by, so a task that ran out of time is cut
+  // finer next time, not packed again as the test times it ran under were (Dew, 2026-11-07: groups of base/kernels'
+  // files ran past their deadline run after run, timed at another branch's times). A row its task never started has
+  // none, and enters no sample.
+  const outOfTime = graded.rows.filter(timedShort);
 
   // The most one task of each size used, the run's own with its plan's, which sizes the next run (`sizeOf`); and what
   // each task used, by its name, which sizes it in the next run under auto (#64).
