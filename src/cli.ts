@@ -13,7 +13,8 @@ import { deploymentConfig } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
-import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
+import { Armada, CONFIG_DIR, connect, connectionAt, connectionFile, ConnectionSchema, describeBoots } from './sdk';
+import { boundsOf, describeRemoved, describeSummary, holdRun, pruneRuns, recordName, releaseRun, RetentionSchema, RUNS, type Retention } from './runs';
 import { BaseSchema, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
@@ -48,6 +49,16 @@ Usage:
   armada webhook remove <project>      remove one, and its GitHub hook when the CLI made it
   armada prune [--keep=N]              delete now the snapshots past the N most recently used environments
                                        (default the deployment's own); an open job's environment stays
+  armada runs prune [--days=N] [--gb=N] [--dry-run]
+                                       delete the run records armada run keeps under ~/.local/state/armada/runs (a
+                                       report and its artifacts), oldest first, past N days (default 14) or beyond
+                                       N GB in all (default 20); each armada run ends by doing this too. It keeps
+                                       the newest green report of each project, every record named in
+                                       ~/.local/state/armada/holds, and any under an hour old; --dry-run only says
+                                       what it would remove
+  armada runs hold <name>              keep a run record (its report's file name, with or without .json) from
+                                       every prune, as one more line in the holds file
+  armada runs release <name>           let it go
 
 map options:
   --times=N            the items are 1 to N
@@ -101,6 +112,8 @@ run options:
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment; in a project whose
 .armada.json names a "deployment", that one is the default.
+The run records' bounds are also read from the connection file in use, as "retention": {"days": N, "gb": N}; a flag
+outranks it, and a deploy keeps it.
 The command's {item}, {index}, {out}, {files}, {inputs} and {artifacts} are filled per item.
 map exits 1 when a task exits nonzero, and 2 when one could not run.
 run exits 1 when a row is red, and 2 when the run can't be graded.
@@ -121,6 +134,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['secret', { options: [], words: 2 }],
   ['webhook', { options: ['repo=', 'branches=', 'pull-requests', 'token-secret='], words: 2 }],
   ['prune', { options: ['keep='], words: 0 }],
+  ['runs', { options: ['days=', 'gb=', 'dry-run'], words: 2 }],
 ]);
 
 const dash = process.argv.indexOf('--');
@@ -142,6 +156,18 @@ function whole(name: string, least = 1): number | undefined {
   const value = Number(text);
 
   if (!Number.isInteger(value) || value < least) throw new Error(`--${name} takes a ${least > 0 ? 'positive ' : ''}whole number, not ${text}`);
+
+  return value;
+}
+
+/** `--name=N` as a number no less than 0, a fraction too, or undefined when it is not given. */
+function amount(name: string): number | undefined {
+  const text = option(name);
+
+  if (text === undefined) return undefined;
+  const value = text === '' ? Number.NaN : Number(text);
+
+  if (!Number.isFinite(value) || value < 0) throw new Error(`--${name} takes a number, 0 or more, not ${text}`);
 
   return value;
 }
@@ -390,9 +416,10 @@ async function healthOf(name: string, deployed: Armada): Promise<Health | null> 
   }
 }
 
-/** A deployment's connection file as `armada deploy` keeps it: the connection, and the token its fleet reads the
- *  account with, which every other reader of the file leaves out. */
-const KeptSchema = v.object({ ...ConnectionSchema.entries, accountToken: v.optional(v.string()) });
+/** A deployment's connection file as `armada deploy` keeps it: the connection, the token its fleet reads the
+ *  account with, which every other reader of the file leaves out, and the bounds on the run records
+ *  (`armada runs prune`), which the CLI reads from the connection file it uses. */
+const KeptSchema = v.object({ ...ConnectionSchema.entries, accountToken: v.optional(v.string()), retention: v.optional(RetentionSchema) });
 
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, its registry credentials, and
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
@@ -465,7 +492,7 @@ async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: numb
     const health = deployed === null ? null : await healthOf(name, deployed);
 
     if (deployed !== null && mustDrain(health, forceDrain, contractOf(ROOT))) await drain(deployed, () => { drained = true; });
-    await install(account, name, file, { vcpus, memoryMib, token: known?.token, accountToken, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    await install(account, name, file, { vcpus, memoryMib, token: known?.token, accountToken, retention: known?.retention, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
@@ -572,10 +599,12 @@ interface Given {
   readonly token: string | undefined;
   /** The token its fleet reads the account with, which the connection file keeps for the next deploy. */
   readonly accountToken: string | undefined;
+  /** The bounds on the run records the connection file keeps for the next deploy. */
+  readonly retention: Retention | undefined;
   readonly secrets: Readonly<Record<string, string>>;
 }
 
-async function install(account: string, name: string, file: string, { vcpus, memoryMib, token: kept, accountToken, secrets }: Given): Promise<void> {
+async function install(account: string, name: string, file: string, { vcpus, memoryMib, token: kept, accountToken, retention, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -616,7 +645,7 @@ async function install(account: string, name: string, file: string, { vcpus, mem
 
     // Private before it holds the bearer.
     if (existsSync(file)) chmodSync(file, 0o600);
-    writeFileSync(file, JSON.stringify({ url, token, account, accountToken } satisfies v.InferInput<typeof KeptSchema>, null, 2) + '\n', { mode: 0o600 });
+    writeFileSync(file, JSON.stringify({ url, token, account, accountToken, retention } satisfies v.InferInput<typeof KeptSchema>, null, 2) + '\n', { mode: 0o600 });
     console.log(`${name} is deployed at ${url}\ntry it: armada map${name === 'armada' ? '' : ` --connection=${file}`} --times=3 --json -- echo hello {item}`);
   } finally {
     rmSync(config, { force: true });
@@ -633,6 +662,55 @@ async function pruneOn(armada: Armada, keep: number | undefined): Promise<number
 
   for (const key of pruned) console.log(`pruned ${key.slice(0, 12)}`);
   console.log(`${String(pruned.length)} pruned`);
+
+  return 0;
+}
+
+const SettingsSchema = v.looseObject({ retention: v.optional(RetentionSchema, {}) });
+
+/** The bounds on the run records that the connection file in use sets (`retention`: `days` and `gb`); none where there is
+ *  no such file, as when ARMADA_URL and ARMADA_TOKEN stand in for one. */
+function retentionOf(): Retention {
+  const { file } = connectionAt(process.cwd());
+
+  if (!existsSync(file)) return {};
+  const settings = v.safeParse(SettingsSchema, JSON.parse(readFileSync(file, 'utf8')));
+
+  if (!settings.success) throw new Error(`${file}: ${v.summarize(settings.issues)}`);
+
+  return settings.output.retention;
+}
+
+/** `runs prune` removes the run records past the bounds, `runs hold <name>` keeps one from every prune, and `runs release
+ *  <name>` lets it go. */
+async function runs(action: string | undefined, name: string | undefined): Promise<number> {
+  if (action === 'prune') {
+    if (name !== undefined) throw new Error(`runs prune takes no record name, not ${name}`);
+    const dry = flag('dry-run');
+    const pruned = await pruneRuns(boundsOf(retentionOf(), { days: amount('days'), gb: amount('gb') }), dry);
+
+    for (const line of describeRemoved(pruned, dry)) console.log(line);
+    console.log(describeSummary(pruned, dry));
+
+    return 0;
+  }
+
+  if ((action !== 'hold' && action !== 'release') || name === undefined) throw new Error('runs takes prune, hold <name> or release <name>, as in: armada runs hold dew-20261108065807-be40ef9e');
+
+  if (option('days') !== undefined || option('gb') !== undefined || flag('dry-run')) throw new Error(`--days, --gb and --dry-run are runs prune's, not runs ${action}'s`);
+  const record = recordName(name);
+
+  if (action === 'release') {
+    console.log(await releaseRun(name) ? `released ${record}` : `${record} was not held`);
+
+    return 0;
+  }
+
+  const { added, exists } = await holdRun(name);
+
+  console.log(added ? `holding ${record}` : `${record} is already held`);
+
+  if (!exists) console.error(`armada: no run record named ${record} is under ${RUNS} now; the hold keeps one that comes by that name`);
 
   return 0;
 }
@@ -857,7 +935,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, { deadline: whole('deadline'), pool: whole('pool'), priority: whole('priority', -Infinity), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json') });
+      return await runCI(connect(), target, { deadline: whole('deadline'), pool: whole('pool'), priority: whole('priority', -Infinity), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json'), retention: boundsOf(retentionOf(), {}) });
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');
@@ -918,6 +996,9 @@ async function main(): Promise<number> {
 
     case 'prune':
       return await pruneOn(connect(), whole('keep', 0));
+
+    case 'runs':
+      return await runs(target, words[1]);
 
     default:
       throw new Error(`no command ${command}`);

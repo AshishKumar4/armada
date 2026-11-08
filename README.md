@@ -368,6 +368,15 @@ progress on stderr and ends with one JSON object on stdout:
 `graded` value and keeps its rows under `verdicts.rows`. A row a problem names exits 2 and carries the `problem`, so it
 never reads green.
 
+A run's report and its artifacts stay under `~/.local/state/armada/runs`, and every run that wrote a report ends by pruning
+them. A record, a report with its artifacts directory, goes oldest first while one is older than 14 days or all take more
+than 20 GB. A prune never removes the newest green report of each project, a record named in
+`~/.local/state/armada/holds`, or one under an hour old. The holds file is one record name per line, the report's file
+name with or without `.json`: `armada runs hold <name>` and `armada runs release <name>` edit it, and another tool may
+append to it to keep the run a receipt cites. `armada runs prune [--days=N] [--gb=N] [--dry-run]` prunes now and lists
+what it removes. The connection file in use may set `"retention": {"days": 7, "gb": 10}`; a flag outranks it, and
+`armada deploy` keeps it.
+
 Each row says the host its task ran on. A row whose task failed beside others and then passed alone grades green, as
 with `mode: 'fast'`, and carries `aloneAfter` in the stored verdict, the report and `--json`. `armada run` and
 `armada verdict` name each such row, and the summary line and the commit status count them.
@@ -513,6 +522,8 @@ armada webhook add <project> --repo=<owner/name> [--branches=a,b] [--pull-reques
 armada webhook list
 armada webhook remove <project>
 armada prune [--keep=N]
+armada runs prune [--days=N] [--gb=N] [--dry-run]
+armada runs hold <name> | release <name>
 ```
 
 `armada --help` describes every option.

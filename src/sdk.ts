@@ -70,17 +70,25 @@ function noConnection(file: string, named: string | undefined, pinned: string | 
   return 'not deployed from this machine: run `armada deploy`, or set ARMADA_URL and ARMADA_TOKEN';
 }
 
+/** The connection file `connect` reads from `from`: the one `ARMADA_CONNECTION` (or `--connection`) names, else the one
+ *  for the deployment the project's `.armada.json` names, else the one this machine deployed (`armada deploy`); `named`
+ *  and `pinned` say which of the first two it is. */
+export function connectionAt(from: string) {
+  const named = process.env['ARMADA_CONNECTION'];
+  const pinned = named === undefined ? projectDeployment(from) : undefined;
+
+  return { file: named ?? connectionFile(pinned ?? 'armada'), named, pinned };
+}
+
 /** The runner `ARMADA_CONNECTION` (or `--connection`) names; else the one `ARMADA_URL` and `ARMADA_TOKEN` give; else the
  *  deployment the project at `from` names in its `.armada.json`; else the one this machine deployed (`armada deploy`). A
  *  named connection comes first: it is the one asked for. */
 export function connect(from = process.cwd()): Armada {
-  const named = process.env['ARMADA_CONNECTION'];
   const url = process.env['ARMADA_URL'];
   const token = process.env['ARMADA_TOKEN'];
 
-  if (named === undefined && url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
-  const pinned = named === undefined ? projectDeployment(from) : undefined;
-  const file = named ?? connectionFile(pinned ?? 'armada');
+  if (process.env['ARMADA_CONNECTION'] === undefined && url !== undefined && token !== undefined) return new Armada({ url, token, account: process.env['ARMADA_ACCOUNT'] ?? '' });
+  const { file, named, pinned } = connectionAt(from);
 
   if (!existsSync(file)) throw new Error(noConnection(file, named, pinned));
 

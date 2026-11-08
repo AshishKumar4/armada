@@ -7,7 +7,7 @@
  * stored on the runner. Exits 0 when every planned row ran once and passed, 1 when one was red, 2 when not graded.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
@@ -15,10 +15,9 @@ import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './g
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { describeSummary, retainRuns, RUNS, type Bounds } from './runs';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
-
-const REPORTS = join(homedir(), '.local', 'state', 'armada', 'runs');
 
 /** Lines of a red row's output printed; the whole of it is in the report. */
 const TAIL_LINES = 60;
@@ -475,6 +474,8 @@ export interface RunOptions {
   readonly planArgs: readonly string[];
   readonly secrets: readonly string[];
   readonly json: boolean;
+  /** The bounds on the run records under `~/.local/state/armada/runs`, which every run that wrote a report ends by pruning to. */
+  readonly retention: Bounds;
 }
 
 /** A failed task's verdict file, which it may have written before it failed, as text; null when it wrote none. */
@@ -535,6 +536,17 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 
   if (options.json) console.log(JSON.stringify(result));
 
+  // After the verdict is out, so a prune never holds a reader of it up; its failure is said, never the run's.
+  if (result.report !== null) {
+    try {
+      const pruned = await retainRuns(options.retention);
+
+      if (pruned !== null && pruned.removed.length > 0) note(describeSummary(pruned, false));
+    } catch (cause) {
+      note(`the run records were not pruned: ${errorOf({ cause }).message}`);
+    }
+  }
+
   return EXITS[result.graded];
 }
 
@@ -565,10 +577,10 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   /** Writes the report, named by the task job, or by the plan when no task job started, and says where. */
   const writeReport = (contents: Report): string => {
-    const path = join(REPORTS, `${config.name}-${contents.job ?? (planId === 'local' ? `local-${String(began)}` : planId)}.json`);
+    const path = join(RUNS, `${config.name}-${contents.job ?? (planId === 'local' ? `local-${String(began)}` : planId)}.json`);
     const { rows, ...rest } = contents;
 
-    mkdirSync(REPORTS, { recursive: true });
+    mkdirSync(RUNS, { recursive: true });
     writeFileSync(path, JSON.stringify({ sha, ...rest, verdicts: { sha, part: 'all', rows } }, null, 2));
 
     return path;
@@ -1059,7 +1071,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   // Each archive extracted as it arrives, so no more than ARCHIVES_AT_ONCE are held in memory at once.
   const extracted = await atOnce(archived, ARCHIVES_AT_ONCE, async ({ job, id, index, local }) => {
     const archive = await job.artifacts(local);
-    const dir = join(REPORTS, `${config.name}-${id}`, `${String(index)}-${nameOf(index)}`);
+    const dir = join(RUNS, `${config.name}-${id}`, `${String(index)}-${nameOf(index)}`);
 
     return archive === null ? [] : [[index, { dir, paths: new Set(extractTar(archive, dir)) }] as const];
   });
