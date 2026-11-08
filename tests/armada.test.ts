@@ -1555,6 +1555,25 @@ describe('armada run', () => {
       .toEqual({ exit: 2, graded: true, verdicts: [], timed: [expect.objectContaining({ rows: { x: 4 }, files: { 'x.py': 3 } })] });
   });
 
+  // Dew, 2026-11-07: base/kernels' groups ran past their deadline run after run, each plan packing them as before, as a
+  // row its deadline cut short recorded no time; and its plan weighs a file by the file timings, which a red row leaves
+  // out. A row its task never started (`unobserved`) has no time: it enters neither, and a file it shares with a timed
+  // row is not timed whole.
+  test('a row its task\'s deadline cut short is timed at the least it needs, in its rows and its file; a row never started, or red otherwise, not at all', async () => {
+    const plan = { include: [{ name: 'a', rows: [{ name: 'x', files: ['x.py'] }, { name: 'g1', files: ['g.py'] }, { name: 'g2', files: ['g.py'] },
+      { name: 'y', files: ['y.py'] }, { name: 'z', files: ['z.py'] }] }] };
+
+    const ran = await run([], plan, { rows: [
+      { name: 'x', exitCode: 1, seconds: 351, kind: 'deadline', timings: { 'x.py': 351 } },
+      { name: 'g1', exitCode: 1, seconds: 300, kind: 'deadline', timings: { 'g.py': 300 } },
+      { name: 'g2', exitCode: 1, seconds: 0, kind: 'deadline', unobserved: true, timings: { 'g.py': 0 } },
+      { name: 'y', exitCode: 1, seconds: 2, timings: { 'y.py': 2 } },
+      { name: 'z', exitCode: 0, seconds: 5, timings: { 'z.py': 5 } }] });
+
+    expect(ran.timed.map((body) => v.parse(v.looseObject({ rows: v.unknown(), files: v.unknown() }), body)).map(({ rows, files }) => ({ rows, files })))
+      .toEqual([{ rows: { x: 351, g1: 300, z: 5 }, files: { 'x.py': 351, 'z.py': 5 } }]);
+  });
+
   // #64: one size served a whole run, the smallest its heaviest task fit, so a few tests that could use more cores ran
   // on 4 vCPUs beside the rest.
   test('runs each size\'s tasks in a job of its own: an entry\'s own size, else under auto the one its last runs needed, and records each task\'s use', async () => {
