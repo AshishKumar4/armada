@@ -2,23 +2,27 @@
  * The CLI's local run records, and the bound on them. `armada run` writes each run's report to
  * `~/.local/state/armada/runs/<project>-<job>.json` and extracts its tasks' artifacts beside it, under `<project>-<job>/`.
  *
- * A record is a report with its artifacts directory, when it has one, taken as one unit and aged by the newer of the
- * two's mtimes. A run of several environments extracts each job's artifacts under that job's own name, and only the first
- * job names the report: each other directory is a record of its own, kept whenever the report that lists it is.
+ * A record is a run's report with every artifacts directory the run made, taken as one unit, aged by the newest of
+ * their mtimes and removed whole, so no report left names evidence that is gone: its own directory, and in a run of
+ * several environments each other job's (`<project>-<job>`, which its report's `jobs` names). A directory no report
+ * owns is a record of its own.
  *
  * Pruning removes the oldest records first, while one is older than the age bound or the records together take more
  * than the size bound, except a record that is
  *   - the newest green report of its project, which other tools read to balance their work;
- *   - named in the holds file (`~/.local/state/armada/holds`, one record name per line), which other tools append to so
- *     a receipt can keep the run it cites;
- *   - under an hour old: the CLI keeps no marker of a run in progress, and a run's artifacts are extracted just before
- *     its report is written.
+ *   - named in the holds file (`~/.local/state/armada/holds`, one record name per line), which a receipt keeps the run
+ *     it cites by, through `armada runs hold`, its one writer;
+ *   - one a run is extracting artifacts into now: the run names its directories in a marker under
+ *     `~/.local/state/armada/active` from before its first extraction until its report is written (`producing`), which
+ *     a prune reads again before each removal;
+ *   - under an hour old.
  *
- * One lock file serialises prunes and `armada` edits of the holds file; a record that vanishes mid-scan, to another
- * prune or a person, is skipped. A tool that appends to the holds file takes no lock, so a prune reads the file again
- * before each removal.
+ * One lock (flock on a lock file, which the kernel lets go of when its holder dies) serialises prunes and every edit of
+ * the holds file; a record that vanishes mid-scan, to a person, is skipped. A file hard-linked under several names is
+ * counted once.
  */
-import { appendFileSync, closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { dlopen, FFIType } from 'bun:ffi';
+import { appendFileSync, closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import * as v from 'valibot';
@@ -32,18 +36,24 @@ export const RUNS = join(STATE, 'runs');
 /** The records no prune removes beyond those it names itself: one name per line. */
 const HOLDS = join(STATE, 'holds');
 
-/** Held while one armada prunes or edits the holds file: it holds the pid of the process that made it. */
+/** Locked (flock) while one armada prunes or edits the holds file. */
 const LOCK = join(STATE, 'retention.lock');
+
+/** The markers of the runs extracting artifacts now (`producing`): each a file of its process's pid, listing names. */
+const ACTIVE = join(STATE, 'active');
 
 const REPORT_SUFFIX = '.json';
 
 /** A record younger than this is not removed. */
 const MIN_AGE_MS = 60 * 60_000;
 
-/** A lock older than this is taken as left by a process that died, whatever its pid says. */
-const LOCK_STALE_MS = 60 * 60_000;
-
 const LOCK_POLL_MS = 100;
+
+/** flock(2)'s exclusive lock. */
+const LOCK_EX = 2;
+
+/** flock(2)'s operation that answers at once rather than waiting. */
+const LOCK_NB = 4;
 
 /** How long a command waits for another armada's prune or hold edit to end. */
 const LOCK_WAIT_MS = 60_000;
@@ -84,6 +94,7 @@ const ReportSchema = v.looseObject({
   graded: v.optional(v.string()),
   problems: v.optional(v.array(v.string()), []),
   artifacts: v.optional(v.record(v.string(), v.string()), {}),
+  jobs: v.optional(v.array(v.looseObject({ job: v.string() })), []),
   verdicts: v.optional(v.object({ rows: v.array(v.looseObject({ exitCode: v.number() })) }), { rows: [] }),
 });
 
@@ -131,45 +142,96 @@ interface Usage {
   readonly mtimeMs: number;
 }
 
-function usage(path: string): Usage | undefined {
+/** `path`'s usage, each file of several hard links counted once across a scan: `seen` holds the (device, inode) of
+ *  those already counted. */
+function usage(path: string, seen: Set<string>): Usage | undefined {
   const own = present(() => lstatSync(path));
 
   if (own === undefined) return undefined;
+  const linked = !own.isDirectory() && own.nlink > 1;
+  const inode = `${String(own.dev)}:${String(own.ino)}`;
+  const counted = linked && seen.has(inode) ? 0 : own.blocks * BLOCK;
 
-  return { bytes: own.blocks * BLOCK + (own.isDirectory() ? within(path) : 0), mtimeMs: own.mtimeMs };
+  if (linked) seen.add(inode);
+
+  return { bytes: counted + (own.isDirectory() ? within(path, seen) : 0), mtimeMs: own.mtimeMs };
 }
 
 /** What a directory's entries take on disk. Symlinks count as themselves, and are never followed. */
-function within(directory: string): number {
-  return (present(() => readdirSync(directory)) ?? []).reduce((sum, entry) => sum + (usage(join(directory, entry))?.bytes ?? 0), 0);
+function within(directory: string, seen: Set<string>): number {
+  return (present(() => readdirSync(directory)) ?? []).reduce((sum, entry) => sum + (usage(join(directory, entry), seen)?.bytes ?? 0), 0);
 }
 
+/** A record: a report (`hasReport`) and the artifacts directories the run made (`directories`, its own name's among
+ *  them where it has one), named by the report, or a directory no report owns by its own name. */
 interface RunRecord {
   readonly name: string;
   readonly hasReport: boolean;
-  readonly hasArtifacts: boolean;
+  readonly directories: readonly string[];
   readonly bytes: number;
   readonly mtimeMs: number;
 }
 
-/** Every record under RUNS. Files that are not reports, and anything that is not a plain file or directory, are not
- *  records, and are left alone. */
+/** The artifacts directories the run of report `name` made: its own name's, each other job's in a run of several
+ *  environments (`<project>-<job>`, as its report's `jobs` names them) and each its tasks' artifacts lie under. */
+function ownedBy(name: string): string[] {
+  const view = viewOf(reportPath(name));
+  const project = projectOf(name);
+  const jobs = project === undefined ? [] : (view?.jobs ?? []).map(({ job }) => `${project}-${job}`);
+  const listed = Object.values(view?.artifacts ?? {}).map((directory) => basename(dirname(directory)));
+
+  return [...new Set([name, ...jobs, ...listed])];
+}
+
+/** Every record under RUNS. A directory whose name no report has is read against the reports of its project written
+ *  within MIN_AGE_MS of it (a run writes its report once it has extracted every job's artifacts), each of which owns
+ *  the directories it names (`ownedBy`); one no report owns is a record of its own. Files that are not reports, and
+ *  anything that is not a plain file or directory, are not records, and are left alone. */
 function scan(): RunRecord[] {
   const entries = present(() => readdirSync(RUNS, { withFileTypes: true })) ?? [];
   const reports = new Set(entries.filter((entry) => entry.isFile() && entry.name.endsWith(REPORT_SUFFIX)).map((entry) => recordName(entry.name)));
   const directories = new Set(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
+  const seen = new Set<string>();
 
-  return [...new Set([...reports, ...directories])].flatMap((name) => {
-    const report = reports.has(name) ? usage(reportPath(name)) : undefined;
-    const artifacts = directories.has(name) ? usage(join(RUNS, name)) : undefined;
+  const reportUsage = new Map([...reports].flatMap((name) => {
+    const found = usage(reportPath(name), seen);
 
-    if (report === undefined && artifacts === undefined) return [];
+    return found === undefined ? [] : [[name, found] as const];
+  }));
 
-    return [{
-      name, hasReport: report !== undefined, hasArtifacts: artifacts !== undefined,
-      bytes: (report?.bytes ?? 0) + (artifacts?.bytes ?? 0), mtimeMs: Math.max(report?.mtimeMs ?? 0, artifacts?.mtimeMs ?? 0),
-    }];
+  const directoryUsage = new Map([...directories].flatMap((name) => {
+    const found = usage(join(RUNS, name), seen);
+
+    return found === undefined ? [] : [[name, found] as const];
+  }));
+
+  // Each directory a report of another name owns: read only for the reports a directory without one could be part of.
+  const owner = new Map<string, string>();
+
+  for (const [directory, { mtimeMs }] of directoryUsage) {
+    if (reportUsage.has(directory) || owner.has(directory)) continue;
+    const project = projectOf(directory);
+    const candidates = [...reportUsage].filter(([name, report]) => projectOf(name) === project && Math.abs(report.mtimeMs - mtimeMs) <= MIN_AGE_MS);
+
+    for (const [name] of candidates) {
+      for (const owned of ownedBy(name)) {
+        if (owned !== name && directoryUsage.has(owned) && !reportUsage.has(owned)) owner.set(owned, name);
+      }
+    }
+  }
+
+  const records: RunRecord[] = [...reportUsage].map(([name, report]) => {
+    const mine = [...directoryUsage.keys()].filter((directory) => directory === name || owner.get(directory) === name);
+    const parts = [report, ...mine.map((directory) => directoryUsage.get(directory)).filter((found) => found !== undefined)];
+
+    return { name, hasReport: true, directories: mine, bytes: parts.reduce((sum, part) => sum + part.bytes, 0), mtimeMs: Math.max(...parts.map((part) => part.mtimeMs)) };
   });
+
+  for (const [directory, found] of directoryUsage) {
+    if (!reportUsage.has(directory) && !owner.has(directory)) records.push({ name: directory, hasReport: false, directories: [directory], ...found });
+  }
+
+  return records;
 }
 
 /** The start of a file. */
@@ -221,14 +283,59 @@ function isGreen(path: string): boolean {
   return view.graded === 'pass';
 }
 
-/** The names of the artifact directories a report lists: each task's is `<project>-<job>/<index>-<name>`. */
-function listedBy(name: string): string[] {
-  return Object.values(viewOf(reportPath(name))?.artifacts ?? {}).map((directory) => basename(dirname(directory)));
-}
-
 /** The names the holds file lists, each as a record's name. */
 function held(): Set<string> {
   return new Set((present(() => readFileSync(HOLDS, 'utf8')) ?? '').split('\n').map(recordName).filter((name) => name !== ''));
+}
+
+const MarkerSchema = v.array(v.string());
+
+/** The directories the runs alive now are extracting artifacts into (`producing`); a marker a dead process left is
+ *  removed. */
+function producingNow(): Set<string> {
+  const names = new Set<string>();
+
+  for (const file of present(() => readdirSync(ACTIVE)) ?? []) {
+    const pid = Number.parseInt(file, 10);
+    const path = join(ACTIVE, file);
+
+    if (!Number.isInteger(pid) || !running(pid)) {
+      rmSync(path, { force: true });
+      continue;
+    }
+
+    const listed = v.safeParse(MarkerSchema, JSON.parse(present(() => readFileSync(path, 'utf8')) ?? '[]'));
+
+    for (const name of listed.success ? listed.output : []) names.add(name);
+  }
+
+  return names;
+}
+
+/** A run's marker (ACTIVE) naming `directories`, its jobs' artifacts directories, written before it extracts the
+ *  first; the remover, to call once its report is written. A prune keeps every record a marker of a process alive
+ *  names, and removes the marker of one that has exited, however it ended. */
+export function producing(directories: readonly string[]): () => void {
+  mkdirSync(ACTIVE, { recursive: true });
+  const path = join(ACTIVE, `${String(process.pid)}-${String(Date.now())}`);
+
+  writeFileSync(path, JSON.stringify(directories));
+
+  return () => { rmSync(path, { force: true }); };
+}
+
+function running(pid: number): boolean {
+  try {
+    return process.kill(pid, 0);
+  } catch (cause) {
+    const code = codeOf({ cause });
+
+    if (code === 'ESRCH') return false;
+
+    if (code === 'EPERM') return true;
+
+    throw cause;
+  }
 }
 
 /** Each record a prune keeps, and why. */
@@ -248,15 +355,12 @@ function kept(records: readonly RunRecord[]): Map<string, string> {
     if (named.has(name) && !why.has(name)) why.set(name, 'held');
   }
 
-  // A kept run keeps every directory its report lists, as a run of several environments has one for each job; a directory
-  // added here has no report to list more.
-  for (const name of why.keys()) {
-    for (const directory of listedBy(name)) {
-      if (named.has(directory) && !why.has(directory)) why.set(directory, `its artifacts are ${name}'s`);
-    }
-  }
-
   return why;
+}
+
+/** Whether a run extracting artifacts now (`producingNow`) names any of `record`'s directories. */
+function inProgress(record: RunRecord, producingNames: ReadonlySet<string>): boolean {
+  return producingNames.has(record.name) || record.directories.some((directory) => producingNames.has(directory));
 }
 
 /** One record a prune removed, or in a dry run would. */
@@ -272,7 +376,7 @@ export interface Pruned {
   readonly scanned: number;
   readonly left: number;
   readonly leftBytes: number;
-  /** The records it kept for being the newest green run of their project, held, or a held run's. */
+  /** The records it kept for being the newest green run of their project, or held. */
   readonly kept: number;
   /** Whether what is left is still past a bound, as every record that could go is gone: the rest are kept or new. */
   readonly past: boolean;
@@ -283,7 +387,8 @@ function pruneUnder(bounds: Bounds, dry: boolean): Pruned {
   const now = Date.now();
   const records = scan();
   const why = kept(records);
-  const oldestFirst = records.filter((record) => !why.has(record.name) && now - record.mtimeMs >= MIN_AGE_MS).toSorted((left, right) => left.mtimeMs - right.mtimeMs || left.name.localeCompare(right.name));
+  const producingNames = producingNow();
+  const oldestFirst = records.filter((record) => !why.has(record.name) && !inProgress(record, producingNames) && now - record.mtimeMs >= MIN_AGE_MS).toSorted((left, right) => left.mtimeMs - right.mtimeMs || left.name.localeCompare(right.name));
   const removed: Removed[] = [];
   const gone = new Set<string>();
   let bytes = records.reduce((sum, record) => sum + record.bytes, 0);
@@ -293,13 +398,14 @@ function pruneUnder(bounds: Bounds, dry: boolean): Pruned {
 
     if (!tooOld && bytes <= bounds.gb * GB) break;
 
-    // A hold another tool has appended since the scan.
-    if (held().has(record.name)) continue;
+    // A run that began extracting into it since the scan.
+    if (inProgress(record, producingNow())) continue;
 
     if (!dry) {
+      // The report first: a record that stops halfway leaves directories no report names, a record of their own.
       if (record.hasReport) rmSync(reportPath(record.name), { force: true });
 
-      if (record.hasArtifacts) rmSync(join(RUNS, record.name), { recursive: true, force: true });
+      for (const directory of record.directories) rmSync(join(RUNS, directory), { recursive: true, force: true });
     }
 
     removed.push({ name: record.name, bytes: record.bytes, ageMs: now - record.mtimeMs });
@@ -315,59 +421,30 @@ function pruneUnder(bounds: Bounds, dry: boolean): Pruned {
   };
 }
 
-/** Whether nothing alive holds the lock: no file, a file of a dead process, or one too old to be a prune's. */
-function unheld(): boolean {
-  const own = present(() => lstatSync(LOCK));
+/** flock(2), from the C library: the lock a prune and every edit of the holds file take, which the kernel lets go of when
+ *  its holder exits however it ends, so none is ever left to break. */
+function flock(): (fd: number, operation: number) => number {
+  const library = dlopen(process.platform === 'darwin' ? 'libc.dylib' : 'libc.so.6', { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
 
-  if (own === undefined || Date.now() - own.mtimeMs > LOCK_STALE_MS) return true;
-  const pid = Number.parseInt(present(() => readFileSync(LOCK, 'utf8')) ?? '', 10);
-
-  // A lock whose pid is not yet written is one being made.
-  return Number.isInteger(pid) && !running(pid);
+  return (fd, operation) => library.symbols.flock(fd, operation);
 }
 
-function running(pid: number): boolean {
-  try {
-    return process.kill(pid, 0);
-  } catch (cause) {
-    const code = codeOf({ cause });
-
-    if (code === 'ESRCH') return false;
-
-    if (code === 'EPERM') return true;
-
-    throw cause;
-  }
-}
-
-/** Takes the lock, waiting up to `patienceMs` for its holder; the release, or null when it is held still. A lock whose
- *  holder has died is broken. Two processes that find the same dead lock at once may both break it and both go on: a
- *  prune twice over is harmless, and an edit of the holds file is a whole line. */
+/** Takes the lock, waiting up to `patienceMs` for its holder; the release, or null when it is held still. */
 async function lock(patienceMs: number): Promise<(() => void) | null> {
   mkdirSync(STATE, { recursive: true });
   const until = Date.now() + patienceMs;
-  const mine = `${String(process.pid)}\n`;
+  const fd = openSync(LOCK, 'a', 0o600);
+  const locking = flock();
 
   for (;;) {
-    try {
-      const fd = openSync(LOCK, 'wx', 0o600);
+    if (locking(fd, LOCK_EX | LOCK_NB) === 0) return () => { closeSync(fd); };
 
-      writeSync(fd, mine);
+    if (Date.now() >= until) {
       closeSync(fd);
 
-      return () => {
-        if (present(() => readFileSync(LOCK, 'utf8')) === mine) rmSync(LOCK, { force: true });
-      };
-    } catch (cause) {
-      if (codeOf({ cause }) !== 'EEXIST') throw cause;
+      return null;
     }
 
-    if (unheld()) {
-      rmSync(LOCK, { force: true });
-      continue;
-    }
-
-    if (Date.now() >= until) return null;
     await Bun.sleep(LOCK_POLL_MS);
   }
 }
@@ -376,7 +453,7 @@ async function lock(patienceMs: number): Promise<(() => void) | null> {
 async function locked<T>(body: () => T): Promise<T> {
   const release = await lock(LOCK_WAIT_MS);
 
-  if (release === null) throw new Error(`another armada is pruning run records or editing ${HOLDS}: it holds ${LOCK}, which is safe to delete if no armada runs`);
+  if (release === null) throw new Error(`another armada is pruning run records or editing ${HOLDS} (it holds the lock on ${LOCK}); try again once it ends`);
 
   try {
     return body();
@@ -444,15 +521,15 @@ export async function holdRun(text: string): Promise<{ readonly added: boolean; 
     mkdirSync(STATE, { recursive: true });
     const current = present(() => readFileSync(HOLDS, 'utf8')) ?? '';
 
-    // One append, so a tool appending beside it loses nothing; after a line another tool left without its newline.
+    // After a line a person left without its newline.
     appendFileSync(HOLDS, `${current === '' || current.endsWith('\n') ? '' : '\n'}${name}\n`);
 
     return { added: true, exists };
   });
 }
 
-/** Lets a record go to the prunes again; whether it was held. The file is replaced whole, so it never holds half a line,
- *  and a line another tool appends in that instant, to the file this replaces, is lost: a hold is a line to add again. */
+/** Lets a record go to the prunes again; whether it was held. The file is replaced whole, under the lock every edit of
+ *  it takes, so it never holds half a line and no other edit is lost. */
 export async function releaseRun(text: string): Promise<boolean> {
   const name = holdName(text);
 

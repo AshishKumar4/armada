@@ -13,8 +13,9 @@ import { deploymentConfig } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
-import { Armada, CONFIG_DIR, connect, connectionAt, connectionFile, ConnectionSchema, describeBoots } from './sdk';
-import { boundsOf, describeRemoved, describeSummary, holdRun, pruneRuns, recordName, releaseRun, RetentionSchema, RUNS, type Retention } from './runs';
+import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
+import { boundsOf, RetentionSchema, type Retention } from './runs';
+import { retentionOf, runsCommand } from './runs-command';
 import { BaseSchema, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
@@ -666,55 +667,6 @@ async function pruneOn(armada: Armada, keep: number | undefined): Promise<number
   return 0;
 }
 
-const SettingsSchema = v.looseObject({ retention: v.optional(RetentionSchema, {}) });
-
-/** The bounds on the run records that the connection file in use sets (`retention`: `days` and `gb`); none where there is
- *  no such file, as when ARMADA_URL and ARMADA_TOKEN stand in for one. */
-function retentionOf(): Retention {
-  const { file } = connectionAt(process.cwd());
-
-  if (!existsSync(file)) return {};
-  const settings = v.safeParse(SettingsSchema, JSON.parse(readFileSync(file, 'utf8')));
-
-  if (!settings.success) throw new Error(`${file}: ${v.summarize(settings.issues)}`);
-
-  return settings.output.retention;
-}
-
-/** `runs prune` removes the run records past the bounds, `runs hold <name>` keeps one from every prune, and `runs release
- *  <name>` lets it go. */
-async function runs(action: string | undefined, name: string | undefined): Promise<number> {
-  if (action === 'prune') {
-    if (name !== undefined) throw new Error(`runs prune takes no record name, not ${name}`);
-    const dry = flag('dry-run');
-    const pruned = await pruneRuns(boundsOf(retentionOf(), { days: amount('days'), gb: amount('gb') }), dry);
-
-    for (const line of describeRemoved(pruned, dry)) console.log(line);
-    console.log(describeSummary(pruned, dry));
-
-    return 0;
-  }
-
-  if ((action !== 'hold' && action !== 'release') || name === undefined) throw new Error('runs takes prune, hold <name> or release <name>, as in: armada runs hold dew-20261108065807-be40ef9e');
-
-  if (option('days') !== undefined || option('gb') !== undefined || flag('dry-run')) throw new Error(`--days, --gb and --dry-run are runs prune's, not runs ${action}'s`);
-  const record = recordName(name);
-
-  if (action === 'release') {
-    console.log(await releaseRun(name) ? `released ${record}` : `${record} was not held`);
-
-    return 0;
-  }
-
-  const { added, exists } = await holdRun(name);
-
-  console.log(added ? `holding ${record}` : `${record} is already held`);
-
-  if (!exists) console.error(`armada: no run record named ${record} is under ${RUNS} now; the hold keeps one that comes by that name`);
-
-  return 0;
-}
-
 /** Refuses an option the command does not take, a value given to a flag or missing from an option, and a word too many. */
 function checkArguments(command: string, words: readonly string[]): void {
   const { options, words: wanted } = COMMANDS.get(command) ?? { options: [], words: 0 };
@@ -998,7 +950,7 @@ async function main(): Promise<number> {
       return await pruneOn(connect(), whole('keep', 0));
 
     case 'runs':
-      return await runs(target, words[1]);
+      return await runsCommand(target, words[1], { days: amount('days'), gb: amount('gb'), dry: flag('dry-run') });
 
     default:
       throw new Error(`no command ${command}`);

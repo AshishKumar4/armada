@@ -15,7 +15,7 @@ import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './g
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
-import { describeSummary, retainRuns, RUNS, type Bounds } from './runs';
+import { describeSummary, producing, retainRuns, RUNS, type Bounds } from './runs';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
 
@@ -1068,6 +1068,10 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     return result === undefined || result.kind === 'lost' || result.kind === 'cancelled' || result.meta.artifacts !== true ? [] : [{ job, id, index, local }];
   }));
 
+  // Each job's artifacts directory named in a marker from before the first extraction until the report is written, so a
+  // prune meanwhile, however long the extraction takes, leaves them (`producing`).
+  const produced = producing(jobs.map(({ id }) => `${config.name}-${id}`));
+
   // Each archive extracted as it arrives, so no more than ARCHIVES_AT_ONCE are held in memory at once.
   const extracted = await atOnce(archived, ARCHIVES_AT_ONCE, async ({ job, id, index, local }) => {
     const archive = await job.artifacts(local);
@@ -1119,6 +1123,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     planJob: planId, job: first.id, graded: outcome, status, summary, problems: graded.problems, rows: graded.rows,
     artifacts: Object.fromEntries([...kept].map(([index, held]) => [String(index), held.dir])), jobs: each,
   });
+
+  produced();
 
   const ran = { sha, planJob: planId, job: first.id, jobs: each?.map(({ job }) => job), report, graded: outcome };
 
