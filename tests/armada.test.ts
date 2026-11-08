@@ -1548,6 +1548,16 @@ describe('armada run', () => {
       .toEqual({ exit: 2, graded: true, verdicts: [], timed: [expect.objectContaining({ rows: { x: 4 }, files: { 'x.py': 3 } })] });
   });
 
+  // Dew, 2026-11-07: base/kernels' groups ran past their deadline run after run, each plan packing them as before, as a
+  // row its deadline cut short recorded no time.
+  test('a row its task\'s deadline cut short is timed at the least it needs, a row red otherwise not at all', async () => {
+    const plan = { include: [{ name: 'a', rows: ['x', 'y', 'z'] }] };
+    const ran = await run([], plan, { rows: [{ name: 'x', exitCode: 1, seconds: 351, kind: 'deadline' },
+      { name: 'y', exitCode: 1, seconds: 2 }, { name: 'z', exitCode: 0, seconds: 5 }] });
+
+    expect(ran.timed.map((body) => v.parse(v.looseObject({ rows: v.unknown() }), body).rows)).toEqual([{ x: 351, z: 5 }]);
+  });
+
   // #64: one size served a whole run, the smallest its heaviest task fit, so a few tests that could use more cores ran
   // on 4 vCPUs beside the rest.
   test('runs each size\'s tasks in a job of its own: an entry\'s own size, else under auto the one its last runs needed, and records each task\'s use', async () => {
