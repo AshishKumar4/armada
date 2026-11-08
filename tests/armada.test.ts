@@ -1,5 +1,5 @@
 import { describe, expect, setSystemTime, test } from 'bun:test';
-import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
@@ -1161,6 +1161,8 @@ interface Runner {
   readonly usage?: (item: Json) => { readonly cpuSeconds: number; readonly peakMemory: number };
   /** How long each task's artifacts archive takes to answer. */
   readonly archiveMs?: number;
+  /** Runs in the CLI's HOME before it starts: what an earlier run left there. */
+  readonly seeded?: (home: string) => void;
 }
 
 /** The host most containers ran on (2026-10-13). */
@@ -1318,6 +1320,8 @@ describe('armada run', () => {
 
       if (runner.bare === true) git(scratch, 'clone', '-q', '--bare', repo, 'repo.git');
 
+      runner.seeded?.(scratch);
+
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: runner.bare === true ? join(scratch, 'repo.git') : join(repo, runner.within ?? ''), env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
@@ -1332,7 +1336,9 @@ describe('armada run', () => {
       const directories = report === '' ? {} : v.parse(v.looseObject({ artifacts: v.optional(v.record(v.string(), v.string()), {}) }), JSON.parse(report)).artifacts;
       const evidence = Object.fromEntries(Object.entries(directories).map(([index, dir]) => [index, { dir, files: Object.fromEntries(readdirSync(dir).map((file) => [file, readFileSync(join(dir, file), 'utf8')])) }]));
 
-      return { exit, stdout, stderr, commands, bodies, timed, seen, cancelled, report, evidence, order, archiving };
+      const records = existsSync(join(scratch, '.local', 'state', 'armada', 'runs')) ? readdirSync(join(scratch, '.local', 'state', 'armada', 'runs')).toSorted() : [];
+
+      return { exit, stdout, stderr, commands, bodies, timed, seen, cancelled, report, evidence, order, archiving, records };
     } finally {
       await server.stop(true);
       rmSync(scratch, { recursive: true, force: true });
@@ -1824,6 +1830,51 @@ describe('armada run', () => {
 
     expect({ exit: ran.exit, graded: result.graded, jobs: ran.bodies.length, passed: result.problems.some((problem) => problem.includes('before its task jobs could start')), report: result.report.endsWith('.json') })
       .toEqual({ exit: 2, graded: 'not graded', jobs: 1, passed: true, report: true });
+  });
+
+  /** What an earlier run left in the CLI's home: run records, each a report graded as given, last changed this many days ago. */
+  const earlier = (records: readonly (readonly [name: string, days: number, graded: string])[], lock?: string) => (home: string): void => {
+    const state = join(home, '.local', 'state', 'armada');
+
+    mkdirSync(join(state, 'runs'), { recursive: true });
+
+    for (const [name, days, graded] of records) {
+      const path = join(state, 'runs', `${name}.json`);
+      const when = (Date.now() - days * 86_400_000) / 1000;
+
+      writeFileSync(path, JSON.stringify({ sha: 'a'.repeat(40), planJob: 'local', job: 'j', graded, problems: [], verdicts: { rows: [] } }, null, 2));
+      utimesSync(path, when, when);
+    }
+
+    if (lock !== undefined) writeFileSync(join(state, 'retention.lock'), lock);
+  };
+
+  test('ends by pruning the run records past its bounds once its verdict is out, keeping the newest green of every project and its own report', async () => {
+    const plan: Json = { include: [{ name: 'a', rows: ['x'] }] };
+
+    const ran = await run(['--json'], plan, { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] }, {
+      seeded: earlier([['other-20261001000001-00000001', 30, 'pass'], ['other-20261001000002-00000002', 20, 'fail'], ['proj-20261001000003-00000003', 20, 'fail'], ['proj-20261001000004-00000004', 2, 'fail']]),
+    });
+
+    expect({ exit: ran.exit, graded: v.parse(v.looseObject({ graded: v.string() }), JSON.parse(ran.stdout)).graded, said: /^removed 2 of 5 run records/mu.test(ran.stderr), records: ran.records })
+      .toEqual({ exit: 0, graded: 'pass', said: true, records: ['other-20261001000001-00000001.json', 'proj-20261001000004-00000004.json', 'proj-tasks.json'] });
+  });
+
+  test('leaves the pruning to an armada that holds the lock, and takes the lock of a process that has died', async () => {
+    const plan: Json = { include: [{ name: 'a', rows: ['x'] }] };
+    const verdict = { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] };
+    const old = [['proj-20261001000003-00000003', 20, 'fail']] as const;
+    const dead = Bun.spawn(['true'], { env: scratchEnv() });
+
+    await dead.exited;
+    // This process is alive, and holds the lock.
+    const busy = await run([], plan, verdict, { seeded: earlier(old, `${String(process.pid)}\n`) });
+    const stale = await run([], plan, verdict, { seeded: earlier(old, `${String(dead.pid)}\n`) });
+
+    expect({ busy: [busy.exit, busy.records], stale: [stale.exit, stale.records] }).toEqual({
+      busy: [0, ['proj-20261001000003-00000003.json', 'proj-tasks.json']],
+      stale: [0, ['proj-tasks.json']],
+    });
   });
 
   test('a task cut off before its verdict makes its rows red, also rows that declare files (#36)', async () => {
