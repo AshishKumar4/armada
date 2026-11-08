@@ -194,7 +194,7 @@ describe('armada runs prune', () => {
       expect({
         exit: pruned.exit, removed: removedIn(pruned.out), said: pruned.out.includes('would remove 5 of 12 run records') && !pruned.out.includes('removed '),
         listing: listing(home), holds: readFileSync(join(stateOf(home), 'holds'), 'utf8'), state: readdirSync(stateOf(home)).toSorted(),
-      }).toEqual({ exit: 0, removed: removed.toSorted(), said: true, listing: before, holds: held, state: ['holds', 'retention.lock', 'runs'] });
+      }).toEqual({ exit: 0, removed: removed.toSorted(), said: true, listing: before, holds: held, state: ['holds', 'runs'] });
     });
   });
 
