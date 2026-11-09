@@ -351,6 +351,41 @@ describe('an efficient job', () => {
       .toEqual({ landed: [[0, 1, null], [1, 0, null]], cores: 2 });
   });
 
+  test('a copied packed run killed for memory is rerun alone before becoming a task failure', async () => {
+    const { job } = await packing([{ weight: 9 }, { weight: 1 }], await learned(SMALL), { hedge: 1 });
+
+    await slotsOf(job, 'v1', 2);
+    const copy = await claimed(job, 'v2');
+
+    await land(job, 'v2', ran(0, 'v2', 0, { attempt: copy.attempt }));
+    await land(job, 'v1', ran(0, 'v1', 1, { oomKilled: true, peakMemory: 6472380416 }));
+    expect((await job.events(0)).events).toEqual([]);
+    const alone = await claimed(job, 'v2');
+
+    expect(alone).toMatchObject({ index: 0, attempt: 2, duplicate: false });
+    expect(await job.claim('v2', 1)).toBeNull();
+    await land(job, 'v2', ran(0, 'v2', 0, { attempt: alone.attempt }));
+    expect((await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter]))
+      .toEqual([[0, 0, 'killed for memory']]);
+  });
+
+  test('an alone retry after a copied packed OOM does not wait on the previous attempt copy', async () => {
+    const { job } = await packing([{ weight: 9 }, { weight: 1 }], await learned(SMALL), { hedge: 1 });
+
+    await slotsOf(job, 'v1', 2);
+    const copy = await claimed(job, 'v2');
+
+    await land(job, 'v1', ran(0, 'v1', 1, { oomKilled: true }));
+    expect((await job.events(0)).events).toEqual([]);
+    const alone = await claimed(job, 'v3');
+
+    expect(alone).toMatchObject({ index: 0, attempt: 2, duplicate: false });
+    await job.stopped('v2', 0, { slot: 0, attempt: copy.attempt });
+    await land(job, 'v3', ran(0, 'v3', 0, { attempt: alone.attempt }));
+    expect((await job.events(0)).events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter]))
+      .toEqual([[0, 0, 'killed for memory']]);
+  });
+
   test('a run whose process exited before another joined its container ran beside nothing, so its red is its own', async () => {
     const { job } = await packing(['a', 'b'], await learned(SMALL));
 
