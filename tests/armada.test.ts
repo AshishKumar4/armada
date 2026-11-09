@@ -1674,21 +1674,25 @@ describe('armada run', () => {
   // Dew's base/kernels, 2026-11-09: a map task "exited 1 after 437 s", its judge's row saying only that its map tasks
   // did not all pass, and nothing kept to attribute it by.
   test('a judge whose map task failed names how it ended: the kernel\'s kill for memory, a signal, and the tail of what it said', async () => {
-    const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'j', after: ['a', 'b'] }] };
+    const plan: Json = { include: [{ name: 'lost' }, { name: 'a' }, { name: 'b' }, { name: 'j', after: ['lost', 'a', 'b'] }] };
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const said = Array.from({ length: 40 }, (_, line) => `line ${String(line)}`).join('\n');
 
     const ran = await run(['--json'], plan, {}, {
       taskConfig: { verdict: false }, exitOf: (item) => ({ a: 137, b: 143 })[nameOf(item)] ?? 0,
       endOf: (item) => nameOf(item) === 'a' ? { tail: `${said}\npytest exited -9 with no report`, oomKilled: true } : { tail: 'Terminated' },
+      lostOf: (item) => nameOf(item) === 'lost',
     });
 
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.string() })) }), JSON.parse(ran.stdout));
     const why = rows.find(({ name }) => name === 'j')?.output ?? '';
 
-    expect({ exit: ran.exit, why: why.split('\n').slice(0, 2), tail: why.includes('line 39\n') && why.includes('pytest exited -9 with no report') && !why.includes('line 0\n'), signal: why.includes('b RED (exit 143, killed by signal 15)'), terminated: why.includes('Terminated') }).toEqual({
-      exit: 1, why: ['its map tasks did not all pass: a RED (exit 137, killed by the kernel for want of memory), b RED (exit 143, killed by signal 15)', 'a said, last:'],
-      tail: true, signal: true, terminated: true,
+    expect({
+      exit: ran.exit, why: why.split('\n').slice(0, 2), tail: why.includes('line 39\n') && why.includes('pytest exited -9 with no report') && !why.includes('line 0\n'),
+      signal: why.includes('b RED (exit 143, killed by signal 15)'), terminated: why.includes('Terminated'), lost: why.split('the container went quiet').length - 1,
+    }).toEqual({
+      exit: 1, why: ['its map tasks did not all pass: lost FAILED: the container went quiet, a RED (exit 137, killed by the kernel for want of memory), b RED (exit 143, killed by signal 15)', 'a said, last:'],
+      tail: true, signal: true, terminated: true, lost: 1,
     });
   });
 
