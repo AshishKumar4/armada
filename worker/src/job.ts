@@ -1188,7 +1188,7 @@ export class ArmadaJob extends DurableObject<Env> {
 
     if (kept !== null && packed !== null) {
       // It failed beside other tasks in its container: it runs again alone, before any retry of its own.
-      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, not_before = 0 WHERE idx = ?`, kept.index);
+      this.sql.exec(`UPDATE tasks SET state = 'queued', vessel = NULL, slot = NULL, dup = NULL, dup_slot = NULL, not_before = 0 WHERE idx = ?`, kept.index);
       this.placement.alone(kept.index, packed);
     } else if (kept !== null && task !== undefined && retries !== undefined && named && task.retries + 1 < retries.attempts) {
       const backoff = retries.backoffSeconds * 1000 * 2 ** task.retries;

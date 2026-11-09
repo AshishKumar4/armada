@@ -210,7 +210,7 @@ export class Placement {
    *  or killed for memory, and its task has not run alone since: it is then to run again alone (`alone`). Null for any
    *  other run: a run alone, a copied one, or one cancelled or lost, which the platform's retries took already. */
   packedFailure(name: string, outcome: Outcome): string | null {
-    const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ? AND copied = 0', name, outcome.index, outcome.attempt).toArray().length > 0;
+    const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ? AND (copied = 0 OR ?)', name, outcome.index, outcome.attempt, outcome.oomKilled === true ? 1 : 0).toArray().length > 0;
     const failure = this.sql.exec<{ failure: string | null }>('SELECT failure FROM placed WHERE idx = ?', outcome.index).toArray()[0]?.failure ?? null;
 
     if (!marked || failure !== null || outcome.reason === 'cancelled' || outcome.reason === 'lost') return null;
