@@ -369,20 +369,24 @@ export async function onCommit(armada: Armada, target: string, size?: Size): Pro
  *  them in turn past the suite's end (train 410's 8 large tasks, 9 minutes). Where any task has no estimate, the
  *  rest goes in proportion to their tasks' count, D'Hondt. One job gets the pool as `lanesFor` would. When more than
  *  one job's widest gangs together pass the pool, how many containers they need instead. */
-export function sharesFor(pool: number, slots: number, groups: readonly { readonly estimates: readonly (number | undefined)[]; readonly ranks: readonly number[] }[]): number[] | { readonly need: number } {
+export function sharesFor(pool: number, slots: number, groups: readonly { readonly estimates: readonly (number | undefined)[]; readonly ranks: readonly number[]; readonly slots?: number }[]): number[] | { readonly need: number } {
   const known = groups.every(({ estimates }) => estimates.every((estimate) => estimate !== undefined));
 
-  const sized = groups.map(({ estimates, ranks }) => {
+  const sized = groups.map(({ estimates, ranks, slots: held = slots }) => {
     const widest = Math.max(1, ...ranks);
     const least = Math.min(pool, widest);
     const total = ranks.reduce((sum, each) => sum + each, 0);
     const queue = queueOf(estimates.map((estimate) => estimate ?? 0), ranks);
-    // With its estimates known, a job takes no more containers than finish it as soon as all of them would
-    // (`poolFor`, as `lanesFor` sizes it after): those past them shorten another job instead (train 757: a job one
-    // long task held to its time took 562 containers and used 122, the other ran out its deadline on 125).
-    const useful = known ? Math.ceil(poolFor(estimates.map((estimate) => estimate ?? 0), total, ranks) / slots) : Math.ceil(total / slots);
 
-    return { widest, least, most: Math.max(least, useful), total, queue };
+    // With its estimates known, a job takes no more containers than finish it as soon as all it could hold would
+    // (`poolFor` within the pool's lanes, as `lanesFor` sizes it after): those past them shorten another job instead
+    // (train 757: a job one long task held to its time took 562 containers and used 122, the other ran out its
+    // deadline on 125). A fresh job's container holds one slot (`JobSpec.fresh`), its `slots` here.
+    const useful = known
+      ? Math.ceil(poolFor(estimates.map((estimate) => estimate ?? 0), Math.min(total, pool * held), ranks) / held)
+      : Math.ceil(total / held);
+
+    return { widest, least, most: Math.max(least, useful), total, queue, slots: held };
   });
 
   const need = sized.reduce((sum, job) => sum + job.widest, 0);
@@ -399,7 +403,7 @@ export function sharesFor(pool: number, slots: number, groups: readonly { readon
 
     if (job === undefined) return 0;
 
-    return known ? finishOn(job.queue, held * slots) : job.total / (held + 1);
+    return known ? finishOn(job.queue, held * job.slots) : job.total / (held + 1);
   };
 
   const ranks = sized.map((_, at) => rank(at));
@@ -712,8 +716,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
   /** The containers each of `wave`'s jobs takes, all at once within the pool, less what the first wave's tail holds, or
    *  how many they need for it. */
-  const sharesOf = (wave: readonly { readonly indexes: readonly number[] }[]) => sharesFor(containers - [...tail.values()].reduce((sum, each) => sum + each, 0), slots, wave.map(({ indexes }) => ({
+  // A wave's group is a group (its `fresh` said) or a launch's, named by its place among the groups (`at`); a fresh
+  // job's container holds one slot (`JobSpec.fresh`).
+  const sharesOf = (wave: readonly { readonly indexes: readonly number[]; readonly fresh?: boolean; readonly at?: number }[]) => sharesFor(containers - [...tail.values()].reduce((sum, each) => sum + each, 0), slots, wave.map(({ indexes, fresh, at }) => ({
     estimates: indexes.map((index) => estimates[index]), ranks: indexes.map((index) => ranks[index] ?? 1),
+    slots: (fresh ?? (at === undefined ? false : groups[at]?.fresh ?? false)) ? 1 : slots,
   })));
 
   // The first wave's map tasks: its judges begin once these have all landed.
