@@ -415,6 +415,11 @@ describe('a CI run\'s pool', () => {
     expect(sharesFor(20, 1, [job(60, 100), job(8, 300)])).toEqual([12, 8]);
     // A job no container can shorten (one 900 s task) takes one, and the rest go where they shorten a job.
     expect(sharesFor(10, 1, [job(20, 100), job(1, 900)])).toEqual([9, 1]);
+    // A job its longest task holds to its time takes the containers that finish it so, and no more: the rest go
+    // where they shorten a job (train 757: a job of one long task among short ones took 562 containers, used 122,
+    // and the other job ran out its deadline on 125, 409 of its tasks unrun).
+    const held = { estimates: [900, ...Array.from({ length: 10 }, () => 10)], ranks: Array.from({ length: 11 }, () => 1) };
+    expect(sharesFor(20, 1, [held, job(40, 100)])).toEqual([2, 18]);
     // Unknown estimates share by task count, as before: four tasks against two on four containers.
     expect(sharesFor(4, 1, [{ estimates: [undefined, 5, 5, 5], ranks: [1, 1, 1, 1] }, { estimates: [1000, 1000], ranks: [1, 1] }])).toEqual([3, 1]);
   });
