@@ -377,8 +377,12 @@ export function sharesFor(pool: number, slots: number, groups: readonly { readon
     const least = Math.min(pool, widest);
     const total = ranks.reduce((sum, each) => sum + each, 0);
     const queue = queueOf(estimates.map((estimate) => estimate ?? 0), ranks);
+    // With its estimates known, a job takes no more containers than finish it as soon as all of them would
+    // (`poolFor`, as `lanesFor` sizes it after): those past them shorten another job instead (train 757: a job one
+    // long task held to its time took 562 containers and used 122, the other ran out its deadline on 125).
+    const useful = known ? Math.ceil(poolFor(estimates.map((estimate) => estimate ?? 0), total, ranks) / slots) : Math.ceil(total / slots);
 
-    return { widest, least, most: Math.max(least, Math.ceil(total / slots)), total, queue };
+    return { widest, least, most: Math.max(least, useful), total, queue };
   });
 
   const need = sized.reduce((sum, job) => sum + job.widest, 0);
