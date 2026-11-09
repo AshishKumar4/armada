@@ -167,12 +167,13 @@ function endedBy({ exitCode, oomKilled }: Meta): string {
   return exitCode > 128 && exitCode < 128 + 65 ? `, killed by signal ${String(exitCode - 128)}` : '';
 }
 
-/** The last lines of what failed map tasks said, each named (`MAP_TAIL_LINES` a task, `TAILS` tasks at most), for their
- *  judge's red row: a map task's failure is attributed from its run's report alone (Dew's base/kernels, 2026-11-09: a
- *  map task "exited 1 after 437 s", its judge's row naming nothing more). */
+/** The last lines of what failed map tasks said, each named (`MAP_TAIL_LINES` a task, the first `TAILS` that said
+ *  anything), for their judge's red row: a map task's failure is attributed from its run's report alone (Dew's
+ *  base/kernels, 2026-11-09: a map task "exited 1 after 437 s", its judge's row naming nothing more). A lost or
+ *  cancelled task's tail is its reason, which `exitWord` says already. */
 function tailsOf(failed: readonly (readonly [string, Result<Json, string | null> | undefined])[]): string {
   return failed.flatMap(([name, result]) => {
-    const tail = result === undefined || result.kind === 'ok' ? '' : result.meta.tail.trimEnd();
+    const tail = result === undefined || result.kind === 'ok' || result.kind === 'lost' || result.kind === 'cancelled' ? '' : result.meta.tail.trimEnd();
 
     return tail === '' ? [] : [`${name} said, last:\n${tail.split('\n').slice(-MAP_TAIL_LINES).map((line) => `  | ${line.slice(0, 300)}`).join('\n')}`];
   }).slice(0, TAILS).join('\n');
@@ -181,7 +182,7 @@ function tailsOf(failed: readonly (readonly [string, Result<Json, string | null>
 /** The lines of a failed map task's output its judge's row keeps (`tailsOf`). */
 const MAP_TAIL_LINES = 20;
 
-/** The failed map tasks whose output a judge's row keeps, the first of its failures (`tailsOf`). */
+/** The failed map tasks whose output a judge's row keeps, the first that said anything (`tailsOf`). */
 const TAILS = 5;
 
 /** A command template's argv for one item: `{item}`, an object item's scalar keys, `{index}`, `{out}`, `{files}`,
