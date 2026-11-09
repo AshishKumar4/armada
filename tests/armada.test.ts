@@ -420,6 +420,9 @@ describe('a CI run\'s pool', () => {
     // and the other job ran out its deadline on 125, 409 of its tasks unrun).
     const held = { estimates: [900, ...Array.from({ length: 10 }, () => 10)], ranks: Array.from({ length: 11 }, () => 1) };
     expect(sharesFor(20, 1, [held, job(40, 100)])).toEqual([2, 18]);
+    // A fresh job holds one slot a container (`JobSpec.fresh`), so its two lanes take two containers where the run's
+    // others hold four slots each; and a job that would finish no sooner on more takes none past it.
+    expect(sharesFor(20, 4, [{ ...held, slots: 1 }, job(40, 100)])).toEqual([2, 10]);
     // Unknown estimates share by task count, as before: four tasks against two on four containers.
     expect(sharesFor(4, 1, [{ estimates: [undefined, 5, 5, 5], ranks: [1, 1, 1, 1] }, { estimates: [1000, 1000], ranks: [1, 1] }])).toEqual([3, 1]);
   });
