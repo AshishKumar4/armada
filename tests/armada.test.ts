@@ -913,6 +913,41 @@ describe('the CLI following a job', () => {
   });
 });
 
+describe('the CLI printing a map\'s results', () => {
+  test('names each result\'s item on its line, whatever order the tasks finished in', async () => {
+    const finished = [1, 0].map((index) => ({ index, kind: 'exited', exitCode: index, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false }));
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const { pathname } = new URL(request.url);
+
+        if (pathname === '/jobs') return Response.json({ id: 'j1' });
+
+        // The second item's task finishes first.
+        if (pathname === '/jobs/j1/events') return Response.json({ events: finished.map((outcome, at) => ({ seq: at + 1, outcome })), done: true });
+
+        return Response.json({
+          id: 'j1', label: '', phase: 'done', key: 'k', createdAt: 0, startedAt: 0, finishedAt: 1, vessels: [], problems: [], environment: null,
+          tasks: { total: 2, queued: 0, running: 0, exited: 2, red: 1, failed: 0 },
+        });
+      },
+    });
+
+    try {
+      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--items=-', '--', 'echo', '{item}'], {
+        env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdin: new TextEncoder().encode('first target\nsecond target\n'), stdout: 'pipe', stderr: 'pipe',
+      });
+      const lines = (await new Response(cli.stdout).text()).split('\n').filter((line) => /^\s+\d+\s/u.test(line));
+
+      expect({ exit: await cli.exited, lines: lines.map((line) => [line.trim().split(/\s+/u)[0], line.endsWith('  first target') ? 'first' : line.endsWith('  second target') ? 'second' : line]) })
+        .toEqual({ exit: 1, lines: [['1', 'second'], ['0', 'first']] });
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
 describe('the CLI mapping over a commit', () => {
   test('at another size than its run\'s, packs against the base its own environment resolves to', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-map-size-'));
