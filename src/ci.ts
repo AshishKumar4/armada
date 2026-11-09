@@ -18,7 +18,7 @@ import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, t
 import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
 import { describeSummary, producing, retainRuns, RUNS, type Bounds } from './runs';
 import { describeBoots, type Armada, type Summary } from './sdk';
-import { commandTask, type Job, type Json, type Recipe, type Result } from './task';
+import { commandTask, type Job, type Json, type Meta, type Recipe, type Result } from './task';
 
 /** Lines of a red row's output printed; the whole of it is in the report. */
 const TAIL_LINES = 60;
@@ -155,9 +155,34 @@ function exitWord(result: Result<Json, string | null>): string {
     case 'lost':
     case 'cancelled': return `FAILED: ${result.reason.slice(-300)}`;
     case 'error':
-    case 'timeout': return `RED (exit ${String(result.meta.exitCode)})`;
+    case 'timeout': return `RED (exit ${String(result.meta.exitCode)}${endedBy(result.meta)})`;
   }
 }
+
+/** What ended a task beside its own exit: the kernel's kill for want of memory, else the signal a shell's exit code
+ *  above 128 says killed it; nothing for an exit of its own. */
+function endedBy({ exitCode, oomKilled }: Meta): string {
+  if (oomKilled === true) return ', killed by the kernel for want of memory';
+
+  return exitCode > 128 && exitCode < 128 + 65 ? `, killed by signal ${String(exitCode - 128)}` : '';
+}
+
+/** The last lines of what failed map tasks said, each named (`MAP_TAIL_LINES` a task, `TAILS` tasks at most), for their
+ *  judge's red row: a map task's failure is attributed from its run's report alone (Dew's base/kernels, 2026-11-09: a
+ *  map task "exited 1 after 437 s", its judge's row naming nothing more). */
+function tailsOf(failed: readonly (readonly [string, Result<Json, string | null> | undefined])[]): string {
+  return failed.flatMap(([name, result]) => {
+    const tail = result === undefined || result.kind === 'ok' ? '' : result.meta.tail.trimEnd();
+
+    return tail === '' ? [] : [`${name} said, last:\n${tail.split('\n').slice(-MAP_TAIL_LINES).map((line) => `  | ${line.slice(0, 300)}`).join('\n')}`];
+  }).slice(0, TAILS).join('\n');
+}
+
+/** The lines of a failed map task's output its judge's row keeps (`tailsOf`). */
+const MAP_TAIL_LINES = 20;
+
+/** The failed map tasks whose output a judge's row keeps, the first of its failures (`tailsOf`). */
+const TAILS = 5;
 
 /** A command template's argv for one item: `{item}`, an object item's scalar keys, `{index}`, `{out}`, `{files}`,
  *  `{inputs}`, `{artifacts}`, `{workdir}` and `{commit}` filled; any other placeholder is an error, never an empty string. */
@@ -933,10 +958,13 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
         const failed = mine(index).flatMap((map) => {
           const result = resultOf.get(map);
 
-          return result?.kind === 'ok' ? [] : [`${nameOf(map)} ${result === undefined ? 'never ran' : exitWord(result)}`];
+          return result?.kind === 'ok' ? [] : [[nameOf(map), result] as const];
         });
 
-        if (failed.length > 0) unjudged.set(index, `its map tasks did not all pass: ${failed.join(', ')}`);
+        const said = failed.map(([name, result]) => `${name} ${result === undefined ? 'never ran' : exitWord(result)}`);
+        const tails = tailsOf(failed);
+
+        if (failed.length > 0) unjudged.set(index, `its map tasks did not all pass: ${said.join(', ')}${tails === '' ? '' : `\n${tails}`}`);
       }
 
       const read = (index: number) => mine(index).flatMap((map) => {
