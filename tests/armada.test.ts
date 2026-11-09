@@ -914,7 +914,7 @@ describe('the CLI following a job', () => {
 });
 
 describe('the CLI printing a map\'s results', () => {
-  test('names each result\'s item on its line, whatever order the tasks finished in', async () => {
+  test('names each result\'s item, as JSON, on its line, whatever order the tasks finished in', async () => {
     const finished = [1, 0].map((index) => ({ index, kind: 'exited', exitCode: index, seconds: 1, vessel: 'v1', attempt: 1, tail: '', output: false }));
 
     const server = Bun.serve({
@@ -940,7 +940,7 @@ describe('the CLI printing a map\'s results', () => {
       });
       const lines = (await new Response(cli.stdout).text()).split('\n').filter((line) => /^\s+\d+\s/u.test(line));
 
-      expect({ exit: await cli.exited, lines: lines.map((line) => [line.trim().split(/\s+/u)[0], line.endsWith('  first target') ? 'first' : line.endsWith('  second target') ? 'second' : line]) })
+      expect({ exit: await cli.exited, lines: lines.map((line) => [line.trim().split(/\s+/u)[0], line.endsWith('  "first target"') ? 'first' : line.endsWith('  "second target"') ? 'second' : line]) })
         .toEqual({ exit: 1, lines: [['1', 'second'], ['0', 'first']] });
     } finally {
       await server.stop(true);

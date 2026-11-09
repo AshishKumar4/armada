@@ -206,11 +206,6 @@ function itemsFrom(source: string): Json[] {
 }
 
 /** `--cpu`'s CPUs: vendor/family/model, as `cpuLabel` writes it, a comma between two. */
-/** A map result's item as its line names it: a string as itself, anything else as its JSON, newlines shown as `\n`. */
-function itemLabel(item: Json): string {
-  return (typeof item === 'string' ? item : JSON.stringify(item)).replaceAll('\n', '\\n');
-}
-
 function cpuOf(given: string | undefined): Cpu[] | undefined {
   return given?.split(',').map((each) => {
     const [vendor, family, model, ...extra] = each.split('/');
@@ -291,7 +286,10 @@ async function map(): Promise<number> {
 
       // JSON leaves out what a result does not have: a value, an error, artifacts kept.
       if (flag('json')) console.log(JSON.stringify({ index: result.index, item: result.item, kind: result.kind, ...result.meta, value: result.ok ? result.value : undefined, error: result.kind === 'error' ? result.error : undefined, artifacts: kept }));
-      else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}`);
+      // Each line names its item, as JSON: results come back as their tasks finish, not in the items' order, so an
+      // index alone was read as another item's (Dew, 2026-11-09: a result taken for another target's, a regression
+      // that was none).
+      else console.log(`${String(result.index).padStart(6)}  ${result.kind === 'ok' || result.kind === 'error' ? `exit ${String(result.meta.exitCode)}` : result.kind.toUpperCase()}  ${result.meta.seconds.toFixed(2)} s  ${result.meta.container}  ${JSON.stringify(result.item)}`);
 
       if (result.meta.artifactsLost !== undefined) console.error(`task ${String(result.index)} kept no artifacts: ${result.meta.artifactsLost}`);
 
