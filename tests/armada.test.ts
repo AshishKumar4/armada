@@ -938,10 +938,12 @@ describe('the CLI printing a map\'s results', () => {
       const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'map', '--items=-', '--', 'echo', '{item}'], {
         env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdin: new TextEncoder().encode('first target\nsecond target\n'), stdout: 'pipe', stderr: 'pipe',
       });
-      const lines = (await new Response(cli.stdout).text()).split('\n').filter((line) => /^\s+\d+\s/u.test(line));
 
-      expect({ exit: await cli.exited, lines: lines.map((line) => [line.trim().split(/\s+/u)[0], line.endsWith('  "first target"') ? 'first' : line.endsWith('  "second target"') ? 'second' : line]) })
-        .toEqual({ exit: 1, lines: [['1', 'second'], ['0', 'first']] });
+      const lines = (await new Response(cli.stdout).text()).split('\n').filter((line) => /^\s+\d+\s/u.test(line));
+      const named = (line: string) => ['first target', 'second target'].find((item) => line.endsWith(`  ${JSON.stringify(item)}`));
+
+      expect({ exit: await cli.exited, lines: lines.map((line) => [line.trim().split(/\s+/u)[0], named(line)]) })
+        .toEqual({ exit: 1, lines: [['1', 'second target'], ['0', 'first target']] });
     } finally {
       await server.stop(true);
     }
