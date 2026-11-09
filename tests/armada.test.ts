@@ -1197,6 +1197,9 @@ interface Runner {
   readonly timingsRefused?: boolean;
   /** What a task of this item used, which its outcome says. */
   readonly usage?: (item: Json) => { readonly cpuSeconds: number; readonly peakMemory: number };
+  /** How a task of this item ended, beside its exit: the tail of what it said, and whether the kernel killed it for
+   *  want of memory. */
+  readonly endOf?: (item: Json) => { readonly tail: string; readonly oomKilled?: boolean };
   /** How long each task's artifacts archive takes to answer. */
   readonly archiveMs?: number;
   /** Runs in the CLI's HOME before it starts: what an earlier run left there. */
@@ -1210,7 +1213,7 @@ describe('armada run', () => {
   /** `armada run HEAD …` in a one-commit repository, against a runner that answers the plan and the one task with
    *  these outputs: what the CLI printed, how it exited, and what it asked of the runner. */
   async function run(args: readonly string[], plan: Json, verdict: Json, runner: Runner = {}) {
-    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, verdictOf, heldOf, lostOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage, archiveMs = 0 } = runner;
+    const { deadline, planDelayMs = 0, taskExit = 0, planExit = 0, planConfig = { command: ['plan'] }, taskConfig = {}, timings = { rows: {}, files: {} }, artifacts, exitOf, verdictOf, heldOf, lostOf, aloneOf, baseOf = () => 'root', refuse, lose, timingsRefused, usage, endOf, archiveMs = 0 } = runner;
     const scratch = mkdtempSync(join(tmpdir(), 'armada-run-'));
     const repo = join(scratch, 'repo');
     const commands: string[][] = [];
@@ -1302,7 +1305,8 @@ describe('armada run', () => {
 
               if (held(item)) return [];
               const used = item === undefined ? undefined : usage?.(item);
-              const exited = { ...outcome, index, exitCode, artifacts: archives, ...used };
+              const ended = item === undefined ? undefined : endOf?.(item);
+              const exited = { ...outcome, index, exitCode, artifacts: archives, ...used, ...ended };
               const landed = item !== undefined && lostOf?.(item, job) === true ? { ...exited, kind: 'failed', reason: 'lost', exitCode: -1, tail: 'the container went quiet', output: false } : exited;
               const aloneAfter = item === undefined ? undefined : aloneOf?.(item);
 
@@ -1664,6 +1668,27 @@ describe('armada run', () => {
       jobs: [{ items: ['plain'], inputs: undefined, after: undefined }, { items: ['a', 'b', 'c'], inputs: undefined, after: undefined },
         { items: ['j'], inputs: ['tasks-2/0', 'tasks-2/1'], after: { j: ['/armada/inputs/tasks-2/0', '/armada/inputs/tasks-2/1'] } }],
       rows: [['plain', 0], ['j', 0], ['k', 1]], why: 'its map tasks did not all pass: c RED (exit 1)',
+    });
+  });
+
+  // Dew's base/kernels, 2026-11-09: a map task "exited 1 after 437 s", its judge's row saying only that its map tasks
+  // did not all pass, and nothing kept to attribute it by.
+  test('a judge whose map task failed names how it ended: the kernel\'s kill for memory, a signal, and the tail of what it said', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'j', after: ['a', 'b'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const said = Array.from({ length: 40 }, (_, line) => `line ${String(line)}`).join('\n');
+
+    const ran = await run(['--json'], plan, {}, {
+      taskConfig: { verdict: false }, exitOf: (item) => ({ a: 137, b: 143 })[nameOf(item)] ?? 0,
+      endOf: (item) => nameOf(item) === 'a' ? { tail: `${said}\npytest exited -9 with no report`, oomKilled: true } : { tail: 'Terminated' },
+    });
+
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number(), output: v.string() })) }), JSON.parse(ran.stdout));
+    const why = rows.find(({ name }) => name === 'j')?.output ?? '';
+
+    expect({ exit: ran.exit, why: why.split('\n').slice(0, 2), tail: why.includes('line 39\n') && why.includes('pytest exited -9 with no report') && !why.includes('line 0\n'), signal: why.includes('b RED (exit 143, killed by signal 15)'), terminated: why.includes('Terminated') }).toEqual({
+      exit: 1, why: ['its map tasks did not all pass: a RED (exit 137, killed by the kernel for want of memory), b RED (exit 143, killed by signal 15)', 'a said, last:'],
+      tail: true, signal: true, terminated: true,
     });
   });
 
