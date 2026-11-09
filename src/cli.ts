@@ -206,6 +206,11 @@ function itemsFrom(source: string): Json[] {
 }
 
 /** `--cpu`'s CPUs: vendor/family/model, as `cpuLabel` writes it, a comma between two. */
+/** A map result's item as its line names it: a string as itself, anything else as its JSON, newlines shown as `\n`. */
+function itemLabel(item: Json): string {
+  return (typeof item === 'string' ? item : JSON.stringify(item)).replaceAll('\n', '\\n');
+}
+
 function cpuOf(given: string | undefined): Cpu[] | undefined {
   return given?.split(',').map((each) => {
     const [vendor, family, model, ...extra] = each.split('/');
