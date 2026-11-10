@@ -217,9 +217,12 @@ export class Placement {
 
     if (outcome.reason === 'timeout') return 'past its timeout';
 
+    // A child the cgroup killed for memory fails its run whatever its wrapper exits: Dew's records a red row and exits 0.
+    if (outcome.oomKilled === true) return KILLED_FOR_MEMORY;
+
     if (outcome.kind !== 'exited' || outcome.exitCode === 0) return null;
 
-    return outcome.oomKilled === true ? KILLED_FOR_MEMORY : `exit ${String(outcome.exitCode)}`;
+    return `exit ${String(outcome.exitCode)}`;
   }
 
   /** Task `index` runs alone from now on, after its run beside others ended `failure`. */
