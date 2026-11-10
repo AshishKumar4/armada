@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { run, startAndAnswer } from '../src/container';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { run, startAndAnswer, waitOn } from '../src/container';
 import { container } from './harness';
 
 describe('startAndAnswer', () => {
@@ -57,5 +60,32 @@ describe('run', () => {
     await expect(run(hanging, ['sleep', '600'], { ms: 30 })).rejects.toBeInstanceOf(DOMException);
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);
     expect(signal?.aborted).toBe(true);
+  });
+});
+
+// 2026-11-10: a task that filled its container's disk exited, but the `exit` its wrapper writes on that disk failed (an
+// I/O error), and its vessel read the empty file as a task still running until its timeout, 900 s.
+describe('waitOn', () => {
+  test('answers a task whose process is gone with no exit recorded at once, as gone, and a running one with nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'armada-wait-'));
+    const wait = (seconds: string) => Bun.spawnSync(['/bin/sh', '-c', waitOn(dir), 'wait', seconds], { stdout: 'pipe' });
+
+    try {
+      // Its runner started, then ended without its exit written: the file it would write is there but empty.
+      const ended = Bun.spawnSync(['/bin/sh', '-c', 'echo $$']);
+
+      writeFileSync(join(dir, 'pid'), ended.stdout.toString());
+      writeFileSync(join(dir, 'exit'), '');
+      const began = Date.now();
+      const gone = wait('20');
+
+      writeFileSync(join(dir, 'pid'), `${String(process.pid)}\n`);
+      const running = wait('1');
+
+      expect({ gone: gone.stdout.toString().trim(), quick: Date.now() - began < 10_000, running: running.stdout.toString().trim() })
+        .toEqual({ gone: 'gone', quick: true, running: '' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
