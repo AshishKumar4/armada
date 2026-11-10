@@ -859,9 +859,11 @@ export class ArmadaVessel extends DurableObject<Env> {
   /** The fleet took its container back for a job of a higher priority, or for room, from tasks that ran past the grace
    *  (`ArmadaFleet.beat`): the container ends with them, and its job queues them again (`ArmadaJob.preempted`). */
   private async preempt(spec: VesselSpec): Promise<false> {
+    // Read before the container ends, as its end releases its hold and the cause with it.
+    const cause = await this.env.FLEET.getByName(SINGLE).recalled(this.holder(spec));
     const gone = await this.end('done', spec);
 
-    await this.env.JOB.getByName(spec.jobId).preempted(spec.name, gone);
+    await this.env.JOB.getByName(spec.jobId).preempted(spec.name, gone, cause ?? 'preempted by the fleet');
 
     return false;
   }

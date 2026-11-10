@@ -13,12 +13,14 @@ test('records why the fleet ended a running attempt, without reporting the retri
   const deadlineAt = now + 6 * 60 * 60_000;
   const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '8' }));
   const begun: VesselSpec[] = [];
-  const env = world({
+
+  const fakes = {
     FLEET: namespace(() => fleet),
     ENVIRONMENTS: readyRegistry(),
     VESSEL: namespace(() => ({ begin: async (spec: VesselSpec) => { begun.push(spec); }, stop: async () => true })),
-  });
-  const job = new ArmadaJob(state().ctx, env);
+  };
+
+  const job = new ArmadaJob(state().ctx, world(fakes));
 
   try {
     setSystemTime(now);
@@ -38,7 +40,7 @@ test('records why the fleet ended a running attempt, without reporting the retri
     expect(claim.attempt).toBe(1);
     // As in fleet.test.ts: the process is running; only the exec boundary is simulated.
     const stored = state(container(() => ({ exitCode: 0, stdout: '' })));
-    const vessel = new ArmadaVessel(stored.ctx, world({ ...env, JOB: namespace(() => job) }));
+    const vessel = new ArmadaVessel(stored.ctx, world({ ...fakes, JOB: namespace(() => job) }));
     const { env: _env, ...kept } = claim;
 
     await stored.ctx.storage.put({ spec, state: 'working', 'slot:0': { claim: kept, startedAt: now } });
@@ -48,7 +50,7 @@ test('records why the fleet ended a running attempt, without reporting the retri
     await vessel.alarm();
     const interrupted = await job.status();
 
-    expect(await stored.ctx.storage.get('state')).toBe('done');
+    expect(await stored.ctx.storage.get<string>('state')).toBe('done');
     expect(await stored.ctx.storage.get('slot:0')).toBeUndefined();
     expect(interrupted?.tasks).toMatchObject({ queued: 1, running: 0, failed: 0 });
     expect(await job.events(0)).toEqual({ events: [], done: false });
@@ -73,7 +75,7 @@ test('records why the fleet ended a running attempt, without reporting the retri
     expect(finished.events.map(({ outcome }) => [outcome.kind, outcome.attempt, outcome.exitCode])).toEqual([['exited', 2, 0]]);
     // A successful replacement must not erase the interrupted container's reason.
     expect((await job.status())?.vessels.find(({ name }) => name === 'v1'))
-      .toMatchObject({ state: 'done', tasks: 0, error: 'preempted by the fleet' });
+      .toMatchObject({ state: 'done', tasks: 0, error: 'preempted by job urgent of priority 5' });
   } finally {
     setSystemTime();
   }
