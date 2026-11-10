@@ -1178,6 +1178,54 @@ describe('armada status', () => {
   });
 });
 
+describe('armada artifacts', () => {
+  test('extracts one task\'s artifacts after its job and prints each file, and exits 2 for a task that kept none', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'armada-artifacts-'));
+    const kept = join(scratch, 'kept');
+    mkdirSync(join(kept, 'stalls'), { recursive: true });
+    writeFileSync(join(kept, 'stalls', '3.12-7_9.txt'), 'Thread 1 (idle): "MainThread"\n');
+    const archive = Bun.spawnSync(['tar', '-czf', '-', '-C', kept, '.'], { stdout: 'pipe' }).stdout;
+    const asked: string[] = [];
+
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        const path = new URL(request.url).pathname;
+        asked.push(path);
+
+        return path === '/jobs/j1/tasks/3/artifacts' ? new Response(archive) : Response.json({ error: 'not found' }, { status: 404 });
+      },
+    });
+
+    try {
+      const artifacts = async (...words: string[]) => {
+        const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'artifacts', ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe' });
+
+        return { exit: await cli.exited, out: await new Response(cli.stdout).text() };
+      };
+
+      const into = join(scratch, 'out');
+      const extracted = await artifacts('j1', '3', into);
+      const none = await artifacts('j1', '4', join(scratch, 'none'));
+
+      expect({
+        extracted: [extracted.exit, extracted.out, readFileSync(join(into, 'stalls', '3.12-7_9.txt'), 'utf8')],
+        none: [none.exit, none.out, existsSync(join(scratch, 'none'))],
+        refused: (await artifacts('j1', 'x', into)).exit,
+        asked,
+      }).toEqual({
+        extracted: [0, `${join(into, 'stalls', '3.12-7_9.txt')}\n`, 'Thread 1 (idle): "MainThread"\n'],
+        none: [2, '', false],
+        refused: 2,
+        asked: ['/jobs/j1/tasks/3/artifacts', '/jobs/j1/tasks/4/artifacts'],
+      });
+    } finally {
+      await server.stop(true);
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('armada verdict', () => {
   test('prints the verdict armada run stored for the commit, and exits 0 green, 1 red and 2 with none', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-verdict-'));
