@@ -275,6 +275,21 @@ describe('an efficient job', () => {
       .toEqual({ besideB: null, begun: ['v1', 'v2'], landed: [[0, 0, 'exit 1'], [1, 0, null]], alone: [true, false] });
   });
 
+  test.each([0, 137])('retries a packed task whose child was OOM-killed even when its wrapper exits %i', async (exitCode) => {
+    const { job } = await packing(['a', 'b'], await learned(SMALL));
+
+    await slotsOf(job, 'v1', 2);
+    // Dew writes failed pytest rows to its output and exits zero; its child's OOM remains recorded by the cgroup.
+    await land(job, 'v1', ran(0, 'v1', exitCode, { oomKilled: true, peakMemory: 7 * GIB }));
+
+    expect((await job.events(0)).events).toEqual([]);
+    await job.alarm();
+    const retry = await claimed(job, 'v2');
+
+    expect(retry).toMatchObject({ index: 0, attempt: 2, duplicate: false });
+    expect(await job.claim('v2', 1)).toBeNull();
+  });
+
   test('runs a task killed for memory beside others again alone, and leaves its item to its own record', async () => {
     const made = await learned(SMALL);
     const { job } = await packing(['a', 'b'], made);
