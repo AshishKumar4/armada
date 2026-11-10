@@ -925,6 +925,7 @@ async function main(): Promise<number> {
       const [index, dir] = [words[1], words[2]];
 
       if (target === undefined || index === undefined || dir === undefined) throw new Error('artifacts needs a job id, a task\'s index and the directory to extract them under');
+
       if (!/^\d+$/u.test(index)) throw new Error(`artifacts takes a task's index after its job id, not ${index}`);
 
       const archive = await connect().artifacts(target, Number(index));

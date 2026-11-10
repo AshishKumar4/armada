@@ -1147,6 +1147,13 @@ describe('the CLI cancelling on an interrupt', () => {
   });
 });
 
+/** The CLI's `command` run against `server`, a stand-in for the Worker: its exit and what it printed. */
+async function cliAgainst(server: Bun.Server<undefined>, command: string, ...words: string[]) {
+  const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), command, ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe' });
+
+  return { exit: await cli.exited, out: await new Response(cli.stdout).text() };
+}
+
 describe('armada status', () => {
   test('prints one task\'s item, seconds and container after its job id, and refuses an index that is not one (#61)', async () => {
     const task = { job: 'j1', phase: 'done', index: 3, item: { files: ['tests/test_slow.py'] }, argv: ['pytest'], state: 'exited', attempt: 1, running: [], exitCode: 0, seconds: 412.5, vessel: 'v7' };
@@ -1162,11 +1169,7 @@ describe('armada status', () => {
     });
 
     try {
-      const status = async (...words: string[]) => {
-        const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'status', ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe' });
-
-        return { exit: await cli.exited, out: await new Response(cli.stdout).text() };
-      };
+      const status = async (...words: string[]) => await cliAgainst(server, 'status', ...words);
 
       const printed = await status('j1', '3');
       const refused = await status('j1', 'x');
@@ -1198,11 +1201,7 @@ describe('armada artifacts', () => {
     });
 
     try {
-      const artifacts = async (...words: string[]) => {
-        const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'artifacts', ...words], { env: { ...scratchEnv(), ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe' });
-
-        return { exit: await cli.exited, out: await new Response(cli.stdout).text() };
-      };
+      const artifacts = async (...words: string[]) => await cliAgainst(server, 'artifacts', ...words);
 
       const into = join(scratch, 'out');
       const extracted = await artifacts('j1', '3', into);
