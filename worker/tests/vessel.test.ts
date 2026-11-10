@@ -239,7 +239,7 @@ describe('a task of a job with no limits', () => {
 describe('a vessel\'s place in its fleet', () => {
   // #63, #66: a recalled container ran its task on, however long, and the job of a higher priority waited for it.
   test('ends a task still running past its recall\'s grace, its job told the fleet took it; one that ends within it lands', async () => {
-    const recalled = (endsBy: number) => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => false, beat: async () => endsBy });
+    const recalled = (endsBy: number) => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => false, beat: async () => endsBy, recalled: async () => 'preempted by job urgent of priority 5' });
     // Taken up mid-task, as a restarted object finds it: one whose grace is out, and one whose grace outlasts its task.
     const out = await run(0, { launched: 60_000, pending: 1_000, fleet: recalled(Date.now() - 1) });
     const within = await run(0, { launched: 60_000, pending: 1, fleet: recalled(Date.now() + 10 * 60_000) });

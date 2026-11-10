@@ -1381,14 +1381,16 @@ export class ArmadaJob extends DurableObject<Env> {
   /** Vessel `name` ended the tasks it ran past its recall's grace, the fleet taking its container back for a job of a
    *  higher priority or for room (`ArmadaFleet.beat`, #63, #66). Each goes on elsewhere at no cost to its retries or
    *  INFRA_ATTEMPTS, as the fleet took it, not its task. No replacement is spent: the job's next vessels wait their
-   *  turn in the fleet's line. Its runs end once its container is `gone`. */
-  async preempted(name: string, gone = false): Promise<void> {
+   *  turn in the fleet's line. Its runs end once its container is `gone`. The vessel keeps `why`, the fleet's
+   *  cause, as its error, in the job's status (2026-11-09: a six-hour task's first attempt ended at about an hour,
+   *  its vessel "done" with no task and no word, and it ran again from its start). */
+  async preempted(name: string, gone = false, why = 'preempted by the fleet'): Promise<void> {
     if ((await this.spec()) === undefined) return;
 
     if (gone) this.runs.gone(name);
 
     // Said again, by an object restarted on the way, it changes nothing.
-    if (this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, Date.now(), name).toArray().length === 0) return;
+    if (this.sql.exec(`UPDATE vessels SET state = 'done', error = ?, beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, why, Date.now(), name).toArray().length === 0) return;
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     await this.abandon(name, (index, infra) => { this.lost(index, infra, { vessel: name, error: '', stormed: true }); });
     await this.grow();

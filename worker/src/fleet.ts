@@ -150,6 +150,9 @@ interface Recallable {
   readonly order: string;
 }
 
+/** Why a loan is recalled (`recall`). */
+const LOAN_RECALLED = 'its loan recalled, as the fleet held more than the account lends it';
+
 /** The fleet's loans, the newest first: it recalls them when it holds more than it may. */
 const LOANS: Recallable = { picked: { where: 'borrowed = 1', bindings: [] }, order: 'granted DESC, holder' };
 
@@ -183,6 +186,9 @@ export class ArmadaFleet extends ArmadaSingle {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS holds (holder TEXT PRIMARY KEY, job TEXT NOT NULL, vcpus REAL NOT NULL, memory REAL NOT NULL, reserve REAL NOT NULL,
       reserve_memory REAL NOT NULL, until INTEGER NOT NULL, granted INTEGER NOT NULL, borrowed INTEGER NOT NULL, priority INTEGER NOT NULL, recalled INTEGER,
       recallable INTEGER NOT NULL, renewed INTEGER NOT NULL)`);
+
+    // Why each recalled hold was recalled (`recall`), which an earlier Worker's table lacks.
+    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(holds)').toArray().some((column) => column.name === 'recall_cause')) this.sql.exec('ALTER TABLE holds ADD COLUMN recall_cause TEXT');
 
     // An earlier Worker's line, which kept no ask's job or memory, goes: its holders take places again as they next ask.
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(waiting)').toArray().some((column) => column.name === 'job')) this.sql.exec('DROP TABLE IF EXISTS waiting');
@@ -231,7 +237,7 @@ export class ArmadaFleet extends ArmadaSingle {
     if (!within(charge, limit) || passes) {
       await this.want(borrows, holder, now);
       // Holds below its priority, lowest and newest first, until it and those ahead of it fit; as `want` left them.
-      this.recall({ limit, ...belowOf(priority, job), asks: throughOf(holder, priority, place), now });
+      this.recall({ limit, ...belowOf(priority, job), asks: throughOf(holder, priority, place), now, cause: `preempted by job ${job} of priority ${String(priority)}` });
 
       return null;
     }
@@ -240,7 +246,8 @@ export class ArmadaFleet extends ArmadaSingle {
     const borrowed = !within(charge, cap);
 
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
-    this.sql.exec('INSERT OR REPLACE INTO holds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)', holder, job, vcpus, memory, reserve, reserveMemory, Math.max(now, deadlineAt) + LEASE_MS,
+    this.sql.exec(`INSERT OR REPLACE INTO holds (holder, job, vcpus, memory, reserve, reserve_memory, until, granted, borrowed, priority, recalled, recallable, renewed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`, holder, job, vcpus, memory, reserve, reserveMemory, Math.max(now, deadlineAt) + LEASE_MS,
       granted, Number(borrowed), priority, Number(recallable), Number(renewed));
 
     return borrowed ? 'borrowed' : 'held';
@@ -274,7 +281,7 @@ export class ArmadaFleet extends ArmadaSingle {
   async renews(holder: string): Promise<boolean> {
     const now = Date.now();
 
-    this.recall({ limit: await this.limit(now), ...LOANS, now });
+    this.recall({ limit: await this.limit(now), ...LOANS, now, cause: LOAN_RECALLED });
 
     return this.sql.exec('SELECT 1 AS n FROM holds WHERE holder = ? AND until > ? AND recalled IS NULL', holder, now).toArray().length > 0;
   }
@@ -303,7 +310,7 @@ export class ArmadaFleet extends ArmadaSingle {
       await this.ctx.storage.put('lending', {
         limit: { vcpus: lends(charge.vcpus, account.vcpus, account.others), memory: lends(charge.memory, account.memory, account.othersMemory) }, at: now,
       } satisfies Lending);
-      this.recall({ limit: await this.limit(answered), ...LOANS, now: answered });
+      this.recall({ limit: await this.limit(answered), ...LOANS, now: answered, cause: LOAN_RECALLED });
     } catch (cause) {
       console.error(JSON.stringify({ fleet: 'reading the account', error: said({ cause }) }));
     }
@@ -353,7 +360,8 @@ export class ArmadaFleet extends ArmadaSingle {
     await this.ctx.storage.put('crowded', { room, until: now + WANT_MS } satisfies Crowded);
     this.sql.exec(`INSERT INTO waiting (holder, job, vcpus, memory, reserve, reserve_memory, place, asked, priority) VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MIN(place), 1) - 1 FROM waiting), ?, ?)
       ON CONFLICT (holder) DO UPDATE SET asked = excluded.asked`, holder, refused.job, refused.vcpus, refused.memory, refused.reserve, refused.reserve_memory, now, refused.priority);
-    this.recall({ limit: room, ...belowOf(refused.priority, refused.job), asks: own(holder), now });
+    this.recall({ limit: room, ...belowOf(refused.priority, refused.job), asks: own(holder), now,
+      cause: `preempted by job ${refused.job} of priority ${String(refused.priority)}, the account refusing its container room` });
   }
 
   /** `holder`, refused, asks: one that borrows has the account read, where the fleet may lend; one that may not, which
@@ -374,7 +382,7 @@ export class ArmadaFleet extends ArmadaSingle {
 
     if (!lent || !within(this.charge(now, { where: 'borrowed = 0', bindings: [] }, own(holder)), cap)) return;
     await this.ctx.storage.put('pressed', now);
-    this.recall({ limit: cap, ...LOANS, asks: own(holder), now });
+    this.recall({ limit: cap, ...LOANS, asks: own(holder), now, cause: `its loan recalled for ${holder}, which may not borrow` });
   }
 
   /** Who reads the account for this deployment: none without the token `armada deploy` gives, which it gives empty
@@ -401,15 +409,22 @@ export class ArmadaFleet extends ArmadaSingle {
 
   /** Recalls, `now`, the live holds `picked` picks, in `order`, until what the rest keep fits `limit` with the asks
    *  `asks` picks in their holders' place: a recalled hold still runs its tasks for its grace, so it counts as gone
-   *  already. A hold is recalled whole, so the fleet may end a little under `limit`. */
-  private recall({ limit, picked, order, asks = NONE, now }: Recallable & { readonly limit: Room; readonly asks?: Where; readonly now: number }): void {
+   *  already. A hold is recalled whole, so the fleet may end a little under `limit`. Each keeps its `cause`, which its
+   *  vessel reads as it ends its tasks (`recalled`). */
+  private recall({ limit, picked, order, asks = NONE, now, cause }: Recallable & { readonly limit: Room; readonly asks?: Where; readonly now: number; readonly cause: string }): void {
     while (!within(this.charge(now, UNRECALLED, asks), limit)) {
       const next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE until > ? AND recalled IS NULL AND (${picked.where}) ORDER BY ${order} LIMIT 1`,
         now, ...picked.bindings).toArray()[0];
 
       if (next === undefined) return;
-      this.sql.exec('UPDATE holds SET recalled = ? WHERE holder = ?', now, next.holder);
+      this.sql.exec('UPDATE holds SET recalled = ?, recall_cause = ? WHERE holder = ?', now, cause, next.holder);
     }
+  }
+
+  /** Why the fleet recalled `holder` (`recall`): for a job of a higher priority, naming it, or its loan; null for a hold
+   *  not recalled, or gone. */
+  async recalled(holder: string): Promise<string | null> {
+    return this.sql.exec<{ cause: string | null }>('SELECT recall_cause AS cause FROM holds WHERE holder = ? AND recalled IS NOT NULL', holder).toArray()[0]?.cause ?? null;
   }
 
   /** `holder` still runs, as its vessel says each slice of its work: the time its container ends the tasks it runs by,
