@@ -518,8 +518,9 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (waited.value.exitCode !== 0) throw new Error(`the wait exited ${String(waited.value.exitCode)}: ${failureTail(waited.value.stdout, waited.value.stderr)}`);
       const exit = waited.value.stdout.trim();
 
+      // Its process gone with no exit recorded: it failed, though what it would have exited is unknown.
       if (exit !== '') {
-        await this.finish(spec, slot, current, { exitCode: Number(exit) });
+        await this.finish(spec, slot, current, { exitCode: exit === 'gone' ? -1 : Number(exit) });
         continue;
       }
 

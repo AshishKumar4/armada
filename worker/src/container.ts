@@ -273,10 +273,15 @@ ${endGroup(group)}
 rm -rf ${root}`;
 
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
- *  nothing while it runs. */
+ *  nothing while it runs; or `gone` where its process (`pid`) has ended with no exit recorded, as when the `exit` its
+ *  wrapper writes failed on a full disk (2026-11-10: a task that filled its disk was read as running until its
+ *  timeout). */
 export function waitOn(dir: string): string {
   return String.raw`end=$(( $(date +%s) + $1 ))
-while [ ! -f ${dir}/exit ] && [ "$(date +%s)" -lt "$end" ]; do sleep 0.05; done
+while [ ! -s ${dir}/exit ] && [ "$(date +%s)" -lt "$end" ]; do
+  if [ -s ${dir}/pid ] && ! kill -0 "$(cat ${dir}/pid)" 2>/dev/null && [ ! -s ${dir}/exit ]; then echo gone; exit 0; fi
+  sleep 0.05
+done
 cat ${dir}/exit 2>/dev/null || true`;
 }
 
@@ -289,7 +294,7 @@ dir="${STATE}/phases/$1"
 shift
 mkdir -p ${STATE}/phases
 mkdir "$dir" 2>/dev/null || exit 0
-setsid sh -c '"$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
+setsid sh -c 'echo $$ > "$0/pid"; "$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
 /** `group`'s task's cgroup after it exited: its peak memory in bytes, its CPU time in microseconds, and how many of its
  *  processes the kernel killed for memory; then, for a task in a slot of its own, the bytes its writes left on the
