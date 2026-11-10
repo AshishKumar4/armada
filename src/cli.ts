@@ -38,6 +38,9 @@ Usage:
   armada push                          send this project's tasks (armada.config.ts) to armada
   armada dev                           push them again on every save
   armada status <job-id> [<index>]     print a job's status as JSON, or one task's: its item, how long it ran, and where
+  armada artifacts <job-id> <index> <dir>
+                                       extract one task's artifacts under <dir> after its job, and print each file;
+                                       exits 2 when the task kept none
   armada dashboard [--serve=<port>] [--all]
                                        open the deployment's dashboard in your browser, signed in;
                                        --serve serves it from this machine instead; --all reads every
@@ -131,6 +134,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
   ['status', { options: [], words: 2 }],
+  ['artifacts', { options: [], words: 3 }],
   ['dashboard', { options: ['serve=', 'all'], words: 0 }],
   ['secret', { options: [], words: 2 }],
   ['webhook', { options: ['repo=', 'branches=', 'pull-requests', 'token-secret='], words: 2 }],
@@ -911,6 +915,27 @@ async function main(): Promise<number> {
 
       if (index !== undefined && !/^\d+$/u.test(index)) throw new Error(`status takes a task's index after its job id, not ${index}`);
       console.log(JSON.stringify(index === undefined ? await connect().status(target) : await connect().task(target, Number(index)), null, 2));
+
+      return 0;
+    }
+
+    case 'artifacts': {
+      // One task's artifacts fetched once its job has them, where map's --artifacts fetches every task's as it ends:
+      // a reader wanting a red task's alone fetches it alone (Dew's run_tests, a stalled pytest's record).
+      const [index, dir] = [words[1], words[2]];
+
+      if (target === undefined || index === undefined || dir === undefined) throw new Error('artifacts needs a job id, a task\'s index and the directory to extract them under');
+      if (!/^\d+$/u.test(index)) throw new Error(`artifacts takes a task's index after its job id, not ${index}`);
+
+      const archive = await connect().artifacts(target, Number(index));
+
+      if (archive === null) {
+        console.error(`task ${index} of ${target} kept no artifacts`);
+
+        return 2;
+      }
+
+      for (const file of extractTar(archive, dir)) console.log(join(dir, file));
 
       return 0;
     }
