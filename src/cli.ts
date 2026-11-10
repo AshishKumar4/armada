@@ -75,7 +75,7 @@ map options:
                        (default efficient)
   --cpu=V/F/M[,...]    the CPU every container's host has, vendor/family/model as /proc/cpuinfo says
                        (AuthenticAMD/25/17), or several, any one of them; a container on another host is replaced
-                       before it takes a task
+                       before it takes a task. With --commit, the commit's .armada.json pin (task.cpu) unless given
   --priority=N         while the fleet is full, a job of a higher priority starts first, and lower jobs' newest
                        containers end until it fits: a task they still run a minute on runs again later, at no cost
                        to its retries (default 0)
@@ -239,12 +239,12 @@ async function map(): Promise<number> {
   const size = given === undefined ? undefined : v.parse(SizeSchema, given);
   const file = recipe(recipeFrom(option('env')));
   // A commit's environment is resolved at the size the job runs at, as its pack's base is that environment's.
-  const where = target === undefined ? { recipe: (size === undefined ? file : file.size(size)).spec, env: {}, tmpfs: undefined } : await onCommit(armada, target, size);
+  const where = target === undefined ? { recipe: (size === undefined ? file : file.size(size)).spec, env: {}, tmpfs: undefined, cpu: undefined } : await onCommit(armada, target, size);
   const argv = argvOf(rest, where.recipe);
   const taskOptions = { speculative: flag('speculative'), fresh: flag('fresh'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
   const mode = option('mode');
-  const options = { armada, pool: whole('pool'), slots: whole('slots'), budget: whole('budget'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')), priority: whole('priority', -Infinity), inputs: option('inputs')?.split(',').filter(Boolean), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
+  const options = { armada, pool: whole('pool'), slots: whole('slots'), budget: whole('budget'), mode: mode === undefined ? undefined : v.parse(ModeSchema, mode), cpu: cpuOf(option('cpu')) ?? where.cpu, priority: whole('priority', -Infinity), inputs: option('inputs')?.split(',').filter(Boolean), deadline, gangStartTimeout: whole('gang-start-timeout'), label: option('label') ?? '', env: where.env, tmpfs: where.tmpfs, lease: true };
   const job = flag('output') ? commandTask(where.recipe, argv, { ...taskOptions, output: 'text' }).stream(all, options) : commandTask(where.recipe, argv, taskOptions).stream(all, options);
   // An interrupt while the job is made cancels it once it is.
   const id = await cancelOnInterrupt([job], async () => await job.id);

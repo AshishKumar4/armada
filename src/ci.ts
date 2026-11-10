@@ -15,7 +15,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, timedShort, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
 import { describeSummary, producing, retainRuns, RUNS, type Bounds } from './runs';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Meta, type Recipe, type Result } from './task';
@@ -304,11 +304,13 @@ export async function verdictCI(armada: Armada, target: string, json: boolean): 
   return reds.length === 0 ? 0 : 1;
 }
 
-/** What runs a command on a commit: its recipe, and the env and tmpfs its `.armada.json` names. */
+/** What runs a command on a commit: its recipe, the env and tmpfs its `.armada.json` names, and the CPUs it pins its
+ *  tasks to (`task.cpu`), where it pins any: a map over the commit runs on them as its CI's tasks do. */
 interface OnCommit {
   readonly recipe: Recipe;
   readonly env: Readonly<Record<string, string>>;
   readonly tmpfs: readonly string[];
+  readonly cpu: readonly Cpu[] | undefined;
 }
 
 /** A run's container size: the config's, or with `auto` the smallest the last runs' usage fits, medium until a run has
@@ -347,7 +349,7 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
   const resolved = await armada.resolve(recipe);
   const base = packBase(repo, resolved.base);
   const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
-  const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs };
+  const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs, cpu: config.task.cpu };
 
   return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, commit, () => packOf(repo, sha, base, config.history)) };
 }

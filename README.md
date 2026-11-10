@@ -436,7 +436,7 @@ for the other.
 | `task.verdict` | `true` | The task writes `{"rows": [{"name", "exitCode", "seconds", "output"}]}` to `{out}`. With `false`, its exit code is its one row. |
 | `task.mode` | `efficient` | As the job option. |
 | `task.slots` | `1` | As the job option. |
-| `task.cpu` | | As the job option, such as `{"vendor": "AuthenticAMD", "family": 25, "model": 17}`, or a list of them. |
+| `task.cpu` | | As the job option, such as `{"vendor": "AuthenticAMD", "family": 25, "model": 17}`, or a list of them. `armada map --commit` runs on it too, unless its `--cpu` names others. |
 | `task.speculative` | `false` | Lets an idle container run a straggler again. |
 | `task.hedge` | `0` | Runs this many of the plan's heaviest tasks twice from the start, the first answer kept. |
 | `task.timeout` | `3600` | A task's limit, in seconds. |
