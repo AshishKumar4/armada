@@ -72,10 +72,11 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     const emptied = sh(`set -eu
 rmdir /sys/fs/cgroup/armada
 echo "-cpuset -cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control
-for group in $(ls -d /sys/fs/cgroup/*/); do for pid in $(cat "$group/cgroup.procs"); do echo "$pid" > /sys/fs/cgroup/cgroup.procs; done; done
+for group in $(ls -d /sys/fs/cgroup/*/); do for pid in $(cat "$group/cgroup.procs"); do echo "$pid" > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true; done; done
 echo "[$(cat /sys/fs/cgroup/cgroup.subtree_control)] $(wc -l < /sys/fs/cgroup/cgroup.procs)"`);
 
-    // The root hands nothing down, and holds this test's own processes.
+    // The root hands nothing down, and holds this test's own processes (a pid listed and gone since, the list's own
+    // reader, moves nowhere).
     expect({ exit: emptied.exitCode, said: emptied.stdout.toString().trim() }).toEqual({ exit: 0, said: expect.stringMatching(/^\[\] [1-9]\d*$/u) });
     // As a task nests (the first case): a group of its own under its own, with a limit of its own.
     const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"; mkdir "$ARMADA_CGROUP/case" && echo 64M > "$ARMADA_CGROUP/case/memory.max" && cat "$ARMADA_CGROUP/case/memory.max"');
