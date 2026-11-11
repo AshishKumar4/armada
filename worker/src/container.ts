@@ -75,6 +75,9 @@ export const phaseDir = (phase: string): string => `${STATE}/phases/${phase}`;
 
 const PARENT_GROUP = '/sys/fs/cgroup/armada';
 
+/** The container's root cgroup, its VM's own: it may hold processes and still hand its controllers down. */
+const ROOT_GROUP = '/sys/fs/cgroup';
+
 /** The cgroup a task runs in, delegated to the user, so a task can give what it starts groups and limits of its own
  *  (a test runner's per-file memory). The task itself is in its `runner` child: a group whose children have
  *  controllers holds no process. Everything in it ends with the task, daemons it detached with `setsid` included. */
@@ -184,7 +187,10 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
 /** The launch preamble both shapes share: refuse a container the platform is stopping, the parent cgroup and its
  *  controllers, its CPUs, the task's own group emptied (`endGroup`), a runner sub-group, an even memory cap for a
  *  slot, and the group handed to the user. The groups are set up here, at each launch, so a container an earlier
- *  Worker started has them.
+ *  Worker started has them. Where the root group hands its children none of the controllers a task's group needs,
+ *  the launch enables them there first, and the CPU set's where it can: the platform's microVM started containers
+ *  with the root's subtree_control empty from 2026-11-11 (no `cloudchamber` group, PID 1 in the root), and the
+ *  parent's write of them failed with ENOENT, so most of a job's containers were lost at their first launch.
  *
  *  A container shows more CPUs than its vCPUs: a medium one shows 8 and runs 4 CPUs' worth, so a task that sizes its
  *  threads by what it sees gets a third or more of its time taken back by the host, and no more work done (8 threads
@@ -193,6 +199,7 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
 function groupSetup(group: string, { cpus, memoryBytes, tasksMemoryBytes }: { readonly cpus: number; readonly memoryBytes?: number; readonly tasksMemoryBytes?: number }): string {
   return String.raw`if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
+for needed in cpu memory pids; do grep -qw "$needed" ${PARENT_GROUP}/cgroup.controllers || { echo '${CONTROLLERS}' > ${ROOT_GROUP}/cgroup.subtree_control; echo +cpuset > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null || true; break; }; done
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 [ ! -e ${PARENT_GROUP}/cpuset.cpus ] || if [ ${String(cpus)} -lt "$(nproc --all)" ]; then echo 0-${String(cpus - 1)}; else echo; fi > ${PARENT_GROUP}/cpuset.cpus
 ${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PARENT_GROUP}/memory.max
