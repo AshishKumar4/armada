@@ -192,7 +192,8 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
  *  slot, and the group handed to the user. The groups are set up here, at each launch, so a container an earlier
  *  Worker started has them. Where the root group hands its children none of the controllers a task's group needs,
  *  the launch enables them there first, moving the root's processes to a group of their own (`INIT_GROUP`) where it
- *  must, and the CPU set's where it can. The platform did both until 2026-11-11 (its `cloudchamber` group held the
+ *  must, and the CPU set's with them in the one write where the root has it, so no launch beside this one finds the
+ *  group with its controllers and without its CPUs. The platform did both until 2026-11-11 (its `cloudchamber` group held the
  *  container's processes, the root handed down cpuset, cpu, memory and pids); from then its microVM started most
  *  containers with every process in the root and its subtree_control empty, the parent's write of its controllers
  *  failed (ENOENT; "launch: 6: echo: echo: I/O error"), and a job lost most of its containers at their first launch.
@@ -205,12 +206,11 @@ function groupSetup(group: string, { cpus, memoryBytes, tasksMemoryBytes }: { re
   return String.raw`if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
 for needed in cpu memory pids; do grep -qw "$needed" ${PARENT_GROUP}/cgroup.controllers || { tries=0
-  until echo '${CONTROLLERS}' > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null; do
+  until echo '+cpuset ${CONTROLLERS}' > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null || echo '${CONTROLLERS}' > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null; do
     tries=$((tries + 1)); [ "$tries" -le 5 ] || { echo "the root group would not hand its controllers down" >&2; exit 1; }
     mkdir -p ${INIT_GROUP}
     for pid in $(cat ${ROOT_GROUP}/cgroup.procs); do echo "$pid" > ${INIT_GROUP}/cgroup.procs 2>/dev/null || true; done
   done
-  echo +cpuset > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null || true
   break; }; done
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 [ ! -e ${PARENT_GROUP}/cpuset.cpus ] || if [ ${String(cpus)} -lt "$(nproc --all)" ]; then echo 0-${String(cpus - 1)}; else echo; fi > ${PARENT_GROUP}/cpuset.cpus

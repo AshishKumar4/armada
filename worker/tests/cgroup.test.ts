@@ -71,13 +71,14 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
 
     const emptied = sh(`set -eu
 rmdir /sys/fs/cgroup/armada
-echo "-cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control
-for group in $(ls -d /sys/fs/cgroup/*/); do for pid in $(cat "$group/cgroup.procs"); do echo "$pid" > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true; done; done
-cat /sys/fs/cgroup/cgroup.subtree_control; grep -c . /sys/fs/cgroup/cgroup.procs`);
+echo "-cpuset -cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control
+for group in $(ls -d /sys/fs/cgroup/*/); do for pid in $(cat "$group/cgroup.procs"); do echo "$pid" > /sys/fs/cgroup/cgroup.procs; done; done
+echo "[$(cat /sys/fs/cgroup/cgroup.subtree_control)] $(wc -l < /sys/fs/cgroup/cgroup.procs)"`);
 
-    expect(emptied.exitCode).toBe(0);
-    expect(emptied.stdout.toString()).not.toMatch(/\b(?:cpu|memory|pids)\b/u);
-    const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"; echo 64M > "$ARMADA_CGROUP/memory.max" && cat "$ARMADA_CGROUP/memory.max"');
+    // The root hands nothing down, and holds this test's own processes.
+    expect({ exit: emptied.exitCode, said: emptied.stdout.toString().trim() }).toEqual({ exit: 0, said: expect.stringMatching(/^\[\] [1-9]\d*$/u) });
+    // As a task nests (the first case): a group of its own under its own, with a limit of its own.
+    const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"; mkdir "$ARMADA_CGROUP/case" && echo 64M > "$ARMADA_CGROUP/case/memory.max" && cat "$ARMADA_CGROUP/case/memory.max"');
 
     expect(ran.exit).toBe('0');
     expect(ran.log.trim().split('\n')).toEqual(['0::/armada/task/runner', expect.stringMatching(/\bcpu\b.*\bmemory\b.*\bpids\b/u), String(64 * 1024 * 1024)]);
