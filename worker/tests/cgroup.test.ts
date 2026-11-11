@@ -62,17 +62,28 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     expect({ one: one.log.trim(), all: all.log.trim() }).toEqual({ one: '1', all: String(ALL) });
   });
 
-  test('a container whose root group hands its children no controllers gets them from the launch', () => {
-    // As the platform's microVM starts a container since 2026-11-11: the root's subtree_control empty, so armada's group
-    // has no cpu, memory or pids controller to hand its tasks' groups, and the launch's write of them failed (ENOENT;
-    // "launch: 6: echo: echo: I/O error", most containers of a job lost at their first launch).
+  test('a container whose root group holds its processes and hands down no controllers gets them from the launch', () => {
+    // As the platform's microVM starts a container since 2026-11-11: every process in the root group, whose
+    // subtree_control is empty, so armada's group has no cpu, memory or pids controller to hand its tasks' groups and
+    // the launch's write of them failed ("launch: 6: echo: echo: I/O error", most containers of a job lost at their
+    // first launch). The launch moves the root's processes to a group of their own, and the root hands them down.
     expect(sh(clearTask(TASK_GROUP, TASK)).exitCode).toBe(0);
-    expect(sh('rmdir /sys/fs/cgroup/armada && echo "-cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control && cat /sys/fs/cgroup/cgroup.subtree_control').stdout.toString()).not.toMatch(/\b(?:cpu|memory|pids)\b/u);
-    const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"');
+
+    const emptied = sh(`set -eu
+rmdir /sys/fs/cgroup/armada
+echo "-cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control
+for group in $(ls -d /sys/fs/cgroup/*/); do for pid in $(cat "$group/cgroup.procs"); do echo "$pid" > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true; done; done
+cat /sys/fs/cgroup/cgroup.subtree_control; grep -c . /sys/fs/cgroup/cgroup.procs`);
+
+    expect(emptied.exitCode).toBe(0);
+    expect(emptied.stdout.toString()).not.toMatch(/\b(?:cpu|memory|pids)\b/u);
+    const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"; echo 64M > "$ARMADA_CGROUP/memory.max" && cat "$ARMADA_CGROUP/memory.max"');
 
     expect(ran.exit).toBe('0');
-    expect(ran.log.trim().split('\n')[0]).toBe('0::/armada/task/runner');
-    expect(ran.log).toMatch(/\bcpu\b.*\bmemory\b.*\bpids\b/u);
+    expect(ran.log.trim().split('\n')).toEqual(['0::/armada/task/runner', expect.stringMatching(/\bcpu\b.*\bmemory\b.*\bpids\b/u), String(64 * 1024 * 1024)]);
+    expect(readFileSync('/sys/fs/cgroup/cgroup.procs', 'utf8').trim()).toBe('');
+    // And a second launch, the root's processes already aside, changes nothing.
+    expect(task('true').exit).toBe('0');
   });
 
   test('a task starts with SIGINT and SIGQUIT at their defaults, so a ^C it sends ends what it reaches', () => {

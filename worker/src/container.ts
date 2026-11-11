@@ -75,8 +75,11 @@ export const phaseDir = (phase: string): string => `${STATE}/phases/${phase}`;
 
 const PARENT_GROUP = '/sys/fs/cgroup/armada';
 
-/** The container's root cgroup, its VM's own: it may hold processes and still hand its controllers down. */
+/** The container's root cgroup, and the group the launch moves the root's own processes to (`groupSetup`): a group that
+ *  holds processes hands its children no memory controller, the root of a container's hierarchy like any other. */
 const ROOT_GROUP = '/sys/fs/cgroup';
+
+const INIT_GROUP = `${ROOT_GROUP}/armada-init`;
 
 /** The cgroup a task runs in, delegated to the user, so a task can give what it starts groups and limits of its own
  *  (a test runner's per-file memory). The task itself is in its `runner` child: a group whose children have
@@ -188,9 +191,11 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
  *  controllers, its CPUs, the task's own group emptied (`endGroup`), a runner sub-group, an even memory cap for a
  *  slot, and the group handed to the user. The groups are set up here, at each launch, so a container an earlier
  *  Worker started has them. Where the root group hands its children none of the controllers a task's group needs,
- *  the launch enables them there first, and the CPU set's where it can: the platform's microVM started containers
- *  with the root's subtree_control empty from 2026-11-11 (no `cloudchamber` group, PID 1 in the root), and the
- *  parent's write of them failed with ENOENT, so most of a job's containers were lost at their first launch.
+ *  the launch enables them there first, moving the root's processes to a group of their own (`INIT_GROUP`) where it
+ *  must, and the CPU set's where it can. The platform did both until 2026-11-11 (its `cloudchamber` group held the
+ *  container's processes, the root handed down cpuset, cpu, memory and pids); from then its microVM started most
+ *  containers with every process in the root and its subtree_control empty, the parent's write of its controllers
+ *  failed (ENOENT; "launch: 6: echo: echo: I/O error"), and a job lost most of its containers at their first launch.
  *
  *  A container shows more CPUs than its vCPUs: a medium one shows 8 and runs 4 CPUs' worth, so a task that sizes its
  *  threads by what it sees gets a third or more of its time taken back by the host, and no more work done (8 threads
@@ -199,7 +204,14 @@ for masked in $(cut -d' ' -f5 /proc/self/mountinfo | grep '^/proc/' | sort -r); 
 function groupSetup(group: string, { cpus, memoryBytes, tasksMemoryBytes }: { readonly cpus: number; readonly memoryBytes?: number; readonly tasksMemoryBytes?: number }): string {
   return String.raw`if [ -e ${STOPPING} ]; then echo "the container is stopping since $(cat ${STOPPING})" >&2; exit 75; fi
 mkdir -p ${PARENT_GROUP}
-for needed in cpu memory pids; do grep -qw "$needed" ${PARENT_GROUP}/cgroup.controllers || { echo '${CONTROLLERS}' > ${ROOT_GROUP}/cgroup.subtree_control; echo +cpuset > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null || true; break; }; done
+for needed in cpu memory pids; do grep -qw "$needed" ${PARENT_GROUP}/cgroup.controllers || { tries=0
+  until echo '${CONTROLLERS}' > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null; do
+    tries=$((tries + 1)); [ "$tries" -le 5 ] || { echo "the root group would not hand its controllers down" >&2; exit 1; }
+    mkdir -p ${INIT_GROUP}
+    for pid in $(cat ${ROOT_GROUP}/cgroup.procs); do echo "$pid" > ${INIT_GROUP}/cgroup.procs 2>/dev/null || true; done
+  done
+  echo +cpuset > ${ROOT_GROUP}/cgroup.subtree_control 2>/dev/null || true
+  break; }; done
 echo '${CONTROLLERS}' > ${PARENT_GROUP}/cgroup.subtree_control
 [ ! -e ${PARENT_GROUP}/cpuset.cpus ] || if [ ${String(cpus)} -lt "$(nproc --all)" ]; then echo 0-${String(cpus - 1)}; else echo; fi > ${PARENT_GROUP}/cpuset.cpus
 ${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PARENT_GROUP}/memory.max
