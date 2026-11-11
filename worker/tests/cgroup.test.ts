@@ -62,6 +62,19 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     expect({ one: one.log.trim(), all: all.log.trim() }).toEqual({ one: '1', all: String(ALL) });
   });
 
+  test('a container whose root group hands its children no controllers gets them from the launch', () => {
+    // As the platform's microVM starts a container since 2026-11-11: the root's subtree_control empty, so armada's group
+    // has no cpu, memory or pids controller to hand its tasks' groups, and the launch's write of them failed (ENOENT;
+    // "launch: 6: echo: echo: I/O error", most containers of a job lost at their first launch).
+    expect(sh(clearTask(TASK_GROUP, TASK)).exitCode).toBe(0);
+    expect(sh('rmdir /sys/fs/cgroup/armada && echo "-cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control && cat /sys/fs/cgroup/cgroup.subtree_control').stdout.toString()).not.toMatch(/\b(?:cpu|memory|pids)\b/u);
+    const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"');
+
+    expect(ran.exit).toBe('0');
+    expect(ran.log.trim().split('\n')[0]).toBe('0::/armada/task/runner');
+    expect(ran.log).toMatch(/\bcpu\b.*\bmemory\b.*\bpids\b/u);
+  });
+
   test('a task starts with SIGINT and SIGQUIT at their defaults, so a ^C it sends ends what it reaches', () => {
     const interrupted = task('sh', '-c', 'grep SigIgn /proc/self/status; kill -INT $$; echo survived');
 
