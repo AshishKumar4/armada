@@ -305,6 +305,7 @@ describe('the driver script', () => {
     writeFileSync(join(bin, 'bun'), `#!/bin/sh
 case "$1" in install) exit 0 ;; -e) kind=count ;; *) kind=cli ;; esac
 printf '%s %s %s\\n' "$kind" "\${GITHUB_TOKEN:-none}" "$(find "$HOME" -name bunfig.toml -o -name x.ts | wc -l | tr -d ' ')" >> ${scratch}/bun
+case "$*" in *--by=1800021300*) echo by >> ${scratch}/by ;; esac
 case "$1" in -e) echo '6 of 6 rows green'; exit 0 ;; esac
 exit ${String(ran)}
 `);
@@ -315,6 +316,7 @@ exit ${String(ran)}
       const env = {
         ...gitEnv, PATH: `${bin}:/usr/bin:/bin`, HOME: home, ARMADA_GITHUB_SECRET: 'GITHUB_TOKEN', GITHUB_TOKEN: 'gh', ARMADA_URL: 'https://armada.test', ARMADA_TOKEN: TOKEN,
         ARMADA_REPO: 'owner/armada', ARMADA_COMMIT: commit, ARMADA_DEPLOYED: deployed, TARGET_URL: 'https://armada.test/ui',
+        ARMADA_RUN_BY: '1800021300',
       };
 
       const exit = Bun.spawnSync(['/bin/sh', '-c', script], { env, stdout: 'pipe', stderr: 'pipe' }).exitCode;
@@ -323,7 +325,10 @@ exit ${String(ran)}
       // Each commit it fetched, and from where.
       const fetched = readFileSync(join(scratch, 'git'), 'utf8').split('\n').flatMap((line) => /fetch -q (?:--depth 1 )?(\S+) (\S+)/u.exec(line)?.slice(1) ?? []);
 
-      return { exit, states, buns, fetched, deployed, commit };
+      // Whether its run was told when its answer is due (`--by`, the spec's ARMADA_RUN_BY).
+      const by = Bun.file(join(scratch, 'by')).size > 0;
+
+      return { exit, states, buns, fetched, deployed, commit, by };
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -338,11 +343,12 @@ exit ${String(ran)}
   });
 
   test('fetches armada at the deployed commit and the commit under test, and puts none of its files where its credentials are (#33)', () => {
-    const { fetched, buns, deployed, commit } = drive(0, 201);
+    const { fetched, buns, deployed, commit, by } = drive(0, 201);
 
-    expect({ fetched, buns }).toEqual({
+    expect({ fetched, buns, by }).toEqual({
       fetched: ['https://github.com/AshishKumar4/armada.git', deployed, 'https://github.com/owner/armada.git', commit],
       buns: [['cli', 'none', '0'], ['count', 'gh', '0']],
+      by: true,
     });
   });
 });

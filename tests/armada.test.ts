@@ -2252,8 +2252,8 @@ describe('a later wave\'s end', () => {
     expect(laterEnd(2700_000, 1800, undefined)).toBe((2700 + 1800 + LATER_START_SECONDS) * 1000);
     // A caller that needs the answer sooner (a webhook's driver, `--by`) has it by then.
     expect(laterEnd(1800_000, 21600, 9000_000)).toBe(9000_000);
-    // Never before the run's own deadline.
-    expect(laterEnd(9000_000, 1800, 5000_000)).toBe(9000_000);
+    // A caller's time bounds the run's deadline too (`runGraded`), and the later waves end no later.
+    expect(laterEnd(5000_000, 1800, 5000_000)).toBe(5000_000);
   });
 });
 

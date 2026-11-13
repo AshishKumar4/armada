@@ -59,11 +59,11 @@ export const LATER_START_SECONDS = 600;
  *  `LATER_START_SECONDS` past the run's deadline (`deadlineAt`), so a judged run whose first wave ran long still
  *  judges what it drew (Dew's train 795, 2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran
  *  out, and the run ended ungraded); never past `by`, the time by which whoever runs it needs its answer (`--by`: a
- *  webhook's driver, whose job ends then), nor before the deadline itself. */
+ *  webhook's driver, whose job ends then), which bounds the deadline itself too (`runGraded`). */
 export function laterEnd(deadlineAt: number, timeout: number | null | undefined, by: number | undefined): number {
   const later = deadlineAt + ((timeout ?? 0) + LATER_START_SECONDS) * 1000;
 
-  return Math.max(deadlineAt, by === undefined ? later : Math.min(later, by));
+  return by === undefined ? later : Math.min(later, by);
 }
 
 /** Why a run that could start no further job is ungraded. */
@@ -609,9 +609,10 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 async function runGraded(armada: Armada, target: string, { deadline, by, pool: bound, priority, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, base, environment, spec, upload, of } = await commitOf(armada, target);
-  const deadlineAt = began + (deadline ?? config.deadline) * 1000;
-  // When its later waves must end (`laterEnd`), past its deadline.
-  const laterAt = laterEnd(deadlineAt, config.task.timeout, by === undefined ? undefined : by * 1000);
+  // Its deadline, never past when its caller needs the answer (`by`), and when its later waves must end (`laterEnd`).
+  const byAt = by === undefined ? undefined : by * 1000;
+  const deadlineAt = Math.min(began + (deadline ?? config.deadline) * 1000, byAt ?? Infinity);
+  const laterAt = laterEnd(deadlineAt, config.task.timeout, byAt);
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 
