@@ -929,39 +929,39 @@ describe('a preparation on a deployment that names its CPUs', () => {
   test('starts its container again until it is on a host of one, and records that host with its snapshot', async () => {
     const recorded: Generation[] = [];
     const hosts = [1, 1, 17];
-    let destroyed = 0;
+    let read = 0;
     const cpuinfo = (model: number) => `vendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: ${String(model)}\nmodel name\t: EPYC\nflags\t\t: avx2\n`;
 
-    // Each container, after the last was destroyed, is on the next host: two of 25/1, then one of 25/17.
+    // Each container its host is read in is on the next host: two of 25/1, then one of 25/17.
     const answer = (argv: readonly string[]) => {
       const command = argv[2] ?? '';
 
-      if (command.includes('/proc/cpuinfo')) return { exitCode: 0, stdout: cpuinfo(hosts[destroyed] ?? 17) };
+      if (command.includes('/proc/cpuinfo')) {
+        read += 1;
+
+        return { exitCode: 0, stdout: cpuinfo(hosts[Math.min(read, hosts.length) - 1] ?? 17) };
+      }
 
       if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
 
       return { exitCode: 0, stdout: command.includes('echo ready') ? 'ready\n' : '' };
     };
 
-    const fake = Object.assign(container(answer), {
-      snapshotContainer: async () => ({ id: 'snapshot', size: 1 }),
-      destroy: async () => { destroyed += 1; },
-    });
-    const stored = state(fake);
+    const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
 
     const preparer = new ArmadaPreparer(stored.ctx, world({
       ENVIRONMENTS: namespace(() => ({
         beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
         prepared: async (made: Generation) => { recorded.push(made); },
       })),
-      PREPARE_CPU: 'AuthenticAMD/25/17,AuthenticAMD/26/17' as never,
+      PREPARE_CPU: 'AuthenticAMD/25/17,AuthenticAMD/26/17',
     }));
 
     await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
 
     for (let alarm = 0; alarm < 30 && recorded.length === 0; alarm += 1) await preparer.alarm();
 
-    expect({ destroyed, host: recorded.map(({ snapshot }) => snapshot.host?.model) }).toEqual({ destroyed: 2, host: [17] });
+    // Three starts' hosts read, then the snapshot's: the one it prepared on.
+    expect({ read, host: recorded.map(({ snapshot }) => snapshot.host?.model) }).toEqual({ read: 4, host: [17] });
   });
 });
-

@@ -36,9 +36,11 @@ export function deploymentConfig(template: string, { name, account, main, dashbo
 
   // Its name and account also name its own container apps among the account's (`readAccount`); FLEET_MEMORY_MIB the
   // fleet's memory, where the deploy read the account's.
-  const named = { ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account,
-    ...(prepareCpu === undefined ? {} : { PREPARE_CPU: prepareCpu }) };
-  const vars = memoryMib === undefined ? named : { ...named, FLEET_MEMORY_MIB: String(memoryMib) };
+  const vars: Record<string, string> = { ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account };
+
+  if (prepareCpu !== undefined) vars['PREPARE_CPU'] = prepareCpu;
+
+  if (memoryMib !== undefined) vars['FLEET_MEMORY_MIB'] = String(memoryMib);
 
   return JSON.stringify({
     ...parsed, name, account_id: account, main,
