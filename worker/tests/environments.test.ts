@@ -898,11 +898,12 @@ async function preparedWith(answer: (argv: readonly string[]) => { readonly exit
   const recorded: Generation[] = [];
   const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
 
-  const registry = namespace(() => ({
+  const environments = namespace(() => ({
     beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
     prepared: async (made: Generation) => { recorded.push(made); },
   }));
-  const preparer = new ArmadaPreparer(stored.ctx, world(prepareCpu === undefined ? { ENVIRONMENTS: registry } : { ENVIRONMENTS: registry, PREPARE_CPU: prepareCpu }));
+
+  const preparer = new ArmadaPreparer(stored.ctx, world(prepareCpu === undefined ? { ENVIRONMENTS: environments } : { ENVIRONMENTS: environments, PREPARE_CPU: prepareCpu }));
 
   await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
 
