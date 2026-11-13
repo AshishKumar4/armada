@@ -2,6 +2,7 @@ import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, PACKER, RecipeSchema, sha256 } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
+import { type Env } from '../src/env';
 import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
@@ -892,74 +893,53 @@ describe('a pack base (#34)', () => {
 });
 
 
+/** The generations a preparation of an empty recipe records, its container's execs answered by `answer`, on a
+ *  deployment with `bindings` besides its registry. */
+async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string }, bindings: Partial<Env> = {}): Promise<Generation[]> {
+  const recorded: Generation[] = [];
+  const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+  const preparer = new ArmadaPreparer(stored.ctx, world({
+    ENVIRONMENTS: namespace(() => ({
+      beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
+      prepared: async (made: Generation) => { recorded.push(made); },
+    })),
+    ...bindings,
+  }));
+
+  await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
+
+  for (let alarm = 0; alarm < 30 && recorded.length === 0; alarm += 1) await preparer.alarm();
+
+  return recorded;
+}
+
+/** An exec's answer in a container on an AMD host of `model` (family 25) that answers every command at once. */
+function onHost(model: () => number) {
+  return (argv: readonly string[]) => {
+    const command = argv[2] ?? '';
+
+    if (command.includes('/proc/cpuinfo')) {
+      return { exitCode: 0, stdout: `vendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: ${String(model())}\nmodel name\t: EPYC\nflags\t\t: avx2\n` };
+    }
+
+    if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
+
+    return { exitCode: 0, stdout: command.includes('echo ready') ? 'ready\n' : '' };
+  };
+}
+
 describe('an environment\'s snapshot', () => {
   test('records the host it was taken on, as the platform may place its containers by it', async () => {
-    const recorded: Generation[] = [];
-    const cpuinfo = 'vendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 17\nmodel name\t: AMD EPYC 9684X 96-Core Processor\nflags\t\t: avx2\n';
-
-    // A container whose every exec answers at once, its host an EPYC 9684X (25/17).
-    const answer = (argv: readonly string[]) => {
-      const command = argv[2] ?? '';
-
-      if (command.includes('/proc/cpuinfo')) return { exitCode: 0, stdout: cpuinfo };
-
-      if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
-
-      return { exitCode: 0, stdout: command.includes('echo ready') ? 'ready\n' : '' };
-    };
-
-    const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
-
-    const preparer = new ArmadaPreparer(stored.ctx, world({
-      ENVIRONMENTS: namespace(() => ({
-        beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
-        prepared: async (made: Generation) => { recorded.push(made); },
-      })),
-    }));
-
-    await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
-
-    for (let alarm = 0; alarm < 20 && recorded.length === 0; alarm += 1) await preparer.alarm();
+    const recorded = await preparedWith(onHost(() => 17));
 
     expect(recorded.map(({ snapshot }) => [snapshot.host?.family, snapshot.host?.model])).toEqual([[25, 17]]);
   });
-});
 
-describe('a preparation on a deployment that names its CPUs', () => {
-  test('starts its container again until it is on a host of one, and records that host with its snapshot', async () => {
-    const recorded: Generation[] = [];
+  test('of a deployment that names its CPUs is taken on one: its container starts again until it is on a host of one', async () => {
+    // Each read of its host is on the next: two of 25/1, then 25/17.
     const hosts = [1, 1, 17];
     let read = 0;
-    const cpuinfo = (model: number) => `vendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: ${String(model)}\nmodel name\t: EPYC\nflags\t\t: avx2\n`;
-
-    // Each container its host is read in is on the next host: two of 25/1, then one of 25/17.
-    const answer = (argv: readonly string[]) => {
-      const command = argv[2] ?? '';
-
-      if (command.includes('/proc/cpuinfo')) {
-        read += 1;
-
-        return { exitCode: 0, stdout: cpuinfo(hosts[Math.min(read, hosts.length) - 1] ?? 17) };
-      }
-
-      if (argv[3] === 'wait') return { exitCode: 0, stdout: '0\n' };
-
-      return { exitCode: 0, stdout: command.includes('echo ready') ? 'ready\n' : '' };
-    };
-
-    const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
-
-    const preparer = new ArmadaPreparer(stored.ctx, world({
-      ENVIRONMENTS: namespace(() => ({
-        beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
-        prepared: async (made: Generation) => { recorded.push(made); },
-      })),
-      PREPARE_CPU: 'AuthenticAMD/25/17,AuthenticAMD/26/17',
-    }));
-
-    await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
-
-    for (let alarm = 0; alarm < 30 && recorded.length === 0; alarm += 1) await preparer.alarm();
+    const recorded = await preparedWith(onHost(() => hosts[Math.min(++read, hosts.length) - 1] ?? 17), { PREPARE_CPU: 'AuthenticAMD/25/17,AuthenticAMD/26/17' });
 
     // Three starts' hosts read, then the snapshot's: the one it prepared on.
     expect({ read, host: recorded.map(({ snapshot }) => snapshot.host?.model) }).toEqual({ read: 4, host: [17] });
