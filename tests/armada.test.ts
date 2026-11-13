@@ -7,7 +7,7 @@ import * as v from 'valibot';
 import { extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
-import { deploymentConfig } from '../src/deploy';
+import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
@@ -337,6 +337,20 @@ describe('a deployment\'s wrangler config', () => {
 
     expect({ same: laid, name: laid.name, account: laid.account_id, main: laid.main, assets: laid.assets.directory, vars: laid.vars, buckets: laid.r2_buckets.map((each) => each.bucket_name), schema: '$schema' in laid })
       .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
+  });
+});
+
+describe('a deployment\'s fleet cap', () => {
+  test('is the one asked, else the deployed Worker\'s own, and a deploy with neither is refused', () => {
+    expect([fleetCap('x', 64, 2900), fleetCap('x', undefined, 2900)]).toEqual([64, 2900]);
+    // 2026-11-07 to 11-13: five redeploys without --vcpus each set the template's 1500, halving the owner's 2900.
+    expect(() => fleetCap('armada-x', undefined, null)).toThrow('armada-x states no fleet cap of its own');
+  });
+
+  test('is in no template: the Worker\'s config holds none of its own', () => {
+    const template = v.parse(v.looseObject({ vars: v.record(v.string(), v.string()) }), Bun.JSONC.parse(readFileSync(join(import.meta.dir, '..', 'worker', 'wrangler.jsonc'), 'utf8')));
+
+    expect('FLEET_VCPUS' in template.vars).toBe(false);
   });
 });
 

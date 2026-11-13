@@ -8,18 +8,18 @@ import * as v from 'valibot';
 /** The template's fields a deployment sets; every other field is the template's own. */
 const TemplateSchema = v.looseObject({
   assets: v.looseObject({ directory: v.string() }),
-  vars: v.looseObject({ FLEET_VCPUS: v.string(), ARMADA_SHA: v.string(), ARMADA_CONTRACT: v.string() }),
+  vars: v.looseObject({ ARMADA_SHA: v.string(), ARMADA_CONTRACT: v.string() }),
   r2_buckets: v.array(v.looseObject({ binding: v.string(), bucket_name: v.string() })),
 });
 
-/** What a deployment sets in the template: `vcpus` absent keeps the template's fleet cap. */
+/** What a deployment sets in the template, its fleet's cap among them (`fleetCap`): the template holds none. */
 export interface Deployment {
   readonly name: string;
   readonly account: string;
   readonly main: string;
   readonly dashboard: string;
   readonly bucket: string;
-  readonly vcpus?: number | undefined;
+  readonly vcpus: number;
   /** The fleet's memory cap in MiB (FLEET_MEMORY_MIB): absent where the deploy could not read the account. */
   readonly memoryMib?: number | undefined;
   readonly sha: string;
@@ -34,7 +34,7 @@ export function deploymentConfig(template: string, { name, account, main, dashbo
 
   // Its name and account also name its own container apps among the account's (`readAccount`); FLEET_MEMORY_MIB the
   // fleet's memory, where the deploy read the account's.
-  const named = { ...parsed.vars, FLEET_VCPUS: vcpus === undefined ? parsed.vars.FLEET_VCPUS : String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account };
+  const named = { ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account };
   const vars = memoryMib === undefined ? named : { ...named, FLEET_MEMORY_MIB: String(memoryMib) };
 
   return JSON.stringify({
@@ -43,4 +43,15 @@ export function deploymentConfig(template: string, { name, account, main, dashbo
     vars,
     r2_buckets: parsed.r2_buckets.map((each) => each.binding === 'ARTIFACTS' ? { ...each, bucket_name: bucket } : each),
   }, null, 2);
+}
+
+/** The fleet cap (FLEET_VCPUS) a deploy of `name` gives it: the one asked (`--vcpus`), else the one its deployed
+ *  Worker states (`deployed`, its /fleet's), so a redeploy keeps a deployment's cap; a deploy that has neither is
+ *  refused, as no default may size what a fleet spends and holds (2026-11-07 to 11-13: five redeploys of
+ *  armada-dew8 without --vcpus each set the template's 1500, halving its owner's 2900). */
+export function fleetCap(name: string, asked: number | undefined, deployed: number | null): number {
+  if (asked !== undefined) return asked;
+  if (deployed !== null) return deployed;
+
+  throw new Error(`${name} states no fleet cap of its own (a first deploy, or a Worker that did not answer its /fleet): name it, --vcpus=N`);
 }

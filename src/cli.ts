@@ -9,7 +9,7 @@ import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } fro
 import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { DeploymentName } from './config';
 import { contractOf } from './contract';
-import { deploymentConfig } from './deploy';
+import { deploymentConfig, fleetCap } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
@@ -101,7 +101,7 @@ deploy options:
   --account=<id>       the account to use, if your login has more than one
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
-  --vcpus=N            the most vCPUs its fleet runs at once (default 1500)
+  --vcpus=N            the most vCPUs its fleet runs at once (a first deploy names it; a redeploy keeps its own)
   --memory=GiB         the most memory its fleet holds at once (default: the account's, in --vcpus's share of
                        its vCPUs, where the deploy has the account token; none without)
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
@@ -435,6 +435,15 @@ const KeptSchema = v.object({ ...ConnectionSchema.entries, accountToken: v.optio
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
+/** The fleet cap a deployed Worker states (its /fleet's `cap`), or null where it states none or does not answer. */
+async function deployedCap(deployed: Armada): Promise<number | null> {
+  try {
+    return v.parse(v.object({ cap: v.number() }), await (await deployed.call('/fleet')).json()).cap;
+  } catch {
+    return null;
+  }
+}
+
 async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined }, forceDrain: boolean, keep: number): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
@@ -453,6 +462,8 @@ async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: numb
 
   if (given !== undefined) accountToken = given === '' ? undefined : given;
 
+  // Its fleet's cap, the one asked or the deployed Worker's own (`fleetCap`), read before anything changes.
+  const cap = fleetCap(name, vcpus, known === null ? null : await deployedCap(new Armada(known)));
   // Checked before anything changes, as the registry's credentials are minted; its memory caps the fleet's in the
   // fleet's share of its vCPUs, as a container holds both (`ArmadaFleet`).
   let memoryMib = memoryGiB === undefined ? undefined : memoryGiB * 1024;
@@ -460,9 +471,6 @@ async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: numb
   if (accountToken !== undefined) {
     try {
       const read = await readAccount({ token: accountToken, account, name });
-
-      const cap = vcpus ?? Number(v.parse(v.looseObject({ vars: v.looseObject({ FLEET_VCPUS: v.string() }) }),
-        Bun.JSONC.parse(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'))).vars.FLEET_VCPUS);
 
       memoryMib ??= Math.floor(read.memory * Math.min(1, cap / read.vcpus));
     } catch (cause) {
@@ -635,7 +643,7 @@ async function install(account: string, name: string, file: string, { vcpus, mem
   await buildDashboard(DASHBOARD);
   // Read from the checkout as it is deployed, as its commit is, not as it was before a drain that may have taken hours.
   writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
-    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus: cap, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
   }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));

@@ -485,7 +485,8 @@ opens one deployment's own pages. Each bearer stays in that one browser.
 ## Deploying
 
 `armada deploy --name=<name>` deploys another armada on the same account and prints the file that `--connection=<file>`
-takes, to point any command at it. `--vcpus=N` caps its fleet. A project whose CI runs on one deployment names it in its
+takes, to point any command at it. `--vcpus=N` caps its fleet: a first deploy names it, and a redeploy without it keeps
+the deployed one's. A project whose CI runs on one deployment names it in its
 `.armada.json`, `"deployment": "<name>"`, and every command run in its checkout reaches that deployment; a connection
 given to the command (`--connection`, `ARMADA_CONNECTION`, or `ARMADA_URL` with `ARMADA_TOKEN`) still comes first.
 

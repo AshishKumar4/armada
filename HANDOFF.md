@@ -130,7 +130,8 @@
 - One container may have 8 vCPUs, 12 GiB and 20 GB (`maxVcpuPerDeployment`, `maxMemoryPerDeployment`,
   `maxDiskPerDeployment`). `large` starts that, by resources named at its start: on 2026-10-28 one showed 8 CPUs to
   `nproc` and its cgroup, 11.7 GiB of memory, on an AMD EPYC 25/17. The docs' 3 GiB per vCPU did not apply.
-- A deployment's fleet cap (`--vcpus`, default 1,500) counts only its own containers. On 2026-10-12, `armada-dew3`
+- A deployment's fleet cap (`--vcpus`: a first deploy names it, a redeploy without it keeps the deployed Worker's own;
+  there is no default) counts only its own containers. On 2026-10-12, `armada-dew3`
   (cap 5,000) ran 375 `medium` containers, all 1,500 vCPUs then, and `armada-v2`'s starts failed with that error.
   Caps that sum past the account's let one deployment starve the others. A fleet deployed with ARMADA_ACCOUNT_TOKEN borrows
   past its cap what the account leaves idle, and gives it back within a task (`ArmadaFleet`): only a cap below the
