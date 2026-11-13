@@ -913,7 +913,7 @@ describe('an environment\'s snapshot', () => {
     const preparer = new ArmadaPreparer(stored.ctx, world({
       ENVIRONMENTS: namespace(() => ({
         beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
-        prepared: async (generation: Generation) => { recorded.push(generation); },
+        prepared: async (made: Generation) => { recorded.push(made); },
       })),
     }));
 
