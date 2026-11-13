@@ -903,18 +903,18 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     }
   };
 
-  /** A wave's jobs (`what`), each a group's `indexes` given `more`, started at once within the seconds `bound`
+  /** A wave's jobs (`what`), each a group's `indexes` given `more`, started at once within the seconds `within`
    *  gives as they start (null: none may): those started, or why one did not start, the others then cancelled. */
-  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], bound: () => number | null, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
+  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: () => number | null, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
     let shares = sharesOf(groupsOf);
-    let bounded = bound();
+    let bounded = within();
 
     // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within its bound as it
     // stands then: what is left of the run's deadline (#37), or not at all; a later wave's own (`laterDeadline`).
     if ('need' in shares && tail.size > 0) {
       await tailEnded;
       shares = sharesOf(groupsOf);
-      bounded = bound();
+      bounded = within();
     }
 
     if (stopped !== null) return { refused: stopped };
