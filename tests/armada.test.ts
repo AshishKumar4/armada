@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, closeSync, cpSync, existsSync, mkdirSync, mk
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { extractTar, judgeChunks, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
+import { extractTar, judgeChunks, LATER_START_SECONDS, laterDeadline, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { deploymentConfig } from '../src/deploy';
@@ -2237,6 +2237,24 @@ describe('a CI deadline', () => {
       expect(remainingDeadline(began + 1800_000)).toBe(1500);
       setSystemTime(began + 1800_000);
       expect(remainingDeadline(began + 1800_000)).toBe(null);
+    } finally {
+      setSystemTime();
+    }
+  });
+});
+
+describe('a later wave\'s deadline', () => {
+  test('is what remains of the run\'s, but never less than a task\'s timeout and a start\'s allowance', () => {
+    const began = Date.now();
+
+    try {
+      setSystemTime(began);
+      expect(laterDeadline(began + 7200_000, 1800)).toBe(7200);
+      // Dew's train 795: the first wave left 192 s of the run's deadline; its judges get a task's timeout and a start.
+      setSystemTime(began + 2508_000);
+      expect(laterDeadline(began + 2700_000, 1800)).toBe(1800 + LATER_START_SECONDS);
+      setSystemTime(began + 3000_000);
+      expect(laterDeadline(began + 2700_000, 1800)).toBe(1800 + LATER_START_SECONDS);
     } finally {
       setSystemTime();
     }

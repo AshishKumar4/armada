@@ -51,6 +51,17 @@ export function remainingDeadline(deadlineAt: number): number | null {
   return remaining > 0 ? remaining : null;
 }
 
+/** How long a later wave's jobs (judges', later map tasks') are given besides one task's timeout: their containers'
+ *  start, which a busy fleet makes minutes. */
+export const LATER_START_SECONDS = 600;
+
+/** A later wave's own bound: what remains of the run's deadline, but never less than one task's `timeout` and
+ *  `LATER_START_SECONDS`, so a judged run whose first wave ran long still judges what it drew (Dew's train 795,
+ *  2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran out, and the run ended ungraded). */
+export function laterDeadline(deadlineAt: number, timeout: number | undefined): number {
+  return Math.max(remainingDeadline(deadlineAt) ?? 0, (timeout ?? 0) + LATER_START_SECONDS);
+}
+
 /** Why a run that could start no further job is ungraded. */
 const PASSED = (next: string) => `CiDeadlineExceeded: the CI run passed its deadline before its ${next} could start`;
 
@@ -892,24 +903,24 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     }
   };
 
-  /** A wave's jobs (`what`), each a group's `indexes` given `more`, started at once within `within` seconds: those
-   *  started, or why one did not start, the others then cancelled. */
-  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: number, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
+  /** A wave's jobs (`what`), each a group's `indexes` given `more`, started at once within the seconds `bound`
+   *  gives as they start (null: none may): those started, or why one did not start, the others then cancelled. */
+  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], bound: () => number | null, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
     let shares = sharesOf(groupsOf);
-    let bounded: number | null = within;
+    let bounded = bound();
 
-    // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within what is left of
-    // the run's deadline (#37), or not at all.
+    // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within its bound as it
+    // stands then: what is left of the run's deadline (#37), or not at all; a later wave's own (`laterDeadline`).
     if ('need' in shares && tail.size > 0) {
       await tailEnded;
       shares = sharesOf(groupsOf);
-      bounded = remainingDeadline(deadlineAt);
+      bounded = bound();
     }
 
     if (stopped !== null) return { refused: stopped };
 
     if (bounded === null) return { refused: PASSED(what) };
-    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, Math.min(within, bounded), each.more));
+    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, bounded, each.more));
 
     started.push(...starting.map(({ job }) => job));
     const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
@@ -994,9 +1005,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       }));
 
       if (judging.length === 0) return null;
-      const remaining = remainingDeadline(deadlineAt);
-
-      return remaining === null ? { refused: PASSED('judges\' jobs') } : await wave(judging, remaining, 'judges\' jobs');
+      return await wave(judging, () => laterDeadline(deadlineAt, config.task.timeout), 'judges\' jobs');
     };
 
     const first = await judgedOver(undefined, (map) => !later.has(map));
@@ -1011,15 +1020,11 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const wanted = new Set([...asking].flatMap((index) => (mapsOf[index] ?? []).filter((map) => later.has(map))));
 
     if (wanted.size > 0) {
-      const remaining = remainingDeadline(deadlineAt);
-
-      if (remaining === null) return { refused: PASSED('later map tasks\' jobs') };
-
       const drawnLater = await wave(groups.flatMap((group, at) => {
         const indexes = group.later ? group.indexes.filter((index) => wanted.has(index)) : [];
 
         return indexes.length === 0 ? [] : [{ at, indexes }];
-      }), remaining, 'later map tasks\' jobs');
+      }), () => laterDeadline(deadlineAt, config.task.timeout), 'later map tasks\' jobs');
 
       if ('refused' in drawnLater) return drawnLater;
       landed = [...landed, ...drawnLater.landed];
@@ -1049,7 +1054,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     const first = groups.flatMap((group, at) => group.judging || group.later ? [] : [{ at, indexes: group.indexes, drawing: group.drawing }]);
 
     if (judges.size === 0 || !first.some(({ drawing }) => drawing)) {
-      const mapped = await wave(first, left, 'task jobs');
+      const mapped = await wave(first, () => left, 'task jobs');
 
       if ('refused' in mapped || judges.size === 0) return mapped;
       const judged = await judgesPart(mapped.landed);
@@ -1060,7 +1065,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     // The first wave's map tasks in jobs of their own (`grouped`): its judges begin as those jobs end, while its other
     // tasks run on, the pool's rest theirs (`tail`). One long task (Dew's train 484, 2026-11-02: a 28-minute test
     // file) held every check-1 judge to its run's last 475 s; one ran past them, and the run had no verdict.
-    const launched = await launch(first, left, 'task jobs');
+    const launched = await launch(first, () => left, 'task jobs');
 
     if ('refused' in launched) return launched;
     const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
