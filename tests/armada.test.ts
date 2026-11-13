@@ -1960,9 +1960,10 @@ describe('armada run', () => {
     expect({ exit: ran.exit, held: slow + judging <= 4, judging: judging > 0 }).toEqual({ exit: 0, held: true, judging: true });
   }, 30_000);
 
-  // A wave that waits on the first wave's tail for room starts within what is left of the run's deadline then, not what
-  // was left when it was asked for (#37).
-  test('a judges\' job that waits on the first wave\'s tail for room starts within the deadline left after it', async () => {
+  // A wave that waits on the first wave's tail for room starts within its own bound as it stands then (#37): a judges'
+  // job's is never less than a task's timeout and a start's allowance, however little of the run's deadline is left
+  // (Dew's train 795, 2026-11-13: its judges got 192 s, and the run ended ungraded).
+  test('a judges\' job that waits on the first wave\'s tail for room starts within its own bound', async () => {
     const plan: Json = { include: [{ name: 'a' }, { name: 'c' }, { name: 'slow1' }, { name: 'slow2' }, { name: 'slow3' }, { name: 'j', after: ['a'], size: 'large' }, { name: 'k', after: ['c'] }] };
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
@@ -1981,7 +1982,7 @@ describe('armada run', () => {
     const judging = ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), deadline: v.number() }), body))
       .filter(({ items }) => items.some(({ item }) => ['j', 'k'].includes(nameOf(item))));
 
-    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline <= 3) }).toEqual({ jobs: 2, within: true });
+    expect({ jobs: judging.length, own: judging.every(({ deadline }) => deadline >= LATER_START_SECONDS) }).toEqual({ jobs: 2, own: true });
   }, 30_000);
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and

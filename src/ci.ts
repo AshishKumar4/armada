@@ -58,7 +58,7 @@ export const LATER_START_SECONDS = 600;
 /** A later wave's own bound: what remains of the run's deadline, but never less than one task's `timeout` and
  *  `LATER_START_SECONDS`, so a judged run whose first wave ran long still judges what it drew (Dew's train 795,
  *  2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran out, and the run ended ungraded). */
-export function laterDeadline(deadlineAt: number, timeout: number | undefined): number {
+export function laterDeadline(deadlineAt: number, timeout: number | null | undefined): number {
   return Math.max(remainingDeadline(deadlineAt) ?? 0, (timeout ?? 0) + LATER_START_SECONDS);
 }
 
@@ -1005,6 +1005,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
       }));
 
       if (judging.length === 0) return null;
+
       return await wave(judging, () => laterDeadline(deadlineAt, config.task.timeout), 'judges\' jobs');
     };
 
