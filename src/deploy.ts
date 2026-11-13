@@ -46,11 +46,12 @@ export function deploymentConfig(template: string, { name, account, main, dashbo
 }
 
 /** The fleet cap (FLEET_VCPUS) a deploy of `name` gives it: the one asked (`--vcpus`), else the one its deployed
- *  Worker states (`deployed`, its /fleet's), so a redeploy keeps a deployment's cap; a deploy that has neither is
+ *  Worker states (`deployed`, its /fleet's), so a redeploy keeps a deployment's cap; a first deploy that names none is
  *  refused, as no default may size what a fleet spends and holds (2026-11-07 to 11-13: five redeploys of
  *  armada-dew8 without --vcpus each set the template's 1500, halving its owner's 2900). */
 export function fleetCap(name: string, asked: number | undefined, deployed: number | null): number {
   if (asked !== undefined) return asked;
+
   if (deployed !== null) return deployed;
 
   throw new Error(`${name} states no fleet cap of its own (a first deploy, or a Worker that did not answer its /fleet): name it, --vcpus=N`);

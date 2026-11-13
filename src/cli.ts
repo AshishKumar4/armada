@@ -431,19 +431,20 @@ async function healthOf(name: string, deployed: Armada): Promise<Health | null> 
  *  (`armada runs prune`), which the CLI reads from the connection file it uses. */
 const KeptSchema = v.object({ ...ConnectionSchema.entries, accountToken: v.optional(v.string()), retention: v.optional(RetentionSchema) });
 
+/** The fleet cap deployed Worker `deployed` (`name`) states, its /fleet's `cap`: a deploy that cannot read it is
+ *  refused, naming it, rather than given a cap no one chose (`fleetCap`). */
+async function deployedCap(name: string, deployed: Armada): Promise<number> {
+  try {
+    return v.parse(v.object({ cap: v.number() }), await (await deployed.call('/fleet')).json()).cap;
+  } catch (cause) {
+    throw new Error(`${name} did not state its fleet cap (${errorOf({ cause }).message}): name it, --vcpus=N`, { cause });
+  }
+}
+
 /** The bucket (packs and job artifacts expire after 7 days), the Worker, its bearer, its registry credentials, and
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
-/** The fleet cap a deployed Worker states (its /fleet's `cap`), or null where it states none or does not answer. */
-async function deployedCap(deployed: Armada): Promise<number | null> {
-  try {
-    return v.parse(v.object({ cap: v.number() }), await (await deployed.call('/fleet')).json()).cap;
-  } catch {
-    return null;
-  }
-}
-
 async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined }, forceDrain: boolean, keep: number): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
@@ -463,7 +464,7 @@ async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: numb
   if (given !== undefined) accountToken = given === '' ? undefined : given;
 
   // Its fleet's cap, the one asked or the deployed Worker's own (`fleetCap`), read before anything changes.
-  const cap = fleetCap(name, vcpus, known === null ? null : await deployedCap(new Armada(known)));
+  const cap = fleetCap(name, vcpus, known === null || vcpus !== undefined ? null : await deployedCap(name, new Armada(known)));
   // Checked before anything changes, as the registry's credentials are minted; its memory caps the fleet's in the
   // fleet's share of its vCPUs, as a container holds both (`ArmadaFleet`).
   let memoryMib = memoryGiB === undefined ? undefined : memoryGiB * 1024;
@@ -510,7 +511,7 @@ async function deploy(name: string, { vcpus, memoryGiB }: { readonly vcpus: numb
     const health = deployed === null ? null : await healthOf(name, deployed);
 
     if (deployed !== null && mustDrain(health, forceDrain, contractOf(ROOT))) await drain(deployed, () => { drained = true; });
-    await install(account, name, file, { vcpus, memoryMib, token: known?.token, accountToken, retention: known?.retention, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    await install(account, name, file, { vcpus: cap, memoryMib, token: known?.token, accountToken, retention: known?.retention, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
@@ -609,10 +610,10 @@ async function mintRegistry(account: string): Promise<{ readonly credentials: st
 /** Where a deploy builds the dashboard the Worker serves (wrangler.jsonc's `assets`). */
 const DASHBOARD = join(ROOT, 'dist', 'dashboard');
 
-/** What a deploy gives the Worker beyond its code: its fleet's vCPUs (the default when undefined), its bearer (a new
- *  one when undefined), and its secrets. */
+/** What a deploy gives the Worker beyond its code: its fleet's vCPUs (`fleetCap`), its bearer (a new one when
+ *  undefined), and its secrets. */
 interface Given {
-  readonly vcpus: number | undefined;
+  readonly vcpus: number;
   readonly memoryMib: number | undefined;
   readonly token: string | undefined;
   /** The token its fleet reads the account with, which the connection file keeps for the next deploy. */
@@ -643,7 +644,7 @@ async function install(account: string, name: string, file: string, { vcpus, mem
   await buildDashboard(DASHBOARD);
   // Read from the checkout as it is deployed, as its commit is, not as it was before a drain that may have taken hours.
   writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
-    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus: cap, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
   }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));
