@@ -898,7 +898,7 @@ describe('an environment\'s snapshot', () => {
     const cpuinfo = 'vendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 17\nmodel name\t: AMD EPYC 9684X 96-Core Processor\nflags\t\t: avx2\n';
 
     // A container whose every exec answers at once, its host an EPYC 9684X (25/17).
-    const answer = (argv: readonly string[]): { readonly exitCode: number; readonly stdout: string } => {
+    const answer = (argv: readonly string[]) => {
       const command = argv[2] ?? '';
 
       if (command.includes('/proc/cpuinfo')) return { exitCode: 0, stdout: cpuinfo };
@@ -907,7 +907,9 @@ describe('an environment\'s snapshot', () => {
 
       return { exitCode: 0, stdout: command.includes('echo ready') ? 'ready\n' : '' };
     };
+
     const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+
     const preparer = new ArmadaPreparer(stored.ctx, world({
       ENVIRONMENTS: namespace(() => ({
         beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
