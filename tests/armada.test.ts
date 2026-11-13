@@ -4,12 +4,12 @@ import { appendFileSync, chmodSync, closeSync, cpSync, existsSync, mkdirSync, mk
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { extractTar, judgeChunks, LATER_START_SECONDS, laterDeadline, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
+import { DRIVER_SECONDS, extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { deploymentConfig } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { DRIVER, environmentKey, HostSchema, JOB_DEADLINE_SECONDS, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
@@ -1975,8 +1975,8 @@ describe('armada run', () => {
     const from = Date.now();
     const heldOf = (item: Json) => nameOf(item).startsWith('slow') && Date.now() - from < 5_000;
     const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
-    // A task's timeout of 1 s floors a later wave's bound at 601 s; the run's 900 s are above it, so the judges' jobs
-    // start within what is left of them once the tail has run its 5 s: at most 896 s, never the 900 s asked for.
+    // A task's timeout of 1 s puts the later waves' end 601 s past the run's 900 s, so the judges' jobs start within
+    // what is left of 1,501 s once the tail has run its 5 s: at most 1,496 s, never what was left when they asked.
     const ran = await run(['--json', '--deadline=900', '--pool=3'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws, draws], taskConfig: { timeout: 1 } });
 
     rmSync(drawn, { recursive: true, force: true });
@@ -1984,7 +1984,7 @@ describe('armada run', () => {
     const judging = ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), deadline: v.number() }), body))
       .filter(({ items }) => items.some(({ item }) => ['j', 'k'].includes(nameOf(item))));
 
-    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline > 1 + LATER_START_SECONDS && deadline <= 896) }).toEqual({ jobs: 2, within: true });
+    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline > 1400 && deadline <= 1496) }).toEqual({ jobs: 2, within: true });
   }, 30_000);
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
@@ -2246,23 +2246,14 @@ describe('a CI deadline', () => {
   });
 });
 
-describe('a later wave\'s deadline', () => {
-  test('is what remains of the run\'s, but never less than a task\'s timeout and a start\'s allowance', () => {
-    const began = Date.now();
-
-    try {
-      setSystemTime(began);
-      expect(laterDeadline(began + 7200_000, 1800)).toBe(7200);
-      // Dew's train 795: the first wave left 192 s of the run's deadline; its judges get a task's timeout and a start.
-      setSystemTime(began + 2508_000);
-      expect(laterDeadline(began + 2700_000, 1800)).toBe(1800 + LATER_START_SECONDS);
-      setSystemTime(began + 3000_000);
-      expect(laterDeadline(began + 2700_000, 1800)).toBe(1800 + LATER_START_SECONDS);
-      // A fractional timeout gives whole seconds, as a job's deadline is.
-      expect(laterDeadline(began + 2700_000, 1.5)).toBe(602);
-    } finally {
-      setSystemTime();
-    }
+describe('a later wave\'s end', () => {
+  test('is a task\'s timeout and a start\'s allowance past the run\'s deadline, within what its driver allows', () => {
+    // Dew's train 795: a 2,700 s run of 1,800 s tasks; its judges, 192 s before the deadline, get 2,592 s more.
+    expect(laterEnd(0, 2700_000, 1800)).toBe((2700 + 1800 + LATER_START_SECONDS) * 1000);
+    // A task's timeout longer than a driver's job: the run still ends before its driver does.
+    expect(laterEnd(0, 1800_000, 21600)).toBe((JOB_DEADLINE_SECONDS - DRIVER_SECONDS) * 1000);
+    // Never before the run's own deadline.
+    expect(laterEnd(0, JOB_DEADLINE_SECONDS * 1000, 1800)).toBe(JOB_DEADLINE_SECONDS * 1000);
   });
 });
 

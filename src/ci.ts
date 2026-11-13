@@ -15,7 +15,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, timedShort, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, atOnce, JOB_DEADLINE_SECONDS, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
 import { describeSummary, producing, retainRuns, RUNS, type Bounds } from './runs';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Meta, type Recipe, type Result } from './task';
@@ -55,12 +55,18 @@ export function remainingDeadline(deadlineAt: number): number | null {
  *  start, which a busy fleet makes minutes. */
 export const LATER_START_SECONDS = 600;
 
-/** A later wave's own bound: what remains of the run's deadline, but never less than one task's `timeout` and
- *  `LATER_START_SECONDS`, so a judged run whose first wave ran long still judges what it drew (Dew's train 795,
- *  2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran out, and the run ended ungraded). */
-export function laterDeadline(deadlineAt: number, timeout: number | null | undefined): number {
-  // In whole seconds, as a job's deadline is (a task's timeout may be a fraction of one).
-  return Math.ceil(Math.max(remainingDeadline(deadlineAt) ?? 0, (timeout ?? 0) + LATER_START_SECONDS));
+/** What a run that begins with its driver may take besides its own, so its driver reports it: the webhook's driver
+ *  is one job of `JOB_DEADLINE_SECONDS` (worker/src/hooks.ts `driverSpec`), and its clone and install come first. */
+export const DRIVER_SECONDS = 15 * 60;
+
+/** When a run's later waves (judges', later map tasks') must end, together: one task's `timeout` and
+ *  `LATER_START_SECONDS` past the run's deadline (`deadlineAt`), so a judged run whose first wave ran long still
+ *  judges what it drew (Dew's train 795, 2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran
+ *  out, and the run ended ungraded), but never past what its driver allows from the run's start (`began`). */
+export function laterEnd(began: number, deadlineAt: number, timeout: number | null | undefined): number {
+  const allowed = began + (JOB_DEADLINE_SECONDS - DRIVER_SECONDS) * 1000;
+
+  return Math.max(deadlineAt, Math.min(deadlineAt + ((timeout ?? 0) + LATER_START_SECONDS) * 1000, allowed));
 }
 
 /** Why a run that could start no further job is ungraded. */
@@ -605,6 +611,8 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
   const began = Date.now();
   const { sha, repo, config, timings, base, environment, spec, upload, of } = await commitOf(armada, target);
   const deadlineAt = began + (deadline ?? config.deadline) * 1000;
+  // When its later waves must end (`laterEnd`), past its deadline.
+  const laterAt = laterEnd(began, deadlineAt, config.task.timeout);
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 
@@ -911,7 +919,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
     let bounded = within();
 
     // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within its bound as it
-    // stands then: what is left of the run's deadline (#37), or not at all; a later wave's own (`laterDeadline`).
+    // stands then: what is left of the run's deadline (#37), or not at all; a later wave's of its own (`laterEnd`).
     if ('need' in shares && tail.size > 0) {
       await tailEnded;
       shares = sharesOf(groupsOf);
@@ -1007,7 +1015,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
 
       if (judging.length === 0) return null;
 
-      return await wave(judging, () => laterDeadline(deadlineAt, config.task.timeout), 'judges\' jobs');
+      return await wave(judging, () => remainingDeadline(laterAt), 'judges\' jobs');
     };
 
     const first = await judgedOver(undefined, (map) => !later.has(map));
@@ -1026,7 +1034,7 @@ async function runGraded(armada: Armada, target: string, { deadline, pool: bound
         const indexes = group.later ? group.indexes.filter((index) => wanted.has(index)) : [];
 
         return indexes.length === 0 ? [] : [{ at, indexes }];
-      }), () => laterDeadline(deadlineAt, config.task.timeout), 'later map tasks\' jobs');
+      }), () => remainingDeadline(laterAt), 'later map tasks\' jobs');
 
       if ('refused' in drawnLater) return drawnLater;
       landed = [...landed, ...drawnLater.landed];
