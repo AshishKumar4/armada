@@ -59,7 +59,8 @@ export const LATER_START_SECONDS = 600;
  *  `LATER_START_SECONDS`, so a judged run whose first wave ran long still judges what it drew (Dew's train 795,
  *  2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran out, and the run ended ungraded). */
 export function laterDeadline(deadlineAt: number, timeout: number | null | undefined): number {
-  return Math.max(remainingDeadline(deadlineAt) ?? 0, (timeout ?? 0) + LATER_START_SECONDS);
+  // In whole seconds, as a job's deadline is (a task's timeout may be a fraction of one).
+  return Math.ceil(Math.max(remainingDeadline(deadlineAt) ?? 0, (timeout ?? 0) + LATER_START_SECONDS));
 }
 
 /** Why a run that could start no further job is ungraded. */

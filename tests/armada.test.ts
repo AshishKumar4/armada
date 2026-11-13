@@ -1975,14 +1975,16 @@ describe('armada run', () => {
     const from = Date.now();
     const heldOf = (item: Json) => nameOf(item).startsWith('slow') && Date.now() - from < 5_000;
     const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
-    const ran = await run(['--json', '--deadline=8', '--pool=3'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws, draws] });
+    // A task's timeout of 1 s floors a later wave's bound at 601 s; the run's 900 s are above it, so the judges' jobs
+    // start within what is left of them once the tail has run its 5 s: at most 896 s, never the 900 s asked for.
+    const ran = await run(['--json', '--deadline=900', '--pool=3'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws, draws], taskConfig: { timeout: 1 } });
 
     rmSync(drawn, { recursive: true, force: true });
 
     const judging = ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), deadline: v.number() }), body))
       .filter(({ items }) => items.some(({ item }) => ['j', 'k'].includes(nameOf(item))));
 
-    expect({ jobs: judging.length, own: judging.every(({ deadline }) => deadline >= LATER_START_SECONDS) }).toEqual({ jobs: 2, own: true });
+    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline > 1 + LATER_START_SECONDS && deadline <= 896) }).toEqual({ jobs: 2, within: true });
   }, 30_000);
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
@@ -2256,6 +2258,8 @@ describe('a later wave\'s deadline', () => {
       expect(laterDeadline(began + 2700_000, 1800)).toBe(1800 + LATER_START_SECONDS);
       setSystemTime(began + 3000_000);
       expect(laterDeadline(began + 2700_000, 1800)).toBe(1800 + LATER_START_SECONDS);
+      // A fractional timeout gives whole seconds, as a job's deadline is.
+      expect(laterDeadline(began + 2700_000, 1.5)).toBe(602);
     } finally {
       setSystemTime();
     }

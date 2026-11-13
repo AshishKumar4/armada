@@ -6,7 +6,7 @@
  * `eventOf` and `driverSpec` are pure, so the tests exercise them without a request.
  */
 import * as v from 'valibot';
-import { Sha, type HookConfig, type JobSpecSchema, type Json, type Webhook } from '../../src/protocol';
+import { JOB_DEADLINE_SECONDS, Sha, type HookConfig, type JobSpecSchema, type Json, type Webhook } from '../../src/protocol';
 import { ArmadaSingle } from './env';
 
 /** What a delivery asks for, once the event and the config decide it. */
@@ -209,6 +209,8 @@ export function driverSpec(project: string, sha: string, { origin, sha: deploySh
     env: { ARMADA_URL: origin, ARMADA_DEPLOYED: deploySha, ARMADA_REPO: config.repo, ARMADA_COMMIT: sha, ARMADA_GITHUB_SECRET: config.tokenSecret, TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}` },
     secrets: [config.tokenSecret],
     deployToken: true,
-    timeout: 3600,
+    // As long as any job of its run may take (a run's later waves start within their own bounds past its deadline,
+    // src/ci.ts `laterDeadline`), so the run returns and the driver posts its status before its own timeout ends it.
+    timeout: JOB_DEADLINE_SECONDS,
   };
 }
