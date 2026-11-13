@@ -69,7 +69,7 @@ export function laterEnd(deadlineAt: number, timeout: number | null | undefined,
 /** Why a run that could start no further job is ungraded. */
 const PASSED = (next: string) => `CiDeadlineExceeded: the CI run passed its deadline before its ${next} could start`;
 
-/** The plan's stdout, run in `repo` where it is a checkout of `sha`, clean, with `{target}` and `{timings}` filled here;
+/** The plan's stdout, run in `repo` where it is a checkout of `sha`, clean, its stderr passed on, with `{target}` and `{timings}` filled here;
  *  undefined where it is not, and the plan runs in a container. A container's start, cold on a new machine, was 61 of
  *  the 70 seconds Dew's plan took. A bare repository has no checkout: the webhook driver fetches the commit into one, so
  *  no code of it runs where the deployment's bearer is (#33). */
@@ -91,6 +91,10 @@ export function localPlan({ repo, sha, command, target, timings, env, deadlineAt
     if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new Error('CiDeadlineExceeded: the local plan passed the CI run\'s deadline');
 
     if (ran.exitCode !== 0) throw new Error(`the plan exited ${String(ran.exitCode)}: ${ran.stderr.toString().slice(-2000)}`);
+
+    // What it said besides its plan is the run's to show, as a plan job's log shows a container's (Dew's plan states
+    // there why each row it did not reuse was not).
+    process.stderr.write(ran.stderr);
 
     return ran.stdout.toString();
   } finally {

@@ -2131,13 +2131,14 @@ describe('armada run', () => {
   test('a local plan runs in the checkout of the commit, with its target and timings filled, and no plan job; a bare repository plans in a container (#33)', async () => {
     const plan = { include: [{ name: 'a', rows: ['x'] }] };
     // The plan checks what it was given: the timings file the runner answered, and the default target.
-    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo '${JSON.stringify(plan)}'`, 'plan', '{timings}', '{target}'];
+    const command = ['sh', '-c', `grep -q '"rows"' "$1" && [ "$2" = 300 ] && echo 'kept 1 of 1' >&2 && echo '${JSON.stringify(plan)}'`, 'plan', '{timings}', '{target}'];
     const verdict = { rows: [{ name: 'x', exitCode: 0, seconds: 2 }] };
     const ran = await Promise.all([false, true].map(async (bare) => await run([], plan, verdict, { planConfig: { command, local: true }, bare })));
 
-    expect(ran.map(({ exit, commands }) => ({ exit, jobs: commands.length, task: commands.at(-1)?.slice(-2) }))).toEqual([
-      { exit: 0, jobs: 1, task: ['task', '/armada/task/out'] },
-      { exit: 0, jobs: 2, task: ['task', '/armada/task/out'] },
+    // A local plan's stderr is the run's own, as a plan job's log is.
+    expect(ran.map(({ exit, commands, stderr }) => ({ exit, jobs: commands.length, task: commands.at(-1)?.slice(-2), said: stderr.split('\n').includes('kept 1 of 1') }))).toEqual([
+      { exit: 0, jobs: 1, task: ['task', '/armada/task/out'], said: true },
+      { exit: 0, jobs: 2, task: ['task', '/armada/task/out'], said: false },
     ]);
   });
 
