@@ -2,7 +2,6 @@ import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
 import { JobSpecSchema, PACKER, RecipeSchema, sha256 } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
-import { type Env } from '../src/env';
 import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
 import { ArmadaJob } from '../src/job';
 import worker from '../src/worker';
@@ -894,17 +893,16 @@ describe('a pack base (#34)', () => {
 
 
 /** The generations a preparation of an empty recipe records, its container's execs answered by `answer`, on a
- *  deployment with `bindings` besides its registry. */
-async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string }, bindings: Partial<Env> = {}): Promise<Generation[]> {
+ *  deployment that prepares on `prepareCpu` where given. */
+async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string }, prepareCpu?: string): Promise<Generation[]> {
   const recorded: Generation[] = [];
   const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
-  const preparer = new ArmadaPreparer(stored.ctx, world({
-    ENVIRONMENTS: namespace(() => ({
-      beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
-      prepared: async (made: Generation) => { recorded.push(made); },
-    })),
-    ...bindings,
+
+  const registry = namespace(() => ({
+    beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
+    prepared: async (made: Generation) => { recorded.push(made); },
   }));
+  const preparer = new ArmadaPreparer(stored.ctx, world(prepareCpu === undefined ? { ENVIRONMENTS: registry } : { ENVIRONMENTS: registry, PREPARE_CPU: prepareCpu }));
 
   await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
 
@@ -939,7 +937,7 @@ describe('an environment\'s snapshot', () => {
     // Each read of its host is on the next: two of 25/1, then 25/17.
     const hosts = [1, 1, 17];
     let read = 0;
-    const recorded = await preparedWith(onHost(() => hosts[Math.min(++read, hosts.length) - 1] ?? 17), { PREPARE_CPU: 'AuthenticAMD/25/17,AuthenticAMD/26/17' });
+    const recorded = await preparedWith(onHost(() => hosts[Math.min(++read, hosts.length) - 1] ?? 17), 'AuthenticAMD/25/17,AuthenticAMD/26/17');
 
     // Three starts' hosts read, then the snapshot's: the one it prepared on.
     expect({ read, host: recorded.map(({ snapshot }) => snapshot.host?.model) }).toEqual({ read: 4, host: [17] });
