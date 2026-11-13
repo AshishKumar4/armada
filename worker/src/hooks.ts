@@ -199,11 +199,11 @@ exit "$code"
 /** How long before its job's end a driver needs to post its run's status. */
 export const REPORT_SECONDS = 5 * 60;
 
-/** The job the webhook starts for a commit at `now` (ms since the epoch): one micro command task labelled `ci <project>
- *  <sha12>`, whose spec names the GitHub token's secret and asks for the deployment's bearer at claim, never in its
+/** The job the webhook starts for a commit when the deployment (`origin`, its `sha`) is asked at `now` (ms since the
+ *  epoch): one micro command task labelled `ci <project> <sha12>`, whose spec names the GitHub token's secret and asks for the deployment's bearer at claim, never in its
  *  stored env. Its run is told when its answer is needed (`--by`, ARMADA_RUN_BY): `REPORT_SECONDS` before the job's
  *  own deadline, so its later waves never outlive it and its status is posted (src/ci.ts `laterEnd`). */
-export function driverSpec(project: string, sha: string, { origin, sha: deploySha }: { readonly origin: string; readonly sha: string }, config: HookConfig, now: number): v.InferInput<typeof JobSpecSchema> {
+export function driverSpec(project: string, sha: string, { origin, sha: deploySha, now }: { readonly origin: string; readonly sha: string; readonly now: number }, config: HookConfig): v.InferInput<typeof JobSpecSchema> {
   return {
     recipe: DRIVER_RECIPE,
     run: { kind: 'command' },
