@@ -5,13 +5,15 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import worker from '../src/worker';
-import { JobSpecSchema, WebhooksSchema, type HookConfig, type Json } from '../../src/protocol';
-import { ArmadaWebhooks, driverSpec, eventOf } from '../src/hooks';
+import { JOB_DEADLINE_SECONDS, JobSpecSchema, WebhooksSchema, type HookConfig, type Json } from '../../src/protocol';
+import { ArmadaWebhooks, driverSpec, eventOf, REPORT_SECONDS } from '../src/hooks';
 import { webhooked, signed } from '../src/worker';
 import * as v from 'valibot';
 import { bucket, namespace, state, world } from './harness';
 
 const TOKEN = 't'.repeat(32);
+// When the webhook starts a driver, in ms since the epoch.
+const NOW = 1_800_000_000_000;
 
 const SECRET = 's'.repeat(48);
 
@@ -241,7 +243,7 @@ describe('the github webhook', () => {
   });
 
   test('builds the driver spec: small command, ci label, secrets by name only, the bearer at claim', () => {
-    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG));
+    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG, NOW));
 
     expect(spec.label).toBe(`ci armada ${SHA.slice(0, 12)}`);
     expect(spec.run).toEqual({ kind: 'command' });
@@ -254,9 +256,11 @@ describe('the github webhook', () => {
     expect(JSON.stringify(spec.env)).not.toContain(TOKEN);
     expect(JSON.stringify(spec)).not.toContain('gh-token-value');
     expect(spec.env['ARMADA_GITHUB_SECRET']).toBe('GITHUB_TOKEN');
+    // Its run's answer is due before its job's deadline, with time to post its status.
+    expect({ by: spec.env['ARMADA_RUN_BY'], deadline: spec.deadline }).toEqual({ by: String(NOW / 1000 + JOB_DEADLINE_SECONDS - REPORT_SECONDS), deadline: JOB_DEADLINE_SECONDS });
     // The environment is the same for every deployed commit: a redeploy takes no new snapshot. The driver fetches
     // armada at the deployed commit when it runs (`the driver script`).
-    expect(v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'c'.repeat(40) }, CONFIG)).recipe).toEqual(spec.recipe);
+    expect(v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'c'.repeat(40) }, CONFIG, NOW)).recipe).toEqual(spec.recipe);
     expect(spec.env['ARMADA_DEPLOYED']).toBe('b'.repeat(40));
   });
 });
@@ -271,7 +275,7 @@ describe('the driver script', () => {
     const bin = join(scratch, 'bin');
     const github = join(scratch, 'github');
     const home = join(scratch, 'home');
-    const script = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG)).items[0]?.argv?.[2] ?? '';
+    const script = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG, NOW)).items[0]?.argv?.[2] ?? '';
     // Git where this machine has it, which a container's runner layer builds into /usr/local.
     const realGit = Bun.which('git') ?? 'git';
     const gitEnv = { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${github}/.insteadOf`, GIT_CONFIG_VALUE_0: 'https://github.com/' };
@@ -366,7 +370,7 @@ describe('the webhooks route', () => {
 describe('a driver job at claim', () => {
   test('gets the deployment bearer in its env, masked by its secrets list, kept nowhere', async () => {
     const { ArmadaJob } = await import('../src/job');
-    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG));
+    const spec = v.parse(JobSpecSchema, driverSpec('armada', SHA, { origin: 'https://armada.test', sha: 'b'.repeat(40) }, CONFIG, NOW));
 
     const open = new ArmadaJob(state().ctx, world({
       ARMADA_TOKEN: TOKEN,

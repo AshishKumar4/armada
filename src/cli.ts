@@ -30,7 +30,7 @@ Usage:
                                        purge exactly this deployment; refuses open jobs unless forced;
                                        R2 expires objects/uploads in 1 day; re-run to remove the empty bucket
   armada map [options] -- <command>    run the command once per item
-  armada run <commit|worktree> [--deadline=S] [--pool=N] [--priority=N] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
+  armada run <commit|worktree> [--deadline=S] [--by=T] [--pool=N] [--priority=N] [--label=<text>] [--secrets=<A,B>] [--json] [-- <plan args>]
                                        run a project's CI from the commit's .armada.json; --json prints the
                                        progress to stderr and one JSON verdict object to stdout
   armada verdict <commit|worktree> [--json]
@@ -112,7 +112,9 @@ deploy options:
 
 run options:
   --deadline=S         the whole CI run's limit, plan and tasks together, in seconds
-                       (default .armada.json's deadline, or 1800)
+                       (default .armada.json's deadline, or 1800); its judges' and later map tasks' jobs may run
+                       a task's timeout and ten minutes past it, to judge what its first wave drew
+  --by=T               when, in seconds since the epoch, its caller needs its answer: nothing runs past it
 
 Every command takes --connection=<file>, or ARMADA_CONNECTION, to use another deployment; in a project whose
 .armada.json names a "deployment", that one is the default.
@@ -129,7 +131,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['deploy', { options: ['account=', 'name=', 'vcpus=', 'memory=', 'drain', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'priority=', 'inputs=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'fresh', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
-  ['run', { options: ['deadline=', 'pool=', 'priority=', 'label=', 'secrets=', 'json'], words: 1 }],
+  ['run', { options: ['deadline=', 'by=', 'pool=', 'priority=', 'label=', 'secrets=', 'json'], words: 1 }],
   ['verdict', { options: ['json'], words: 1 }],
   ['push', { options: [], words: 0 }],
   ['dev', { options: [], words: 0 }],
@@ -894,7 +896,7 @@ async function main(): Promise<number> {
     case 'run':
       if (target === undefined) throw new Error('run needs a commit or a worktree, as in: armada run HEAD');
 
-      return await runCI(connect(), target, { deadline: whole('deadline'), pool: whole('pool'), priority: whole('priority', -Infinity), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json'), retention: boundsOf(retentionOf(), {}) });
+      return await runCI(connect(), target, { deadline: whole('deadline'), by: whole('by'), pool: whole('pool'), priority: whole('priority', -Infinity), label: option('label') ?? '', planArgs: rest, secrets: option('secrets')?.split(',').filter(Boolean) ?? [], json: flag('json'), retention: boundsOf(retentionOf(), {}) });
 
     case 'verdict':
       if (target === undefined) throw new Error('verdict needs a commit or a worktree, as in: armada verdict HEAD');

@@ -15,7 +15,7 @@ import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from
 import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, timedShort, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
-import { ARTIFACTS_PATH, atOnce, JOB_DEADLINE_SECONDS, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
+import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
 import { describeSummary, producing, retainRuns, RUNS, type Bounds } from './runs';
 import { describeBoots, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Meta, type Recipe, type Result } from './task';
@@ -55,18 +55,15 @@ export function remainingDeadline(deadlineAt: number): number | null {
  *  start, which a busy fleet makes minutes. */
 export const LATER_START_SECONDS = 600;
 
-/** What a run that begins with its driver may take besides its own, so its driver reports it: the webhook's driver
- *  is one job of `JOB_DEADLINE_SECONDS` (worker/src/hooks.ts `driverSpec`), and its clone and install come first. */
-export const DRIVER_SECONDS = 15 * 60;
-
 /** When a run's later waves (judges', later map tasks') must end, together: one task's `timeout` and
  *  `LATER_START_SECONDS` past the run's deadline (`deadlineAt`), so a judged run whose first wave ran long still
  *  judges what it drew (Dew's train 795, 2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran
- *  out, and the run ended ungraded), but never past what its driver allows from the run's start (`began`). */
-export function laterEnd(began: number, deadlineAt: number, timeout: number | null | undefined): number {
-  const allowed = began + (JOB_DEADLINE_SECONDS - DRIVER_SECONDS) * 1000;
+ *  out, and the run ended ungraded); never past `by`, the time by which whoever runs it needs its answer (`--by`: a
+ *  webhook's driver, whose job ends then), nor before the deadline itself. */
+export function laterEnd(deadlineAt: number, timeout: number | null | undefined, by: number | undefined): number {
+  const later = deadlineAt + ((timeout ?? 0) + LATER_START_SECONDS) * 1000;
 
-  return Math.max(deadlineAt, Math.min(deadlineAt + ((timeout ?? 0) + LATER_START_SECONDS) * 1000, allowed));
+  return Math.max(deadlineAt, by === undefined ? later : Math.min(later, by));
 }
 
 /** Why a run that could start no further job is ungraded. */
@@ -520,6 +517,8 @@ export function lanesFor(estimates: readonly (number | undefined)[], weights: re
 export interface RunOptions {
   /** The whole run's bound in seconds; the commit's config (1800 by default) when absent. */
   readonly deadline?: number;
+  /** When, in seconds since the epoch, whoever runs it needs its answer: its later waves end by then (`laterEnd`). */
+  readonly by?: number;
   /** The most containers the run takes at once, within the commit's config `pool`: a run beside others on one
    *  deployment, bounded so they share its fleet. What it runs, and so its verdict, is the commit's either way. */
   readonly pool?: number;
@@ -607,12 +606,12 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 
 /** `planArgs` narrow the run: they follow the plan command (a tier, a few files), and the verdict of a narrowed run is
  *  printed and reported but never stored as the commit's. */
-async function runGraded(armada: Armada, target: string, { deadline, pool: bound, priority, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
+async function runGraded(armada: Armada, target: string, { deadline, by, pool: bound, priority, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, base, environment, spec, upload, of } = await commitOf(armada, target);
   const deadlineAt = began + (deadline ?? config.deadline) * 1000;
   // When its later waves must end (`laterEnd`), past its deadline.
-  const laterAt = laterEnd(began, deadlineAt, config.task.timeout);
+  const laterAt = laterEnd(deadlineAt, config.task.timeout, by === undefined ? undefined : by * 1000);
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 

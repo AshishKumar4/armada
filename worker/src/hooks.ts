@@ -188,7 +188,7 @@ git -C "$HOME/repo" fetch -q "https://github.com/$ARMADA_REPO.git" "$ARMADA_COMM
   || git -C "$HOME/repo" fetch -q "https://x-access-token:$github@github.com/$ARMADA_REPO.git" "$ARMADA_COMMIT"
 cd "$HOME/repo"
 set +e
-env -u "$ARMADA_GITHUB_SECRET" bun "$HOME/armada/src/cli.ts" run "$ARMADA_COMMIT" --json > "$HOME/verdict.json"
+env -u "$ARMADA_GITHUB_SECRET" bun "$HOME/armada/src/cli.ts" run "$ARMADA_COMMIT" --by="$ARMADA_RUN_BY" --json > "$HOME/verdict.json"
 code=$?
 set -e
 count=$(bun -e 'const { greenOf } = await import(process.argv[1]); try { console.log(greenOf(JSON.parse(require("fs").readFileSync(process.argv[2], "utf8")).rows)); } catch { console.log("the run did not grade"); }' "$HOME/armada/src/grade.ts" "$HOME/verdict.json")
@@ -196,9 +196,14 @@ case "$code" in 0) status success "$count" ;; 1) status failure "$count" ;; *) s
 exit "$code"
 `;
 
-/** The job the webhook starts for a commit: one micro command task labelled `ci <project> <sha12>`, whose spec names
- *  the GitHub token's secret and asks for the deployment's bearer at claim, never in its stored env. */
-export function driverSpec(project: string, sha: string, { origin, sha: deploySha }: { readonly origin: string; readonly sha: string }, config: HookConfig): v.InferInput<typeof JobSpecSchema> {
+/** How long before its job's end a driver needs to post its run's status. */
+export const REPORT_SECONDS = 5 * 60;
+
+/** The job the webhook starts for a commit at `now` (ms since the epoch): one micro command task labelled `ci <project>
+ *  <sha12>`, whose spec names the GitHub token's secret and asks for the deployment's bearer at claim, never in its
+ *  stored env. Its run is told when its answer is needed (`--by`, ARMADA_RUN_BY): `REPORT_SECONDS` before the job's
+ *  own deadline, so its later waves never outlive it and its status is posted (src/ci.ts `laterEnd`). */
+export function driverSpec(project: string, sha: string, { origin, sha: deploySha }: { readonly origin: string; readonly sha: string }, config: HookConfig, now: number): v.InferInput<typeof JobSpecSchema> {
   return {
     recipe: DRIVER_RECIPE,
     run: { kind: 'command' },
@@ -206,11 +211,11 @@ export function driverSpec(project: string, sha: string, { origin, sha: deploySh
     output: false,
     pool: 1,
     label: `ci ${project} ${sha.slice(0, 12)}`,
-    env: { ARMADA_URL: origin, ARMADA_DEPLOYED: deploySha, ARMADA_REPO: config.repo, ARMADA_COMMIT: sha, ARMADA_GITHUB_SECRET: config.tokenSecret, TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}` },
+    env: { ARMADA_URL: origin, ARMADA_DEPLOYED: deploySha, ARMADA_REPO: config.repo, ARMADA_COMMIT: sha, ARMADA_GITHUB_SECRET: config.tokenSecret, TARGET_URL: `${origin}/ui/#/ci/${project}/${sha}`, ARMADA_RUN_BY: String(Math.floor(now / 1000) + JOB_DEADLINE_SECONDS - REPORT_SECONDS) },
     secrets: [config.tokenSecret],
     deployToken: true,
-    // As long as any job of its run may take (a run's later waves start within their own bounds past its deadline,
-    // src/ci.ts `laterDeadline`), so the run returns and the driver posts its status before its own timeout ends it.
+    // Its whole job's bound, which its run's `--by` keeps clear of (`REPORT_SECONDS`).
+    deadline: JOB_DEADLINE_SECONDS,
     timeout: JOB_DEADLINE_SECONDS,
   };
 }

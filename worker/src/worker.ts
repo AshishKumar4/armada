@@ -687,7 +687,7 @@ async function drive(request: Request, env: Env, { project, config, payload }: {
 
   // The driver installs armada at the commit this Worker was deployed from, which `armada deploy` records.
   if (env.ARMADA_SHA === undefined || env.ARMADA_SHA === '') throw new Refused(503, 'this Worker does not know its commit; deploy it with armada deploy');
-  const spec = v.parse(JobSpecSchema, driverSpec(project, sha, { origin: new URL(request.url).origin, sha: env.ARMADA_SHA }, config));
+  const spec = v.parse(JobSpecSchema, driverSpec(project, sha, { origin: new URL(request.url).origin, sha: env.ARMADA_SHA }, config, Date.now()));
   const held = spec.secrets.length === 0 ? {} : await env.SECRETS.getByName(SINGLE).values(spec.secrets);
   const unset = spec.secrets.find((name) => !(name in held));
 

@@ -4,12 +4,12 @@ import { appendFileSync, chmodSync, closeSync, cpSync, existsSync, mkdirSync, mk
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { DRIVER_SECONDS, extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
+import { extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packOf } from '../src/git';
 import { parseConfig } from '../src/config';
 import { deploymentConfig } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { DRIVER, environmentKey, HostSchema, JOB_DEADLINE_SECONDS, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
@@ -2247,13 +2247,13 @@ describe('a CI deadline', () => {
 });
 
 describe('a later wave\'s end', () => {
-  test('is a task\'s timeout and a start\'s allowance past the run\'s deadline, within what its driver allows', () => {
+  test('is a task\'s timeout and a start\'s allowance past the run\'s deadline, never past when its caller needs it', () => {
     // Dew's train 795: a 2,700 s run of 1,800 s tasks; its judges, 192 s before the deadline, get 2,592 s more.
-    expect(laterEnd(0, 2700_000, 1800)).toBe((2700 + 1800 + LATER_START_SECONDS) * 1000);
-    // A task's timeout longer than a driver's job: the run still ends before its driver does.
-    expect(laterEnd(0, 1800_000, 21600)).toBe((JOB_DEADLINE_SECONDS - DRIVER_SECONDS) * 1000);
+    expect(laterEnd(2700_000, 1800, undefined)).toBe((2700 + 1800 + LATER_START_SECONDS) * 1000);
+    // A caller that needs the answer sooner (a webhook's driver, `--by`) has it by then.
+    expect(laterEnd(1800_000, 21600, 9000_000)).toBe(9000_000);
     // Never before the run's own deadline.
-    expect(laterEnd(0, JOB_DEADLINE_SECONDS * 1000, 1800)).toBe(JOB_DEADLINE_SECONDS * 1000);
+    expect(laterEnd(9000_000, 1800, 5000_000)).toBe(9000_000);
   });
 });
 
