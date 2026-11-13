@@ -12,7 +12,7 @@ import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
 import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
-import { AccountFull, AS_USER, EXEC_MS, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
+import { AccountFull, AS_USER, CPU_INFO, EXEC_MS, hostOf, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
 import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
 
@@ -626,8 +626,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
         });
 
       case 'snapshot': {
-        // The phases' logs stay out of the environment.
+        // The phases' logs stay out of the environment; the host it is taken on is recorded with it.
         await must(container, 'clearing the phases', ['rm', '-rf', `${STATE}/phases`], { ms: EXEC_MS });
+        const host = hostOf((await must(container, 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
         const [taken] = await Promise.allSettled([container.snapshotContainer({ name: `armada-${preparation.key.slice(0, 20)}` })]);
 
         if (taken.status === 'rejected') {
@@ -639,7 +640,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
         }
 
 
-        return { snapshot: { id: taken.value.id, size: taken.value.size } };
+        return { snapshot: { id: taken.value.id, size: taken.value.size, host } };
       }
     }
   }

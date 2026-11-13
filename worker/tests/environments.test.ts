@@ -891,3 +891,26 @@ describe('a pack base (#34)', () => {
   });
 });
 
+
+describe('an environment\'s snapshot', () => {
+  test('records the host it was taken on, as the platform may place its containers by it', async () => {
+    const recorded: Generation[] = [];
+    // A container whose every exec answers at once, its host an EPYC 9684X (25/17).
+    const stored = state(Object.assign(container((argv) => (argv[2] ?? '').includes('/proc/cpuinfo')
+      ? { exitCode: 0, stdout: 'vendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 17\nmodel name\t: AMD EPYC 9684X 96-Core Processor\nflags\t\t: avx2\n' }
+      : { exitCode: 0, stdout: argv[3] === 'wait' ? '0\n' : ((argv[2] ?? '').includes('echo ready') ? 'ready\n' : '') }),
+    { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
+    const preparer = new ArmadaPreparer(stored.ctx, world({
+      ENVIRONMENTS: namespace(() => ({
+        beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
+        prepared: async (generation: Generation) => { recorded.push(generation); },
+      })),
+    }));
+
+    await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
+
+    for (let alarm = 0; alarm < 20 && recorded.length === 0; alarm += 1) await preparer.alarm();
+
+    expect(recorded.map(({ snapshot }) => [snapshot.host?.family, snapshot.host?.model])).toEqual([[25, 17]]);
+  });
+});

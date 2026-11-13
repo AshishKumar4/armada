@@ -599,7 +599,10 @@ export function briefOf(status: JobStatus): JobBrief {
 /** An environment snapshot: what every container with its key starts from. */
 export const GenerationSchema = v.object({
   key: v.string(),
-  snapshot: v.object({ id: v.string(), size: v.number() }),
+  /** Its snapshot, and the host it was taken on: which hosts the platform places a snapshot's containers on is not
+   *  ours to choose, and a pinned job of one taken on another CPU may find none of its own (Dew, 2026-11-13: one
+   *  environment's 179 containers all landed on 25/1 while its jobs required 25/17). Absent from an earlier Worker's. */
+  snapshot: v.object({ id: v.string(), size: v.number(), host: v.optional(HostSchema) }),
   /** The commit whose checkout and install it holds, for a repository recipe. */
   sha: v.nullable(v.string()),
   /** Its commit's history stops short of the root: prepared from a shallow pack, so never the base of a pack of `full`
