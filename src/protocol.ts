@@ -356,6 +356,20 @@ export const CpusSchema = v.pipe(v.union([CpuSchema, v.pipe(v.array(CpuSchema), 
 /** CPUs as `--cpu` takes them and a person reads them: `AuthenticAMD/25/17 or AuthenticAMD/26/17`. */
 export const cpuLabel = (cpus: readonly Cpu[]): string => cpus.map(({ vendor, family, model }) => `${vendor}/${String(family)}/${String(model)}`).join(' or ');
 
+/** CPUs as `cpuLabel` writes them and `--cpu` takes them, a comma between two (`vendor/family/model`); `what` names
+ *  where they were given, for the refusal of one that is not. */
+export function cpusOf(given: string, what: string): Cpu[] {
+  return given.split(',').map((each) => {
+    const [vendor, family, model, ...extra] = each.split('/');
+
+    if (vendor === undefined || vendor === '' || family === undefined || model === undefined || extra.length > 0 || !/^\d+$/u.test(family) || !/^\d+$/u.test(model)) {
+      throw new Error(`${what} takes vendor/family/model as /proc/cpuinfo has them, such as AuthenticAMD/25/17, or several with a comma between, not ${given}`);
+    }
+
+    return { vendor, family: Number(family), model: Number(model) };
+  });
+}
+
 /** Whether `host` has one of the CPUs `cpus`. */
 export const hasCpu = (host: Host, cpus: readonly Cpu[]): boolean => cpus.some((cpu) => host.vendor === cpu.vendor && host.family === cpu.family && host.model === cpu.model);
 
@@ -685,6 +699,8 @@ export const HealthSchema = v.object({
   contract: v.optional(v.string()),
   /** When the registry credentials a `--keep` deploy gave the Worker expire, an ISO date; absent without them. */
   keepUntil: v.optional(v.string()),
+  /** The CPUs it prepares environments on (`--prepare-cpu`, PREPARE_CPU); absent where it names none. */
+  prepareCpu: v.optional(v.string()),
 });
 
 export type Health = v.InferOutput<typeof HealthSchema>;

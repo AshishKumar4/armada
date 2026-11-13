@@ -31,6 +31,10 @@ export interface Env {
   readonly ARMADA_TOKEN: string;
   /** Concurrent vCPUs across every job of this deployment. */
   readonly FLEET_VCPUS: string;
+  /** The CPUs an environment is prepared on (`cpusOf`'s form), where the deployment names them: the platform may place
+   *  a snapshot's containers by the host it was taken on, so a pinned job finds hosts of its own only for a snapshot
+   *  taken on one (`ArmadaPreparer`). Unset, a preparation takes the host it is given. */
+  readonly PREPARE_CPU?: string;
   /** Concurrent memory, in MiB, across every job of this deployment: `armada deploy` gives the account's memory in
    *  FLEET_VCPUS's share of its vCPUs. An earlier deploy gave none, and its fleet counted vCPUs alone. */
   readonly FLEET_MEMORY_MIB?: string;

@@ -10,9 +10,9 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { boundaryOf, failureTail, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
+import { boundaryOf, cpusOf, failureTail, hasCpu, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
-import { AccountFull, AS_USER, CPU_INFO, EXEC_MS, hostOf, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
+import { AccountFull, AS_USER, CPU_INFO, EXEC_MS, hostOf, Misplaced, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
 import { CAPACITY_RETRY_MS, grantOf, letGo } from './fleet';
 
@@ -461,7 +461,16 @@ export interface Preparation {
    *  absent until then. */
   readonly refused?: number;
   readonly room?: Room | 'failed';
+  /** When its container first started on a host of none of the deployment's PREPARE_CPU; absent until then. */
+  readonly misplaced?: number;
 }
+
+/** How long a preparation starts its container again for one on a host of the deployment's PREPARE_CPU, as a pinned
+ *  job does for its own (job.ts `PIN_WAIT_MS`); past it, it prepares where it is, its snapshot's host recorded. */
+const PREPARE_PIN_MS = 8 * 60_000;
+
+/** How soon a misplaced preparation starts its container again. */
+const REPLACE_MS = 5000;
 
 /** A phase not done yet: its alarm takes it up again in `retryInMs`. */
 interface Pending {
@@ -556,6 +565,15 @@ export class ArmadaPreparer extends DurableObject<Env> {
       await this.ctx.storage.put('preparation', { ...advanced, phase: next } satisfies Preparation);
       await this.ctx.storage.setAlarm(Date.now());
     } catch (cause) {
+      // Its container is on a host of no CPU the deployment prepares on: it starts again in a moment, keeping its hold.
+      if (cause instanceof Misplaced) {
+        await this.container().destroy();
+        await this.ctx.storage.put('preparation', { ...preparation, misplaced: preparation.misplaced ?? Date.now() } satisfies Preparation);
+        console.log(JSON.stringify({ preparation: preparation.key, misplaced: cause.message }));
+
+        return await this.ctx.storage.setAlarm(Date.now() + REPLACE_MS);
+      }
+
       // The account had no room for its container: its hold goes back, and it asks the fleet again in a moment.
       if (cause instanceof AccountFull) {
         await letGo(this.ctx, this.env, { holder: holderOf(preparation), inactivityMs: LEASE_MS });
@@ -595,6 +613,8 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
               throw new PlatformFailed('the container would not start', { cause });
             }
+
+            await this.placed(preparation);
           },
         });
 
@@ -643,6 +663,20 @@ export class ArmadaPreparer extends DurableObject<Env> {
         return { snapshot: { id: taken.value.id, size: taken.value.size, host } };
       }
     }
+  }
+
+  /** Its container is on a host of the deployment's PREPARE_CPU, where it names some, or the preparation has started
+   *  it again for one as long as `PREPARE_PIN_MS` allows: `Misplaced` otherwise, which `alarm` answers by starting it
+   *  again in a moment. */
+  private async placed(preparation: Preparation): Promise<void> {
+    const required = this.env.PREPARE_CPU === undefined || this.env.PREPARE_CPU === '' ? undefined : cpusOf(this.env.PREPARE_CPU, 'PREPARE_CPU');
+
+    if (required === undefined) return;
+    const host = hostOf((await must(this.container(), 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
+
+    if (hasCpu(host, required) || Date.now() - (preparation.misplaced ?? Date.now()) >= PREPARE_PIN_MS) return;
+
+    throw new Misplaced(host, required);
   }
 
   /** The account's snapshot storage is full: the registry frees what this deployment can (`makeRoom`), and the snapshot

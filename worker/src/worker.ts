@@ -572,6 +572,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return Response.json({
       ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await stillOpen(env, fleet), sha: env.ARMADA_SHA === '' ? undefined : env.ARMADA_SHA,
       contract: env.ARMADA_CONTRACT === '' ? undefined : env.ARMADA_CONTRACT, keepUntil,
+      prepareCpu: env.PREPARE_CPU === '' ? undefined : env.PREPARE_CPU,
     } satisfies Health);
   }
 

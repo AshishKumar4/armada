@@ -340,6 +340,16 @@ describe('a deployment\'s wrangler config', () => {
   });
 });
 
+describe('a deployment\'s preparation CPUs', () => {
+  test('are in its config where it names them, and nowhere where it names none', () => {
+    const template = readFileSync(join(import.meta.dir, '..', 'worker', 'wrangler.jsonc'), 'utf8');
+    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/w.ts', dashboard: '/tmp/dash', bucket: 'b', vcpus: 64, sha: 'b'.repeat(40), contract: 'c'.repeat(64) };
+    const vars = (prepareCpu?: string) => v.parse(v.looseObject({ vars: v.record(v.string(), v.string()) }), JSON.parse(deploymentConfig(template, { ...deployment, prepareCpu }))).vars['PREPARE_CPU'];
+
+    expect([vars('AuthenticAMD/25/17,AuthenticAMD/26/17'), vars()]).toEqual(['AuthenticAMD/25/17,AuthenticAMD/26/17', undefined]);
+  });
+});
+
 describe('a deployment\'s fleet cap', () => {
   test('is the one asked, else the deployed Worker\'s own, and a deploy with neither is refused', () => {
     expect([fleetCap('x', 64, 2900), fleetCap('x', undefined, 2900)]).toEqual([64, 2900]);
