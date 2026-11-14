@@ -900,8 +900,33 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
   // Why the run stopped starting jobs, once one could not be followed: a part of the run still going starts none after.
   let stopped: string | null = null;
-  // The first wave's tail followed to its end (`tasked`): a wave the rest of the pool cannot hold waits for it.
-  let tailEnded: Promise<unknown> = Promise.resolve();
+  // A running job ending (`released`): a wave the rest of the pool cannot hold waits for one, then looks again.
+  let freed: () => void = () => undefined;
+  let tailFreed = new Promise<void>((resolve) => { freed = resolve; });
+
+  // The keys under which each started job's containers are counted off the pool's rest (`tail`), one a job.
+  let reserving = 0;
+
+  /** Job `each`, started by `launch` (which counted its containers off the pool's rest under `each.held`: `tail`,
+   *  `sharesOf`), followed to its end (`ending`), its containers given back as it ends, and any wave waiting for room
+   *  woken (`tailFreed`): every job of the run holds what it took while it runs, so waves begun beside each other
+   *  (a judges' job beside map jobs, two judges' jobs) never pass the pool. */
+  const following = async (each: Parameters<typeof followed>[0] & { readonly held: string }) => {
+    try {
+      return await ending(each);
+    } finally {
+      released([each.held]);
+    }
+  };
+
+  /** The containers held under `keys` given back to the pool's rest, and every wave waiting for room woken to look
+   *  again, or to find the run stopped. */
+  const released = (keys: readonly string[]) => {
+    for (const key of keys) tail.delete(key);
+
+    freed();
+    tailFreed = new Promise<void>((resolve) => { freed = resolve; });
+  };
 
   /** A job followed to its end, as `followed`; one that cannot be leaves the run without an answer, its jobs cancelled
    *  and none started after. */
@@ -918,14 +943,19 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
   /** A wave's jobs (`what`), each a group's `indexes` given `more`, started at once within the seconds `within`
    *  gives as they start (null: none may): those started, or why one did not start, the others then cancelled. */
-  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: () => number | null, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string })[] }> => {
+  const launch = async (groupsOf: readonly { readonly at: number; readonly indexes: readonly number[]; readonly more?: Parameters<typeof start>[3] }[], within: () => number | null, what: string): Promise<{ readonly refused: string } | { readonly these: (ReturnType<typeof start> & { readonly id: string; readonly held: string })[] }> => {
     let shares = sharesOf(groupsOf);
     let bounded = within();
 
-    // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within its bound as it
-    // stands then: what is left of the run's deadline (#37), or not at all; a later wave's of its own (`laterEnd`).
-    if ('need' in shares && tail.size > 0) {
-      await tailEnded;
+    // A wave the pool's rest cannot hold waits for running jobs to end, each end a look again, then starts within its
+    // bound as it stands then: what is left of the run's deadline (#37), or not at all; a later wave's of its own
+    // (`laterEnd`).
+    // Room for each job's widest gang among the containers no running job holds, or the wait goes on.
+    const fits = () => groupsOf.reduce((sum, { indexes }) => sum + Math.max(1, ...indexes.map((index) => ranks[index] ?? 1)), 0)
+      <= containers - [...tail.values()].reduce((sum, each) => sum + each, 0);
+
+    while (('need' in shares || !fits()) && tail.size > 0 && stopped === null) {
+      await tailFreed;
       shares = sharesOf(groupsOf);
       bounded = within();
     }
@@ -933,7 +963,16 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     if (stopped !== null) return { refused: stopped };
 
     if (bounded === null) return { refused: PASSED(what) };
-    const starting = groupsOf.map((each, place) => start(each, 'need' in shares ? 1 : shares[place] ?? 1, bounded, each.more));
+
+    // Each job's containers counted off the pool's rest as it starts, before any other wave can look (`following`).
+    const starting = groupsOf.map((each, place) => {
+      const begun = start(each, 'need' in shares ? 1 : shares[place] ?? 1, bounded, each.more);
+      const key = `held-${String(reserving++)}`;
+
+      tail.set(key, begun.pool);
+
+      return { ...begun, held: key };
+    });
 
     started.push(...starting.map(({ job }) => job));
     const created = await Promise.allSettled(starting.map(async ({ job }) => await job.id));
@@ -942,6 +981,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     // A job that did not start leaves the run ungraded, and the others, started with it and not yet followed, end.
     if (refused !== undefined) {
       stopped ??= 'a task job did not start';
+      released(starting.map(({ held: key }) => key));
       await cancelEach(started, stopped);
 
       return { refused: errorOf({ cause: refused.reason }).message };
@@ -965,17 +1005,20 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
   const wave = async (...args: Parameters<typeof launch>) => {
     const launched = await launch(...args);
 
-    return 'refused' in launched ? launched : { landed: (await Promise.all(launched.these.map(ending))).flat() };
+    return 'refused' in launched ? launched : { landed: (await Promise.all(launched.these.map(following))).flat() };
   };
 
   // Why each judge whose map tasks did not all pass fails, by its plan index.
   const unjudged = new Map<number, string>();
 
-  /** The judges' part of a run, given the first wave's map tasks' results (`drawnLanded`): each judge's judgements, its
-   *  later map tasks between them where it asks for them; the results it landed, or why one of its jobs did not
-   *  start. */
-  const judgesPart = async (drawnLanded: readonly Result<Json, string | null>[]) => {
+  /** The judges' part of a run, given the first wave's map tasks' jobs (`mapJobs`, each its results once it ends): each
+   *  judge's judgements, its later map tasks between them where it asks for them; the results it landed, or why one of
+   *  its jobs did not start. A judge's first judgement starts as the job that lands its last first-stage map task
+   *  ends, beside the map jobs still running, never after them all (Dew's trains of 2026-11-14: every judge began at
+   *  the map wave's end, its last 1.5 to 3 minutes of the CI's wall). */
+  const judgesPart = async (mapJobs: readonly Promise<readonly Result<Json, string | null>[]>[]) => {
     let landed: Result<Json, string | null>[] = [];
+    const drawnLanded: Result<Json, string | null>[] = [];
 
     /** `asked` judges (all where undefined) judged over their map tasks that ran, those of `maps` in `among` (its first
      *  judgement its map tasks but the later ones, its second all of them): each judges' job takes the artifacts its
@@ -1022,12 +1065,32 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       return await wave(judging, () => remainingDeadline(laterAt), 'judges\' jobs');
     };
 
-    const first = await judgedOver(undefined, (map) => !later.has(map));
+    // Each judge judged first once its first-stage map tasks have all landed, as each map job ends; any whose did not
+    // all land (a job that lost one) with the rest once every map job has ended, failing as `judgedOver` says.
+    const firstly = (map: number) => !later.has(map);
+    const judgedFirst = new Set<number>();
 
-    if (first === null) return { landed };
+    const judgedReady = async (all: boolean) => {
+      const have = new Set(drawnLanded.map((result) => result.index));
+      const ready = new Set([...judges].filter((index) => !judgedFirst.has(index) && (all || (mapsOf[index] ?? []).filter(firstly).every((map) => have.has(map)))));
 
-    if ('refused' in first) return first;
-    landed = [...landed, ...first.landed];
+      for (const index of ready) judgedFirst.add(index);
+
+      return ready.size === 0 ? null : await judgedOver(ready, firstly);
+    };
+
+    const firsts = [...await Promise.all(mapJobs.map(async (job) => {
+      drawnLanded.push(...await job);
+
+      return await judgedReady(false);
+    })), await judgedReady(true)];
+
+    const refusedFirst = firsts.find((each) => each !== null && 'refused' in each);
+
+    if (refusedFirst !== undefined && refusedFirst !== null && 'refused' in refusedFirst) return refusedFirst;
+    landed = firsts.flatMap((each) => each === null || 'refused' in each ? [] : each.landed);
+
+    if (firsts.every((each) => each === null)) return { landed: drawnLanded };
     // The judges whose first judgement asks for their later map tasks (a row's `more`): those run, then each judges
     // again over all its map tasks, that judgement its answer.
     const asking = new Set([...judges].filter((index) => !unjudged.has(index) && (verdicts.get(index) ?? []).some((row) => row.more === true)));
@@ -1044,13 +1107,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       landed = [...landed, ...drawnLater.landed];
     }
 
-    if (asking.size === 0) return { landed };
+    if (asking.size === 0) return { landed: [...drawnLanded, ...landed] };
 
     // A first judgement that asked is no answer: the second's rows are, or none where it never landed.
     for (const index of asking) verdicts.delete(index);
     const second = await judgedOver(asking, () => true);
 
-    if (second === null) return { landed };
+    if (second === null) return { landed: [...drawnLanded, ...landed] };
 
     if ('refused' in second) return second;
 
@@ -1061,7 +1124,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       if (still.length > 0) unjudged.set(index, `its second judgement still asks for more, past its last map tasks: ${still.map(rowName).join(', ')}`);
     }
 
-    return { landed: [...landed, ...second.landed] };
+    return { landed: [...drawnLanded, ...landed, ...second.landed] };
   };
 
   const tasked = await cancelOnInterrupt(started, async () => {
@@ -1071,9 +1134,8 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       const mapped = await wave(first, () => left, 'task jobs');
 
       if ('refused' in mapped || judges.size === 0) return mapped;
-      const judged = await judgesPart(mapped.landed);
 
-      return 'refused' in judged ? judged : { landed: [...mapped.landed, ...judged.landed] };
+      return await judgesPart([Promise.resolve(mapped.landed)]);
     }
 
     // The first wave's map tasks in jobs of their own (`grouped`): its judges begin as those jobs end, while its other
@@ -1084,25 +1146,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     if ('refused' in launched) return launched;
     const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
 
-    for (const { each, drawing } of firstJobs) if (!drawing) tail.set(each.id, each.pool);
+    // Every first-wave job holds its containers off the pool's rest until it ends (`following`), the map tasks' jobs too, so
+    // judges' jobs begun beside them take only what is free.
+    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => await following(each)));
 
-    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => {
-      try {
-        return await ending(each);
-      } finally {
-        tail.delete(each.id);
-      }
-    }));
-
-    // Settled either way: a wave waiting on it starts once the tail's jobs end, or finds the run stopped.
-    tailEnded = Promise.allSettled([tailLanded]);
-
-    const judged = (async () => {
-      const drawnLanded = (await Promise.all(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await ending(each)))).flat();
-      const part = await judgesPart(drawnLanded);
-
-      return 'refused' in part ? part : { landed: [...drawnLanded, ...part.landed] };
-    })();
+    // The judges' part, each map job's results as it ends: a judge's first judgement waits for its own map tasks'
+    // job, not every one (`judgesPart`).
+    const judged = judgesPart(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await following(each)));
 
     // Both parts end before the run answers: a failure in either stops the other starting jobs (`stopped`) and cancels
     // its own.

@@ -1935,18 +1935,23 @@ describe('armada run', () => {
     expect({ exit: ran.exit, graded: reportOf(ran.report).graded }).toEqual({ exit: 2, graded: 'not graded' });
   });
 
-  // Dew's train 484, 2026-11-02: a 28-minute test file held the first wave, its check-1 judges began at 37:05 of a
-  // 45-minute deadline, and one ran past it, leaving the run without a verdict.
-  test('a judge begins once its map tasks have landed, while a long task of the first wave runs on', async () => {
-    const plan: Json = { include: [{ name: 'a' }, { name: 'slow' }, { name: 'j', after: ['a'] }] };
+  // A judge begins once its own map tasks have landed, while the rest of the first wave runs on: beside a long task of
+  // the first wave (Dew's train 484, 2026-11-02: a 28-minute test file held every judge to 37:05 of a 45-minute
+  // deadline, and one ran past it), and beside another site's map job (Dew's trains of 2026-11-14: every check-1 judge
+  // began once the last map job had ended, the CI's last minutes). The held task runs until j's judges' job exists, so
+  // a run whose judges wait for it never ends.
+  test.each([
+    { case: 'a long task of the first wave', include: [{ name: 'a' }, { name: 'slow' }, { name: 'j', after: ['a'] }], heldName: 'slow', rows: ['j 0', 'slow 0'] },
+    { case: 'another site\'s map job', include: [{ name: 'a' }, { name: 'b', size: 'large' }, { name: 'j', after: ['a'] }, { name: 'k', after: ['b'], size: 'large' }], heldName: 'b', rows: ['j 0', 'k 0'] },
+  ])('a judge begins once its own map tasks have landed, beside $case', async ({ include, heldName, rows: expected }) => {
+    const plan: Json = { include };
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
 
     writeFileSync(join(drawn, 'draws.json'), '[]');
     const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
 
-    // slow runs until j's job exists, so a run whose judges wait on every task of the first wave never ends.
-    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'slow' && !created.some((items) => items.some((each) => nameOf(each) === 'j'));
+    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === heldName && !created.some((items) => items.some((each) => nameOf(each) === 'j'));
     const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
     const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
 
@@ -1954,8 +1959,9 @@ describe('armada run', () => {
 
     if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
+    const named = rows.map(({ name, exitCode }) => `${name} ${String(exitCode)}`).sort((one, other) => one.localeCompare(other));
 
-    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({ exit: 0, rows: [['slow', 0], ['j', 0]] });
+    expect({ exit: ran.exit, rows: named }).toEqual({ exit: 0, rows: [...expected] });
   }, 30_000);
 
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
