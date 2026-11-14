@@ -241,11 +241,13 @@ function sampled(group: string, dir: string): string {
 echo "$token" > ${peak}.token
 (prev=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat); at=$(date +%s%N); most=0
 echo "$prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state.$token
-while sleep ${String(PEAK_WINDOW_SECONDS)} && [ "$(cat ${peak}.token 2>/dev/null)" = "$token" ] && [ ! -s ${dir}/exit ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat 2>/dev/null) && [ -n "$now" ]; do
+while sleep ${String(PEAK_WINDOW_SECONDS)} && [ "$(cat ${peak}.token 2>/dev/null)" = "$token" ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat 2>/dev/null) && [ -n "$now" ]; do
   t=$(date +%s%N); span=$(( (t - at) / 1000 ))
   if [ "$span" -ge ${String(LEAST_WINDOW_US)} ]; then rate=$(( (now - prev) * 1000000 / span )); [ "$rate" -le "$most" ] || most=$rate; fi
   prev=$now; at=$t
   echo "$prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state.$token
+  # The window the task exited in is read and kept before the sampler stops, whenever its usage is read after.
+  [ ! -s ${dir}/exit ] || break
 done; rm -f ${peak}.part.$token) </dev/null >/dev/null 2>&1 &`;
 }
 

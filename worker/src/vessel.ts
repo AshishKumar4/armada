@@ -754,7 +754,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const value = out === null || out.small === null ? undefined : textOf(out.small);
     // A task that exited 0 with a red row in its verdict (a CI's task writes its red rows and exits 0): read whole,
     // from R2 where the output was too large to ride inline, for packing to run its item alone after (`packedRed`).
-    const redRow = exitCode === 0 && out !== null && redRowIn(value ?? await (await this.env.ARTIFACTS.get(runKey(spec.jobId, index, kept, 'output')))?.text()) ? true : undefined;
+    const redRow = exitCode === 0 && out !== null && redRowIn(value ?? await this.verdictText(runKey(spec.jobId, index, kept, 'output'))) ? true : undefined;
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 && artifactsLost === undefined ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
 
@@ -770,6 +770,16 @@ export class ArmadaVessel extends DurableObject<Env> {
       index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
       host: await this.ctx.storage.get<Host>('host'),
     };
+  }
+
+  /** The stored output at `key` as text where it is no larger than a verdict may be (`VERDICT_BYTES`), else undefined:
+   *  an output past it (an image, an archive) is never read into the Worker's memory. */
+  private async verdictText(key: string): Promise<string | undefined> {
+    const head = await this.env.ARTIFACTS.head(key);
+
+    if (head === null || head.size > VERDICT_BYTES) return undefined;
+
+    return await (await this.env.ARTIFACTS.get(key))?.text();
   }
 
   /** A slot's task cleared (`clearTask`) once its answer is read, before its job counts the slot free. A container that
@@ -870,6 +880,10 @@ export class ArmadaVessel extends DurableObject<Env> {
     return false;
   }
 }
+
+/** The largest output read as a verdict when it is too large to ride inline: a CI's verdict of a few thousand rows is
+ *  some MB (Dew's ~7 MB), far within a Worker's memory. */
+const VERDICT_BYTES = 32 * 1024 * 1024;
 
 /** A CI task's verdict, its output: its rows, each its exit, the rest of each row the CI's own. */
 const VerdictRowsSchema = v.object({ rows: v.array(v.looseObject({ exitCode: v.number() })) });
