@@ -1183,6 +1183,9 @@ export class ArmadaJob extends DurableObject<Env> {
     if (task !== undefined && member === undefined) this.placement.learn(`${id}/${String(outcome.index)}/${String(outcome.attempt)}/${name}`, name, outcome, spec?.slots ?? 1);
     const packed = kept !== null && task !== undefined && member === undefined ? this.placement.packedFailure(name, kept) : null;
 
+    // A red row written by a packed run that exited 0: its item runs alone from the next job on, its red kept.
+    if (kept !== null && task !== undefined && member === undefined && packed === null) this.placement.packedRed(name, kept);
+
     const named = kept !== null && kept.exitCode !== 0
       && (retries?.exitCodes.includes(kept.exitCode) === true || (kept.error !== undefined && retries?.errors.includes(kept.error) === true));
 
