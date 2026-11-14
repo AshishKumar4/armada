@@ -900,8 +900,21 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
   // Why the run stopped starting jobs, once one could not be followed: a part of the run still going starts none after.
   let stopped: string | null = null;
-  // The first wave's tail followed to its end (`tasked`): a wave the rest of the pool cannot hold waits for it.
-  let tailEnded: Promise<unknown> = Promise.resolve();
+  // A job of the first wave ending (`held`): a wave the rest of the pool cannot hold waits for one, then looks again.
+  let freed: () => void = () => undefined;
+  let tailFreed = new Promise<void>((resolve) => { freed = resolve; });
+  /** First-wave job `each` followed to its end (`ending`), the containers it holds counted off the pool's rest
+   *  (`tail`, `sharesOf`) until it ends: its map tasks' jobs as much as the rest, while judges' jobs start beside them. */
+  const held = async (each: Parameters<typeof followed>[0] & { readonly id: string; readonly pool: number }) => {
+    tail.set(each.id, each.pool);
+    try {
+      return await ending(each);
+    } finally {
+      tail.delete(each.id);
+      freed();
+      tailFreed = new Promise<void>((resolve) => { freed = resolve; });
+    }
+  };
 
   /** A job followed to its end, as `followed`; one that cannot be leaves the run without an answer, its jobs cancelled
    *  and none started after. */
@@ -924,8 +937,8 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
     // A wave the pool's rest cannot hold waits for the first wave's tail to end, then starts within its bound as it
     // stands then: what is left of the run's deadline (#37), or not at all; a later wave's of its own (`laterEnd`).
-    if ('need' in shares && tail.size > 0) {
-      await tailEnded;
+    while ('need' in shares && tail.size > 0 && stopped === null) {
+      await tailFreed;
       shares = sharesOf(groupsOf);
       bounded = within();
     }
@@ -1102,22 +1115,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     if ('refused' in launched) return launched;
     const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
 
-    for (const { each, drawing } of firstJobs) if (!drawing) tail.set(each.id, each.pool);
-
-    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => {
-      try {
-        return await ending(each);
-      } finally {
-        tail.delete(each.id);
-      }
-    }));
-
-    // Settled either way: a wave waiting on it starts once the tail's jobs end, or finds the run stopped.
-    tailEnded = Promise.allSettled([tailLanded]);
+    // Every first-wave job holds its containers off the pool's rest until it ends (`held`), the map tasks' jobs too, so
+    // judges' jobs begun beside them take only what is free.
+    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => await held(each)));
 
     // The judges' part, each map job's results as it ends: a judge's first judgement waits for its own map tasks'
     // job, not every one (`judgesPart`).
-    const judged = judgesPart(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await ending(each)));
+    const judged = judgesPart(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await held(each)));
 
     // Both parts end before the run answers: a failure in either stops the other starting jobs (`stopped`) and cancels
     // its own.
