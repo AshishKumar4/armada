@@ -1961,7 +1961,7 @@ describe('armada run', () => {
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
     const named = rows.map(({ name, exitCode }) => `${name} ${String(exitCode)}`).sort((one, other) => one.localeCompare(other));
 
-    expect({ exit: ran.exit, rows: named }).toEqual({ exit: 0, rows: expected });
+    expect({ exit: ran.exit, rows: named }).toEqual({ exit: 0, rows: [...expected] });
   }, 30_000);
 
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
