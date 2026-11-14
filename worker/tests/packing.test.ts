@@ -49,7 +49,8 @@ function stores(answers: () => boolean = () => true, held: (() => Promise<void>)
 }
 
 /** The items these jobs run, each a run alone of its own measured beforehand (`learned`). */
-const MEASURED: readonly Json[] = ['a', 'b', 'c', 'd', 'e', 'f'];
+const MEASURED: readonly Json[] = ['a', 'b', 'c', 'd', 'e', 'f', { weight: 9 }, { weight: 1 }, { name: 'c' }, { name: 'd' },
+  { name: '3.12-940', weight: 7 }, ...[0, 1, 2, 3].map((n) => ({ weight: 9, n }))];
 
 /** A class store that has learned `sample`, MIN_SAMPLES times, and each of `items` alone at it: an item with no cores of
  *  its own runs whole until it is measured. */
@@ -208,7 +209,7 @@ describe('an efficient job', () => {
   });
 
   // #47: packed by records of runs beside others, Dew's next job ran up to six tasks a container, each 1.15 to 1.72x slower.
-  test('keeps a run beside others out of its item\'s cores, which say only what it was given, and keeps its memory', async () => {
+  test('keeps a run beside others out of its item\'s cores, its measured ones kept, and keeps its memory', async () => {
     const made = await learned({ cores: 1.5, memory: GIB, disk: 1e6 });
     const first = await packing(['a', 'b'], made);
     const packed = await slotsOf(first.job, 'v1', 3);
@@ -221,7 +222,7 @@ describe('an efficient job', () => {
     const next = await packing(['a', 'b', 'c', 'd'], made);
 
     expect({ packed, record: [record?.cores, record?.memory], next: [next.begun, await slotsOf(next.job, 'v1', 3)] })
-      .toEqual({ packed: [0, 1, null], record: [null, 2 * GIB], next: [['v1', 'v2'], [0, 1, null]] });
+      .toEqual({ packed: [0, 1, null], record: [1.5, 2 * GIB], next: [['v1', 'v2'], [0, 1, null]] });
   });
 
   // Dew's CI re-cuts its plan each run: a task's name and weight are new each time, so no item record ever matched and
@@ -282,13 +283,13 @@ describe('an efficient job', () => {
 
   test('runs a task whose item has no cores of its own whole, though its class is measured, and records its busiest window', async () => {
     const made = await learned(SMALL);
-    const first = await packing(['a', 'b'], made);
+    const first = await packing(['x', 'y'], made);
     const handed = await slotsOf(first.job, 'v1', 2);
 
     // Alone, a pool of four processes: 0.5 cores over its wall, four in its busiest window.
     await land(first.job, 'v1', ran(0, 'v1', 0, { cpuSeconds: 5, peakCores: 4 }));
     await first.job.alarm();
-    const key = await itemKey({ item: 'a', argv: argvOf('a') });
+    const key = await itemKey({ item: 'x', argv: argvOf('x') });
 
     expect({ handed, cores: (await made.store(CLASS)?.read([key]))?.items[key]?.cores }).toEqual({ handed: [0, null], cores: 4 });
   });
