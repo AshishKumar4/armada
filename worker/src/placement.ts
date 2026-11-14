@@ -4,9 +4,11 @@
  * used, delivered to their classes' stores (`estimates.ts`). It keeps its own tables in the job's storage and reads the
  * job's `tasks` and `members`; the job hands out each run it chooses, as it does any other.
  *
- * A task's estimate is its own item's record where its item ran before, else its class's, read live from the class's
- * last answer; a task with neither, one not looked up yet, one that runs alone, a gang's rank and a task with a copy
- * running each take a container whole.
+ * A task's estimate is its own item's record where its item ran before, its memory else its class's, read live from
+ * the class's last answer; a task whose item has no cores of its own (none of its runs ran alone, so none measured
+ * them), one not looked up yet, one that runs alone, a gang's rank and a task with a copy running each take a
+ * container whole: its first run alone measures it, as a class's cores say nothing of an item that starts four
+ * processes (Dew row 6003: packed at its class's estimate, a four-rank pool got one core and aborted).
  */
 import type { Outcome, Size } from '../../src/protocol';
 import { roomOf, type ArmadaEstimates, type Estimate, type Sample, type Usage } from './estimates';
@@ -28,7 +30,7 @@ const STORE_CALLS = 32;
  *  tasks. */
 const ESTIMATED = `SELECT t.idx, t.state, t.weight, t.not_before, t.vessel, t.dup,
     COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk, ${ranksOf('t.item')} AS ranks, ${costOf('t.item')} AS cost,
-    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR COALESCE(p.cores, c.cores) IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
+    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR p.cores IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
   FROM tasks t LEFT JOIN placed p ON p.idx = t.idx LEFT JOIN classes c ON c.class = p.class`;
 
 /** The task states whose runs hold a container. */
@@ -270,15 +272,16 @@ export class Placement {
     return task.failure;
   }
 
-  /** What `run`, vessel `name`'s run of task `index`, used, to deliver to its class: only a run measured whole, its disk
-   *  included, which a run in a slot of its own is. It ran beside others when it was marked so (`beside`), or when its
+  /** What `run`, vessel `name`'s run of task `index`, used, to deliver to its class (its cores its busiest window's,
+   *  `peakCores`, where the container read it): only a run measured whole, its disk included, which a run in a slot of
+   *  its own is. It ran beside others when it was marked so (`beside`), or when its
    *  job runs a fixed number of `slots` in each container. */
-  learn(run: string, name: string, { index, attempt, cpuSeconds, peakMemory, diskBytes, seconds }: Outcome, slots: number): void {
+  learn(run: string, name: string, { index, attempt, cpuSeconds, peakCores, peakMemory, diskBytes, seconds }: Outcome, slots: number): void {
     if (cpuSeconds === undefined || peakMemory === undefined || diskBytes === undefined || seconds <= 0) return;
     const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ?', name, index, attempt).toArray().length > 0;
 
     this.sql.exec('INSERT OR IGNORE INTO outbox (run, class, item, cores, memory, disk, beside) SELECT ?, class, item, ?, ?, ?, ? FROM placed WHERE idx = ?',
-      run, cpuSeconds / seconds, peakMemory, diskBytes, marked || slots > 1 ? 1 : 0, index);
+      run, peakCores ?? cpuSeconds / seconds, peakMemory, diskBytes, marked || slots > 1 ? 1 : 0, index);
   }
 
   /** Delivers to each class's store what the job has for it and has not delivered, and takes its answer as the class's

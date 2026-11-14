@@ -497,6 +497,9 @@ export const OutcomeSchema = v.object({
   /** The task's cgroup at its end: the most memory it held, file cache included, in bytes, and the CPU it used. */
   peakMemory: v.optional(v.number()),
   cpuSeconds: v.optional(v.number()),
+  /** The most cores the run kept busy in one short window while it ran (its cgroup's CPU time read every few seconds):
+   *  a pool of processes that work together reads as all of them, where `cpuSeconds` over the wall averages them down. */
+  peakCores: v.optional(v.number()),
   /** The kernel killed a process of the task's for want of memory. */
   oomKilled: v.optional(v.boolean()),
   /** It ran beside other tasks in its container and ended other than green, so it ran again alone, and this is that run:

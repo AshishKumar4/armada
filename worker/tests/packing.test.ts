@@ -275,6 +275,19 @@ describe('an efficient job', () => {
       .toEqual({ besideB: null, begun: ['v1', 'v2'], landed: [[0, 0, 'exit 1'], [1, 0, null]], alone: [true, false] });
   });
 
+  test('runs a task whose item has no cores of its own whole, though its class is measured, and records its busiest window', async () => {
+    const made = await learned(SMALL);
+    const first = await packing(['a', 'b'], made);
+    const handed = await slotsOf(first.job, 'v1', 2);
+
+    // Alone, a pool of four processes: 0.5 cores over its wall, four in its busiest window.
+    await land(first.job, 'v1', ran(0, 'v1', 0, { cpuSeconds: 5, peakCores: 4 }));
+    await first.job.alarm();
+    const key = await itemKey({ item: 'a', argv: argvOf('a') });
+
+    expect({ handed, cores: (await made.store(CLASS)?.read([key]))?.items[key]?.cores }).toEqual({ handed: [0, null], cores: 4 });
+  });
+
   test('keeps the red row of a packed run that exited 0 as its verdict, and runs its item alone in the jobs after', async () => {
     const made = await learned(SMALL);
     const { job } = await packing(['a', 'b'], made);

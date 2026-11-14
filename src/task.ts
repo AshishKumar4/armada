@@ -870,7 +870,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
 
     const meta: Meta = {
       seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true, artifactsLost: outcome.artifactsLost,
-      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes, aloneAfter: outcome.aloneAfter, host: outcome.host,
+      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, peakCores: outcome.peakCores, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes, aloneAfter: outcome.aloneAfter, host: outcome.host,
     };
 
     const base = { index: outcome.index, item, meta };
