@@ -881,9 +881,10 @@ export class ArmadaVessel extends DurableObject<Env> {
   }
 }
 
-/** The largest output read as a verdict when it is too large to ride inline: a CI's verdict of a few thousand rows is
- *  some MB (Dew's ~7 MB), far within a Worker's memory. */
-const VERDICT_BYTES = 32 * 1024 * 1024;
+/** The largest output read as a verdict when it is too large to ride inline: one task's verdict holds its own rows, tens
+ *  of KB (a Dew task's rows and their output tails); parsed whole, any JSON of 2 MiB stays a few tens of MB, within a
+ *  Worker's 128 MB. A larger output is never classified, its red still its verdict, its item packed as before. */
+const VERDICT_BYTES = 2 * 1024 * 1024;
 
 /** A CI task's verdict, its output: its rows, each its exit, the rest of each row the CI's own. */
 const VerdictRowsSchema = v.object({ rows: v.array(v.looseObject({ exitCode: v.number() })) });
