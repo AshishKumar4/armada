@@ -218,7 +218,7 @@ function resumed(dir: string, slot: number): string {
 
 /** The seconds between `sampled`'s reads of a task's CPU: short enough that a pool of processes that runs together for
  *  a moment reads as all its cores, long enough that a scheduler tick does not. */
-export const PEAK_WINDOW_SECONDS = 2;
+const PEAK_WINDOW_SECONDS = 2;
 
 /** The least a window's span may be, in microseconds, to count: a shorter one's few microseconds of CPU time over its
  *  span read as cores no task kept busy. */
