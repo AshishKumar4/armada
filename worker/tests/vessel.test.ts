@@ -7,7 +7,7 @@ import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED,
 import { ArmadaFleet } from '../src/fleet';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_LOG, RELAY_PY } from '../src/relay';
-import { ArmadaVessel, INPUTS_AT_ONCE, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
+import { ArmadaVessel, INPUTS_AT_ONCE, redRowIn, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bundleKey, runKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
 
@@ -975,5 +975,14 @@ describe('a vessel\'s boot', () => {
     await vessel.alarm();
 
     expect(booted.map((boot) => boot.restarts)).toEqual([['killed as it came up (137)', 'this vessel restarted during the start']]);
+  });
+});
+
+describe('a verdict\'s red row', () => {
+  test('is a row of its verdict that exited other than 0, however the JSON is spaced, never a field outside its rows', () => {
+    expect([
+      redRowIn('{"rows": [{"name": "a", "exitCode":  1}]}'), redRowIn('{"rows":[{"exitCode"\n: -1}]}'),
+      redRowIn('{"exitCode": 1, "rows": [{"exitCode": 0}]}'), redRowIn('not a verdict'), redRowIn(undefined),
+    ]).toEqual([true, true, false, false, false]);
   });
 });

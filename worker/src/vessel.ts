@@ -10,7 +10,8 @@
  * container's relay dials the gang's hubs (`ArmadaHub`), so no link passes through this object or waits on its storage.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, RESUME_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
+import * as v from 'valibot';
+import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, jsonOf, PY_BUNDLE_PATH, RESUME_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
   AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, resumeArchive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, unpackInputs, usageFrom, usageOf, waitOn,
 } from './container';
@@ -751,6 +752,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     const kept = { vessel: spec.name, attempt };
     const out = spec.output || spec.bundle !== null ? await this.store(`${dir}/out`, runKey(spec.jobId, index, kept, 'output'), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
+    // A task that exited 0 with a red row in its verdict (a CI's task writes its red rows and exits 0): read whole,
+    // from R2 where the output was too large to ride inline, for packing to run its item alone after (`packedRed`).
+    const redRow = exitCode === 0 && out !== null && redRowIn(value ?? await this.verdictText(runKey(spec.jobId, index, kept, 'output'))) ? true : undefined;
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 && artifactsLost === undefined ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
 
@@ -763,9 +767,19 @@ export class ArmadaVessel extends DurableObject<Env> {
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
 
     return {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
       host: await this.ctx.storage.get<Host>('host'),
     };
+  }
+
+  /** The stored output at `key` as text where it is no larger than a verdict may be (`VERDICT_BYTES`), else undefined:
+   *  an output past it (an image, an archive) is never read into the Worker's memory. */
+  private async verdictText(key: string): Promise<string | undefined> {
+    const head = await this.env.ARTIFACTS.head(key);
+
+    if (head === null || head.size > VERDICT_BYTES) return undefined;
+
+    return await (await this.env.ARTIFACTS.get(key))?.text();
   }
 
   /** A slot's task cleared (`clearTask`) once its answer is read, before its job counts the slot free. A container that
@@ -865,4 +879,19 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     return false;
   }
+}
+
+/** The largest output read as a verdict when it is too large to ride inline: one task's verdict holds its own rows, tens
+ *  of KB (a Dew task's rows and their output tails); parsed whole, any JSON of 2 MiB stays a few tens of MB, within a
+ *  Worker's 128 MB. A larger output is never classified, its red still its verdict, its item packed as before. */
+const VERDICT_BYTES = 2 * 1024 * 1024;
+
+/** A CI task's verdict, its output: its rows, each its exit, the rest of each row the CI's own. */
+const VerdictRowsSchema = v.object({ rows: v.array(v.looseObject({ exitCode: v.number() })) });
+
+/** Whether `text`, a task's output, is a verdict (`VerdictRowsSchema`) with a row that exited other than 0. */
+export function redRowIn(text: string | undefined): boolean {
+  const verdict = text === undefined ? undefined : v.safeParse(VerdictRowsSchema, jsonOf(text));
+
+  return verdict?.success === true && verdict.output.rows.some((row) => row.exitCode !== 0);
 }

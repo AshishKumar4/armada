@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { run, startAndAnswer, waitOn } from '../src/container';
+import { run, startAndAnswer, usageFrom, waitOn } from '../src/container';
 import { container } from './harness';
 
 describe('startAndAnswer', () => {
@@ -87,5 +87,13 @@ describe('waitOn', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a run\'s usage', () => {
+  test('reads its busiest window\'s cores beside its memory, CPU time, kills and disk, and none where no window was read', () => {
+    expect([usageFrom(`${String(2 ** 30)}\n5000000\n0\n4000000\n1000`), usageFrom(`${String(2 ** 30)}\n5000000\n0\n-1`)])
+      .toEqual([{ peakMemory: 2 ** 30, cpuSeconds: 5, peakCores: 4, oomKilled: undefined, diskBytes: 1000 },
+        { peakMemory: 2 ** 30, cpuSeconds: 5, peakCores: undefined, oomKilled: undefined, diskBytes: undefined }]);
   });
 });

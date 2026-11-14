@@ -48,11 +48,17 @@ function stores(answers: () => boolean = () => true, held: (() => Promise<void>)
   return { space, store: (name: string) => of(name) };
 }
 
-/** A class store that has learned `sample`, MIN_SAMPLES times. */
-async function learned(sample: Usage, answers?: () => boolean): Promise<Stores> {
-  const made = stores(answers);
+/** The items these jobs run, each a run alone of its own measured beforehand (`learned`). */
+const MEASURED: readonly Json[] = ['a', 'b', 'c', 'd', 'e', 'f', { weight: 9 }, { weight: 1 }, { name: 'c' }, { name: 'd' },
+  { name: '3.12-940', weight: 7 }, ...[0, 1, 2, 3].map((n) => ({ weight: 9, n }))];
 
-  await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...sample, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}`, beside: false })));
+/** A class store that has learned `sample`, MIN_SAMPLES times, and each of `items` alone at it: an item with no cores of
+ *  its own runs whole until it is measured. */
+async function learned(sample: Usage, answers?: () => boolean, items: readonly Json[] = MEASURED): Promise<Stores> {
+  const made = stores(answers);
+  const own = await Promise.all(items.map(async (item, at) => ({ ...sample, run: `own/${String(at)}/1/v1`, item: await itemKey({ item, argv: argvOf(item) }), beside: false })));
+
+  await made.store(CLASS)?.record([...Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...sample, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}`, beside: false })), ...own]);
 
   return made;
 }
@@ -203,7 +209,7 @@ describe('an efficient job', () => {
   });
 
   // #47: packed by records of runs beside others, Dew's next job ran up to six tasks a container, each 1.15 to 1.72x slower.
-  test('keeps a run beside others out of its item\'s cores, which say only what it was given, and keeps its memory', async () => {
+  test('keeps a run beside others out of its item\'s cores, its measured ones kept, and keeps its memory', async () => {
     const made = await learned({ cores: 1.5, memory: GIB, disk: 1e6 });
     const first = await packing(['a', 'b'], made);
     const packed = await slotsOf(first.job, 'v1', 3);
@@ -216,7 +222,7 @@ describe('an efficient job', () => {
     const next = await packing(['a', 'b', 'c', 'd'], made);
 
     expect({ packed, record: [record?.cores, record?.memory], next: [next.begun, await slotsOf(next.job, 'v1', 3)] })
-      .toEqual({ packed: [0, 1, null], record: [null, 2 * GIB], next: [['v1', 'v2'], [0, 1, null]] });
+      .toEqual({ packed: [0, 1, null], record: [1.5, 2 * GIB], next: [['v1', 'v2'], [0, 1, null]] });
   });
 
   // Dew's CI re-cuts its plan each run: a task's name and weight are new each time, so no item record ever matched and
@@ -273,6 +279,35 @@ describe('an efficient job', () => {
 
     expect({ besideB, begun, landed: events.map(({ outcome }) => [outcome.index, outcome.exitCode, outcome.aloneAfter ?? null]), alone: [await aloneIn(made, 'a'), await aloneIn(made, 'b')] })
       .toEqual({ besideB: null, begun: ['v1', 'v2'], landed: [[0, 0, 'exit 1'], [1, 0, null]], alone: [true, false] });
+  });
+
+  test('runs a task whose item has no cores of its own whole, though its class is measured, and records its busiest window', async () => {
+    const made = await learned(SMALL);
+    const first = await packing(['x', 'y'], made);
+    const handed = await slotsOf(first.job, 'v1', 2);
+
+    // Alone, a pool of four processes: 0.5 cores over its wall, four in its busiest window.
+    await land(first.job, 'v1', ran(0, 'v1', 0, { cpuSeconds: 5, peakCores: 4 }));
+    await first.job.alarm();
+    const key = await itemKey({ item: 'x', argv: argvOf('x') });
+
+    expect({ handed, cores: (await made.store(CLASS)?.read([key]))?.items[key]?.cores }).toEqual({ handed: [0, null], cores: 4 });
+  });
+
+  test('keeps the red row of a packed run that exited 0 as its verdict, and runs its item alone in the jobs after', async () => {
+    const made = await learned(SMALL);
+    const { job } = await packing(['a', 'b'], made);
+
+    await slotsOf(job, 'v1', 2);
+    // Dew's CI task writes its red rows and exits 0 (row 6003: a four-process pool beside four tasks, starved).
+    await land(job, 'v1', ran(0, 'v1', 0, { redRow: true }));
+    await land(job, 'v1', ran(1, 'v1', 0));
+    await job.alarm();
+    const { events } = await job.events(0);
+    const next = await packing(['a', 'c'], made);
+
+    expect({ landed: events.map(({ outcome }) => [outcome.index, outcome.attempt]), alone: [await aloneIn(made, 'a'), await aloneIn(made, 'b')], next: await slotsOf(next.job, 'v1', 2) })
+      .toEqual({ landed: [[0, 1], [1, 1]], alone: [true, false], next: [0, null] });
   });
 
   test.each([0, 137])('retries a packed task whose child was OOM-killed even when its wrapper exits %i', async (exitCode) => {
