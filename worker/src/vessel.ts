@@ -10,7 +10,8 @@
  * container's relay dials the gang's hubs (`ArmadaHub`), so no link passes through this object or waits on its storage.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, PY_BUNDLE_PATH, RESUME_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
+import * as v from 'valibot';
+import { atOnce, boundaryOf, BUNDLE_PATH, detach, failureTail, hasCpu, INLINE_BYTES, INPUTS_DIR, JOB_DEADLINE_SECONDS, jsonOf, PY_BUNDLE_PATH, RESUME_PATH, type Commit, type Cpu, type Host, type Outcome } from '../../src/protocol';
 import {
   AccountFull, clearTask, CPU_INFO, ENTRYPOINT, hostOf, Misplaced, EXEC_MS, INACTIVITY_MS, KEEP_MASK, SLICE_MS, WAIT_SECONDS, MASK, MASK_VALUES, OWN_STATE, TASK, TASK_GROUP, USER_HOME, argvOf, bounded, killOf, launchArgv, launchSlot, launchTask, maskValuesOf, MissingSnapshot, mounts, must, pipeIn, positional, receive, resumeArchive, run, slotRoot, slotTask, startAndAnswer, STATE, STOPPED, taskGroup, unpackInputs, usageFrom, usageOf, waitOn,
 } from './container';
@@ -741,7 +742,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
-    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, dir, isolated ? slotRoot(slot) : undefined)]) ?? '');
+    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, isolated ? slotRoot(slot) : undefined)]) ?? '');
 
     // The task ran to its exit, which its job has accepted: a packer that fails loses its artifacts, said on its outcome
     // with how much they held, never the run, which ran again would end the same way.
@@ -751,6 +752,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     const kept = { vessel: spec.name, attempt };
     const out = spec.output || spec.bundle !== null ? await this.store(`${dir}/out`, runKey(spec.jobId, index, kept, 'output'), {}) : null;
     const value = out === null || out.small === null ? undefined : textOf(out.small);
+    // A task that exited 0 with a red row in its verdict (a CI's task writes its red rows and exits 0): read whole,
+    // from R2 where the output was too large to ride inline, for packing to run its item alone after (`packedRed`).
+    const redRow = exitCode === 0 && out !== null && redRowIn(value ?? await (await this.env.ARTIFACTS.get(runKey(spec.jobId, index, kept, 'output')))?.text()) ? true : undefined;
     // A gang's artifacts are its rank 0's; an empty directory stores nothing.
     const packed = rank === 0 && artifactsLost === undefined ? await this.store(`${dir}/artifacts.tar.gz`, runKey(spec.jobId, index, kept, 'artifacts'), { contentType: 'application/gzip' }) : null;
 
@@ -763,7 +767,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
 
     return {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
+      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
       host: await this.ctx.storage.get<Host>('host'),
     };
   }
@@ -865,4 +869,14 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     return false;
   }
+}
+
+/** A CI task's verdict, its output: its rows, each its exit, the rest of each row the CI's own. */
+const VerdictRowsSchema = v.object({ rows: v.array(v.looseObject({ exitCode: v.number() })) });
+
+/** Whether `text`, a task's output, is a verdict (`VerdictRowsSchema`) with a row that exited other than 0. */
+export function redRowIn(text: string | undefined): boolean {
+  const verdict = text === undefined ? undefined : v.safeParse(VerdictRowsSchema, jsonOf(text));
+
+  return verdict?.success === true && verdict.output.rows.some((row) => row.exitCode !== 0);
 }

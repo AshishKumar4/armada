@@ -224,9 +224,9 @@ const PEAK_WINDOW_SECONDS = 2;
  *  span read as cores no task kept busy. */
 const LEAST_WINDOW_US = 500_000;
 
-/** The files of `group`'s sampler (`sampled`), root's alone: its token, which the sampler it names alone may write
- *  beside, and its state, the token, the last CPU time read (microseconds), when (nanoseconds), and the most cores held
- *  in a window so far (millionths). */
+/** The files of `group`'s sampler (`sampled`), root's alone: its token, the current sampler's, and each sampler's
+ *  state under its own token, the last CPU time read (microseconds), when (nanoseconds), and the most cores held in a
+ *  window so far (millionths): an earlier sampler that writes late writes only its own. */
 export const peakFile = (group: string): string => `${STATE}/peak${group.replaceAll('/', '-')}`;
 
 /** As root, detached: `group`'s cgroup's CPU time (cpu.stat's usage_usec, the one counter the kernel keeps, cumulative)
@@ -240,21 +240,21 @@ function sampled(group: string, dir: string): string {
   return String.raw`token=$(date +%s%N)-$$
 echo "$token" > ${peak}.token
 (prev=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat); at=$(date +%s%N); most=0
-echo "$token $prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state
+echo "$prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state.$token
 while sleep ${String(PEAK_WINDOW_SECONDS)} && [ "$(cat ${peak}.token 2>/dev/null)" = "$token" ] && [ ! -s ${dir}/exit ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat 2>/dev/null) && [ -n "$now" ]; do
   t=$(date +%s%N); span=$(( (t - at) / 1000 ))
   if [ "$span" -ge ${String(LEAST_WINDOW_US)} ]; then rate=$(( (now - prev) * 1000000 / span )); [ "$rate" -le "$most" ] || most=$rate; fi
   prev=$now; at=$t
-  echo "$token $prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state
+  echo "$prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state.$token
 done; rm -f ${peak}.part.$token) </dev/null >/dev/null 2>&1 &`;
 }
 
-/** The most cores `group`'s task in `dir` held in one window (millionths), its last window, from the sampler's last read
- *  to the task's exit, counted too; -1 where its sampler left no state of its own token. */
-function peakOf(group: string, dir: string): string {
+/** The most cores `group`'s task held in one window (millionths), its last window, from the sampler's last read to now,
+ *  the counter and the clock read together, counted too; -1 where the current sampler left no state. */
+function peakOf(group: string): string {
   const peak = peakFile(group);
 
-  return String.raw`{ read -r token prev at most < ${peak}.state && [ "$token" = "$(cat ${peak}.token)" ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat) && end=$(date -r ${dir}/exit +%s%N 2>/dev/null || date +%s%N) && span=$(( (end - at) / 1000 )) && { [ "$span" -lt ${String(LEAST_WINDOW_US)} ] || { rate=$(( (now - prev) * 1000000 / span )); [ "$rate" -le "$most" ] || most=$rate; }; } && echo "$most"; } 2>/dev/null || echo -1`;
+  return String.raw`{ read -r prev at most < ${peak}.state.$(cat ${peak}.token) && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat) && end=$(date +%s%N) && span=$(( (end - at) / 1000 )) && { [ "$span" -lt ${String(LEAST_WINDOW_US)} ] || { rate=$(( (now - prev) * 1000000 / span )); [ "$rate" -le "$most" ] || most=$rate; }; } && echo "$most"; } 2>/dev/null || echo -1`;
 }
 
 /** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
@@ -313,7 +313,7 @@ exec "$@"' ns ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/
  *  main process holds for it no longer (`hold`). */
 export const clearTask = (group: string, root: string): string => String.raw`set -eu
 ${endGroup(group)}
-rm -f ${peakFile(group)}.token ${peakFile(group)}.state
+rm -f ${peakFile(group)}.token ${peakFile(group)}.state.* ${peakFile(group)}.part.*
 rm -rf ${root}`;
 
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
@@ -340,24 +340,23 @@ mkdir -p ${STATE}/phases
 mkdir "$dir" 2>/dev/null || exit 0
 setsid sh -c 'echo $$ > "$0/pid"; "$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
-/** `group`'s task's cgroup after its task in `dir` exited: its peak memory in bytes, its CPU time in microseconds, how
- *  many of its processes the kernel killed for memory, the most cores it held in one window (millionths, `peakOf`, -1
- *  for none), and whether its output is a verdict with a row that exited other than 0 (1 or 0: a CI's task writes its
- *  red rows and exits 0, `Outcome.redRow`, read here whatever the output's size); then, for a task in a slot of its own,
- *  the bytes its writes left on the container's disk under the slot's `root` (its overlays and its task dir). */
-export const usageOf = (group: string, dir: string, root?: string): string =>
-  String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat; sed -n 's/^oom_kill //p' ${group}/memory.events; ${peakOf(group, dir)}; if grep -Eq '"exitCode": ?(-[0-9]|[1-9])' ${dir}/out 2>/dev/null; then echo 1; else echo 0; fi${root === undefined ? '' : `; du -sxb ${root} | cut -f1`}`;
+/** `group`'s task's cgroup after it exited: its peak memory in bytes, its CPU time in microseconds, how many of its
+ *  processes the kernel killed for memory, and the most cores it held in one window (millionths, `peakOf`, -1 for
+ *  none); then, for a task in a slot of its own, the bytes its writes left on the container's disk under the slot's
+ *  `root` (its overlays and its task dir). */
+export const usageOf = (group: string, root?: string): string =>
+  String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat; sed -n 's/^oom_kill //p' ${group}/memory.events; ${peakOf(group)}${root === undefined ? '' : `; du -sxb ${root} | cut -f1`}`;
 
 /** `usageOf`'s answer, or nothing for a group already gone. An answer from before the kills and the disk were read
  *  carries neither. */
-export function usageFrom(stdout: string): Pick<Outcome, 'peakMemory' | 'cpuSeconds' | 'peakCores' | 'redRow' | 'oomKilled' | 'diskBytes'> {
-  const [memory, cpu, killed, peak, red, disk] = stdout.trim().split('\n').map(Number);
+export function usageFrom(stdout: string): Pick<Outcome, 'peakMemory' | 'cpuSeconds' | 'peakCores' | 'oomKilled' | 'diskBytes'> {
+  const [memory, cpu, killed, peak, disk] = stdout.trim().split('\n').map(Number);
 
   if (memory === undefined || cpu === undefined || !Number.isFinite(memory) || !Number.isFinite(cpu)) return {};
 
   return {
     peakMemory: memory, cpuSeconds: cpu / 1e6,
-    peakCores: peak !== undefined && Number.isFinite(peak) && peak > 0 ? peak / 1e6 : undefined, redRow: red === 1 ? true : undefined,
+    peakCores: peak !== undefined && Number.isFinite(peak) && peak > 0 ? peak / 1e6 : undefined,
     oomKilled: killed !== undefined && killed > 0 ? true : undefined, diskBytes: disk !== undefined && Number.isFinite(disk) ? disk : undefined,
   };
 }
