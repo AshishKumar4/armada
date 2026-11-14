@@ -1016,7 +1016,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
    *  its jobs did not start. A judge's first judgement starts as the job that lands its last first-stage map task
    *  ends, beside the map jobs still running, never after them all (Dew's trains of 2026-11-14: every judge began at
    *  the map wave's end, its last 1.5 to 3 minutes of the CI's wall). */
-  const judgesPart = async (drawn: readonly Promise<readonly Result<Json, string | null>[]>[]) => {
+  const judgesPart = async (mapJobs: readonly Promise<readonly Result<Json, string | null>[]>[]) => {
     let landed: Result<Json, string | null>[] = [];
     const drawnLanded: Result<Json, string | null>[] = [];
 
@@ -1079,7 +1079,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       return ready.size === 0 ? null : await judgedOver(ready, firstly);
     };
 
-    const firsts = [...await Promise.all(drawn.map(async (job) => {
+    const firsts = [...await Promise.all(mapJobs.map(async (job) => {
       drawnLanded.push(...await job);
 
       return await judgedReady(false);

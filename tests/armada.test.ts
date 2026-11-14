@@ -1941,8 +1941,8 @@ describe('armada run', () => {
   // began once the last map job had ended, the CI's last minutes). The held task runs until j's judges' job exists, so
   // a run whose judges wait for it never ends.
   test.each([
-    { case: 'a long task of the first wave', include: [{ name: 'a' }, { name: 'slow' }, { name: 'j', after: ['a'] }], heldName: 'slow', rows: [['j', 0], ['slow', 0]] },
-    { case: 'another site\'s map job', include: [{ name: 'a' }, { name: 'b', size: 'large' }, { name: 'j', after: ['a'] }, { name: 'k', after: ['b'], size: 'large' }], heldName: 'b', rows: [['j', 0], ['k', 0]] },
+    { case: 'a long task of the first wave', include: [{ name: 'a' }, { name: 'slow' }, { name: 'j', after: ['a'] }], heldName: 'slow', rows: [['j', 0], ['slow', 0]] as (string | number)[][] },
+    { case: 'another site\'s map job', include: [{ name: 'a' }, { name: 'b', size: 'large' }, { name: 'j', after: ['a'] }, { name: 'k', after: ['b'], size: 'large' }], heldName: 'b', rows: [['j', 0], ['k', 0]] as (string | number)[][] },
   ])('a judge begins once its own map tasks have landed, beside $case', async ({ include, heldName, rows: expected }) => {
     const plan: Json = { include };
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
@@ -1961,7 +1961,7 @@ describe('armada run', () => {
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
     const named = rows.map(({ name, exitCode }) => [name, exitCode]).sort(([one], [other]) => String(one).localeCompare(String(other)));
 
-    expect({ exit: ran.exit, rows: named }).toEqual({ exit: 0, rows: expected });
+    expect({ exit: ran.exit, rows: named }).toEqual({ exit: 0, rows: expected.map((row) => [...row]) });
   }, 30_000);
 
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
