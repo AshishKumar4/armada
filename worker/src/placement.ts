@@ -10,12 +10,8 @@
  * container whole: its first run alone measures it, as a class's cores say nothing of an item that starts four
  * processes (Dew row 6003: packed at its class's estimate, a four-rank pool got one core and aborted).
  */
-import { jsonOf, type Outcome, type Size } from '../../src/protocol';
-import * as v from 'valibot';
+import type { Outcome, Size } from '../../src/protocol';
 import { roomOf, type ArmadaEstimates, type Estimate, type Sample, type Usage } from './estimates';
-
-/** A CI task's verdict, its `value`: its rows, each its exit, the rest of each row the CI's own. */
-const VerdictRowsSchema = v.object({ rows: v.array(v.object({ exitCode: v.number() })) });
 
 /** How a run beside other tasks ended when the kernel killed it for memory. */
 export const KILLED_FOR_MEMORY = 'killed for memory';
@@ -231,18 +227,16 @@ export class Placement {
     return `exit ${String(outcome.exitCode)}`;
   }
 
-  /** Whether `outcome`, `name`'s run of its task beside other tasks, exited 0 with a red row in its verdict (its `value`'s
-   *  `rows`, the CI's): a task that grades its own tests writes their red and exits 0, so its packed red is no exit
+  /** Whether `outcome`, `name`'s run of its task beside other tasks, exited 0 with a red row in its verdict (`redRow`,
+   *  read from its output whatever its size): a task that grades its own tests writes their red and exits 0, so its packed red is no exit
    *  `packedFailure` sees. Its item then runs alone in the jobs after (`isolate`), and its red stays the run's verdict,
    *  never retried to green (Dew's bible; row 6003: a four-process pool packed beside four tasks got one core and aborted,
    *  and its next run was packed the same). */
   packedRed(name: string, outcome: Outcome): boolean {
-    if (outcome.kind !== 'exited' || outcome.exitCode !== 0 || outcome.value === undefined) return false;
+    if (outcome.kind !== 'exited' || outcome.exitCode !== 0 || outcome.redRow !== true) return false;
     const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ? AND copied = 0', name, outcome.index, outcome.attempt).toArray().length > 0;
-    const verdict = v.safeParse(VerdictRowsSchema, jsonOf(outcome.value));
 
-    if (!marked || !verdict.success || !verdict.output.rows.some((row) => row.exitCode !== 0)) return false;
-
+    if (!marked) return false;
     this.sql.exec('INSERT OR IGNORE INTO isolate (class, item) SELECT class, item FROM placed WHERE idx = ?', outcome.index);
 
     return true;

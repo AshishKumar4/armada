@@ -300,8 +300,8 @@ describe('an efficient job', () => {
 
     await slotsOf(job, 'v1', 2);
     // Dew's CI task writes its red rows and exits 0 (row 6003: a four-process pool beside four tasks, starved).
-    await land(job, 'v1', ran(0, 'v1', 0, { value: JSON.stringify({ rows: [{ name: '3.14:tests/test_pool.py#7/20', exitCode: 1 }] }) }));
-    await land(job, 'v1', ran(1, 'v1', 0, { value: JSON.stringify({ rows: [{ name: '3.12:tests/test_b.py', exitCode: 0 }] }) }));
+    await land(job, 'v1', ran(0, 'v1', 0, { redRow: true }));
+    await land(job, 'v1', ran(1, 'v1', 0));
     await job.alarm();
     const { events } = await job.events(0);
     const next = await packing(['a', 'c'], made);

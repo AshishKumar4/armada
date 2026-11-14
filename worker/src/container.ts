@@ -216,28 +216,45 @@ function resumed(dir: string, slot: number): string {
   return String.raw`if [ -f ${archive} ]; then mkdir -p ${dir}/resume; tar -xzf ${archive} -C ${dir}/resume; rm -f ${archive}; fi`;
 }
 
-/** The seconds of each window `sampled` reads a task's CPU over: short enough that a pool of processes that runs
- *  together for a moment reads as all its cores, long enough that a scheduler tick does not. */
+/** The seconds between `sampled`'s reads of a task's CPU: short enough that a pool of processes that runs together for
+ *  a moment reads as all its cores, long enough that a scheduler tick does not. */
 export const PEAK_WINDOW_SECONDS = 2;
 
-/** Where the most CPU `group`'s task used in one `PEAK_WINDOW_SECONDS` window waits, in microseconds, root's alone. */
+/** The least a window's span may be, in microseconds, to count: a shorter one's few microseconds of CPU time over its
+ *  span read as cores no task kept busy. */
+const LEAST_WINDOW_US = 500_000;
+
+/** The files of `group`'s sampler (`sampled`), root's alone: its token, which the sampler it names alone may write
+ *  beside, and its state, the token, the last CPU time read (microseconds), when (nanoseconds), and the most cores held
+ *  in a window so far (millionths). */
 export const peakFile = (group: string): string => `${STATE}/peak${group.replaceAll('/', '-')}`;
 
 /** As root, detached: `group`'s cgroup's CPU time (cpu.stat's usage_usec, the one counter the kernel keeps, cumulative)
- *  read each `PEAK_WINDOW_SECONDS` while its task in `dir` runs, the largest window's in `peakFile`: a run's cores are
- *  its busiest window's, not its average over the wall, which reads a pool of four processes that wait on one another
- *  between steps as 2.4 (Dew row 6003). The last task's sampler ends first. */
+ *  read about each `PEAK_WINDOW_SECONDS` while its task in `dir` runs, each window divided by its own measured span, the
+ *  busiest kept in `peakFile`'s state: a run's cores are its busiest window's, not its average over the wall, which
+ *  reads a pool of four processes that wait on one another between steps as 2.4 (Dew row 6003). A new token ends the
+ *  last task's sampler at its next read (`clearTask` removes it), and no sampler signals any process. */
 function sampled(group: string, dir: string): string {
   const peak = peakFile(group);
 
-  return String.raw`[ ! -s ${peak}.pid ] || kill "$(cat ${peak}.pid)" 2>/dev/null || true
-rm -f ${peak} ${peak}.pid
-(prev=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat); most=0
-while sleep ${String(PEAK_WINDOW_SECONDS)} && [ ! -s ${dir}/exit ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat 2>/dev/null) && [ -n "$now" ]; do
-  if [ $((now - prev)) -gt "$most" ]; then most=$((now - prev)); echo "$most" > ${peak}.part && mv ${peak}.part ${peak}; fi
-  prev=$now
-done) </dev/null >/dev/null 2>&1 &
-echo $! > ${peak}.pid`;
+  return String.raw`token=$(date +%s%N)-$$
+echo "$token" > ${peak}.token
+(prev=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat); at=$(date +%s%N); most=0
+echo "$token $prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state
+while sleep ${String(PEAK_WINDOW_SECONDS)} && [ "$(cat ${peak}.token 2>/dev/null)" = "$token" ] && [ ! -s ${dir}/exit ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat 2>/dev/null) && [ -n "$now" ]; do
+  t=$(date +%s%N); span=$(( (t - at) / 1000 ))
+  if [ "$span" -ge ${String(LEAST_WINDOW_US)} ]; then rate=$(( (now - prev) * 1000000 / span )); [ "$rate" -le "$most" ] || most=$rate; fi
+  prev=$now; at=$t
+  echo "$token $prev $at $most" > ${peak}.part.$token && mv ${peak}.part.$token ${peak}.state
+done; rm -f ${peak}.part.$token) </dev/null >/dev/null 2>&1 &`;
+}
+
+/** The most cores `group`'s task in `dir` held in one window (millionths), its last window, from the sampler's last read
+ *  to the task's exit, counted too; -1 where its sampler left no state of its own token. */
+function peakOf(group: string, dir: string): string {
+  const peak = peakFile(group);
+
+  return String.raw`{ read -r token prev at most < ${peak}.state && [ "$token" = "$(cat ${peak}.token)" ] && now=$(sed -n 's/^usage_usec //p' ${group}/cpu.stat) && end=$(date -r ${dir}/exit +%s%N 2>/dev/null || date +%s%N) && span=$(( (end - at) / 1000 )) && { [ "$span" -lt ${String(LEAST_WINDOW_US)} ] || { rate=$(( (now - prev) * 1000000 / span )); [ "$rate" -le "$most" ] || most=$rate; }; } && echo "$most"; } 2>/dev/null || echo -1`;
 }
 
 /** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
@@ -296,6 +313,7 @@ exec "$@"' ns ${AS_USER.join(' ')} sh -c 'echo $$ > ${TASK}/pid; "$@" > ${TASK}/
  *  main process holds for it no longer (`hold`). */
 export const clearTask = (group: string, root: string): string => String.raw`set -eu
 ${endGroup(group)}
+rm -f ${peakFile(group)}.token ${peakFile(group)}.state
 rm -rf ${root}`;
 
 /** Waits up to `$1` seconds for what runs in `dir` (a task, a preparation's phase), then prints its exit code, or
@@ -322,23 +340,24 @@ mkdir -p ${STATE}/phases
 mkdir "$dir" 2>/dev/null || exit 0
 setsid sh -c 'echo $$ > "$0/pid"; "$@" > "$0/log" 2>&1; echo $? > "$0/exit"' "$dir" "$@" </dev/null >/dev/null 2>&1 &`;
 
-/** `group`'s task's cgroup after it exited: its peak memory in bytes, its CPU time in microseconds, how many of its
- *  processes the kernel killed for memory, and its busiest window's CPU in microseconds (`sampled`, -1 for none); then,
- *  for a task in a slot of its own, the bytes its writes left on the container's disk under the slot's `root` (its
- *  overlays and its task dir). */
-export const usageOf = (group: string, root?: string): string =>
-  String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat; sed -n 's/^oom_kill //p' ${group}/memory.events; cat ${peakFile(group)} 2>/dev/null || echo -1${root === undefined ? '' : `; du -sxb ${root} | cut -f1`}`;
+/** `group`'s task's cgroup after its task in `dir` exited: its peak memory in bytes, its CPU time in microseconds, how
+ *  many of its processes the kernel killed for memory, the most cores it held in one window (millionths, `peakOf`, -1
+ *  for none), and whether its output is a verdict with a row that exited other than 0 (1 or 0: a CI's task writes its
+ *  red rows and exits 0, `Outcome.redRow`, read here whatever the output's size); then, for a task in a slot of its own,
+ *  the bytes its writes left on the container's disk under the slot's `root` (its overlays and its task dir). */
+export const usageOf = (group: string, dir: string, root?: string): string =>
+  String.raw`cat ${group}/memory.peak; sed -n 's/^usage_usec //p' ${group}/cpu.stat; sed -n 's/^oom_kill //p' ${group}/memory.events; ${peakOf(group, dir)}; if grep -Eq '"exitCode": ?(-[0-9]|[1-9])' ${dir}/out 2>/dev/null; then echo 1; else echo 0; fi${root === undefined ? '' : `; du -sxb ${root} | cut -f1`}`;
 
 /** `usageOf`'s answer, or nothing for a group already gone. An answer from before the kills and the disk were read
  *  carries neither. */
-export function usageFrom(stdout: string): Pick<Outcome, 'peakMemory' | 'cpuSeconds' | 'peakCores' | 'oomKilled' | 'diskBytes'> {
-  const [memory, cpu, killed, peak, disk] = stdout.trim().split('\n').map(Number);
+export function usageFrom(stdout: string): Pick<Outcome, 'peakMemory' | 'cpuSeconds' | 'peakCores' | 'redRow' | 'oomKilled' | 'diskBytes'> {
+  const [memory, cpu, killed, peak, red, disk] = stdout.trim().split('\n').map(Number);
 
   if (memory === undefined || cpu === undefined || !Number.isFinite(memory) || !Number.isFinite(cpu)) return {};
 
   return {
     peakMemory: memory, cpuSeconds: cpu / 1e6,
-    peakCores: peak !== undefined && Number.isFinite(peak) && peak > 0 ? peak / 1e6 / PEAK_WINDOW_SECONDS : undefined,
+    peakCores: peak !== undefined && Number.isFinite(peak) && peak > 0 ? peak / 1e6 : undefined, redRow: red === 1 ? true : undefined,
     oomKilled: killed !== undefined && killed > 0 ? true : undefined, diskBytes: disk !== undefined && Number.isFinite(disk) ? disk : undefined,
   };
 }

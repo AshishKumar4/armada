@@ -163,6 +163,8 @@ export interface Meta {
   readonly cpuSeconds?: number;
   /** The most cores it kept busy in one short window (`Outcome.peakCores`). */
   readonly peakCores?: number;
+  /** Its output is a verdict holding a red row (`Outcome.redRow`). */
+  readonly redRow?: true;
   /** The kernel killed a process of the task's for want of memory. */
   readonly oomKilled?: boolean;
   /** The bytes its writes left on its container's disk, for a task in a slot of its own. */
@@ -872,7 +874,7 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
 
     const meta: Meta = {
       seconds: outcome.seconds, attempt: outcome.attempt, container: outcome.vessel, exitCode: outcome.exitCode, tail: outcome.tail, cached: outcome.cached === true, artifacts: outcome.artifacts === true, artifactsLost: outcome.artifactsLost,
-      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, peakCores: outcome.peakCores, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes, aloneAfter: outcome.aloneAfter, host: outcome.host,
+      peakMemory: outcome.peakMemory, cpuSeconds: outcome.cpuSeconds, peakCores: outcome.peakCores, redRow: outcome.redRow, oomKilled: outcome.oomKilled, diskBytes: outcome.diskBytes, aloneAfter: outcome.aloneAfter, host: outcome.host,
     };
 
     const base = { index: outcome.index, item, meta };

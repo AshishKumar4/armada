@@ -741,7 +741,7 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
     // What it used is a measurement, never a reason to lose the task.
-    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, isolated ? slotRoot(slot) : undefined)]) ?? '');
+    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, dir, isolated ? slotRoot(slot) : undefined)]) ?? '');
 
     // The task ran to its exit, which its job has accepted: a packer that fails loses its artifacts, said on its outcome
     // with how much they held, never the run, which ran again would end the same way.
