@@ -62,6 +62,32 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     expect({ one: one.log.trim(), all: all.log.trim() }).toEqual({ one: '1', all: String(ALL) });
   });
 
+  test('a container whose root group holds its processes and hands down no controllers gets them from the launch', () => {
+    // As the platform's microVM starts a container since 2026-11-11: every process in the root group, whose
+    // subtree_control is empty, so armada's group has no cpu, memory or pids controller to hand its tasks' groups and
+    // the launch's write of them failed ("launch: 6: echo: echo: I/O error", most containers of a job lost at their
+    // first launch). The launch moves the root's processes to a group of their own, and the root hands them down.
+    expect(sh(clearTask(TASK_GROUP, TASK)).exitCode).toBe(0);
+
+    const emptied = sh(`set -eu
+rmdir /sys/fs/cgroup/armada
+echo "-cpuset -cpu -memory -pids" > /sys/fs/cgroup/cgroup.subtree_control
+for group in $(ls -d /sys/fs/cgroup/*/); do for pid in $(cat "$group/cgroup.procs"); do echo "$pid" > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true; done; done
+echo "[$(cat /sys/fs/cgroup/cgroup.subtree_control)] $(wc -l < /sys/fs/cgroup/cgroup.procs)"`);
+
+    // The root hands nothing down, and holds this test's own processes (a pid listed and gone since, the list's own
+    // reader, moves nowhere).
+    expect({ exit: emptied.exitCode, said: emptied.stdout.toString().trim() }).toEqual({ exit: 0, said: expect.stringMatching(/^\[\] [1-9]\d*$/u) });
+    // As a task nests (the first case): a group of its own under its own, with a limit of its own.
+    const ran = task('sh', '-c', 'cat /proc/self/cgroup; cat "$ARMADA_CGROUP/cgroup.controllers"; mkdir "$ARMADA_CGROUP/case" && echo 64M > "$ARMADA_CGROUP/case/memory.max" && cat "$ARMADA_CGROUP/case/memory.max"');
+
+    expect(ran.exit).toBe('0');
+    expect(ran.log.trim().split('\n')).toEqual(['0::/armada/task/runner', expect.stringMatching(/\bcpu\b.*\bmemory\b.*\bpids\b/u), String(64 * 1024 * 1024)]);
+    expect(readFileSync('/sys/fs/cgroup/cgroup.procs', 'utf8').trim()).toBe('');
+    // And a second launch, the root's processes already aside, changes nothing.
+    expect(task('true').exit).toBe('0');
+  });
+
   test('a task starts with SIGINT and SIGQUIT at their defaults, so a ^C it sends ends what it reaches', () => {
     const interrupted = task('sh', '-c', 'grep SigIgn /proc/self/status; kill -INT $$; echo survived');
 
