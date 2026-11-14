@@ -900,10 +900,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
   // Why the run stopped starting jobs, once one could not be followed: a part of the run still going starts none after.
   let stopped: string | null = null;
-  // A job of the first wave ending (`held`): a wave the rest of the pool cannot hold waits for one, then looks again.
+  // A running job ending (`released`): a wave the rest of the pool cannot hold waits for one, then looks again.
   let freed: () => void = () => undefined;
   let tailFreed = new Promise<void>((resolve) => { freed = resolve; });
+
+  // The keys under which each started job's containers are counted off the pool's rest (`tail`), one a job.
   let reserving = 0;
+
   /** Job `each`, started by `launch` (which counted its containers off the pool's rest under `each.held`: `tail`,
    *  `sharesOf`), followed to its end (`ending`), its containers given back as it ends, and any wave waiting for room
    *  woken (`tailFreed`): every job of the run holds what it took while it runs, so waves begun beside each other
@@ -915,10 +918,12 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       released([each.held]);
     }
   };
+
   /** The containers held under `keys` given back to the pool's rest, and every wave waiting for room woken to look
    *  again, or to find the run stopped. */
   const released = (keys: readonly string[]) => {
     for (const key of keys) tail.delete(key);
+
     freed();
     tailFreed = new Promise<void>((resolve) => { freed = resolve; });
   };
@@ -1063,6 +1068,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     // all land (a job that lost one) with the rest once every map job has ended, failing as `judgedOver` says.
     const firstly = (map: number) => !later.has(map);
     const judgedFirst = new Set<number>();
+
     const judgedReady = async (all: boolean) => {
       const have = new Set(drawnLanded.map((result) => result.index));
       const ready = new Set([...judges].filter((index) => !judgedFirst.has(index) && (all || (mapsOf[index] ?? []).filter(firstly).every((map) => have.has(map)))));
@@ -1071,11 +1077,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
       return ready.size === 0 ? null : await judgedOver(ready, firstly);
     };
+
     const firsts = [...await Promise.all(drawn.map(async (job) => {
       drawnLanded.push(...await job);
 
       return await judgedReady(false);
     })), await judgedReady(true)];
+
     const refusedFirst = firsts.find((each) => each !== null && 'refused' in each);
 
     if (refusedFirst !== undefined && refusedFirst !== null && 'refused' in refusedFirst) return refusedFirst;

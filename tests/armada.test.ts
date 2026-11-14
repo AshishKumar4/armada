@@ -1977,7 +1977,7 @@ describe('armada run', () => {
     if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
     const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
 
-    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort() }).toEqual({ exit: 0, rows: [['j', 0], ['k', 0]] });
+    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort(([one], [other]) => String(one).localeCompare(String(other))) }).toEqual({ exit: 0, rows: [['j', 0], ['k', 0]] });
   }, 30_000);
 
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
