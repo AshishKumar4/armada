@@ -963,6 +963,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     if (stopped !== null) return { refused: stopped };
 
     if (bounded === null) return { refused: PASSED(what) };
+
     // Each job's containers counted off the pool's rest as it starts, before any other wave can look (`held`).
     const starting = groupsOf.map((each, place) => {
       const begun = start(each, 'need' in shares ? 1 : shares[place] ?? 1, bounded, each.more);
@@ -1133,6 +1134,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       const mapped = await wave(first, () => left, 'task jobs');
 
       if ('refused' in mapped || judges.size === 0) return mapped;
+
       return await judgesPart([Promise.resolve(mapped.landed)]);
     }
 
