@@ -911,7 +911,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
    *  `sharesOf`), followed to its end (`ending`), its containers given back as it ends, and any wave waiting for room
    *  woken (`tailFreed`): every job of the run holds what it took while it runs, so waves begun beside each other
    *  (a judges' job beside map jobs, two judges' jobs) never pass the pool. */
-  const held = async (each: Parameters<typeof followed>[0] & { readonly held: string }) => {
+  const following = async (each: Parameters<typeof followed>[0] & { readonly held: string }) => {
     try {
       return await ending(each);
     } finally {
@@ -964,7 +964,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
     if (bounded === null) return { refused: PASSED(what) };
 
-    // Each job's containers counted off the pool's rest as it starts, before any other wave can look (`held`).
+    // Each job's containers counted off the pool's rest as it starts, before any other wave can look (`following`).
     const starting = groupsOf.map((each, place) => {
       const begun = start(each, 'need' in shares ? 1 : shares[place] ?? 1, bounded, each.more);
       const key = `held-${String(reserving++)}`;
@@ -1005,7 +1005,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
   const wave = async (...args: Parameters<typeof launch>) => {
     const launched = await launch(...args);
 
-    return 'refused' in launched ? launched : { landed: (await Promise.all(launched.these.map(held))).flat() };
+    return 'refused' in launched ? launched : { landed: (await Promise.all(launched.these.map(following))).flat() };
   };
 
   // Why each judge whose map tasks did not all pass fails, by its plan index.
@@ -1146,13 +1146,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     if ('refused' in launched) return launched;
     const firstJobs = launched.these.map((each, place) => ({ each, drawing: first[place]?.drawing === true }));
 
-    // Every first-wave job holds its containers off the pool's rest until it ends (`held`), the map tasks' jobs too, so
+    // Every first-wave job holds its containers off the pool's rest until it ends (`following`), the map tasks' jobs too, so
     // judges' jobs begun beside them take only what is free.
-    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => await held(each)));
+    const tailLanded = Promise.all(firstJobs.filter(({ drawing }) => !drawing).map(async ({ each }) => await following(each)));
 
     // The judges' part, each map job's results as it ends: a judge's first judgement waits for its own map tasks'
     // job, not every one (`judgesPart`).
-    const judged = judgesPart(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await held(each)));
+    const judged = judgesPart(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await following(each)));
 
     // Both parts end before the run answers: a failure in either stops the other starting jobs (`stopped`) and cancels
     // its own.
