@@ -1958,6 +1958,28 @@ describe('armada run', () => {
     expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]) }).toEqual({ exit: 0, rows: [['slow', 0], ['j', 0]] });
   }, 30_000);
 
+  // Dew's trains of 2026-11-14: every check-1 judge began once the last map job had ended, the CI's last minutes.
+  test('a judge begins once its own map tasks\' job has ended, while another map job runs on', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b', size: 'large' }, { name: 'j', after: ['a'] }, { name: 'k', after: ['b'], size: 'large' }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
+
+    writeFileSync(join(drawn, 'draws.json'), '[]');
+    const draws = Bun.spawnSync(['tar', '-czf', '-', '-C', drawn, 'draws.json']).stdout;
+
+    // b's map job runs until j's judges' job exists, so a run whose judges wait for every map job never ends.
+    const heldOf = (item: Json, created: readonly (readonly Json[])[]) => nameOf(item) === 'b' && !created.some((items) => items.some((each) => nameOf(each) === 'j'));
+    const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
+    const ran = await run(['--json', '--deadline=10'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws] });
+
+    rmSync(drawn, { recursive: true, force: true });
+
+    if (ran.stdout === '') throw new Error(`no verdict: ${ran.stderr.slice(-800)}`);
+    const { rows } = v.parse(v.object({ rows: v.array(v.object({ name: v.string(), exitCode: v.number() })) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, rows: rows.map(({ name, exitCode }) => [name, exitCode]).sort() }).toEqual({ exit: 0, rows: [['j', 0], ['k', 0]] });
+  }, 30_000);
+
   // A judges' job begun while the first wave's tail runs takes the pool's rest, so the run holds no more than its pool.
   test('a judges\' job begun beside the first wave\'s tail takes the pool\'s rest', async () => {
     const maps = ['a', 'c', 'e', 'g'];

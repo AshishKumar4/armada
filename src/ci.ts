@@ -971,11 +971,14 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
   // Why each judge whose map tasks did not all pass fails, by its plan index.
   const unjudged = new Map<number, string>();
 
-  /** The judges' part of a run, given the first wave's map tasks' results (`drawnLanded`): each judge's judgements, its
-   *  later map tasks between them where it asks for them; the results it landed, or why one of its jobs did not
-   *  start. */
-  const judgesPart = async (drawnLanded: readonly Result<Json, string | null>[]) => {
+  /** The judges' part of a run, given the first wave's map tasks' jobs (`drawn`, each its results once it ends): each
+   *  judge's judgements, its later map tasks between them where it asks for them; the results it landed, or why one of
+   *  its jobs did not start. A judge's first judgement starts as the job that lands its last first-stage map task
+   *  ends, beside the map jobs still running, never after them all (Dew's trains of 2026-11-14: every judge began at
+   *  the map wave's end, its last 1.5 to 3 minutes of the CI's wall). */
+  const judgesPart = async (drawn: readonly Promise<readonly Result<Json, string | null>[]>[]) => {
     let landed: Result<Json, string | null>[] = [];
+    const drawnLanded: Result<Json, string | null>[] = [];
 
     /** `asked` judges (all where undefined) judged over their map tasks that ran, those of `maps` in `among` (its first
      *  judgement its map tasks but the later ones, its second all of them): each judges' job takes the artifacts its
@@ -1022,12 +1025,29 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       return await wave(judging, () => remainingDeadline(laterAt), 'judges\' jobs');
     };
 
-    const first = await judgedOver(undefined, (map) => !later.has(map));
+    // Each judge judged first once its first-stage map tasks have all landed, as each map job ends; any whose did not
+    // all land (a job that lost one) with the rest once every map job has ended, failing as `judgedOver` says.
+    const firstly = (map: number) => !later.has(map);
+    const judgedFirst = new Set<number>();
+    const judgedReady = async (all: boolean) => {
+      const have = new Set(drawnLanded.map((result) => result.index));
+      const ready = new Set([...judges].filter((index) => !judgedFirst.has(index) && (all || (mapsOf[index] ?? []).filter(firstly).every((map) => have.has(map)))));
 
-    if (first === null) return { landed };
+      for (const index of ready) judgedFirst.add(index);
 
-    if ('refused' in first) return first;
-    landed = [...landed, ...first.landed];
+      return ready.size === 0 ? null : await judgedOver(ready, firstly);
+    };
+    const firsts = [...await Promise.all(drawn.map(async (job) => {
+      drawnLanded.push(...await job);
+
+      return await judgedReady(false);
+    })), await judgedReady(true)];
+    const refusedFirst = firsts.find((each) => each !== null && 'refused' in each);
+
+    if (refusedFirst !== undefined && refusedFirst !== null && 'refused' in refusedFirst) return refusedFirst;
+    landed = firsts.flatMap((each) => each === null || 'refused' in each ? [] : each.landed);
+
+    if (firsts.every((each) => each === null)) return { landed: drawnLanded };
     // The judges whose first judgement asks for their later map tasks (a row's `more`): those run, then each judges
     // again over all its map tasks, that judgement its answer.
     const asking = new Set([...judges].filter((index) => !unjudged.has(index) && (verdicts.get(index) ?? []).some((row) => row.more === true)));
@@ -1044,13 +1064,13 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       landed = [...landed, ...drawnLater.landed];
     }
 
-    if (asking.size === 0) return { landed };
+    if (asking.size === 0) return { landed: [...drawnLanded, ...landed] };
 
     // A first judgement that asked is no answer: the second's rows are, or none where it never landed.
     for (const index of asking) verdicts.delete(index);
     const second = await judgedOver(asking, () => true);
 
-    if (second === null) return { landed };
+    if (second === null) return { landed: [...drawnLanded, ...landed] };
 
     if ('refused' in second) return second;
 
@@ -1061,7 +1081,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       if (still.length > 0) unjudged.set(index, `its second judgement still asks for more, past its last map tasks: ${still.map(rowName).join(', ')}`);
     }
 
-    return { landed: [...landed, ...second.landed] };
+    return { landed: [...drawnLanded, ...landed, ...second.landed] };
   };
 
   const tasked = await cancelOnInterrupt(started, async () => {
@@ -1071,9 +1091,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       const mapped = await wave(first, () => left, 'task jobs');
 
       if ('refused' in mapped || judges.size === 0) return mapped;
-      const judged = await judgesPart(mapped.landed);
-
-      return 'refused' in judged ? judged : { landed: [...mapped.landed, ...judged.landed] };
+      return await judgesPart([Promise.resolve(mapped.landed)]);
     }
 
     // The first wave's map tasks in jobs of their own (`grouped`): its judges begin as those jobs end, while its other
@@ -1097,12 +1115,9 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     // Settled either way: a wave waiting on it starts once the tail's jobs end, or finds the run stopped.
     tailEnded = Promise.allSettled([tailLanded]);
 
-    const judged = (async () => {
-      const drawnLanded = (await Promise.all(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await ending(each)))).flat();
-      const part = await judgesPart(drawnLanded);
-
-      return 'refused' in part ? part : { landed: [...drawnLanded, ...part.landed] };
-    })();
+    // The judges' part, each map job's results as it ends: a judge's first judgement waits for its own map tasks'
+    // job, not every one (`judgesPart`).
+    const judged = judgesPart(firstJobs.filter(({ drawing }) => drawing).map(async ({ each }) => await ending(each)));
 
     // Both parts end before the run answers: a failure in either stops the other starting jobs (`stopped`) and cancels
     // its own.
