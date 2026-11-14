@@ -275,6 +275,22 @@ describe('an efficient job', () => {
       .toEqual({ besideB: null, begun: ['v1', 'v2'], landed: [[0, 0, 'exit 1'], [1, 0, null]], alone: [true, false] });
   });
 
+  test('keeps the red row of a packed run that exited 0 as its verdict, and runs its item alone in the jobs after', async () => {
+    const made = await learned(SMALL);
+    const { job } = await packing(['a', 'b'], made);
+
+    await slotsOf(job, 'v1', 2);
+    // Dew's CI task writes its red rows and exits 0 (row 6003: a four-process pool beside four tasks, starved).
+    await land(job, 'v1', ran(0, 'v1', 0, { value: JSON.stringify({ rows: [{ name: '3.14:tests/test_pool.py#7/20', exitCode: 1 }] }) }));
+    await land(job, 'v1', ran(1, 'v1', 0, { value: JSON.stringify({ rows: [{ name: '3.12:tests/test_b.py', exitCode: 0 }] }) }));
+    await job.alarm();
+    const { events } = await job.events(0);
+    const next = await packing(['a', 'c'], made);
+
+    expect({ landed: events.map(({ outcome }) => [outcome.index, outcome.attempt]), alone: [await aloneIn(made, 'a'), await aloneIn(made, 'b')], next: await slotsOf(next.job, 'v1', 2) })
+      .toEqual({ landed: [[0, 1], [1, 1]], alone: [true, false], next: [0, null] });
+  });
+
   test.each([0, 137])('retries a packed task whose child was OOM-killed even when its wrapper exits %i', async (exitCode) => {
     const { job } = await packing(['a', 'b'], await learned(SMALL));
 
