@@ -912,10 +912,15 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     try {
       return await ending(each);
     } finally {
-      tail.delete(each.held);
-      freed();
-      tailFreed = new Promise<void>((resolve) => { freed = resolve; });
+      released([each.held]);
     }
+  };
+  /** The containers held under `keys` given back to the pool's rest, and every wave waiting for room woken to look
+   *  again, or to find the run stopped. */
+  const released = (keys: readonly string[]) => {
+    for (const key of keys) tail.delete(key);
+    freed();
+    tailFreed = new Promise<void>((resolve) => { freed = resolve; });
   };
 
   /** A job followed to its end, as `followed`; one that cannot be leaves the run without an answer, its jobs cancelled
@@ -970,7 +975,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     // A job that did not start leaves the run ungraded, and the others, started with it and not yet followed, end.
     if (refused !== undefined) {
       stopped ??= 'a task job did not start';
-      for (const { held: key } of starting) tail.delete(key);
+      released(starting.map(({ held: key }) => key));
       await cancelEach(started, stopped);
 
       return { refused: errorOf({ cause: refused.reason }).message };
