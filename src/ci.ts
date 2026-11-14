@@ -1011,7 +1011,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
   // Why each judge whose map tasks did not all pass fails, by its plan index.
   const unjudged = new Map<number, string>();
 
-  /** The judges' part of a run, given the first wave's map tasks' jobs (`drawn`, each its results once it ends): each
+  /** The judges' part of a run, given the first wave's map tasks' jobs (`mapJobs`, each its results once it ends): each
    *  judge's judgements, its later map tasks between them where it asks for them; the results it landed, or why one of
    *  its jobs did not start. A judge's first judgement starts as the job that lands its last first-stage map task
    *  ends, beside the map jobs still running, never after them all (Dew's trains of 2026-11-14: every judge began at
