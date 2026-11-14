@@ -48,11 +48,16 @@ function stores(answers: () => boolean = () => true, held: (() => Promise<void>)
   return { space, store: (name: string) => of(name) };
 }
 
-/** A class store that has learned `sample`, MIN_SAMPLES times. */
-async function learned(sample: Usage, answers?: () => boolean): Promise<Stores> {
-  const made = stores(answers);
+/** The items these jobs run, each a run alone of its own measured beforehand (`learned`). */
+const MEASURED: readonly Json[] = ['a', 'b', 'c', 'd', 'e', 'f'];
 
-  await made.store(CLASS)?.record(Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...sample, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}`, beside: false })));
+/** A class store that has learned `sample`, MIN_SAMPLES times, and each of `items` alone at it: an item with no cores of
+ *  its own runs whole until it is measured. */
+async function learned(sample: Usage, answers?: () => boolean, items: readonly Json[] = MEASURED): Promise<Stores> {
+  const made = stores(answers);
+  const own = await Promise.all(items.map(async (item, at) => ({ ...sample, run: `own/${String(at)}/1/v1`, item: await itemKey({ item, argv: argvOf(item) }), beside: false })));
+
+  await made.store(CLASS)?.record([...Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...sample, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}`, beside: false })), ...own]);
 
   return made;
 }

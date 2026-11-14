@@ -10,8 +10,12 @@
  * container whole: its first run alone measures it, as a class's cores say nothing of an item that starts four
  * processes (Dew row 6003: packed at its class's estimate, a four-rank pool got one core and aborted).
  */
-import type { Outcome, Size } from '../../src/protocol';
+import { jsonOf, type Outcome, type Size } from '../../src/protocol';
+import * as v from 'valibot';
 import { roomOf, type ArmadaEstimates, type Estimate, type Sample, type Usage } from './estimates';
+
+/** A CI task's verdict, its `value`: its rows, each its exit, the rest of each row the CI's own. */
+const VerdictRowsSchema = v.object({ rows: v.array(v.object({ exitCode: v.number() })) });
 
 /** How a run beside other tasks ended when the kernel killed it for memory. */
 export const KILLED_FOR_MEMORY = 'killed for memory';
@@ -235,16 +239,10 @@ export class Placement {
   packedRed(name: string, outcome: Outcome): boolean {
     if (outcome.kind !== 'exited' || outcome.exitCode !== 0 || outcome.value === undefined) return false;
     const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ? AND copied = 0', name, outcome.index, outcome.attempt).toArray().length > 0;
+    const verdict = v.safeParse(VerdictRowsSchema, jsonOf(outcome.value));
 
-    if (!marked) return false;
-    let rows: unknown;
+    if (!marked || !verdict.success || !verdict.output.rows.some((row) => row.exitCode !== 0)) return false;
 
-    try {
-      rows = (JSON.parse(outcome.value) as { rows?: unknown }).rows;
-    } catch {
-      return false;
-    }
-    if (!Array.isArray(rows) || !rows.some((row) => typeof row === 'object' && row !== null && (row as { exitCode?: unknown }).exitCode !== 0 && typeof (row as { exitCode?: unknown }).exitCode === 'number')) return false;
     this.sql.exec('INSERT OR IGNORE INTO isolate (class, item) SELECT class, item FROM placed WHERE idx = ?', outcome.index);
 
     return true;

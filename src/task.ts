@@ -161,6 +161,8 @@ export interface Meta {
   /** The most memory its cgroup held, in bytes, and the CPU it used. */
   readonly peakMemory?: number;
   readonly cpuSeconds?: number;
+  /** The most cores it kept busy in one short window (`Outcome.peakCores`). */
+  readonly peakCores?: number;
   /** The kernel killed a process of the task's for want of memory. */
   readonly oomKilled?: boolean;
   /** The bytes its writes left on its container's disk, for a task in a slot of its own. */
