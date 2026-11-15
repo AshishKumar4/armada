@@ -2,6 +2,7 @@
  * A deployment of armada and the requests it answers: jobs, their events and outputs, packs and bundles. The typed
  * API (`task.ts`) and the CLI are built on it.
  */
+import { openJobs, type ListedJob } from './drain';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -225,6 +226,11 @@ export class Armada {
 
   async admit(): Promise<void> {
     await this.call('/drain', { method: 'DELETE' }, this.spoken);
+  }
+
+  /** Its jobs not yet done, every page read (`openJobs`). */
+  async openJobs(): Promise<ListedJob[]> {
+    return await openJobs(async (path) => await this.call(path, {}, this.spoken));
   }
 
   /** The drain asked in wire `protocol`, or null when the Worker answers that it speaks another. */

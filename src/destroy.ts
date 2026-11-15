@@ -1,7 +1,8 @@
 /** A deployment's purge. Discovery is read-only; its exact inventory is saved before the Worker (and its objects)
  * goes, so a failure never loses the snapshot IDs needed on the next run. R2 empties by lifecycle, without S3 keys. */
+import { openJobs, type ListedJob } from './drain';
 import * as v from 'valibot';
-import { PROTOCOL, PROTOCOL_HEADER, JsonSchema, type Json } from './protocol';
+import { errorOf, PROTOCOL, PROTOCOL_HEADER, JsonSchema, type Json } from './protocol';
 import { ConnectionSchema, type Connection } from './sdk';
 import type { Deletion } from './registry';
 
@@ -46,8 +47,6 @@ const Envelope = v.object({
   errors: v.nullish(v.array(v.object({ message: v.string() })), []),
   result_info: v.optional(v.object({ total_pages: v.optional(v.number()) })),
 });
-
-const Jobs = v.object({ jobs: v.array(v.object({ id: v.string(), label: v.optional(v.string(), ''), phase: v.picklist(['preparing', 'running', 'done']) })) });
 
 const Entries = v.array(v.object({ entry: v.object({ state: v.string(), generation: v.optional(v.object({ snapshot: v.object({ id: v.string() }) })) }) }));
 
@@ -139,26 +138,11 @@ class Deployment {
     throw new Error('cannot inspect deployment: no supported armada-protocol');
   }
 
-  async open(): Promise<v.InferOutput<typeof Jobs>['jobs']> {
-    const open: v.InferOutput<typeof Jobs>['jobs'] = [];
-    const seen = new Set<string>();
-    let before: string | undefined;
-
-    for (;;) {
-      const answer = await this.call(`/jobs?limit=100${before === undefined ? '' : `&before=${encodeURIComponent(before)}`}`);
-
-      if (answer.status === 404) throw new Error('cannot inspect deployment: GET /jobs is unavailable; refusing to destroy it');
-      const { jobs } = v.parse(Jobs, await answer.json());
-
-      for (const job of jobs) {
-        if (seen.has(job.id)) throw new Error('GET /jobs repeated an id while paging; refusing an incomplete job check');
-        seen.add(job.id);
-
-        if (job.phase !== 'done') open.push(job);
-      }
-
-      if (jobs.length < 100) return open;
-      before = jobs.at(-1)?.id;
+  async open(): Promise<ListedJob[]> {
+    try {
+      return await openJobs(async (path) => await this.call(path));
+    } catch (cause) {
+      throw new Error(`cannot inspect deployment: ${errorOf({ cause }).message}; refusing to destroy it`, { cause });
     }
   }
 
@@ -204,7 +188,7 @@ function ran(io: DestroyIO, account: string, words: readonly string[]): string {
   return result.output;
 }
 
-function refuseJobs(io: DestroyIO, jobs: v.InferOutput<typeof Jobs>['jobs'], force: boolean): void {
+function refuseJobs(io: DestroyIO, jobs: readonly ListedJob[], force: boolean): void {
   if (jobs.length === 0) return;
   const names = jobs.map((job) => `${job.id}${job.label === '' ? '' : ` (${job.label})`} [${job.phase}]`).join(', ');
 
