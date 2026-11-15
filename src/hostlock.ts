@@ -25,12 +25,19 @@ function flock(fd: number, operation: number): number {
   return flocked(fd, operation);
 }
 
-/** The lock on `path` where no other open file holds it now: its release, or null. */
-export function tried(path: string): (() => void) | null {
+/** A lock held: its open file, which a child process given it holds the lock through as long as it lives, and its
+ *  release here. */
+export interface Held {
+  readonly fd: number;
+  readonly release: () => void;
+}
+
+/** The lock on `path` where no other open file holds it now, or null. */
+export function tried(path: string): Held | null {
   mkdirSync(dirname(path), { recursive: true });
   const fd = openSync(path, 'a', 0o600);
 
-  if (flock(fd, LOCK_EX | LOCK_NB) === 0) return () => { closeSync(fd); };
+  if (flock(fd, LOCK_EX | LOCK_NB) === 0) return { fd, release: () => { closeSync(fd); } };
 
   closeSync(fd);
 
@@ -42,9 +49,11 @@ export async function taken(path: string, patienceMs: number, pollMs: number): P
   const until = Date.now() + patienceMs;
 
   for (;;) {
-    const release = tried(path);
+    const held = tried(path);
 
-    if (release !== null || Date.now() >= until) return release;
+    if (held !== null) return held.release;
+
+    if (Date.now() >= until) return null;
     await Bun.sleep(pollMs);
   }
 }

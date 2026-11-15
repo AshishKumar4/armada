@@ -681,7 +681,7 @@ async function packCommand(repo: string | undefined, out: string | undefined, re
   if (repo === undefined || out === undefined) throw new Error('pack takes --repo=<repository> and --out=<file>');
   const input = await new Response(Bun.stdin.stream()).text();
 
-  await slotted(async () => { await packed(repo, revs ? ['--revs'] : [], input, out); });
+  await slotted(async (held) => { await packed(repo, { options: revs ? ['--revs'] : [], input, held }, out); });
 
   return 0;
 }

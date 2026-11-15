@@ -9,18 +9,22 @@
  *   ends, lets the lock go, and a waiter then packs.
  * - At most PACK_SLOTS packs at once on the host, whichever commits, each git bounded in memory (git.ts' GIT_BOUNDS).
  * - A pack is written to a file on disk, PACKS, and read from it in parts as it is stored, never held whole in memory;
- *   the file is removed once stored or failed, and one a killed client left is swept at the next submission.
+ *   the file is removed once stored or failed, and one a killed client left is swept at the next submission, once
+ *   the git writing it has ended too (it holds the locks it was given).
  */
-import { readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync, statfsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
-import { tried } from './hostlock';
-import type { Armada } from './sdk';
+import { tried, type Held } from './hostlock';
 import type { Commit } from './protocol';
+import type { Armada } from './sdk';
 
-/** The packs being made: under the user's cache ($XDG_CACHE_HOME, else ~/.cache), on disk, never a /tmp that may be
- *  memory (a tmpfs), which a pack would fill. */
-export const PACKS = join(process.env.XDG_CACHE_HOME === undefined || process.env.XDG_CACHE_HOME === '' ? join(homedir(), '.cache') : process.env.XDG_CACHE_HOME, 'armada', 'packs');
+/** The packs being made and the locks their makers take: one place per user on the host, whatever a process's own
+ *  cache settings say, so every submitter's locks meet; on disk, never a tmpfs (`onDisk`), which a pack would fill. */
+export const PACKS = join(homedir(), '.cache', 'armada', 'packs');
+
+/** statfs(2)'s f_type of a tmpfs, a filesystem in memory. */
+const TMPFS = 0x01_02_19_94;
 
 const GIB = 2 ** 30;
 
@@ -31,20 +35,26 @@ export const PACK_SLOTS = Math.max(1, Math.floor(totalmem() / (16 * GIB)));
 /** How often a waiting submission asks again. */
 const POLL_MS = 1000;
 
-/** The host's pack slot, waited for: its release. */
-async function slot(): Promise<() => void> {
+/** PACKS made, and refused where it is memory: a pack there is the exhaustion packing on disk prevents. */
+function onDisk(): void {
+  if (statfsSync(PACKS).type === TMPFS) throw new Error(`${PACKS} is on a tmpfs, in memory, where no pack is made: give this user a home on disk`);
+}
+
+/** The host's pack slot, waited for. */
+async function slot(): Promise<Held> {
   for (;;) {
     for (let at = 0; at < PACK_SLOTS; at += 1) {
-      const release = tried(join(PACKS, `slot-${String(at)}.lock`));
+      const held = tried(join(PACKS, `slot-${String(at)}.lock`));
 
-      if (release !== null) return release;
+      if (held !== null) return held;
     }
 
     await Bun.sleep(POLL_MS);
   }
 }
 
-/** Each pack file in PACKS whose lock no process holds: what a client killed while packing or storing left. */
+/** Each pack file in PACKS whose lock no process holds: what a client killed while packing or storing left. A git
+ *  still writing one holds its lock (`slotted`'s descriptors), so none is taken from under it. */
 export function sweep(): void {
   let names: string[];
 
@@ -58,41 +68,45 @@ export function sweep(): void {
   }
 
   for (const name of names.filter((found) => found.endsWith('.pack'))) {
-    const release = tried(join(PACKS, `${name.slice(0, -'.pack'.length)}.lock`));
+    const held = tried(join(PACKS, `${name.slice(0, -'.pack'.length)}.lock`));
 
-    if (release === null) continue;
+    if (held === null) continue;
 
     try {
       rmSync(join(PACKS, name), { force: true });
     } finally {
-      release();
+      held.release();
     }
   }
 }
 
-/** A git pack made within a host slot: `make` writes it to the file it is given, under PACKS. */
-export async function slotted<T>(make: () => Promise<T>): Promise<T> {
-  const release = await slot();
+/** `make` within one of the host's pack slots, given the descriptors of the locks it holds (the slot's, and `also`),
+ *  which the git it starts inherits, so the slot and those locks stay held while that git lives, though this process
+ *  ends first. */
+export async function slotted<T>(make: (held: readonly number[]) => Promise<T>, also: readonly number[] = []): Promise<T> {
+  mkdirSync(PACKS, { recursive: true });
+  onDisk();
+  const held = await slot();
 
   try {
-    return await make();
+    return await make([held.fd, ...also]);
   } finally {
-    release();
+    held.release();
   }
 }
 
-/** What storing one pack needs: whether the runner holds it, its making into a file, and its storing from that file
- *  (null where the runner held it by then). */
+/** What storing one pack needs: whether the runner holds it, its making into a file (given the lock descriptors its
+ *  git inherits), and its storing from that file (null where the runner held it by then). */
 export interface Storing {
   readonly held: () => Promise<boolean>;
-  readonly make: (file: string) => Promise<void>;
+  readonly make: (file: string, held: readonly number[]) => Promise<void>;
   readonly store: (file: string) => Promise<number | null>;
 }
 
 /** The pack `key` names (a runner's path for it) stored once from this host: null where the runner holds it, else
  *  what `store` answered. Only the holder of its lock makes it, within a slot, into its own file under PACKS, which is
- *  removed however it ends; every other waits, asking the runner each `pollMs`, and asks once more on taking the lock,
- *  since the holder it waited on may just have stored it. */
+ *  removed however it ends; every other waits, asking the runner each `pollMs`; the holder asks once more on taking
+ *  the lock, since one before it may have stored it between its ask and its lock. */
 export async function packedOnce(key: string, { held, make, store }: Storing, pollMs = POLL_MS): Promise<number | null> {
   sweep();
   const name = new Bun.CryptoHasher('sha256').update(key).digest('hex').slice(0, 32);
@@ -100,10 +114,10 @@ export async function packedOnce(key: string, { held, make, store }: Storing, po
 
   if (await held()) return null;
 
-  for (let waited = false; ; waited = true) {
-    const release = tried(join(PACKS, `${name}.lock`));
+  for (;;) {
+    const locked = tried(join(PACKS, `${name}.lock`));
 
-    if (release === null) {
+    if (locked === null) {
       await Bun.sleep(pollMs);
 
       if (await held()) return null;
@@ -111,20 +125,20 @@ export async function packedOnce(key: string, { held, make, store }: Storing, po
     }
 
     try {
-      if (waited && await held()) return null;
-      await slotted(async () => { await make(file); });
+      if (await held()) return null;
+      await slotted(async (descriptors) => { await make(file, descriptors); }, [locked.fd]);
 
       return await store(file);
     } finally {
       rmSync(file, { force: true });
-      release();
+      locked.release();
     }
   }
 }
 
 /** A commit's pack stored once from this host (`packedOnce`): `make` writes it to the file it is given, only where the
  *  runner lacks it; its size, or null where none was stored here. */
-export async function uploadPack(armada: Armada, project: string, commit: Pick<Commit, 'sha' | 'base' | 'shallow'>, make: (file: string) => Promise<void>): Promise<number | null> {
+export async function uploadPack(armada: Armada, project: string, commit: Pick<Commit, 'sha' | 'base' | 'shallow'>, make: (file: string, held: readonly number[]) => Promise<void>): Promise<number | null> {
   const path = armada.packPath(project, commit);
 
   return await packedOnce(`${armada.connection.url} ${path}`, { held: async () => await armada.packHeld(path), make, store: async (file) => await armada.storePack(path, file) });

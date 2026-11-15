@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { tried } from '../src/hostlock';
+import { PACK_SLOTS, PACKS, packedOnce } from '../src/packs';
 import { git, scratchEnv } from './fakes';
 
 const ROOT = resolve(import.meta.dir, '..');
@@ -84,9 +85,9 @@ import { packTo } from '${ROOT}/src/git';
 import { uploadPack } from '${ROOT}/src/packs';
 const [url, repo, sha, made] = process.argv.slice(2);
 const armada = new Armada({ url, token: 't', account: 'a' });
-const stored = await uploadPack(armada, 'app', { sha, base: 'root' }, async (file) => {
+const stored = await uploadPack(armada, 'app', { sha, base: 'root' }, async (file, held) => {
   appendFileSync(made, sha + '\\n');
-  await packTo(repo, { sha, base: 'root', history: 'full' }, file);
+  await packTo(repo, { sha, base: 'root', history: 'commit' }, file, held);
 });
 const hwm = Number(/VmHWM:\\s+(\\d+)/u.exec(readFileSync('/proc/self/status', 'utf8'))?.[1] ?? 0) * 1024;
 console.log(JSON.stringify({ stored, hwm }));
@@ -96,25 +97,98 @@ console.log(JSON.stringify({ stored, hwm }));
 const EndSchema = v.object({ stored: v.nullable(v.number()), hwm: v.number() });
 
 /** A submission: the runner's address, the commit's repository and sha, the file each packing appends its sha to,
- *  the submitter script, and the cache whose packs and slots the host's submitters share. */
+ *  the submitter script, and the home whose ~/.cache/armada/packs (packs and their locks) the submitters share. */
 interface Submission {
   readonly url: string;
   readonly repo: string;
   readonly sha: string;
   readonly made: string;
   readonly script: string;
-  readonly cache: string;
+  readonly home: string;
 }
 
 /** A submitter's own process, started with this test's environment but git's and armada's own variables. */
-function submit({ url, repo, sha, made, script, cache }: Submission) {
-  return Bun.spawn(['bun', script, url, repo, sha, made], { env: { ...scratchEnv(), XDG_CACHE_HOME: cache }, stdout: 'pipe', stderr: 'pipe' });
+function submit({ url, repo, sha, made, script, home }: Submission) {
+  return Bun.spawn(['bun', script, url, repo, sha, made], { env: { ...scratchEnv(), HOME: home }, stdout: 'pipe', stderr: 'pipe' });
 }
+
+/** Each submitter's end, as it printed it; a submitter that failed throws what it said. */
+async function ended(running: ReturnType<typeof submit>) {
+  const [code, out, err] = await Promise.all([running.exited, new Response(running.stdout).text(), new Response(running.stderr).text()]);
+
+  if (code !== 0) throw new Error(err);
+
+  return v.parse(EndSchema, JSON.parse(out));
+}
+
+/** This process's descendants as /proc lists them now: each one's resident bytes and command line. */
+function descendants(): { rss: number; command: string }[] {
+  const children = new Map<number, number[]>();
+
+  for (const entry of new Bun.Glob('[0-9]*').scanSync({ cwd: '/proc', onlyFiles: false })) {
+    const stat = readable(`/proc/${entry}/stat`);
+    const parent = Number(stat?.split(') ').at(-1)?.split(' ')[1]);
+
+    if (stat !== null) children.set(parent, [...children.get(parent) ?? [], Number(entry)]);
+  }
+
+  const found: { rss: number; command: string }[] = [];
+  const stack = [...children.get(process.pid) ?? []];
+
+  for (let pid = stack.pop(); pid !== undefined; pid = stack.pop()) {
+    stack.push(...children.get(pid) ?? []);
+    const status = readable(`/proc/${String(pid)}/status`);
+    const command = readable(`/proc/${String(pid)}/cmdline`);
+
+    if (status !== null && command !== null) found.push({ rss: Number(/VmRSS:\s+(\d+)/u.exec(status)?.[1] ?? 0) * 1024, command: command.replaceAll('\0', ' ') });
+  }
+
+  return found;
+}
+
+/** A /proc file's text, or null where its process ended while it was read. */
+function readable(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (cause) {
+    if (cause instanceof Error && 'code' in cause && (cause.code === 'ENOENT' || cause.code === 'ESRCH')) return null;
+
+    throw cause;
+  }
+}
+
+/** While `running` settles, the peak of every descendant's resident bytes summed and the most `git pack-objects`
+ *  alive at once, sampled each 50 ms. */
+async function sampled<T>(running: Promise<T>): Promise<{ value: T; peak: number; packers: number }> {
+  let done = false;
+  let peak = 0;
+  let packers = 0;
+
+  const watching = (async () => {
+    while (!done) {
+      const now = descendants();
+
+      peak = Math.max(peak, now.reduce((sum, each) => sum + each.rss, 0));
+      packers = Math.max(packers, now.filter((each) => each.command.includes('pack-objects')).length);
+      // Sampling a process tree is reading the platform's clock; no fake timer reaches another process.
+      await Bun.sleep(50);
+    }
+  })();
+
+  try {
+    return { value: await running, peak, packers };
+  } finally {
+    done = true;
+    await watching;
+  }
+}
+
+const MIB = 2 ** 20;
 
 describe('a host packs one commit once, within its slots, never holding a pack whole', () => {
   // 2026-11-15: 42 submissions of one commit from one machine each packed it at once (about 1 GB of git apiece) and
   // the machine ran out of memory.
-  test('42 processes submitting one commit the runner lacks make one pack between them, each within its bound', async () => {
+  test('42 processes submitting one commit the runner lacks make one pack between them, the whole tree within its bound', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-packs-'));
     const served = runner();
 
@@ -123,88 +197,87 @@ describe('a host packs one commit once, within its slots, never holding a pack w
       const made = join(scratch, 'made');
       const script = join(scratch, 'submit.ts');
 
-      Bun.spawnSync(['mkdir', '-p', repo]);
+      mkdirSync(repo);
       const sha = repository(repo, 96);
 
       writeFileSync(made, '');
       writeFileSync(script, SUBMITTER);
 
-      const submission = { url: served.url, repo, sha, made, script, cache: join(scratch, 'cache') };
-      const submitters = Array.from({ length: 42 }, () => submit(submission));
-
-      const ends = await Promise.all(submitters.map(async (running) => {
-        const [code, out, err] = await Promise.all([running.exited, new Response(running.stdout).text(), new Response(running.stderr).text()]);
-
-        if (code !== 0) throw new Error(err);
-
-        return v.parse(EndSchema, JSON.parse(out));
-      }));
-
+      const submission = { url: served.url, repo, sha, made, script, home: join(scratch, 'home') };
+      const { value: ends, peak } = await sampled(Promise.all(Array.from({ length: 42 }, async () => await ended(submit(submission)))));
       const pack = [...served.stored.values()][0] ?? 0;
 
       // One pack, by one process, stored once; every other process found it stored.
       expect(readFileSync(made, 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
       expect(served.packsPut()).toBe(1);
       expect(ends.filter((end) => end.stored !== null).map((end) => end.stored)).toEqual([pack]);
-      // The pack is larger than a part (so it went in parts), yet no process held it whole: each peaked below its
-      // runtime and one part's bytes (64 MiB) with room, far below a pack's three copies.
-      expect(pack).toBeGreaterThan(64 * 2 ** 20);
-      expect(Math.max(...ends.map((end) => end.hwm))).toBeLessThan(256 * 2 ** 20);
+      // The pack is larger than a part (so it went in parts), yet no process held it whole, and the whole tree (42
+      // clients and the one git) stayed within 42 clients of 160 MiB and one bounded git (1 GiB): far below 42
+      // packs of a GiB.
+      expect(pack).toBeGreaterThan(64 * MIB);
+      expect(Math.max(...ends.map((end) => end.hwm))).toBeLessThan(256 * MIB);
+      expect(peak).toBeLessThan(42 * 160 * MIB + 1024 * MIB);
       // Nothing is left on disk.
-      expect([...new Bun.Glob('*.pack').scanSync(join(scratch, 'cache', 'armada', 'packs'))]).toEqual([]);
+      expect([...new Bun.Glob('*.pack').scanSync(join(scratch, 'home', '.cache', 'armada', 'packs'))]).toEqual([]);
     } finally {
       await served.stop();
       rmSync(scratch, { recursive: true, force: true });
     }
   }, 600_000);
 
-  test('a second commit waits for a free slot: with every slot held, nothing is packed until one is let go', async () => {
+  test('distinct commits submitted at once pack within the host\'s slots, each once', async () => {
     const scratch = mkdtempSync(join(tmpdir(), 'armada-slots-'));
     const served = runner();
-    const cache = join(scratch, 'cache');
-    const held: (() => void)[] = [];
 
     try {
-      const repo = join(scratch, 'repo');
       const made = join(scratch, 'made');
       const script = join(scratch, 'submit.ts');
+      const commits = Array.from({ length: PACK_SLOTS + 2 }, (_, at) => {
+        const repo = join(scratch, `repo-${String(at)}`);
 
-      Bun.spawnSync(['mkdir', '-p', repo]);
-      const sha = repository(repo, 1);
+        mkdirSync(repo);
+
+        return { repo, sha: repository(repo, 48) };
+      });
 
       writeFileSync(made, '');
       writeFileSync(script, SUBMITTER);
 
-      // Every slot this host has, held here, as other packs in progress would hold them.
-      for (let at = 0; ; at += 1) {
-        const release = tried(join(cache, 'armada', 'packs', `slot-${String(at)}.lock`));
+      const home = join(scratch, 'home');
+      const { packers } = await sampled(Promise.all(commits.map(async ({ repo, sha }) => await ended(submit({ url: served.url, repo, sha, made, script, home })))));
 
-        if (release === null || at >= 64) {
-          release?.();
-          break;
-        }
-
-        held.push(release);
-      }
-
-      const waiting = submit({ url: served.url, repo, sha, made, script, cache });
-      const packs = join(cache, 'armada', 'packs');
-      const holding = () => [...new Bun.Glob('*.lock').scanSync(packs)].some((name) => !name.startsWith('slot-'));
-
-      // The submitter holds its commit's lock, so it waits on a slot alone.
-      while (!holding()) await Bun.sleep(50);
-      // Across processes, what is shown is that it does not go on: one turn of its slot wait (a second) passes on the
-      // platform's clock, which no fake timer reaches in another process.
-      await Bun.sleep(1500);
-      expect([readFileSync(made, 'utf8'), served.packsPut()]).toEqual(['', 0]);
-      // The first slot let go: every host has it.
-      held.shift()?.();
-      expect(await waiting.exited).toBe(0);
-      expect(served.packsPut()).toBe(1);
+      expect(packers).toBeLessThanOrEqual(PACK_SLOTS);
+      expect(served.packsPut()).toBe(commits.length);
+      expect(readFileSync(made, 'utf8').split('\n').filter(Boolean).toSorted()).toEqual(commits.map(({ sha }) => sha).toSorted());
     } finally {
-      for (const release of held) release();
       await served.stop();
       rmSync(scratch, { recursive: true, force: true });
     }
-  }, 120_000);
+  }, 600_000);
+
+  test('a holder that takes the lock just after another stored the pack asks the runner again and makes none', async () => {
+    const key = `test ${String(Date.now())} ${String(Math.random())}`;
+    const name = new Bun.CryptoHasher('sha256').update(key).digest('hex').slice(0, 32);
+    const other = tried(join(PACKS, `${name}.lock`));
+    let asked = 0;
+    let made = 0;
+
+    // The other holder stores the pack and lets the lock go between this one's first ask and its lock.
+    const stored = await packedOnce(key, {
+      held: async () => {
+        asked += 1;
+
+        if (asked === 1) other?.release();
+
+        return await Promise.resolve(asked > 1);
+      },
+      make: async () => {
+        made += 1;
+        await Promise.resolve();
+      },
+      store: async () => await Promise.resolve(1),
+    }, 10);
+
+    expect([stored, made, asked]).toEqual([null, 0, 2]);
+  });
 });

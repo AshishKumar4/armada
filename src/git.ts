@@ -81,28 +81,28 @@ export const GIT_BOUNDS = ['-c', 'pack.threads=2', '-c', 'pack.windowMemory=256m
  *  environment commit's tree and nothing of its history, so the pack is every object of the commit's tree that tree
  *  lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the base, which the checkout
  *  never received. With history, git walks the revisions itself (`--revs`), no object list read here. */
-export async function packTo(repo: string, { sha, base, history }: { readonly sha: string; readonly base: string; readonly history: Config['history'] }, file: string): Promise<void> {
+export async function packTo(repo: string, { sha, base, history }: { readonly sha: string; readonly base: string; readonly history: Config['history'] }, file: string, held: readonly number[] = []): Promise<void> {
   if (history !== 'commit') {
-    await packed(repo, ['--revs'], `${sha}\n${base === 'root' ? '' : `^${base}\n`}`, file);
+    await packed(repo, { options: ['--revs'], input: `${sha}\n${base === 'root' ? '' : `^${base}\n`}`, held }, file);
 
     return;
   }
 
   const listed = (...args: string[]) => git(repo, ['rev-list', '--objects', ...args]).toString().split('\n').filter((line) => line !== '');
   const id = (line: string) => line.split(' ')[0] ?? '';
-  const held = new Set(base === 'root' ? [] : listed('--no-walk', base).map(id));
+  const kept = new Set(base === 'root' ? [] : listed('--no-walk', base).map(id));
 
-  await packed(repo, [], listed('--no-walk', sha).filter((line) => !held.has(id(line))).map((line) => `${line}\n`).join(''), file);
+  await packed(repo, { options: [], input: listed('--no-walk', sha).filter((line) => !kept.has(id(line))).map((line) => `${line}\n`).join(''), held }, file);
 }
 
 /** `git pack-objects` in `repo`, bounded (`GIT_BOUNDS`), reading `input` (object names, or revisions with `--revs`),
- *  writing the pack to `file`. */
-export async function packed(repo: string, options: readonly string[], input: string, file: string): Promise<void> {
+ *  writing the pack to `file`; it inherits the lock descriptors `held`, so the locks stay held while it lives. */
+export async function packed(repo: string, { options, input, held = [] }: { readonly options: readonly string[]; readonly input: string; readonly held?: readonly number[] }, file: string): Promise<void> {
   mkdirSync(dirname(file), { recursive: true });
   const out = openSync(file, 'w', 0o600);
 
   try {
-    const packing = Bun.spawn(['git', ...GIT_BOUNDS, 'pack-objects', ...options, '--stdout', '-q'], { cwd: repo, env: GIT_ENV, stdin: new Blob([input]), stdout: out, stderr: 'pipe' });
+    const packing = Bun.spawn(['git', ...GIT_BOUNDS, 'pack-objects', ...options, '--stdout', '-q'], { cwd: repo, env: GIT_ENV, stdio: [new Blob([input]), out, 'pipe', ...held] });
     const [exit, said] = await Promise.all([packing.exited, new Response(packing.stderr).text()]);
 
     if (exit !== 0) throw new Error(`git pack-objects ${options.join(' ')}: ${said.trim()}`);
