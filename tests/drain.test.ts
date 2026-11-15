@@ -34,7 +34,7 @@ describe('a deploy drains the deployed version for a bound at most', () => {
     const { deployed, calls, clock } = deployment(null, OPEN);
     let drained = false;
     const said: string[] = [];
-    const ended = drainWithin(deployed, 5 * MINUTE, () => { drained = true; }, (line) => { said.push(line); }, clock);
+    const ended = drainWithin(deployed, { boundMs: 5 * MINUTE, drained: () => { drained = true; }, say: (line) => { said.push(line); }, ...clock });
 
     const error = await ended.then(() => null, (cause: unknown) => cause);
 
@@ -56,7 +56,7 @@ describe('a deploy drains the deployed version for a bound at most', () => {
     const { deployed, calls, clock } = deployment(2, OPEN);
     let drained = false;
 
-    await drainWithin(deployed, 5 * MINUTE, () => { drained = true; }, () => undefined, clock);
+    await drainWithin(deployed, { boundMs: 5 * MINUTE, drained: () => { drained = true; }, say: () => undefined, ...clock });
 
     expect(drained).toBe(true);
     expect(calls).toEqual(['drain', 'drain', 'drain']);
@@ -71,14 +71,14 @@ describe('a deploy drains the deployed version for a bound at most', () => {
       openJobs: async () => await Promise.resolve([]),
     };
 
-    await drainWithin(old, MINUTE, () => { drained = true; }, () => undefined, { now: () => 0, sleep: async () => { await Promise.resolve(); }, pollMs: 1 });
+    await drainWithin(old, { boundMs: MINUTE, drained: () => { drained = true; }, say: () => undefined, now: () => 0, sleep: async () => { await Promise.resolve(); }, pollMs: 1 });
 
     expect([drained, calls]).toEqual([false, ['drain']]);
   });
 });
 
 describe('a deploy says why it drains', () => {
-  const health = (fields: Partial<Health>): Health => ({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: 3, vcpus: 1, jobs: 0, contract: 'this', ...fields }) as Health;
+  const health = (fields: Partial<Health>): Health => ({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: 3, vcpus: 1, jobs: 0, contract: 'this', ...fields });
 
   test('one reason for each way the deployed Worker differs, none where this one takes over its jobs', () => {
     expect([

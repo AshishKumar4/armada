@@ -395,11 +395,11 @@ const DRAIN_BOUND_MIN = 30;
 
 /** Drains the deployed version `deployed` (`name`), first saying why and what it waits on: each open job, oldest first,
  *  with its age. Bounded (`drainWithin`): at its bound the deployed version admits jobs again and the deploy ends. */
-async function drain(name: string, deployed: Armada, reasons: readonly string[], boundMin: number, drained: () => void): Promise<void> {
+async function drain(deployed: Armada, { name, reasons, boundMin, drained }: { readonly name: string; readonly reasons: readonly string[]; readonly boundMin: number; readonly drained: () => void }): Promise<void> {
   const open = describeJobs(await deployed.openJobs(), Date.now());
 
   console.log(`${name} drains first (${reasons.join('; ')}): it admits no new job until this deploy is done, at most ${String(boundMin)} min (--drain-bound), waiting on ${String(open.length)} open job${open.length === 1 ? '' : 's'}${open.length === 0 ? '' : `: ${open.join('; ')}`}`);
-  await drainWithin(deployed, boundMin * 60_000, drained, (line) => { console.log(line); }, { now: Date.now, sleep: Bun.sleep, pollMs: DRAIN_POLL_MS });
+  await drainWithin(deployed, { boundMs: boundMin * 60_000, drained, say: (line) => { console.log(line); }, now: Date.now, sleep: Bun.sleep, pollMs: DRAIN_POLL_MS });
 }
 
 /** The deployed Worker's health, or null, said, when it does not answer one: its jobs are drained first then. */
@@ -432,7 +432,7 @@ async function deployedCap(name: string, deployed: Armada): Promise<number> {
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
-async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined; readonly prepareCpu: string | undefined }, forceDrain: boolean, drainBound: number, keep: number): Promise<number> {
+async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked, keep }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined; readonly prepareCpu: string | undefined; readonly keep: number }, { force: forceDrain, boundMin: drainBound }: { readonly force: boolean; readonly boundMin: number }): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
   // One read of the deployment as this machine knows it, for both its preflight and its bearer: a connection of another
@@ -499,7 +499,7 @@ async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked }: { r
 
     const reasons = deployed === null ? [] : drainReasons(health, forceDrain, contractOf(ROOT));
 
-    if (deployed !== null && reasons.length > 0) await drain(name, deployed, reasons, drainBound, () => { drained = true; });
+    if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, drained: () => { drained = true; } });
     // The CPUs it prepares on: the ones asked (`--prepare-cpu`, '' for none), else the deployed Worker's own.
     const prepareCpu = asked ?? health?.prepareCpu;
 
@@ -972,7 +972,7 @@ async function main(): Promise<number> {
 
       if (!v.safeParse(DeploymentName, name).success) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory'), prepareCpu: option('prepare-cpu') }, flag('drain'), whole('drain-bound') ?? DRAIN_BOUND_MIN, whole('keep', 0) ?? KEPT_ENVIRONMENTS);
+      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory'), prepareCpu: option('prepare-cpu'), keep: whole('keep', 0) ?? KEPT_ENVIRONMENTS }, { force: flag('drain'), boundMin: whole('drain-bound') ?? DRAIN_BOUND_MIN });
     }
 
     case 'destroy':
