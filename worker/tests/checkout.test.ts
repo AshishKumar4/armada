@@ -1,5 +1,5 @@
 /**
- * A container's checkout on real git: a run's pack (`shallowOf`, `packOf`) received as the container receives it
+ * A container's checkout on real git: a run's pack (`shallowOf`, `packTo`) received as the container receives it
  * (`receive`), its boundary marked shallow (#34). It writes the pack where a container does, under `STATE`, so it runs as
  * root (`ci/privileged.sh`); elsewhere it is skipped, and says so.
  */
@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { packOf, shallowOf } from '../../src/git';
+import { packTo, shallowOf } from '../../src/git';
 import { receive, STATE } from '../src/container';
 
 const root = process.getuid?.() === 0;
@@ -47,7 +47,7 @@ function merged(dir: string): string {
 
 /** `sha`'s pack against `base`, from `repo`, received into the checkout `into` as a container receives it. */
 async function received(repo: string, into: string, sha: string, base: string): Promise<boolean> {
-  writeFileSync(`${STATE}/pack`, new Uint8Array(await packOf(repo, sha, base, 'full').arrayBuffer()));
+  await packTo(repo, { sha, base, history: 'full' }, `${STATE}/pack`);
 
   return Bun.spawnSync(['/bin/sh', '-c', receive(into), 'receive', sha, ...shallowOf(repo, sha, 'full')], { cwd: into, env, stdout: 'pipe', stderr: 'pipe' }).exitCode === 0;
 }

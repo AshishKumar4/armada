@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
-import { manifestOf, packBase, packOf } from '../src/git';
+import { manifestOf, packBase, packTo } from '../src/git';
+import { uploadPack } from '../src/packs';
 import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
@@ -517,11 +518,11 @@ describe('uploading a pack', () => {
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
-      expect(await armada.uploadPack('app', { sha: 'a'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(PACK_PART)]))).toBe(PACK_PART);
-      expect(seen.splice(0)).toEqual([`HEAD root?packer=${String(PACKER)}`, `PUT root?packer=${String(PACKER)}`]);
-      expect(await armada.uploadPack('app', { sha: 'b'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(2 * PACK_PART + 5)]))).toBe(2 * PACK_PART + 5);
+      expect(await uploadPack(armada, 'app', { sha: 'a'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(PACK_PART)); })).toBe(PACK_PART);
+      expect(seen.splice(0)).toEqual([`HEAD root?packer=${String(PACKER)}`, `HEAD root?packer=${String(PACKER)}`, `PUT root?packer=${String(PACKER)}`]);
+      expect(await uploadPack(armada, 'app', { sha: 'b'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); })).toBe(2 * PACK_PART + 5);
       expect(seen).toEqual([
-        `HEAD root?packer=${String(PACKER)}`, `POST root?packer=${String(PACKER)}&uploads`, `PUT root?packer=${String(PACKER)}&upload=u1&part=1`, `PUT root?packer=${String(PACKER)}&upload=u1&part=2`,
+        `HEAD root?packer=${String(PACKER)}`, `HEAD root?packer=${String(PACKER)}`, `POST root?packer=${String(PACKER)}&uploads`, `PUT root?packer=${String(PACKER)}&upload=u1&part=1`, `PUT root?packer=${String(PACKER)}&upload=u1&part=2`,
         `PUT root?packer=${String(PACKER)}&upload=u1&part=3`, `POST root?packer=${String(PACKER)}&upload=u1`,
       ]);
       expect(sent).toEqual([PACK_PART, PACK_PART, 5]);
@@ -533,8 +534,8 @@ describe('uploading a pack', () => {
   // #62: a run lost every outcome when another run of its commit stored the same pack at that moment.
   test('one another client stores at the same moment is asked for again: taken once there, else stored', async () => {
     const seen: string[] = [];
-    // What the runner answers each HEAD and PUT, in order.
-    const heads = [404, 200, 404, 404];
+    // What the runner answers each HEAD and PUT, in order: each submission asks once, and again on taking its lock.
+    const heads = [404, 404, 200, 404, 404, 404];
     const puts = [429, 429, 200];
     const original = globalThis.fetch;
 
@@ -552,16 +553,15 @@ describe('uploading a pack', () => {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
       let packed = 0;
 
-      const pack = () => {
+      const pack = async (file: string) => {
         packed += 1;
-
-        return new Blob([new Uint8Array(5)]);
+        await Bun.write(file, new Uint8Array(5));
       };
 
-      const taken = await armada.uploadPack('app', { sha: 'd'.repeat(40), base: 'root' }, pack);
-      const stored = await armada.uploadPack('app', { sha: 'e'.repeat(40), base: 'root' }, pack);
+      const taken = await uploadPack(armada, 'app', { sha: 'd'.repeat(40), base: 'root' }, pack);
+      const stored = await uploadPack(armada, 'app', { sha: 'e'.repeat(40), base: 'root' }, pack);
 
-      expect({ taken, stored, packed, seen }).toEqual({ taken: null, stored: 5, packed: 2, seen: ['HEAD', 'PUT', 'HEAD', 'HEAD', 'PUT', 'HEAD', 'PUT'] });
+      expect({ taken, stored, packed, seen }).toEqual({ taken: null, stored: 5, packed: 2, seen: ['HEAD', 'HEAD', 'PUT', 'HEAD', 'HEAD', 'HEAD', 'PUT', 'HEAD', 'PUT'] });
     } finally {
       globalThis.fetch = original;
     }
@@ -590,7 +590,7 @@ describe('uploading a pack', () => {
       let failed = '';
 
       try {
-        await armada.uploadPack('app', { sha: 'c'.repeat(40), base: 'root' }, () => new Blob([new Uint8Array(2 * PACK_PART + 5)]));
+        await uploadPack(armada, 'app', { sha: 'c'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); });
       } catch (cause) {
         failed = errorOf({ cause }).message;
       }
@@ -725,7 +725,10 @@ describe('packing a commit', () => {
       git(scratch, 'init', '-q', checkout);
 
       for (const { sha, from, base } of [{ sha: environment, from: origin, base: 'root' }, { sha: head, from: shallow, base: packBase(shallow, environment) }]) {
-        const pack = new Uint8Array(await packOf(from, sha, base, 'commit').arrayBuffer());
+        const packing = join(scratch, `${sha}.pack`);
+
+        await packTo(from, { sha, base, history: 'commit' }, packing);
+        const pack = new Uint8Array(await Bun.file(packing).arrayBuffer());
 
         expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: scratchEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
         appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
@@ -769,7 +772,10 @@ describe('a commit checkout', () => {
 
       // The environment's own commit run again packs nothing, and the overlay's pack carries what the checkout lacks.
       for (const [sha, base] of [[environment, 'root'], [environment, environment], [head, environment]] as const) {
-        const pack = new Uint8Array(await packOf(origin, sha, base, 'commit').arrayBuffer());
+        const packing = join(scratch, `${sha}.pack`);
+
+        await packTo(origin, { sha, base, history: 'commit' }, packing);
+        const pack = new Uint8Array(await Bun.file(packing).arrayBuffer());
 
         expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: scratchEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
         appendFileSync(join(checkout, '.git', 'shallow'), `${sha}\n`);
