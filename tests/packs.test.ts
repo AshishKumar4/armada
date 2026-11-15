@@ -86,7 +86,7 @@ const [url, repo, sha, made] = process.argv.slice(2);
 const armada = new Armada({ url, token: 't', account: 'a' });
 const stored = await uploadPack(armada, 'app', { sha, base: 'root' }, async (file) => {
   appendFileSync(made, sha + '\\n');
-  await packTo(repo, sha, 'root', 'full', file);
+  await packTo(repo, { sha, base: 'root', history: 'full' }, file);
 });
 const hwm = Number(/VmHWM:\\s+(\\d+)/u.exec(readFileSync('/proc/self/status', 'utf8'))?.[1] ?? 0) * 1024;
 console.log(JSON.stringify({ stored, hwm }));
@@ -131,6 +131,7 @@ describe('a host packs one commit once, within its slots, never holding a pack w
 
       const submission = { url: served.url, repo, sha, made, script, cache: join(scratch, 'cache') };
       const submitters = Array.from({ length: 42 }, () => submit(submission));
+
       const ends = await Promise.all(submitters.map(async (running) => {
         const [code, out, err] = await Promise.all([running.exited, new Response(running.stdout).text(), new Response(running.stderr).text()]);
 
@@ -196,7 +197,8 @@ describe('a host packs one commit once, within its slots, never holding a pack w
       // platform's clock, which no fake timer reaches in another process.
       await Bun.sleep(1500);
       expect([readFileSync(made, 'utf8'), served.packsPut()]).toEqual(['', 0]);
-      held.pop()?.();
+      // The first slot let go: every host has it.
+      held.shift()?.();
       expect(await waiting.exited).toBe(0);
       expect(served.packsPut()).toBe(1);
     } finally {

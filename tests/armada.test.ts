@@ -727,7 +727,7 @@ describe('packing a commit', () => {
       for (const { sha, from, base } of [{ sha: environment, from: origin, base: 'root' }, { sha: head, from: shallow, base: packBase(shallow, environment) }]) {
         const packing = join(scratch, `${sha}.pack`);
 
-        await packTo(from, sha, base, 'commit', packing);
+        await packTo(from, { sha, base, history: 'commit' }, packing);
         const pack = new Uint8Array(await Bun.file(packing).arrayBuffer());
 
         expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: scratchEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);
@@ -774,7 +774,7 @@ describe('a commit checkout', () => {
       for (const [sha, base] of [[environment, 'root'], [environment, environment], [head, environment]] as const) {
         const packing = join(scratch, `${sha}.pack`);
 
-        await packTo(origin, sha, base, 'commit', packing);
+        await packTo(origin, { sha, base, history: 'commit' }, packing);
         const pack = new Uint8Array(await Bun.file(packing).arrayBuffer());
 
         expect(Bun.spawnSync(['git', 'index-pack', '--stdin'], { cwd: checkout, env: scratchEnv(), stdin: pack, stdout: 'pipe', stderr: 'pipe' }).exitCode).toBe(0);

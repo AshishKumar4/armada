@@ -50,8 +50,11 @@ export function sweep(): void {
 
   try {
     names = readdirSync(PACKS);
-  } catch {
-    return;
+  } catch (cause) {
+    // No packs directory yet: nothing was ever left.
+    if (cause instanceof Error && 'code' in cause && cause.code === 'ENOENT') return;
+
+    throw cause;
   }
 
   for (const name of names.filter((found) => found.endsWith('.pack'))) {

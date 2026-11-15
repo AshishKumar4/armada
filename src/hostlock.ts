@@ -31,6 +31,7 @@ export function tried(path: string): (() => void) | null {
   const fd = openSync(path, 'a', 0o600);
 
   if (flock(fd, LOCK_EX | LOCK_NB) === 0) return () => { closeSync(fd); };
+
   closeSync(fd);
 
   return null;

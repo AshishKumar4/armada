@@ -81,7 +81,7 @@ export const GIT_BOUNDS = ['-c', 'pack.threads=2', '-c', 'pack.windowMemory=256m
  *  environment commit's tree and nothing of its history, so the pack is every object of the commit's tree that tree
  *  lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the base, which the checkout
  *  never received. With history, git walks the revisions itself (`--revs`), no object list read here. */
-export async function packTo(repo: string, sha: string, base: string, history: Config['history'], file: string): Promise<void> {
+export async function packTo(repo: string, { sha, base, history }: { readonly sha: string; readonly base: string; readonly history: Config['history'] }, file: string): Promise<void> {
   if (history !== 'commit') {
     await packed(repo, ['--revs'], `${sha}\n${base === 'root' ? '' : `^${base}\n`}`, file);
 

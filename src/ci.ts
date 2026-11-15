@@ -371,7 +371,7 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
   const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
   const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs, cpu: config.task.cpu };
 
-  return { environment: resolved, spec, upload: async () => await uploadPack(armada, config.name, commit, async (file) => { await packTo(repo, sha, base, config.history, file); }) };
+  return { environment: resolved, spec, upload: async () => await uploadPack(armada, config.name, commit, async (file) => { await packTo(repo, { sha, base, history: config.history }, file); }) };
 }
 
 /** A commit's job fields at `size`, else at its run's size, its pack uploaded against that environment's base: a job
