@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { readAccount } from './account';
+import { packed } from './git';
+import { slotted } from './packs';
 import { drainWithin } from './drain';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
@@ -53,6 +55,9 @@ Usage:
   armada webhook list                  list the configured projects
   armada webhook remove <project>      remove one, and its GitHub hook when the CLI made it
   armada prune [--keep=N]              delete now the snapshots past the N most recently used environments
+  armada pack --repo=<dir> --out=<file> [--revs]
+                                       a git pack of the object names (or with --revs the revisions) on stdin, made
+                                       within this host's pack slots by git bounded in memory, into <file>
                                        (default the deployment's own); an open job's environment stays
   armada runs prune [--days=N] [--gb=N] [--dry-run]
                                        delete the run records armada run keeps under ~/.local/state/armada/runs (a
@@ -145,6 +150,7 @@ const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; reado
   ['secret', { options: [], words: 2 }],
   ['webhook', { options: ['repo=', 'branches=', 'pull-requests', 'token-secret='], words: 2 }],
   ['prune', { options: ['keep='], words: 0 }],
+  ['pack', { options: ['repo=', 'out=', 'revs'], words: 0 }],
   ['runs', { options: ['days=', 'gb=', 'dry-run'], words: 2 }],
 ]);
 
@@ -668,6 +674,18 @@ async function install(account: string, name: string, file: string, { vcpus, mem
 /** Has the Worker delete now, with the registry credentials its deploy minted, the snapshots past those it keeps, or
  *  past the `keep` most recently used with no recent hour spared; an open job's environment stays
  *  (`ArmadaEnvironments.prune`). A later job prepares one again. */
+/** `armada pack`: a git pack of `repo` made as a submission's is on this host (`packs`), within one of its pack
+ *  slots, by git bounded in memory, into the file `out` on disk: of the object names on stdin, or with `revs` the
+ *  revisions there. Another tool's packing on the host (dew-ops' dispatch of a node's commits) shares its bound. */
+async function packCommand(repo: string | undefined, out: string | undefined, revs: boolean): Promise<number> {
+  if (repo === undefined || out === undefined) throw new Error('pack takes --repo=<repository> and --out=<file>');
+  const input = await new Response(Bun.stdin.stream()).text();
+
+  await slotted(async () => { await packed(repo, revs ? ['--revs'] : [], input, out); });
+
+  return 0;
+}
+
 async function pruneOn(armada: Armada, keep: number | undefined): Promise<number> {
   const answer = await armada.call('/environments/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep }) });
   const { pruned } = v.parse(v.object({ pruned: v.array(v.string()) }), await answer.json());
@@ -981,6 +999,9 @@ async function main(): Promise<number> {
 
     case 'prune':
       return await pruneOn(connect(), whole('keep', 0));
+
+    case 'pack':
+      return await packCommand(option('repo'), option('out'), flag('revs'));
 
     case 'runs':
       return await runsCommand(target, words[1], { days: amount('days'), gb: amount('gb'), dry: flag('dry-run') });

@@ -3,10 +3,11 @@
  * and its pack for a container, against the environment's commit or from the root, with the shallow boundary its
  * checkout marks (#34).
  */
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import * as v from 'valibot';
 import type { Config, Environment } from './config';
+import { GIT_BOUNDS } from './packs';
 import type { Manifest } from './protocol';
 
 /** This process's environment without GIT_DIR and its like, which a hook that runs armada sets for its own repo. */
@@ -72,15 +73,37 @@ export function shallowOf(repo: string, sha: string, history: Config['history'])
   return lines(readFileSync(resolve(repo, git(repo, ['rev-parse', '--git-path', 'shallow']).toString().trim()), 'utf8')).filter((line) => reachable.has(line));
 }
 
-/** The commit from the root (with its history, or alone), or what it adds to the environment's commit. A `commit`
- *  checkout holds the environment commit's tree and nothing of its history, so the pack is every object of the
- *  commit's tree that tree lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the
- *  base, which the checkout never received. */
-export function packOf(repo: string, sha: string, base: string, history: Config['history']): Blob {
+/** The commit from the root (with its history, or alone), or what it adds to the environment's commit, packed into
+ *  `file` by git bounded in memory (`GIT_BOUNDS`), its output streamed to the file. A `commit` checkout holds the
+ *  environment commit's tree and nothing of its history, so the pack is every object of the commit's tree that tree
+ *  lacks: `--not <base>` would also leave out what the commit shares with an ancestor of the base, which the checkout
+ *  never received. With history, git walks the revisions itself (`--revs`), no object list read here. */
+export async function packTo(repo: string, sha: string, base: string, history: Config['history'], file: string): Promise<void> {
+  if (history !== 'commit') {
+    await packed(repo, ['--revs'], `${sha}\n${base === 'root' ? '' : `^${base}\n`}`, file);
+
+    return;
+  }
+
   const listed = (...args: string[]) => git(repo, ['rev-list', '--objects', ...args]).toString().split('\n').filter((line) => line !== '');
   const id = (line: string) => line.split(' ')[0] ?? '';
-  const held = new Set(history === 'commit' && base !== 'root' ? listed('--no-walk', base).map(id) : []);
-  const objects = history === 'commit' ? listed('--no-walk', sha).filter((line) => !held.has(id(line))) : listed(sha, ...base === 'root' ? [] : ['--not', base]);
+  const held = new Set(base === 'root' ? [] : listed('--no-walk', base).map(id));
 
-  return new Blob([new Uint8Array(git(repo, ['-c', 'pack.threads=4', 'pack-objects', '--stdout', '-q'], new TextEncoder().encode(objects.map((line) => `${line}\n`).join(''))))]);
+  await packed(repo, [], listed('--no-walk', sha).filter((line) => !held.has(id(line))).map((line) => `${line}\n`).join(''), file);
+}
+
+/** `git pack-objects` in `repo`, bounded (`GIT_BOUNDS`), reading `input` (object names, or revisions with `--revs`),
+ *  writing the pack to `file`. */
+export async function packed(repo: string, options: readonly string[], input: string, file: string): Promise<void> {
+  mkdirSync(dirname(file), { recursive: true });
+  const out = openSync(file, 'w', 0o600);
+
+  try {
+    const packing = Bun.spawn(['git', ...GIT_BOUNDS, 'pack-objects', ...options, '--stdout', '-q'], { cwd: repo, env: GIT_ENV, stdin: new Blob([input]), stdout: out, stderr: 'pipe' });
+    const [exit, said] = await Promise.all([packing.exited, new Response(packing.stderr).text()]);
+
+    if (exit !== 0) throw new Error(`git pack-objects ${options.join(' ')}: ${said.trim()}`);
+  } finally {
+    closeSync(out);
+  }
 }

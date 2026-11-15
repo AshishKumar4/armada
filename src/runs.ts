@@ -21,11 +21,11 @@
  * the holds file; a record that vanishes mid-scan, to a person, is skipped. A file hard-linked under several names is
  * counted once.
  */
-import { dlopen, FFIType } from 'bun:ffi';
 import { appendFileSync, closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import * as v from 'valibot';
+import { taken } from './hostlock';
 import { JOB_ID } from './protocol';
 
 const STATE = join(homedir(), '.local', 'state', 'armada');
@@ -48,12 +48,6 @@ const REPORT_SUFFIX = '.json';
 const MIN_AGE_MS = 60 * 60_000;
 
 const LOCK_POLL_MS = 100;
-
-/** flock(2)'s exclusive lock. */
-const LOCK_EX = 2;
-
-/** flock(2)'s operation that answers at once rather than waiting. */
-const LOCK_NB = 4;
 
 /** How long a command waits for another armada's prune or hold edit to end. */
 const LOCK_WAIT_MS = 60_000;
@@ -421,32 +415,9 @@ function pruneUnder(bounds: Bounds, dry: boolean): Pruned {
   };
 }
 
-/** flock(2), from the C library: the lock a prune and every edit of the holds file take, which the kernel lets go of when
- *  its holder exits however it ends, so none is ever left to break. */
-function flock(): (fd: number, operation: number) => number {
-  const library = dlopen(process.platform === 'darwin' ? 'libc.dylib' : 'libc.so.6', { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
-
-  return (fd, operation) => library.symbols.flock(fd, operation);
-}
-
 /** Takes the lock, waiting up to `patienceMs` for its holder; the release, or null when it is held still. */
 async function lock(patienceMs: number): Promise<(() => void) | null> {
-  mkdirSync(STATE, { recursive: true });
-  const until = Date.now() + patienceMs;
-  const fd = openSync(LOCK, 'a', 0o600);
-  const locking = flock();
-
-  for (;;) {
-    if (locking(fd, LOCK_EX | LOCK_NB) === 0) return () => { closeSync(fd); };
-
-    if (Date.now() >= until) {
-      closeSync(fd);
-
-      return null;
-    }
-
-    await Bun.sleep(LOCK_POLL_MS);
-  }
+  return await taken(LOCK, patienceMs, LOCK_POLL_MS);
 }
 
 /** `body`, holding the lock; a command waits up to LOCK_WAIT_MS for it. */

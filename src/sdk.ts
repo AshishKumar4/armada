@@ -2,6 +2,7 @@
  * A deployment of armada and the requests it answers: jobs, their events and outputs, packs and bundles. The typed
  * API (`task.ts`) and the CLI are built on it.
  */
+import { packedOnce } from './packs';
 import { openJobs, type ListedJob } from './drain';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -287,19 +288,35 @@ export class Armada {
     return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe: ownPacker(recipe) }));
   }
 
-  /** Stores a commit's pack once, under this client's `PACKER` and its shallow boundary (`CommitSchema`); `pack` is
-   *  called only when the runner lacks it. One larger than a request may carry goes in parts of PACK_PART bytes, and an
-   *  upload that fails is aborted, so its parts don't stay in the bucket; the bucket's lifecycle aborts what a client
-   *  that died left. */
-  async uploadPack(project: string, { sha, base, shallow = [] }: Pick<Commit, 'sha' | 'base' | 'shallow'>, pack: () => Blob): Promise<number | null> {
+  /** Stores a commit's pack once, under this client's `PACKER` and its shallow boundary (`CommitSchema`): `make` writes
+   *  it to the file it is given, only where the runner lacks it, and on this host once however many submit it at once
+   *  (`packedOnce`); its size, or null where none was stored here. One larger than a request may carry goes in parts of
+   *  PACK_PART bytes, read from its file one at a time, and an upload that fails is aborted, so its parts don't stay in
+   *  the bucket; the bucket's lifecycle aborts what a client that died left. */
+  async uploadPack(project: string, { sha, base, shallow = [] }: Pick<Commit, 'sha' | 'base' | 'shallow'>, make: (file: string) => Promise<void>): Promise<number | null> {
     const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}${shallow.length === 0 ? '' : `&shallow=${shallow.join(',')}`}`;
-    let body: Blob | undefined;
 
-    return await this.storeOnce(path, async () => {
-      body ??= pack();
-      await this.putPack(path, body);
+    return await packedOnce(`${this.connection.url} ${path}`, {
+      held: async () => (await this.call(path, { method: 'HEAD' })).status !== 404,
+      make,
+      store: async (file) => {
+        const body = Bun.file(file);
 
-      return body.size;
+        // Asked again while another client stores the same at that moment, which the runner answers 429 (#62).
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            await this.putPack(path, body);
+
+            return body.size;
+          } catch (cause) {
+            if (!(cause instanceof RequestError) || cause.status !== 429 || attempt >= STORE_ATTEMPTS) throw cause;
+          }
+
+          await Bun.sleep(attempt * 1000);
+
+          if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
+        }
+      },
     });
   }
 
@@ -319,7 +336,7 @@ export class Armada {
     }
   }
 
-  /** `body` at `path`: in one PUT, or in parts past PACK_PART bytes. */
+  /** `body` at `path`: in one PUT, or in parts past PACK_PART bytes, each read from it as it is sent. */
   private async putPack(path: string, body: Blob): Promise<void> {
     if (body.size <= PACK_PART) {
       await this.call(path, { method: 'PUT', body });
@@ -329,12 +346,11 @@ export class Armada {
 
     const { upload } = v.parse(v.object({ upload: v.string() }), await this.post(`${path}&uploads`, {}));
     const uploading = `${path}&upload=${encodeURIComponent(upload)}`;
-    const bytes = new Uint8Array(await body.arrayBuffer());
     const parts = [];
 
     try {
-      for (let start = 0, partNumber = 1; start < bytes.length; start += PACK_PART, partNumber += 1) {
-        const stored = await (await this.call(`${uploading}&part=${String(partNumber)}`, { method: 'PUT', body: bytes.subarray(start, start + PACK_PART) })).json();
+      for (let start = 0, partNumber = 1; start < body.size; start += PACK_PART, partNumber += 1) {
+        const stored = await (await this.call(`${uploading}&part=${String(partNumber)}`, { method: 'PUT', body: body.slice(start, start + PACK_PART) })).json();
 
         parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
       }

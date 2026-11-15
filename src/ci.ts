@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
 import { checkoutOf, CONFIG_FILE, environmentOf, parseConfig, type Config } from './config';
-import { git, manifestOf, packBase, packOf, resolveCommit, shallowOf } from './git';
+import { git, manifestOf, packBase, packTo, resolveCommit, shallowOf } from './git';
 import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, timedShort, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
@@ -370,7 +370,7 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
   const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
   const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs, cpu: config.task.cpu };
 
-  return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, commit, () => packOf(repo, sha, base, config.history)) };
+  return { environment: resolved, spec, upload: async () => await armada.uploadPack(config.name, commit, async (file) => { await packTo(repo, sha, base, config.history, file); }) };
 }
 
 /** A commit's job fields at `size`, else at its run's size, its pack uploaded against that environment's base: a job
