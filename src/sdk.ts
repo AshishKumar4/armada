@@ -124,17 +124,42 @@ async function redeploying(response: Response): Promise<string | null> {
   return said.success ? said.output.error : null;
 }
 
+/** `ms` waited, or ended at once, rejecting with its reason, once `signal` aborts: a request its caller gave up on asks
+ *  nothing more. */
+async function pause(ms: number, signal: AbortSignal | null | undefined): Promise<void> {
+  if (signal === null || signal === undefined) {
+    await Bun.sleep(ms);
+
+    return;
+  }
+
+  signal.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const aborted = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', aborted);
+      resolve();
+    }, ms);
+
+    signal.addEventListener('abort', aborted, { once: true });
+  });
+}
+
 /** The answer of `send`, asked again while the Worker refuses it for a redeploy (`redeploying`), a second apart more
- *  each time up to REDEPLOY_WAIT_MS, the refusal said once under `request`'s name. */
-async function deployed(request: string, send: () => Promise<Response>): Promise<Response> {
+ *  each time up to REDEPLOY_WAIT_MS, the refusal said once under `request`'s name; never again once `signal` aborts. */
+async function deployed(request: string, send: () => Promise<Response>, signal: AbortSignal | null | undefined): Promise<Response> {
   for (let refusals = 1; ; refusals += 1) {
+    signal?.throwIfAborted();
     const sent = await send();
     const refused = await redeploying(sent);
 
     if (refused === null) return sent;
 
     if (refusals === 1) console.error(`${request}: ${refused}; asked again until the deploy is done`);
-    await Bun.sleep(Math.min(refusals * 1000, REDEPLOY_WAIT_MS));
+    await pause(Math.min(refusals * 1000, REDEPLOY_WAIT_MS), signal);
   }
 }
 
@@ -176,16 +201,16 @@ export class Armada {
       let sent: Response;
 
       try {
-        sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }));
+        sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }), init.signal);
       } catch (cause) {
-        // A connection that dropped is asked again, as a gateway's failure is.
-        if (attempt >= attempts) throw cause;
-        await Bun.sleep(attempt * 1000);
+        // A connection that dropped is asked again, as a gateway's failure is; one its caller gave up on, never.
+        if (attempt >= attempts || init.signal?.aborted === true) throw cause;
+        await pause(attempt * 1000, init.signal);
         continue;
       }
 
       if ([500, 502, 503, 504].includes(sent.status) && attempt < attempts) {
-        await Bun.sleep(attempt * 1000);
+        await pause(attempt * 1000, init.signal);
         continue;
       }
 
@@ -208,11 +233,11 @@ export class Armada {
   }
 
   /** Admits no new job until the version deployed now is replaced, or `admit` is called; answers how many jobs are
-   *  still open, or null for a Worker too old to drain. */
-  async drain(): Promise<number | null> {
+   *  still open, or null for a Worker too old to drain. `signal` ends the ask, and every retry of it, once aborted. */
+  async drain(signal?: AbortSignal): Promise<number | null> {
     // A Worker that answers the drain only in its own version is asked in each older one, down to the first that had it.
     for (let protocol = PROTOCOL; protocol >= FIRST_DRAIN; protocol -= 1) {
-      const answer = await this.drainIn(protocol);
+      const answer = await this.drainIn(protocol, signal);
 
       if (answer !== null) {
         this.spoken = protocol;
@@ -224,19 +249,31 @@ export class Armada {
     return null;
   }
 
-  async admit(): Promise<void> {
-    await this.call('/drain', { method: 'DELETE' }, this.spoken);
+  async admit(signal?: AbortSignal): Promise<void> {
+    await this.call('/drain', { method: 'DELETE', signal }, this.spoken);
   }
 
-  /** Its jobs not yet done, every page read (`openJobs`). */
-  async openJobs(): Promise<ListedJob[]> {
-    return await openJobs(async (path) => await this.call(path, {}, this.spoken));
+  /** Its jobs not yet done, every page read (`openJobs`) in the newest wire the Worker lists them in: one that drains
+   *  in any wire still lists its jobs only in its own. */
+  async openJobs(signal?: AbortSignal): Promise<ListedJob[]> {
+    return await openJobs(async (path) => await this.readIn(path, signal));
+  }
+
+  /** `path` read in the newest wire the Worker answers it in, from this client's own down. */
+  private async readIn(path: string, signal: AbortSignal | undefined): Promise<Response> {
+    for (let protocol = PROTOCOL; ; protocol -= 1) {
+      try {
+        return await this.call(path, { signal }, protocol);
+      } catch (cause) {
+        if (!(cause instanceof RequestError && cause.status === 426) || protocol <= 1) throw cause;
+      }
+    }
   }
 
   /** The drain asked in wire `protocol`, or null when the Worker answers that it speaks another. */
-  private async drainIn(protocol: number): Promise<Response | null> {
+  private async drainIn(protocol: number, signal: AbortSignal | undefined): Promise<Response | null> {
     try {
-      return await this.call('/drain', { method: 'POST' }, protocol);
+      return await this.call('/drain', { method: 'POST', signal }, protocol);
     } catch (cause) {
       if (cause instanceof RequestError && cause.status === 426) return null;
 

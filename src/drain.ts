@@ -60,9 +60,9 @@ export function describeJobs(jobs: readonly ListedJob[], now: number): string[] 
 /** What a drain asks of the deployed version: to admit no new job (answering how many are open, or null for a Worker
  *  too old to drain), to admit jobs again, and its open jobs. */
 export interface Drainable {
-  drain(): Promise<number | null>;
-  admit(): Promise<void>;
-  openJobs(): Promise<ListedJob[]>;
+  drain(signal?: AbortSignal): Promise<number | null>;
+  admit(signal?: AbortSignal): Promise<void>;
+  openJobs(signal?: AbortSignal): Promise<ListedJob[]>;
 }
 
 /** A drain that reached its bound: nothing is deployed, and the deployed version admits jobs again, or lets its drain
@@ -87,16 +87,29 @@ export interface DrainOptions {
 /** The longest the admission and the last listing at a drain's bound are waited for. */
 const CLEANUP_MS = 30_000;
 
-/** `request`'s answer, or `late` where `expiry(ms)` settles first. */
-async function within<T, L>(request: Promise<T>, ms: number, expiry: (ms: number) => Promise<void>, late: L): Promise<T | L> {
-  return await Promise.race([request, expiry(Math.max(0, ms)).then(() => late)]);
+/** `request`'s answer, or `late` where `expiry(ms)` settles first; either way its signal is then aborted, so a request
+ *  given up on, and every retry of it, asks the Worker nothing more (a drain's ask retried past the bound would
+ *  renew the drain after its admission). */
+async function within<T, L>(request: (signal: AbortSignal) => Promise<T>, ms: number, expiry: (ms: number) => Promise<void>,
+  late: L): Promise<T | L> {
+  const stop = new AbortController();
+  const asked = request(stop.signal);
+
+  // The loser's end, an abort's rejection among them, is no one's to hear.
+  asked.catch(() => undefined);
+
+  try {
+    return await Promise.race([asked, expiry(Math.max(0, ms)).then(() => late)]);
+  } finally {
+    stop.abort();
+  }
 }
 
 /** The deployed version's open jobs in one line each (`describeJobs`), or why they could not be listed: a Worker that
  *  predates `GET /jobs`, or one that does not answer, is drained all the same. */
 async function listed(deployed: Drainable, ms: number, { now, expiry }: Pick<DrainOptions, 'now' | 'expiry'>): Promise<string> {
   try {
-    const jobs = await within(deployed.openJobs(), ms, expiry, null);
+    const jobs = await within((signal) => deployed.openJobs(signal), ms, expiry, null);
 
     if (jobs === null) return 'its open jobs did not list in time';
 
@@ -118,7 +131,7 @@ export async function drainWithin(deployed: Drainable, options: DrainOptions): P
   const deadline = now() + boundMs;
   const left = () => deadline - now();
   const expired = Symbol('expired');
-  let jobs = await within(deployed.drain(), left(), expiry, expired);
+  let jobs = await within((signal) => deployed.drain(signal), left(), expiry, expired);
 
   if (jobs === null) {
     say('the deployed Worker cannot stop taking jobs, so any job it runs now ends with this deploy');
@@ -133,7 +146,8 @@ export async function drainWithin(deployed: Drainable, options: DrainOptions): P
   // Each ask renews the drain, which lapses by itself if this process dies.
   while (jobs === expired || (jobs !== null && jobs > 0)) {
     if (jobs === expired || left() <= 0) {
-      const admitted = await within(deployed.admit().then(() => true), CLEANUP_MS, expiry, false);
+      // An admission refused or unanswered is unconfirmed, never a reason to wait on it again: the drain is let go.
+      const admitted = await within(async (signal) => await deployed.admit(signal).then(() => true, () => false), CLEANUP_MS, expiry, false);
 
       held(false);
       throw new DrainBound(`the drain reached its bound of ${String(Math.round(boundMs / 60_000))} min, so nothing was deployed and ${admitted ? 'the deployed version admits jobs again' : 'its admission went unanswered: the drain lapses by itself once this deploy stops asking'}; still open: ${await listed(deployed, CLEANUP_MS, options)}`);
@@ -141,6 +155,6 @@ export async function drainWithin(deployed: Drainable, options: DrainOptions): P
 
     say(`waiting for ${String(jobs)} open job${jobs === 1 ? '' : 's'} to finish; new jobs are refused until the deploy is done, at most ${String(Math.ceil(left() / 60_000))} min more`);
     await sleep(Math.min(pollMs, left()));
-    jobs = left() <= 0 ? expired : await within(deployed.drain(), left(), expiry, expired);
+    jobs = left() <= 0 ? expired : await within((signal) => deployed.drain(signal), left(), expiry, expired);
   }
 }

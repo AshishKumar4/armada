@@ -64,20 +64,24 @@ describe('a deploy drains the deployed version for a bound at most', () => {
     expect(said).toHaveLength(6);
   });
 
-  test('a Worker that stops answering is let go at the bound, never waited on past it', async () => {
+  test('a Worker that stops answering is let go at the bound: every ask given up on is ended before the admission', async () => {
     let asks = 0;
     const calls: string[] = [];
     const held: boolean[] = [];
+    const signals: AbortSignal[] = [];
 
     const silent: Drainable = {
-      drain: async () => {
+      drain: async (signal) => {
         asks += 1;
         calls.push('drain');
+
+        if (signal !== undefined) signals.push(signal);
 
         return asks === 1 ? await Promise.resolve(2) : await new Promise<never>(() => undefined);
       },
       admit: async () => {
-        calls.push('admit');
+        // A retry still pending would renew the drain after this admission.
+        calls.push(signals.every((signal) => signal.aborted) ? 'admit, every ask ended' : 'admit, an ask still pending');
         await new Promise<never>(() => undefined);
       },
       openJobs: async () => await new Promise<never>(() => undefined),
@@ -89,7 +93,15 @@ describe('a deploy drains the deployed version for a bound at most', () => {
     const ended = drainWithin(silent, { boundMs: 5 * MINUTE, held: (holds) => { held.push(holds); }, say: () => undefined, now: () => 0, sleep: async () => { await Promise.resolve(); }, expiry, pollMs: MINUTE });
 
     await expect(ended).rejects.toBeInstanceOf(DrainBound);
-    expect([calls, held]).toEqual([['drain', 'drain', 'admit'], [true, false]]);
+    expect([calls, held]).toEqual([['drain', 'drain', 'admit, every ask ended'], [true, false]]);
+  });
+
+  test('an admission refused at the bound still lets the drain go and ends the deploy', async () => {
+    const { deployed, held, options } = deployment(null, listed);
+    const refusing: Drainable = { ...deployed, admit: async () => { await Promise.reject(new Error('DELETE /drain: connection dropped')); } };
+
+    await expect(drainWithin(refusing, { ...options, boundMs: 2 * MINUTE, say: () => undefined })).rejects.toBeInstanceOf(DrainBound);
+    expect(held).toEqual([true, false]);
   });
 
   test('open jobs that finish within the bound leave the drain held for the deploy, never admitting, listed or not', async () => {
