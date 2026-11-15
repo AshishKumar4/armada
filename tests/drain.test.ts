@@ -10,6 +10,7 @@ function deployment(finishing: number | null, open: readonly ListedJob[]) {
   const calls: string[] = [];
   let asks = 0;
   let clock = 0;
+
   const deployed: Drainable = {
     drain: async () => {
       calls.push('drain');
@@ -36,19 +37,13 @@ describe('a deploy drains the deployed version for a bound at most', () => {
     const said: string[] = [];
     const ended = drainWithin(deployed, { boundMs: 5 * MINUTE, drained: () => { drained = true; }, say: (line) => { said.push(line); }, ...clock });
 
-    const error = await ended.then(() => null, (cause: unknown) => cause);
-
-    expect(error).toBeInstanceOf(DrainBound);
+    // Every job still open is named, oldest first, with its age at the bound.
+    await expect(ended).rejects.toBeInstanceOf(DrainBound);
+    await expect(ended).rejects.toThrow(/job-a[^]*185 min[^]*job-b[^]*125 min/u);
     expect(drained).toBe(true);
     // Refused for the bound and no longer: asked each minute, then admitted once.
     expect(calls).toEqual(['drain', 'drain', 'drain', 'drain', 'drain', 'drain', 'admit']);
     expect(clock.now()).toBe(5 * MINUTE);
-    // Every job still open is named, oldest first, with its age at the bound.
-    const message = (error as DrainBound).message;
-
-    expect(message.indexOf('job-a')).toBeLessThan(message.indexOf('job-b'));
-    expect(message).toContain('185 min');
-    expect(message).toContain('125 min');
     expect(said).toHaveLength(5);
   });
 
@@ -65,8 +60,13 @@ describe('a deploy drains the deployed version for a bound at most', () => {
   test('a Worker too old to drain is neither drained nor admitted', async () => {
     const calls: string[] = [];
     let drained = false;
+
     const old: Drainable = {
-      drain: async () => { calls.push('drain'); return await Promise.resolve(null); },
+      drain: async () => {
+        calls.push('drain');
+
+        return await Promise.resolve(null);
+      },
       admit: async () => { calls.push('admit'); await Promise.resolve(); },
       openJobs: async () => await Promise.resolve([]),
     };
@@ -99,6 +99,7 @@ describe('the open jobs are read whole or not at all', () => {
     const asked: string[] = [];
     const open = await openJobs(async (path) => {
       asked.push(path);
+
 
       return await Promise.resolve(path.includes('before=') ? page(['last'], new Set()) : page(first, new Set(['j0'])));
     });
