@@ -25,6 +25,7 @@ function deployment(finishing: number | null, listing: () => Promise<ListedJob[]
     },
     openJobs: listing,
   };
+
   const options = {
     held: (holds: boolean) => { held.push(holds); },
     now: () => clock,
@@ -81,6 +82,7 @@ describe('a deploy drains the deployed version for a bound at most', () => {
       },
       openJobs: async () => await new Promise<never>(() => undefined),
     };
+
     // Every pending request is abandoned once its span passes (a macrotask later), the answered one first.
     const expiry = async () => { await new Promise((settled) => { setTimeout(settled, 0); }); };
 
