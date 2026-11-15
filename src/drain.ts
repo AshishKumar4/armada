@@ -93,13 +93,16 @@ const CLEANUP_MS = 30_000;
 async function within<T, L>(request: (signal: AbortSignal) => Promise<T>, ms: number, expiry: (ms: number) => Promise<void>,
   late: L): Promise<T | L> {
   const stop = new AbortController();
-  const asked = request(stop.signal);
-
-  // The loser's end, an abort's rejection among them, is no one's to hear.
-  asked.catch(() => undefined);
+  // Its end as an outcome, a failure apart from an answer, so a request that loses the race and then fails (its
+  // abort's rejection among them) leaves no rejection unheard; one that wins and failed throws as it did.
+  const asked = request(stop.signal).then((answer) => ({ answer }), (failure: unknown) => ({ failure }));
 
   try {
-    return await Promise.race([asked, expiry(Math.max(0, ms)).then(() => late)]);
+    const first = await Promise.race([asked, expiry(Math.max(0, ms)).then(() => ({ late }))]);
+
+    if ('failure' in first) throw first.failure;
+
+    return 'late' in first ? first.late : first.answer;
   } finally {
     stop.abort();
   }
@@ -147,10 +150,10 @@ export async function drainWithin(deployed: Drainable, options: DrainOptions): P
   while (jobs === expired || (jobs !== null && jobs > 0)) {
     if (jobs === expired || left() <= 0) {
       // An admission refused or unanswered is unconfirmed, never a reason to wait on it again: the drain is let go.
-      const admitted = await within(async (signal) => await deployed.admit(signal).then(() => true, () => false), CLEANUP_MS, expiry, false);
+      const admission = await within(async (signal) => await deployed.admit(signal).then(() => 'the deployed version admits jobs again', (refused: unknown) => `its admission was refused (${refused instanceof Error ? refused.message : String(refused)}): the drain lapses by itself once this deploy stops asking`), CLEANUP_MS, expiry, 'its admission went unanswered: the drain lapses by itself once this deploy stops asking');
 
       held(false);
-      throw new DrainBound(`the drain reached its bound of ${String(Math.round(boundMs / 60_000))} min, so nothing was deployed and ${admitted ? 'the deployed version admits jobs again' : 'its admission went unanswered: the drain lapses by itself once this deploy stops asking'}; still open: ${await listed(deployed, CLEANUP_MS, options)}`);
+      throw new DrainBound(`the drain reached its bound of ${String(Math.round(boundMs / 60_000))} min, so nothing was deployed and ${admission}; still open: ${await listed(deployed, CLEANUP_MS, options)}`);
     }
 
     say(`waiting for ${String(jobs)} open job${jobs === 1 ? '' : 's'} to finish; new jobs are refused until the deploy is done, at most ${String(Math.ceil(left() / 60_000))} min more`);

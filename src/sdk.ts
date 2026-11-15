@@ -134,14 +134,15 @@ async function pause(ms: number, signal: AbortSignal | null | undefined): Promis
   }
 
   signal.throwIfAborted();
-  await new Promise<void>((resolve, reject) => {
+  await new Promise<void>((waited, reject) => {
     const aborted = () => {
       clearTimeout(timer);
       reject(signal.reason);
     };
+
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', aborted);
-      resolve();
+      waited();
     }, ms);
 
     signal.addEventListener('abort', aborted, { once: true });
