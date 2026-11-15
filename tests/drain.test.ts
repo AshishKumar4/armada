@@ -1,13 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { DrainBound, drainWithin, openJobs, type Drainable, type ListedJob } from '../src/drain';
+import { DrainBound, drainWithin, openJobs, Unlisted, type Drainable, type ListedJob } from '../src/drain';
 import { DRIVER, drainReasons, PROTOCOL, type Health } from '../src/protocol';
 
 const MINUTE = 60_000;
 
 /** A deployed version whose open jobs finish after `finishing` asks of the drain (never, where null), every call kept
- *  in order, on a clock that each sleep advances. */
-function deployment(finishing: number | null, open: readonly ListedJob[]) {
+ *  in order, on a clock that each sleep advances; `listing` its open jobs' answer. */
+function deployment(finishing: number | null, listing: () => Promise<ListedJob[]>) {
   const calls: string[] = [];
+  const held: boolean[] = [];
   let asks = 0;
   let clock = 0;
 
@@ -16,13 +17,27 @@ function deployment(finishing: number | null, open: readonly ListedJob[]) {
       calls.push('drain');
       asks += 1;
 
-      return await Promise.resolve(finishing !== null && asks > finishing ? 0 : open.length);
+      return await Promise.resolve(finishing !== null && asks > finishing ? 0 : OPEN.length);
     },
-    admit: async () => { calls.push('admit'); await Promise.resolve(); },
-    openJobs: async () => await Promise.resolve([...open]),
+    admit: async () => {
+      calls.push('admit');
+      await Promise.resolve();
+    },
+    openJobs: listing,
+  };
+  const options = {
+    held: (holds: boolean) => { held.push(holds); },
+    now: () => clock,
+    sleep: async (ms: number) => {
+      clock += ms;
+      await Promise.resolve();
+    },
+    // No Worker request outlasts its share of the bound here: each answers at once.
+    expiry: async () => { await new Promise<never>(() => undefined); },
+    pollMs: MINUTE,
   };
 
-  return { deployed, calls, clock: { now: () => clock, sleep: async (ms: number) => { clock += ms; await Promise.resolve(); }, pollMs: MINUTE } };
+  return { deployed, calls, held, options };
 }
 
 const OPEN: ListedJob[] = [
@@ -30,36 +45,64 @@ const OPEN: ListedJob[] = [
   { id: 'job-a', label: '', phase: 'preparing', createdAt: -180 * MINUTE },
 ];
 
+const listed = async () => await Promise.resolve([...OPEN]);
+
 describe('a deploy drains the deployed version for a bound at most', () => {
   test('open jobs that outlast the bound end the drain: the deployed version admits jobs again and the deploy ends naming them', async () => {
-    const { deployed, calls, clock } = deployment(null, OPEN);
-    let drained = false;
+    const { deployed, calls, held, options } = deployment(null, listed);
     const said: string[] = [];
-    const ended = drainWithin(deployed, { boundMs: 5 * MINUTE, drained: () => { drained = true; }, say: (line) => { said.push(line); }, ...clock });
+    const ended = drainWithin(deployed, { ...options, boundMs: 5 * MINUTE, say: (line) => { said.push(line); } });
 
     // Every job still open is named, oldest first, with its age at the bound.
     await expect(ended).rejects.toBeInstanceOf(DrainBound);
     await expect(ended).rejects.toThrow(/job-a[^]*185 min[^]*job-b[^]*125 min/u);
-    expect(drained).toBe(true);
-    // Refused for the bound and no longer: asked each minute, then admitted once.
-    expect(calls).toEqual(['drain', 'drain', 'drain', 'drain', 'drain', 'drain', 'admit']);
-    expect(clock.now()).toBe(5 * MINUTE);
-    expect(said).toHaveLength(5);
+    // Refused for the bound and no longer: asked each minute until it, then admitted once; held, then let go.
+    expect(calls).toEqual(['drain', 'drain', 'drain', 'drain', 'drain', 'admit']);
+    expect(options.now()).toBe(5 * MINUTE);
+    expect(held).toEqual([true, false]);
+    expect(said).toHaveLength(6);
   });
 
-  test('open jobs that finish within the bound leave the drain held for the deploy, never admitting', async () => {
-    const { deployed, calls, clock } = deployment(2, OPEN);
-    let drained = false;
+  test('a Worker that stops answering is let go at the bound, never waited on past it', async () => {
+    let asks = 0;
+    const calls: string[] = [];
+    const held: boolean[] = [];
 
-    await drainWithin(deployed, { boundMs: 5 * MINUTE, drained: () => { drained = true; }, say: () => undefined, ...clock });
+    const silent: Drainable = {
+      drain: async () => {
+        asks += 1;
+        calls.push('drain');
 
-    expect(drained).toBe(true);
-    expect(calls).toEqual(['drain', 'drain', 'drain']);
+        return asks === 1 ? await Promise.resolve(2) : await new Promise<never>(() => undefined);
+      },
+      admit: async () => {
+        calls.push('admit');
+        await new Promise<never>(() => undefined);
+      },
+      openJobs: async () => await new Promise<never>(() => undefined),
+    };
+    // Every pending request is abandoned once its span passes (a macrotask later), the answered one first.
+    const expiry = async () => { await new Promise((settled) => { setTimeout(settled, 0); }); };
+
+    const ended = drainWithin(silent, { boundMs: 5 * MINUTE, held: (holds) => { held.push(holds); }, say: () => undefined, now: () => 0, sleep: async () => { await Promise.resolve(); }, expiry, pollMs: MINUTE });
+
+    await expect(ended).rejects.toBeInstanceOf(DrainBound);
+    expect([calls, held]).toEqual([['drain', 'drain', 'admit'], [true, false]]);
+  });
+
+  test('open jobs that finish within the bound leave the drain held for the deploy, never admitting, listed or not', async () => {
+    for (const listing of [listed, async () => await Promise.reject(new Error('GET /jobs is unavailable'))]) {
+      const { deployed, calls, held, options } = deployment(2, listing);
+
+      await drainWithin(deployed, { ...options, boundMs: 5 * MINUTE, say: () => undefined });
+
+      expect([calls, held]).toEqual([['drain', 'drain', 'drain'], [true]]);
+    }
   });
 
   test('a Worker too old to drain is neither drained nor admitted', async () => {
     const calls: string[] = [];
-    let drained = false;
+    const held: boolean[] = [];
 
     const old: Drainable = {
       drain: async () => {
@@ -67,13 +110,16 @@ describe('a deploy drains the deployed version for a bound at most', () => {
 
         return await Promise.resolve(null);
       },
-      admit: async () => { calls.push('admit'); await Promise.resolve(); },
+      admit: async () => {
+        calls.push('admit');
+        await Promise.resolve();
+      },
       openJobs: async () => await Promise.resolve([]),
     };
 
-    await drainWithin(old, { boundMs: MINUTE, drained: () => { drained = true; }, say: () => undefined, now: () => 0, sleep: async () => { await Promise.resolve(); }, pollMs: 1 });
+    await drainWithin(old, { boundMs: MINUTE, held: (holds) => { held.push(holds); }, say: () => undefined, now: () => 0, sleep: async () => { await Promise.resolve(); }, expiry: async () => { await new Promise<never>(() => undefined); }, pollMs: 1 });
 
-    expect([drained, calls]).toEqual([false, ['drain']]);
+    expect([held, calls]).toEqual([[], ['drain']]);
   });
 });
 
@@ -110,7 +156,7 @@ describe('the open jobs are read whole or not at all', () => {
   test('a listing that repeats an id, or that no Worker answers, is refused', async () => {
     const repeated = Array.from({ length: 100 }, () => 'same');
 
-    expect(await openJobs(async () => await Promise.resolve(page(repeated))).then(() => 'read', () => 'refused')).toBe('refused');
-    expect(await openJobs(async () => await Promise.resolve(new Response(null, { status: 404 }))).then(() => 'read', () => 'refused')).toBe('refused');
+    await expect(openJobs(async () => await Promise.resolve(page(repeated)))).rejects.toEqual(new Unlisted('repeated'));
+    await expect(openJobs(async () => await Promise.resolve(new Response(null, { status: 404 })))).rejects.toEqual(new Unlisted('unavailable'));
   });
 });

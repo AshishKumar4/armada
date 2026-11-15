@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { readAccount } from './account';
-import { describeJobs, drainWithin } from './drain';
+import { drainWithin } from './drain';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { DeploymentName } from './config';
@@ -393,13 +393,12 @@ const DRAIN_POLL_MS = 15_000;
 /** The longest a deploy drains the deployed version for unless told otherwise (`--drain-bound`), in minutes. */
 const DRAIN_BOUND_MIN = 30;
 
-/** Drains the deployed version `deployed` (`name`), first saying why and what it waits on: each open job, oldest first,
- *  with its age. Bounded (`drainWithin`): at its bound the deployed version admits jobs again and the deploy ends. */
-async function drain(deployed: Armada, { name, reasons, boundMin, drained }: { readonly name: string; readonly reasons: readonly string[]; readonly boundMin: number; readonly drained: () => void }): Promise<void> {
-  const open = describeJobs(await deployed.openJobs(), Date.now());
-
-  console.log(`${name} drains first (${reasons.join('; ')}): it admits no new job until this deploy is done, at most ${String(boundMin)} min (--drain-bound), waiting on ${String(open.length)} open job${open.length === 1 ? '' : 's'}${open.length === 0 ? '' : `: ${open.join('; ')}`}`);
-  await drainWithin(deployed, { boundMs: boundMin * 60_000, drained, say: (line) => { console.log(line); }, now: Date.now, sleep: Bun.sleep, pollMs: DRAIN_POLL_MS });
+/** Drains the deployed version `deployed` (`name`), first saying why, then what it waits on: each open job, oldest
+ *  first, with its age (`drainWithin`). Bounded: at its bound the deployed version admits jobs again and the deploy
+ *  ends. */
+async function drain(deployed: Armada, { name, reasons, boundMin, held }: { readonly name: string; readonly reasons: readonly string[]; readonly boundMin: number; readonly held: (held: boolean) => void }): Promise<void> {
+  console.log(`${name} drains first (${reasons.join('; ')}): it admits no new job until this deploy is done, at most ${String(boundMin)} min (--drain-bound)`);
+  await drainWithin(deployed, { boundMs: boundMin * 60_000, held, say: (line) => { console.log(line); }, now: Date.now, sleep: Bun.sleep, expiry: Bun.sleep, pollMs: DRAIN_POLL_MS });
 }
 
 /** The deployed Worker's health, or null, said, when it does not answer one: its jobs are drained first then. */
@@ -499,7 +498,7 @@ async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked, keep 
 
     const reasons = deployed === null ? [] : drainReasons(health, forceDrain, contractOf(ROOT));
 
-    if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, drained: () => { drained = true; } });
+    if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, held: (held) => { drained = held; } });
     // The CPUs it prepares on: the ones asked (`--prepare-cpu`, '' for none), else the deployed Worker's own.
     const prepareCpu = asked ?? health?.prepareCpu;
 

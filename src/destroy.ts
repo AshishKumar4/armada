@@ -1,8 +1,8 @@
 /** A deployment's purge. Discovery is read-only; its exact inventory is saved before the Worker (and its objects)
  * goes, so a failure never loses the snapshot IDs needed on the next run. R2 empties by lifecycle, without S3 keys. */
-import { openJobs, type ListedJob } from './drain';
+import { openJobs, Unlisted, type ListedJob } from './drain';
 import * as v from 'valibot';
-import { errorOf, PROTOCOL, PROTOCOL_HEADER, JsonSchema, type Json } from './protocol';
+import { PROTOCOL, PROTOCOL_HEADER, JsonSchema, type Json } from './protocol';
 import { ConnectionSchema, type Connection } from './sdk';
 import type { Deletion } from './registry';
 
@@ -142,7 +142,9 @@ class Deployment {
     try {
       return await openJobs(async (path) => await this.call(path));
     } catch (cause) {
-      throw new Error(`cannot inspect deployment: ${errorOf({ cause }).message}; refusing to destroy it`, { cause });
+      if (!(cause instanceof Unlisted)) throw cause;
+
+      throw new Error(cause.kind === 'unavailable' ? 'cannot inspect deployment: GET /jobs is unavailable; refusing to destroy it' : 'GET /jobs repeated an id while paging; refusing an incomplete job check', { cause });
     }
   }
 
