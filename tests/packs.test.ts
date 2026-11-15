@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import * as v from 'valibot';
 import { tried } from '../src/hostlock';
+import { git, scratchEnv } from './fakes';
 
 const ROOT = resolve(import.meta.dir, '..');
 
@@ -26,7 +28,7 @@ function runner() {
       if (request.method === 'PUT') {
         let bytes = 0;
 
-        for await (const chunk of request.body ?? []) bytes += (chunk as Uint8Array).byteLength;
+        if (request.body !== null) for await (const chunk of request.body) bytes += chunk.byteLength;
 
         if (url.searchParams.has('part')) {
           parts.set(key, (parts.get(key) ?? 0) + bytes);
@@ -51,25 +53,17 @@ function runner() {
     },
   });
 
-  return { url: `http://127.0.0.1:${String(server.port)}`, stored, packsPut: () => packsPut, stop: () => { void server.stop(true); } };
+  return { url: `http://127.0.0.1:${String(server.port)}`, stored, packsPut: () => packsPut, stop: async () => { await server.stop(true); } };
 }
 
 /** A repository whose one commit packs to about `megabytes` MiB (incompressible), and its sha. */
 function repository(at: string, megabytes: number): string {
-  const run = (...args: string[]) => {
-    const ran = Bun.spawnSync(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: at, stdout: 'pipe', stderr: 'pipe' });
-
-    if (ran.exitCode !== 0) throw new Error(ran.stderr.toString());
-
-    return ran.stdout.toString().trim();
-  };
-
-  run('init', '-q');
+  git(at, 'init', '-q');
   writeFileSync(join(at, 'blob.bin'), random(megabytes));
-  run('add', '-A');
-  run('commit', '-q', '-m', 'c');
+  git(at, 'add', '-A');
+  git(at, 'commit', '-q', '-m', 'c');
 
-  return run('rev-parse', 'HEAD');
+  return git(at, 'rev-parse', 'HEAD');
 }
 
 /** `megabytes` MiB of random bytes, filled 64 KiB at a time (getRandomValues' limit). */
@@ -81,15 +75,16 @@ function random(megabytes: number): Uint8Array {
   return bytes;
 }
 
-/** A submitter: its own process, the real client (`Armada.uploadPack`, `packTo`), against `url`; it prints what it
+/** A submitter: its own process, the real client (`uploadPack`, `packTo`), against `url`; it prints what it
  *  stored, whether it packed, and its peak resident memory (VmHWM). */
 const SUBMITTER = `
 import { appendFileSync, readFileSync } from 'node:fs';
 import { Armada } from '${ROOT}/src/sdk';
 import { packTo } from '${ROOT}/src/git';
+import { uploadPack } from '${ROOT}/src/packs';
 const [url, repo, sha, made] = process.argv.slice(2);
 const armada = new Armada({ url, token: 't', account: 'a' });
-const stored = await armada.uploadPack('app', { sha, base: 'root' }, async (file) => {
+const stored = await uploadPack(armada, 'app', { sha, base: 'root' }, async (file) => {
   appendFileSync(made, sha + '\\n');
   await packTo(repo, sha, 'root', 'full', file);
 });
@@ -97,9 +92,23 @@ const hwm = Number(/VmHWM:\\s+(\\d+)/u.exec(readFileSync('/proc/self/status', 'u
 console.log(JSON.stringify({ stored, hwm }));
 `;
 
-/** Each submitter's process started against `url` with its own environment (its cache under `cache`). */
-function submit(url: string, repo: string, sha: string, made: string, script: string, cache: string) {
-  return Bun.spawn(['bun', script, url, repo, sha, made], { env: { ...process.env, XDG_CACHE_HOME: cache }, stdout: 'pipe', stderr: 'pipe' });
+/** What a submitter printed: what it stored, and its peak resident memory. */
+const EndSchema = v.object({ stored: v.nullable(v.number()), hwm: v.number() });
+
+/** A submission: the runner's address, the commit's repository and sha, the file each packing appends its sha to,
+ *  the submitter script, and the cache whose packs and slots the host's submitters share. */
+interface Submission {
+  readonly url: string;
+  readonly repo: string;
+  readonly sha: string;
+  readonly made: string;
+  readonly script: string;
+  readonly cache: string;
+}
+
+/** A submitter's own process, started with this test's environment but git's and armada's own variables. */
+function submit({ url, repo, sha, made, script, cache }: Submission) {
+  return Bun.spawn(['bun', script, url, repo, sha, made], { env: { ...scratchEnv(), XDG_CACHE_HOME: cache }, stdout: 'pipe', stderr: 'pipe' });
 }
 
 describe('a host packs one commit once, within its slots, never holding a pack whole', () => {
@@ -119,14 +128,17 @@ describe('a host packs one commit once, within its slots, never holding a pack w
 
       writeFileSync(made, '');
       writeFileSync(script, SUBMITTER);
-      const submitters = Array.from({ length: 42 }, () => submit(served.url, repo, sha, made, script, join(scratch, 'cache')));
+
+      const submission = { url: served.url, repo, sha, made, script, cache: join(scratch, 'cache') };
+      const submitters = Array.from({ length: 42 }, () => submit(submission));
       const ends = await Promise.all(submitters.map(async (running) => {
         const [code, out, err] = await Promise.all([running.exited, new Response(running.stdout).text(), new Response(running.stderr).text()]);
 
         if (code !== 0) throw new Error(err);
 
-        return JSON.parse(out) as { stored: number | null; hwm: number };
+        return v.parse(EndSchema, JSON.parse(out));
       }));
+
       const pack = [...served.stored.values()][0] ?? 0;
 
       // One pack, by one process, stored once; every other process found it stored.
@@ -138,9 +150,9 @@ describe('a host packs one commit once, within its slots, never holding a pack w
       expect(pack).toBeGreaterThan(64 * 2 ** 20);
       expect(Math.max(...ends.map((end) => end.hwm))).toBeLessThan(256 * 2 ** 20);
       // Nothing is left on disk.
-      expect(new Bun.Glob('*.pack').scanSync(join(scratch, 'cache', 'armada', 'packs')).toArray()).toEqual([]);
+      expect([...new Bun.Glob('*.pack').scanSync(join(scratch, 'cache', 'armada', 'packs'))]).toEqual([]);
     } finally {
-      served.stop();
+      await served.stop();
       rmSync(scratch, { recursive: true, force: true });
     }
   }, 600_000);
@@ -174,9 +186,9 @@ describe('a host packs one commit once, within its slots, never holding a pack w
         held.push(release);
       }
 
-      const waiting = submit(served.url, repo, sha, made, script, cache);
+      const waiting = submit({ url: served.url, repo, sha, made, script, cache });
       const packs = join(cache, 'armada', 'packs');
-      const holding = () => new Bun.Glob('*.lock').scanSync(packs).toArray().some((name) => !name.startsWith('slot-'));
+      const holding = () => [...new Bun.Glob('*.lock').scanSync(packs)].some((name) => !name.startsWith('slot-'));
 
       // The submitter holds its commit's lock, so it waits on a slot alone.
       while (!holding()) await Bun.sleep(50);
@@ -189,7 +201,7 @@ describe('a host packs one commit once, within its slots, never holding a pack w
       expect(served.packsPut()).toBe(1);
     } finally {
       for (const release of held) release();
-      served.stop();
+      await served.stop();
       rmSync(scratch, { recursive: true, force: true });
     }
   }, 120_000);

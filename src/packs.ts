@@ -1,5 +1,5 @@
 /**
- * Where and how a host makes a commit's pack before it is stored (`Armada.uploadPack`), so that however many of its
+ * Where and how a host makes a commit's pack before it is stored (`uploadPack`), so that however many of its
  * processes submit, and whatever they submit, packing cannot exhaust it and one commit is packed once (2026-11-15: 42
  * submissions of one commit from one machine each packed it at once, about 1 GB of git apiece, and the machine ran out
  * of memory).
@@ -7,7 +7,7 @@
  * - One pack per commit: a submission packs only holding its pack's lock (`hostlock`), asking the runner again first;
  *   the others wait, asking the runner each second, and take nothing once it holds the pack. A holder that fails, or
  *   ends, lets the lock go, and a waiter then packs.
- * - At most PACK_SLOTS packs at once on the host, whichever commits, each git bounded in memory (`GIT_BOUNDS`).
+ * - At most PACK_SLOTS packs at once on the host, whichever commits, each git bounded in memory (git.ts' GIT_BOUNDS).
  * - A pack is written to a file on disk, PACKS, and read from it in parts as it is stored, never held whole in memory;
  *   the file is removed once stored or failed, and one a killed client left is swept at the next submission.
  */
@@ -15,14 +15,12 @@ import { readdirSync, rmSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { tried } from './hostlock';
+import type { Armada } from './sdk';
+import type { Commit } from './protocol';
 
 /** The packs being made: under the user's cache ($XDG_CACHE_HOME, else ~/.cache), on disk, never a /tmp that may be
  *  memory (a tmpfs), which a pack would fill. */
 export const PACKS = join(process.env.XDG_CACHE_HOME === undefined || process.env.XDG_CACHE_HOME === '' ? join(homedir(), '.cache') : process.env.XDG_CACHE_HOME, 'armada', 'packs');
-
-/** What one git packing takes at most: its delta windows (two threads of 256 MiB) and delta cache (64 MiB) bounded,
- *  so with its object table about 1 GiB, whatever the commit. */
-export const GIT_BOUNDS = ['-c', 'pack.threads=2', '-c', 'pack.windowMemory=256m', '-c', 'pack.deltaCacheSize=64m'];
 
 const GIB = 2 ** 30;
 
@@ -119,4 +117,12 @@ export async function packedOnce(key: string, { held, make, store }: Storing, po
       release();
     }
   }
+}
+
+/** A commit's pack stored once from this host (`packedOnce`): `make` writes it to the file it is given, only where the
+ *  runner lacks it; its size, or null where none was stored here. */
+export async function uploadPack(armada: Armada, project: string, commit: Pick<Commit, 'sha' | 'base' | 'shallow'>, make: (file: string) => Promise<void>): Promise<number | null> {
+  const path = armada.packPath(project, commit);
+
+  return await packedOnce(`${armada.connection.url} ${path}`, { held: async () => await armada.packHeld(path), make, store: async (file) => await armada.storePack(path, file) });
 }

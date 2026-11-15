@@ -2,7 +2,6 @@
  * A deployment of armada and the requests it answers: jobs, their events and outputs, packs and bundles. The typed
  * API (`task.ts`) and the CLI are built on it.
  */
-import { packedOnce } from './packs';
 import { openJobs, type ListedJob } from './drain';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -288,36 +287,36 @@ export class Armada {
     return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe: ownPacker(recipe) }));
   }
 
-  /** Stores a commit's pack once, under this client's `PACKER` and its shallow boundary (`CommitSchema`): `make` writes
-   *  it to the file it is given, only where the runner lacks it, and on this host once however many submit it at once
-   *  (`packedOnce`); its size, or null where none was stored here. One larger than a request may carry goes in parts of
-   *  PACK_PART bytes, read from its file one at a time, and an upload that fails is aborted, so its parts don't stay in
-   *  the bucket; the bucket's lifecycle aborts what a client that died left. */
-  async uploadPack(project: string, { sha, base, shallow = [] }: Pick<Commit, 'sha' | 'base' | 'shallow'>, make: (file: string) => Promise<void>): Promise<number | null> {
-    const path = `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}${shallow.length === 0 ? '' : `&shallow=${shallow.join(',')}`}`;
+  /** Where the runner keeps a commit's pack, under this client's `PACKER` and its shallow boundary (`CommitSchema`). */
+  packPath(project: string, { sha, base, shallow = [] }: Pick<Commit, 'sha' | 'base' | 'shallow'>): string {
+    return `/packs/${project}/${sha}/${base}?packer=${String(PACKER)}${shallow.length === 0 ? '' : `&shallow=${shallow.join(',')}`}`;
+  }
 
-    return await packedOnce(`${this.connection.url} ${path}`, {
-      held: async () => (await this.call(path, { method: 'HEAD' })).status !== 404,
-      make,
-      store: async (file) => {
-        const body = Bun.file(file);
+  /** Whether the runner holds the pack at `path`. */
+  async packHeld(path: string): Promise<boolean> {
+    return (await this.call(path, { method: 'HEAD' })).status !== 404;
+  }
 
-        // Asked again while another client stores the same at that moment, which the runner answers 429 (#62).
-        for (let attempt = 1; ; attempt += 1) {
-          try {
-            await this.putPack(path, body);
+  /** The pack in `file` stored at `path`: its size, or null where another client stored it first. One larger than a
+   *  request may carry goes in parts of PACK_PART bytes, read from the file one at a time, and an upload that fails is
+   *  aborted, so its parts don't stay in the bucket; the bucket's lifecycle aborts what a client that died left. Asked
+   *  again while another client stores the same at that moment, which the runner answers 429 (#62). */
+  async storePack(path: string, file: string): Promise<number | null> {
+    const body = Bun.file(file);
 
-            return body.size;
-          } catch (cause) {
-            if (!(cause instanceof RequestError) || cause.status !== 429 || attempt >= STORE_ATTEMPTS) throw cause;
-          }
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.putPack(path, body);
 
-          await Bun.sleep(attempt * 1000);
+        return body.size;
+      } catch (cause) {
+        if (!(cause instanceof RequestError) || cause.status !== 429 || attempt >= STORE_ATTEMPTS) throw cause;
+      }
 
-          if ((await this.call(path, { method: 'HEAD' })).status !== 404) return null;
-        }
-      },
-    });
+      await Bun.sleep(attempt * 1000);
+
+      if (await this.packHeld(path)) return null;
+    }
   }
 
   /** Stores what `path` names once: none when the runner has it, else `put`'s, asked again while another client stores
@@ -337,7 +336,7 @@ export class Armada {
   }
 
   /** `body` at `path`: in one PUT, or in parts past PACK_PART bytes, each read from it as it is sent. */
-  private async putPack(path: string, body: Blob): Promise<void> {
+  private async putPack(path: string, body: ReturnType<typeof Bun.file>): Promise<void> {
     if (body.size <= PACK_PART) {
       await this.call(path, { method: 'PUT', body });
 

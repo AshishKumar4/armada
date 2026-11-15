@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import * as v from 'valibot';
 import { extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packTo } from '../src/git';
+import { uploadPack } from '../src/packs';
 import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
@@ -517,9 +518,9 @@ describe('uploading a pack', () => {
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
-      expect(await armada.uploadPack('app', { sha: 'a'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(PACK_PART)); })).toBe(PACK_PART);
+      expect(await uploadPack(armada, 'app', { sha: 'a'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(PACK_PART)); })).toBe(PACK_PART);
       expect(seen.splice(0)).toEqual([`HEAD root?packer=${String(PACKER)}`, `PUT root?packer=${String(PACKER)}`]);
-      expect(await armada.uploadPack('app', { sha: 'b'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); })).toBe(2 * PACK_PART + 5);
+      expect(await uploadPack(armada, 'app', { sha: 'b'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); })).toBe(2 * PACK_PART + 5);
       expect(seen).toEqual([
         `HEAD root?packer=${String(PACKER)}`, `POST root?packer=${String(PACKER)}&uploads`, `PUT root?packer=${String(PACKER)}&upload=u1&part=1`, `PUT root?packer=${String(PACKER)}&upload=u1&part=2`,
         `PUT root?packer=${String(PACKER)}&upload=u1&part=3`, `POST root?packer=${String(PACKER)}&upload=u1`,
@@ -557,8 +558,8 @@ describe('uploading a pack', () => {
         await Bun.write(file, new Uint8Array(5));
       };
 
-      const taken = await armada.uploadPack('app', { sha: 'd'.repeat(40), base: 'root' }, pack);
-      const stored = await armada.uploadPack('app', { sha: 'e'.repeat(40), base: 'root' }, pack);
+      const taken = await uploadPack(armada, 'app', { sha: 'd'.repeat(40), base: 'root' }, pack);
+      const stored = await uploadPack(armada, 'app', { sha: 'e'.repeat(40), base: 'root' }, pack);
 
       expect({ taken, stored, packed, seen }).toEqual({ taken: null, stored: 5, packed: 2, seen: ['HEAD', 'PUT', 'HEAD', 'HEAD', 'PUT', 'HEAD', 'PUT'] });
     } finally {
@@ -589,7 +590,7 @@ describe('uploading a pack', () => {
       let failed = '';
 
       try {
-        await armada.uploadPack('app', { sha: 'c'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); });
+        await uploadPack(armada, 'app', { sha: 'c'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); });
       } catch (cause) {
         failed = errorOf({ cause }).message;
       }

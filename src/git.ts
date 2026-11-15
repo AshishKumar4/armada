@@ -7,7 +7,6 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } fr
 import { dirname, resolve } from 'node:path';
 import * as v from 'valibot';
 import type { Config, Environment } from './config';
-import { GIT_BOUNDS } from './packs';
 import type { Manifest } from './protocol';
 
 /** This process's environment without GIT_DIR and its like, which a hook that runs armada sets for its own repo. */
@@ -72,6 +71,10 @@ export function shallowOf(repo: string, sha: string, history: Config['history'])
 
   return lines(readFileSync(resolve(repo, git(repo, ['rev-parse', '--git-path', 'shallow']).toString().trim()), 'utf8')).filter((line) => reachable.has(line));
 }
+
+/** What one git packing takes at most: its delta windows (two threads of 256 MiB) and delta cache (64 MiB) bounded,
+ *  so with its object table about 1 GiB, whatever the commit. */
+export const GIT_BOUNDS = ['-c', 'pack.threads=2', '-c', 'pack.windowMemory=256m', '-c', 'pack.deltaCacheSize=64m'];
 
 /** The commit from the root (with its history, or alone), or what it adds to the environment's commit, packed into
  *  `file` by git bounded in memory (`GIT_BOUNDS`), its output streamed to the file. A `commit` checkout holds the
