@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { errorOf } from './protocol';
 
 /** A job a deployment lists (`GET /jobs`) as a Worker of any wire since the drain answers it: its id, label, phase
  *  and, where it says it, when it was made. */
@@ -87,6 +88,15 @@ export interface DrainOptions {
 /** The longest the admission and the last listing at a drain's bound are waited for. */
 const CLEANUP_MS = 30_000;
 
+/** `request`'s end as an outcome: its answer, or the failure it threw. */
+async function outcome<T>(request: Promise<T>): Promise<{ readonly answer: T } | { readonly failure: Error }> {
+  try {
+    return { answer: await request };
+  } catch (cause) {
+    return { failure: errorOf({ cause }) };
+  }
+}
+
 /** `request`'s answer, or `late` where `expiry(ms)` settles first; either way its signal is then aborted, so a request
  *  given up on, and every retry of it, asks the Worker nothing more (a drain's ask retried past the bound would
  *  renew the drain after its admission). */
@@ -95,7 +105,7 @@ async function within<T, L>(request: (signal: AbortSignal) => Promise<T>, ms: nu
   const stop = new AbortController();
   // Its end as an outcome, a failure apart from an answer, so a request that loses the race and then fails (its
   // abort's rejection among them) leaves no rejection unheard; one that wins and failed throws as it did.
-  const asked = request(stop.signal).then((answer) => ({ answer }), (failure: unknown) => ({ failure }));
+  const asked = outcome(request(stop.signal));
 
   try {
     const first = await Promise.race([asked, expiry(Math.max(0, ms)).then(() => ({ late }))]);
@@ -118,7 +128,18 @@ async function listed(deployed: Drainable, ms: number, { now, expiry }: Pick<Dra
 
     return jobs.length === 0 ? 'no open job listed' : describeJobs(jobs, now()).join('; ');
   } catch (cause) {
-    return `its open jobs could not be listed (${cause instanceof Error ? cause.message : String(cause)})`;
+    return `its open jobs could not be listed (${errorOf({ cause }).message})`;
+  }
+}
+
+/** The deployed version asked to admit jobs again, and what came of it in words: admitted, or refused and why. */
+async function admitted(deployed: Drainable, signal: AbortSignal): Promise<string> {
+  try {
+    await deployed.admit(signal);
+
+    return 'the deployed version admits jobs again';
+  } catch (cause) {
+    return `its admission was refused (${errorOf({ cause }).message}): the drain lapses by itself once this deploy stops asking`;
   }
 }
 
@@ -150,7 +171,7 @@ export async function drainWithin(deployed: Drainable, options: DrainOptions): P
   while (jobs === expired || (jobs !== null && jobs > 0)) {
     if (jobs === expired || left() <= 0) {
       // An admission refused or unanswered is unconfirmed, never a reason to wait on it again: the drain is let go.
-      const admission = await within(async (signal) => await deployed.admit(signal).then(() => 'the deployed version admits jobs again', (refused: unknown) => `its admission was refused (${refused instanceof Error ? refused.message : String(refused)}): the drain lapses by itself once this deploy stops asking`), CLEANUP_MS, expiry, 'its admission went unanswered: the drain lapses by itself once this deploy stops asking');
+      const admission = await within(async (signal) => await admitted(deployed, signal), CLEANUP_MS, expiry, 'its admission went unanswered: the drain lapses by itself once this deploy stops asking');
 
       held(false);
       throw new DrainBound(`the drain reached its bound of ${String(Math.round(boundMs / 60_000))} min, so nothing was deployed and ${admission}; still open: ${await listed(deployed, CLEANUP_MS, options)}`);
