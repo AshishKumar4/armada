@@ -88,31 +88,17 @@ export interface DrainOptions {
 /** The longest the admission and the last listing at a drain's bound are waited for. */
 const CLEANUP_MS = 30_000;
 
-/** `request`'s end as an outcome: its answer, or the failure it threw. */
-async function outcome<T>(request: Promise<T>): Promise<{ readonly answer: T } | { readonly failure: Error }> {
-  try {
-    return { answer: await request };
-  } catch (cause) {
-    return { failure: errorOf({ cause }) };
-  }
-}
-
 /** `request`'s answer, or `late` where `expiry(ms)` settles first; either way its signal is then aborted, so a request
  *  given up on, and every retry of it, asks the Worker nothing more (a drain's ask retried past the bound would
  *  renew the drain after its admission). */
 async function within<T, L>(request: (signal: AbortSignal) => Promise<T>, ms: number, expiry: (ms: number) => Promise<void>,
   late: L): Promise<T | L> {
   const stop = new AbortController();
-  // Its end as an outcome, a failure apart from an answer, so a request that loses the race and then fails (its
-  // abort's rejection among them) leaves no rejection unheard; one that wins and failed throws as it did.
-  const asked = outcome(request(stop.signal));
 
+  // Promise.race hears every input's end, so a request that loses and then fails, its abort's rejection among them,
+  // leaves no rejection unheard.
   try {
-    const first = await Promise.race([asked, expiry(Math.max(0, ms)).then(() => ({ late }))]);
-
-    if ('failure' in first) throw first.failure;
-
-    return 'late' in first ? first.late : first.answer;
+    return await Promise.race([request(stop.signal), expiry(Math.max(0, ms)).then(() => late)]);
   } finally {
     stop.abort();
   }
