@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { tried } from '../src/hostlock';
@@ -189,7 +189,7 @@ describe('a host packs one commit once, within its slots, never holding a pack w
   // 2026-11-15: 42 submissions of one commit from one machine each packed it at once (about 1 GB of git apiece) and
   // the machine ran out of memory.
   test('42 processes submitting one commit the runner lacks make one pack between them, the whole tree within its bound', async () => {
-    const scratch = mkdtempSync(join(tmpdir(), 'armada-packs-'));
+    const scratch = mkdtempSync(join(homedir(), 'armada-packs-'));
     const served = runner();
 
     try {
@@ -226,12 +226,13 @@ describe('a host packs one commit once, within its slots, never holding a pack w
   }, 600_000);
 
   test('distinct commits submitted at once pack within the host\'s slots, each once', async () => {
-    const scratch = mkdtempSync(join(tmpdir(), 'armada-slots-'));
+    const scratch = mkdtempSync(join(homedir(), 'armada-slots-'));
     const served = runner();
 
     try {
       const made = join(scratch, 'made');
       const script = join(scratch, 'submit.ts');
+
       const commits = Array.from({ length: PACK_SLOTS + 2 }, (_, at) => {
         const repo = join(scratch, `repo-${String(at)}`);
 
@@ -244,6 +245,7 @@ describe('a host packs one commit once, within its slots, never holding a pack w
       writeFileSync(script, SUBMITTER);
 
       const home = join(scratch, 'home');
+
       const { packers } = await sampled(Promise.all(commits.map(async ({ repo, sha }) => await ended(submit({ url: served.url, repo, sha, made, script, home })))));
 
       expect(packers).toBeLessThanOrEqual(PACK_SLOTS);

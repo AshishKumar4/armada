@@ -519,10 +519,10 @@ describe('uploading a pack', () => {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
       expect(await uploadPack(armada, 'app', { sha: 'a'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(PACK_PART)); })).toBe(PACK_PART);
-      expect(seen.splice(0)).toEqual([`HEAD root?packer=${String(PACKER)}`, `PUT root?packer=${String(PACKER)}`]);
+      expect(seen.splice(0)).toEqual([`HEAD root?packer=${String(PACKER)}`, `HEAD root?packer=${String(PACKER)}`, `PUT root?packer=${String(PACKER)}`]);
       expect(await uploadPack(armada, 'app', { sha: 'b'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(2 * PACK_PART + 5)); })).toBe(2 * PACK_PART + 5);
       expect(seen).toEqual([
-        `HEAD root?packer=${String(PACKER)}`, `POST root?packer=${String(PACKER)}&uploads`, `PUT root?packer=${String(PACKER)}&upload=u1&part=1`, `PUT root?packer=${String(PACKER)}&upload=u1&part=2`,
+        `HEAD root?packer=${String(PACKER)}`, `HEAD root?packer=${String(PACKER)}`, `POST root?packer=${String(PACKER)}&uploads`, `PUT root?packer=${String(PACKER)}&upload=u1&part=1`, `PUT root?packer=${String(PACKER)}&upload=u1&part=2`,
         `PUT root?packer=${String(PACKER)}&upload=u1&part=3`, `POST root?packer=${String(PACKER)}&upload=u1`,
       ]);
       expect(sent).toEqual([PACK_PART, PACK_PART, 5]);
@@ -534,8 +534,8 @@ describe('uploading a pack', () => {
   // #62: a run lost every outcome when another run of its commit stored the same pack at that moment.
   test('one another client stores at the same moment is asked for again: taken once there, else stored', async () => {
     const seen: string[] = [];
-    // What the runner answers each HEAD and PUT, in order.
-    const heads = [404, 200, 404, 404];
+    // What the runner answers each HEAD and PUT, in order: each submission asks once, and again on taking its lock.
+    const heads = [404, 404, 200, 404, 404, 404];
     const puts = [429, 429, 200];
     const original = globalThis.fetch;
 
@@ -561,7 +561,7 @@ describe('uploading a pack', () => {
       const taken = await uploadPack(armada, 'app', { sha: 'd'.repeat(40), base: 'root' }, pack);
       const stored = await uploadPack(armada, 'app', { sha: 'e'.repeat(40), base: 'root' }, pack);
 
-      expect({ taken, stored, packed, seen }).toEqual({ taken: null, stored: 5, packed: 2, seen: ['HEAD', 'PUT', 'HEAD', 'HEAD', 'PUT', 'HEAD', 'PUT'] });
+      expect({ taken, stored, packed, seen }).toEqual({ taken: null, stored: 5, packed: 2, seen: ['HEAD', 'HEAD', 'PUT', 'HEAD', 'HEAD', 'HEAD', 'PUT', 'HEAD', 'PUT'] });
     } finally {
       globalThis.fetch = original;
     }
