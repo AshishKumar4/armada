@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as v from 'valibot';
 import { readAccount } from './account';
+import { drainWithin } from './drain';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { DeploymentName } from './config';
@@ -16,7 +17,7 @@ import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
 import { boundsOf, RetentionSchema, type Retention } from './runs';
 import { retentionOf, runsCommand } from './runs-command';
-import { BaseSchema, cpusOf, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, mustDrain, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
+import { BaseSchema, cpusOf, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, drainReasons, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -24,7 +25,7 @@ const ROOT = join(import.meta.dir, '..');
 const USAGE = `armada runs a command over many inputs at once, on Cloudflare Containers.
 
 Usage:
-  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--memory=GiB] [--drain] [--keep=N]
+  armada deploy [--account=<id>] [--name=<name>] [--vcpus=N] [--memory=GiB] [--drain] [--drain-bound=MIN] [--keep=N]
                                        deploy armada to your Cloudflare account, logging in if needed
   armada destroy --name=<name> [--account=<id>] [--force]
                                        purge exactly this deployment; refuses open jobs unless forced;
@@ -108,6 +109,8 @@ deploy options:
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
                        client the deployed one serves, its driver differs, or its Durable
                        Objects call each other or store their records differently
+  --drain-bound=MIN    the longest a drain refuses new jobs (default 30): at it the deployed version admits jobs
+                       again and the deploy ends, naming the jobs still open
   --keep=N             the environments whose snapshots stay beyond those open jobs use: the N most recently
                        used (default 3), and any used in the last hour; the rest are deleted
 
@@ -129,7 +132,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
-  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'memory=', 'drain', 'keep=', 'prepare-cpu='], words: 0 }],
+  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'memory=', 'drain', 'drain-bound=', 'keep=', 'prepare-cpu='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'priority=', 'inputs=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'fresh', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'by=', 'pool=', 'priority=', 'label=', 'secrets=', 'json'], words: 1 }],
@@ -387,25 +390,15 @@ function accountOf(): string {
 /** How often a deploy asks the deployed version whether its open jobs have finished. */
 const DRAIN_POLL_MS = 15_000;
 
-/** Drains the deployed version: it admits no new job, which `drained` is told of at once, and this waits for its open
- *  jobs to finish. A Worker too old to drain is said to be, and its running jobs end with the deploy. */
-async function drain(armada: Armada, drained: () => void): Promise<void> {
-  let jobs = await armada.drain();
+/** The longest a deploy drains the deployed version for unless told otherwise (`--drain-bound`), in minutes. */
+const DRAIN_BOUND_MIN = 30;
 
-  if (jobs === null) {
-    console.log('the deployed Worker cannot stop taking jobs, so any job it runs now ends with this deploy');
-
-    return;
-  }
-
-  drained();
-
-  // Each ask renews the drain, which lapses by itself if this process dies.
-  while (jobs !== null && jobs > 0) {
-    console.log(`waiting for ${String(jobs)} open job${jobs === 1 ? '' : 's'} to finish; new jobs are refused until the deploy is done`);
-    await Bun.sleep(DRAIN_POLL_MS);
-    jobs = await armada.drain();
-  }
+/** Drains the deployed version `deployed` (`name`), first saying why, then what it waits on: each open job, oldest
+ *  first, with its age (`drainWithin`). Bounded: at its bound the deployed version admits jobs again and the deploy
+ *  ends. */
+async function drain(deployed: Armada, { name, reasons, boundMin, held }: { readonly name: string; readonly reasons: readonly string[]; readonly boundMin: number; readonly held: (held: boolean) => void }): Promise<void> {
+  console.log(`${name} drains first (${reasons.join('; ')}): it admits no new job until this deploy is done, at most ${String(boundMin)} min (--drain-bound)`);
+  await drainWithin(deployed, { boundMs: boundMin * 60_000, held, say: (line) => { console.log(line); }, now: Date.now, sleep: Bun.sleep, expiry: Bun.sleep, pollMs: DRAIN_POLL_MS });
 }
 
 /** The deployed Worker's health, or null, said, when it does not answer one: its jobs are drained first then. */
@@ -438,7 +431,7 @@ async function deployedCap(name: string, deployed: Armada): Promise<number> {
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
-async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined; readonly prepareCpu: string | undefined }, forceDrain: boolean, keep: number): Promise<number> {
+async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked, keep }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined; readonly prepareCpu: string | undefined; readonly keep: number }, { force: forceDrain, boundMin: drainBound }: { readonly force: boolean; readonly boundMin: number }): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
   // One read of the deployment as this machine knows it, for both its preflight and its bearer: a connection of another
@@ -503,7 +496,9 @@ async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked }: { r
     // and takes its first job once they run its own (`ArmadaFleet.admitJob`).
     const health = deployed === null ? null : await healthOf(name, deployed);
 
-    if (deployed !== null && mustDrain(health, forceDrain, contractOf(ROOT))) await drain(deployed, () => { drained = true; });
+    const reasons = deployed === null ? [] : drainReasons(health, forceDrain, contractOf(ROOT));
+
+    if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, held: (held) => { drained = held; } });
     // The CPUs it prepares on: the ones asked (`--prepare-cpu`, '' for none), else the deployed Worker's own.
     const prepareCpu = asked ?? health?.prepareCpu;
 
@@ -976,7 +971,7 @@ async function main(): Promise<number> {
 
       if (!v.safeParse(DeploymentName, name).success) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory'), prepareCpu: option('prepare-cpu') }, flag('drain'), whole('keep', 0) ?? KEPT_ENVIRONMENTS);
+      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory'), prepareCpu: option('prepare-cpu'), keep: whole('keep', 0) ?? KEPT_ENVIRONMENTS }, { force: flag('drain'), boundMin: whole('drain-bound') ?? DRAIN_BOUND_MIN });
     }
 
     case 'destroy':

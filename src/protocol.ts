@@ -723,7 +723,21 @@ export function servedFloor(health: Health): number {
  *  driver, or when its Durable Objects call each other by another interface, or one it does not say. Its objects keep
  *  running its code for minutes after the deploy, so they would read the new objects' calls by the old interface. */
 export function mustDrain(health: Health | null, force: boolean, contract: string): boolean {
-  return force || health === null || health.protocol > PROTOCOL || servedFloor(health) < OLDEST_CLIENT || health.driver !== DRIVER || health.contract !== contract;
+  return drainReasons(health, force, contract).length > 0;
+}
+
+/** Why the deployed Worker of `health` is drained before one of interface `contract` replaces it (`mustDrain`), each
+ *  in words a deploy says before it drains; none where this Worker takes over its running jobs. */
+export function drainReasons(health: Health | null, force: boolean, contract: string): string[] {
+  if (health === null) return [...(force ? ['--drain asks it'] : []), 'the deployed Worker does not say what it serves'];
+
+  return [
+    ...(force ? ['--drain asks it'] : []),
+    ...(health.protocol > PROTOCOL ? [`its wire ${String(health.protocol)} is newer than this one's ${String(PROTOCOL)}`] : []),
+    ...(servedFloor(health) < OLDEST_CLIENT ? [`it serves clients from wire ${String(servedFloor(health))}, below this one's floor ${String(OLDEST_CLIENT)}`] : []),
+    ...(health.driver !== DRIVER ? [`its containers run driver ${String(health.driver)}, not ${String(DRIVER)}`] : []),
+    ...(health.contract !== contract ? [`its objects call each other by another interface (${health.contract ?? 'unsaid'})`] : []),
+  ];
 }
 
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });
