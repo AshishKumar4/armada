@@ -97,9 +97,9 @@ describe('the open jobs are read whole or not at all', () => {
   test('every page is read, done jobs left out', async () => {
     const first = Array.from({ length: 100 }, (_, at) => `j${String(at)}`);
     const asked: string[] = [];
+
     const open = await openJobs(async (path) => {
       asked.push(path);
-
 
       return await Promise.resolve(path.includes('before=') ? page(['last'], new Set()) : page(first, new Set(['j0'])));
     });
