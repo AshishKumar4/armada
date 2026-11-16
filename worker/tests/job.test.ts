@@ -808,7 +808,7 @@ describe('a job holding places back after starts on another CPU', () => {
 
       for (const boots of [false, true, 'sets up'] as const) {
         setSystemTime(start);
-        const { job: open, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu });
+        const { job: open, stored, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu });
 
         // v1 boots on a host of its CPU first, where it does, and runs a task throughout.
         const running = boots === true ? await open.booted('v1', 1000).then(async () => await open.claim('v1')) : null;
@@ -817,10 +817,11 @@ describe('a job holding places back after starts on another CPU', () => {
           if (running !== null && !('waitMs' in running)) await open.still('v1', running.index, 0, running.attempt);
         };
 
-        for (const [at, name] of [[0, 'v2'], [31_000, 'v3'], [92_000, 'v4'], [213_000, 'v5'], [454_000, 'v6']] as const) {
+        // Each start its job made lands on another CPU, the latest each time.
+        for (const at of [0, 31_000, 92_000, 213_000, 454_000]) {
           setSystemTime(start + at);
           await working();
-          await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
+          await open.vesselFailed(begun.at(-1)?.split('/')[1] ?? 'v2', 'its host is another', { misplaced: zen3 });
           await open.alarm();
         }
 
