@@ -169,8 +169,9 @@ const PIN_WAIT_MS = MISPLACED_MAX_MS;
  *  window then started again from now; or its pin state changed while the fleet was asked (a container booted on its
  *  CPU, or one works), which the room's answer let in. A function of the module, not a method, so the Worker's
  *  declarations, its contract, stay as they were. */
-async function pinWaitRestarted(env: Env, storage: DurableObjectStorage, spec: Kept, since: number, last: number | undefined,
-  starting: () => boolean, working: () => boolean): Promise<boolean> {
+async function pinWaitRestarted(env: Env, storage: DurableObjectStorage, { spec, since, last, starting, working }: {
+  readonly spec: Kept; readonly since: number; readonly last: number | undefined; readonly starting: () => boolean; readonly working: () => boolean;
+}): Promise<boolean> {
   const room = await env.FLEET.getByName(SINGLE).room((await storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
 
   if ((await storage.get<number>('misplacedSince')) !== since || working()) return true;
@@ -405,9 +406,11 @@ export class ArmadaJob extends DurableObject<Env> {
     const last = (await this.ctx.storage.get<number>('misplacedLast')) ?? since;
 
     if (spec.cpu !== undefined && since !== undefined && held !== undefined && Date.now() - since >= PIN_WAIT_MS && this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length === 0
-      && !(await pinWaitRestarted(this.env, this.ctx.storage, spec, since, last,
-        () => this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'booting'").toArray().length > 0,
-        () => this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length > 0))) {
+      && !(await pinWaitRestarted(this.env, this.ctx.storage, {
+        spec, since, last,
+        starting: () => this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'booting'").toArray().length > 0,
+        working: () => this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length > 0,
+      }))) {
       return await this.cancel(`CpuUnavailable: no container of the job started on a host of ${cpuLabel(spec.cpu)} in ${String(PIN_WAIT_MS / 60_000)} min, the platform placing containers by region alone; the last started on ${hostLabel(held.host)}`, 'lost', 'unplaced');
     }
 
