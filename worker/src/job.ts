@@ -662,7 +662,10 @@ export class ArmadaJob extends DurableObject<Env> {
       tmpfs: spec.tmpfs, files: spec.files, bundle: spec.run.kind === 'task' ? spec.run.bundle ?? null : null,
       runtime: spec.run.kind === 'task' ? spec.run.runtime : 'node', output: spec.output, timeout: spec.timeout,
       slots: spec.slots, pack: packs(spec),
-      slotMemoryBytes: packs(spec) ? tasksMemoryOf(spec.recipe.size) : Math.floor(SIZES[spec.recipe.size].memoryGiB * 2 ** 30 / spec.slots),
+      // Every slot's cap leaves the container's own memory (`tasksMemoryOf`): a task that fills its slot is killed in its
+      // group, a red, where one that filled the whole container killed its exec and its runner beside it, the vessel
+      // lost and the task run again on the next (Dew 2026-11-16: 9 of a job's 12 tasks lost 64 vessels in 3.7 h).
+      slotMemoryBytes: Math.floor(tasksMemoryOf(spec.recipe.size) / spec.slots),
       reserve: Number(this.sql.exec('SELECT ranks FROM vessels WHERE name = ?', name).one()['ranks']) * SIZES[spec.recipe.size].vcpus,
       deadlineAt: spec.deadline === null ? null : ((await this.ctx.storage.get<number>('createdAt')) ?? Date.now()) + spec.deadline * 1000,
       cpu: spec.cpu,

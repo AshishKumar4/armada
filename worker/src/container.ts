@@ -220,6 +220,7 @@ ${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PA
 mkdir -p ${group}/runner
 echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
 ${memoryBytes === undefined ? '' : `echo ${String(memoryBytes)} > ${group}/memory.max
+[ ! -e ${group}/memory.swap.max ] || echo 0 > ${group}/memory.swap.max
 `}for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done`;
 }
 
@@ -281,10 +282,15 @@ function peakOf(group: string): string {
 /** As root, detached so the exec returns: whatever the last task left running ended, then one task as the user in its
  *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
  *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
- *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. */
+ *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. Its
+ *  group is capped at ARMADA_TASK_MEMORY_MAX bytes where the launch's exec sets it: a variable, not an argument, so the
+ *  Worker's declarations and so its contract (`contractOf`) stay as they were, and a deploy that caps a task takes
+ *  over the running jobs, where one that changed the contract would drain them all. */
 export function launchTask(workdir: string, cpus: number): string {
   return String.raw`set -eu
 ${groupSetup(TASK_GROUP, { cpus })}
+cap=$(printenv ARMADA_TASK_MEMORY_MAX || true)
+[ -z "$cap" ] || { echo "$cap" > ${TASK_GROUP}/memory.max; [ ! -e ${TASK_GROUP}/memory.swap.max ] || echo 0 > ${TASK_GROUP}/memory.swap.max; }
 rm -rf ${TASK}
 mkdir -p ${TASK} ${ARTIFACTS_PATH}
 ${resumed(TASK, 0)}

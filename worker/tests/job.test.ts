@@ -90,6 +90,18 @@ describe('a job of size large (#64)', () => {
   });
 });
 
+describe('a container\'s slots (Dew, 2026-11-16)', () => {
+  test('are capped with the container\'s own memory left beside them, packing or not, one slot or many', async () => {
+    const fast = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast', slots: 2 });
+    const alone = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast' });
+    const packing = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'efficient' });
+    const tasks = SIZES.medium.memoryGiB * 2 ** 30 - 2 * 2 ** 30;
+
+    expect([fast, alone, packing].map(({ specs }) => specs.map((spec) => [spec.slotMemoryBytes, spec.slots])))
+      .toEqual([[[Math.floor(tasks / 2), 2]], [[tasks, 1]], [[tasks, 1]]]);
+  });
+});
+
 describe('a job\'s priority (#60)', () => {
   test('reaches every container it starts, which asks the fleet with it; a job that names none has 0', async () => {
     const urgent = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, priority: 5 });
