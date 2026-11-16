@@ -12,11 +12,12 @@ import { deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobSta
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
-/** How long a read is asked again of a runner it cannot reach, or whose gateway or Worker failed to answer it
- *  (`Armada.call`): a network that drops for a while (2026-11-16: the PC's tunnel down 35 s, every read failing on a
- *  certificate a captive path served) is ridden out, as a run that polls for hours should be, and a runner gone for
- *  good still ends the read. */
-export const READ_OUTAGE_MS = 5 * 60_000;
+/** How long a read is asked again, from its first failure, of a runner it cannot reach, or whose gateway or Worker
+ *  failed to answer it (`Armada.call`): a network that drops for a while (2026-11-16: the PC's tunnel down 35 s, every
+ *  read failing on a certificate a captive path served) is ridden out, and a runner gone for good still ends the read.
+ *  Within a job's lease (`JOB_LEASE_SECONDS`) less a renewal, so a job is never cancelled by its lease while its
+ *  client still waits on the runner. */
+export const READ_OUTAGE_MS = 120_000;
 
 /** The longest pause between two asks of a read that failed (`Armada.call`). */
 export const READ_PAUSE_MS = 15_000;
@@ -173,6 +174,15 @@ async function deployed(request: string, send: () => Promise<Response>, signal: 
 /** The first version of the wire whose Worker drains. */
 const FIRST_DRAIN = 2;
 
+/** A runner a request could not reach: the connection failed (dropped, refused, its TLS refused) through every ask
+ *  `Armada.call` made of it. What the runner holds stands; only this client lost it. */
+export class Unreachable extends Error {
+  constructor(readonly request: string, options: { readonly cause: unknown }) {
+    super(`${request}: ${errorOf(options).message}`, options);
+    this.name = 'Unreachable';
+  }
+}
+
 /** A request the Worker answered with an error: its status, and what it said. */
 export class RequestError extends Error {
   constructor(readonly status: number, message: string) {
@@ -201,16 +211,18 @@ export class Armada {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const read = method === 'GET' || method === 'HEAD';
-    const began = Date.now();
-    let said = false;
+    // When the outage began, at the read's first failure: a redeploy's wait (`deployed`) before it is no outage.
+    let began: number | null = null;
 
     // Whether a read that failed is asked again, the first failure said with its cause.
     const again = (cause: string): boolean => {
-      if (!read || Date.now() - began >= READ_OUTAGE_MS || init.signal?.aborted === true) return false;
-      if (!said) console.error(`${method} ${path}: ${cause}; asked again for up to ${String(READ_OUTAGE_MS / 60_000)} min`);
-      said = true;
+      if (!read || init.signal?.aborted === true) return false;
+      if (began === null) {
+        began = Date.now();
+        console.error(`${method} ${path}: ${cause}; asked again for up to ${String(READ_OUTAGE_MS / 1000)} s`);
+      }
 
-      return true;
+      return Date.now() - began < READ_OUTAGE_MS;
     };
 
     headers.set('authorization', `Bearer ${this.connection.token}`);
@@ -223,7 +235,8 @@ export class Armada {
         sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }), init.signal);
       } catch (cause) {
         // A connection that failed is asked again, as a gateway's failure is; one its caller gave up on, never.
-        if (!again(errorOf({ cause }).message)) throw cause;
+        if (init.signal?.aborted === true) throw cause;
+        if (!again(errorOf({ cause }).message)) throw new Unreachable(`${method} ${path}`, { cause });
         await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
       }
@@ -247,8 +260,9 @@ export class Armada {
     return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json());
   }
 
-  async health(): Promise<Health> {
-    return v.parse(HealthSchema, await (await this.call('/health', {}, this.spoken)).json());
+  /** The deployment's health; `signal` ends the ask, and every retry of it, once aborted. */
+  async health(signal?: AbortSignal): Promise<Health> {
+    return v.parse(HealthSchema, await (await this.call('/health', signal === undefined ? {} : { signal }, this.spoken)).json());
   }
 
   /** Admits no new job until the version deployed now is replaced, or `admit` is called; answers how many jobs are

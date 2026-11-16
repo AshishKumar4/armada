@@ -11,7 +11,7 @@ import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
-import { Armada, PACK_PART, READ_OUTAGE_MS } from '../src/sdk';
+import { Armada, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
@@ -1643,6 +1643,30 @@ describe('armada run', () => {
     expect([unknown, refused].map((ran) => ({ exit: ran.exit, started: taskJobs(ran.bodies).length, cancelled: ran.cancelled, graded: reportOf(ran.report).graded })))
       .toEqual([{ exit: 2, started: 0, cancelled: [], graded: 'not graded' }, { exit: 2, started: 2, cancelled: ['tasks'], graded: 'not graded' }]);
     expect({ exit: lost.exit, cancelled: lost.cancelled.toSorted((left, right) => left.localeCompare(right)) }).toEqual({ exit: 2, cancelled: ['tasks', 'tasks-2'] });
+    // The runner cannot be reached for the second job's results past a read's outage: the run is not graded, and its
+    // jobs are left to finish, a cancel reaching nothing. Each pause moves the clock on by what it waits.
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const now = Date.now;
+    let skipped = 0;
+
+    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(input instanceof Request ? input.url : input).pathname.startsWith('/jobs/tasks-2/events')) throw new Error('certificate has expired');
+
+      return await original(input, init);
+    }, { preconnect: original.preconnect });
+    Bun.sleep = async (ms: number | Date) => { skipped += typeof ms === 'number' ? ms : 0; await sleep(0); };
+    Date.now = () => now() + skipped;
+
+    try {
+      const cut = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf });
+
+      expect({ exit: cut.exit, cancelled: cut.cancelled }).toEqual({ exit: 2, cancelled: [] });
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+      Date.now = now;
+    }
     expect(reportOf(unknown.report).problems.some((problem) => problem.includes('py399'))).toBe(true);
   });
 
@@ -2333,7 +2357,7 @@ describe('asking the runner', () => {
 });
 
 describe('a read through an outage', () => {
-  test('is asked again while the runner cannot be reached, for READ_OUTAGE_MS of wall time, the failure said once, and a write is not', async () => {
+  test('is asked again while the runner cannot be reached, for READ_OUTAGE_MS from its first failure, said once, and a write is not', async () => {
     const original = globalThis.fetch;
     const sleep = Bun.sleep;
     const now = Date.now;
@@ -2344,7 +2368,7 @@ describe('a read through an outage', () => {
     let asked = 0;
 
     // Each pause moves the clock on by what it waits, so the outage is measured in wall time, not in asks.
-    Bun.sleep = (async (ms: number) => { clock += ms; }) as typeof Bun.sleep;
+    Bun.sleep = async (ms: number | Date) => { clock += typeof ms === 'number' ? ms : ms.getTime() - clock; };
     Date.now = () => clock;
     console.error = (line: string) => { said.push(line); };
     globalThis.fetch = fakeFetch(() => {
@@ -2364,10 +2388,11 @@ describe('a read through an outage', () => {
       expect(clock).toBeGreaterThanOrEqual(35_000);
       expect(said).toHaveLength(1);
       expect(said[0]).toContain('certificate has expired');
+      said.length = 0;
       // Down past READ_OUTAGE_MS: the read ends with the failure.
       clock = 0;
       down = READ_OUTAGE_MS + 60_000;
-      await expect(armada.call('/health')).rejects.toThrow('certificate has expired');
+      await expect(armada.call('/health')).rejects.toBeInstanceOf(Unreachable);
       expect(clock).toBeGreaterThanOrEqual(READ_OUTAGE_MS);
       // A write is asked once.
       clock = 0;

@@ -575,7 +575,7 @@ async function firstLook(name: string, file: string, sha: string): Promise<void>
 
   while (Date.now() < deadline) {
     try {
-      if ((await armada.health()).sha === sha) {
+      if ((await armada.health(AbortSignal.timeout(Math.max(deadline - Date.now(), 1)))).sha === sha) {
         await pruneOn(armada, undefined);
 
         return;
