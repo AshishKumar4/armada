@@ -1369,7 +1369,7 @@ interface Runner {
   readonly usage?: (item: Json) => { readonly cpuSeconds: number; readonly peakMemory: number };
   /** How a task of this item ended, beside its exit: the tail of what it said, and whether the kernel killed it for
    *  want of memory. */
-  readonly endOf?: (item: Json) => { readonly tail: string; readonly oomKilled?: boolean };
+  readonly endOf?: (item: Json) => { readonly tail?: string; readonly oomKilled?: boolean; readonly capacity?: true };
   /** How long each task's artifacts archive takes to answer. */
   readonly archiveMs?: number;
   /** Runs in the CLI's HOME before it starts: what an earlier run left there. */
@@ -1888,6 +1888,20 @@ Date.now = () => now() + skipped;
       exit: 1, why: ['its map tasks did not all pass: lost FAILED: the container went quiet, a RED (exit 137, killed by the kernel for want of memory), b RED (exit 143, killed by signal 15)', 'a said, last:'],
       tail: true, signal: true, terminated: true, lost: 1,
     });
+  });
+
+  // Dew's base/kernels, 2026-11-16: a judge's draws waited for the fleet past their job's deadline, never ran, and the
+  // judge went red for tests that never ran.
+  test('a judge whose map tasks never ran for want of capacity leaves the run ungraded, never red', async () => {
+    const plan: Json = { include: [{ name: 'a' }, { name: 'b' }, { name: 'j', after: ['a', 'b'] }] };
+    const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
+    const starved = (item: Json) => nameOf(item) === 'a';
+
+    const ran = await run(['--json'], plan, {}, { taskConfig: { verdict: false }, lostOf: starved, endOf: (item) => starved(item) ? { capacity: true } : {} });
+    const { graded, rows, problems } = v.parse(v.object({ graded: v.string(), rows: v.array(v.unknown()), problems: v.array(v.string()) }), JSON.parse(ran.stdout));
+
+    expect({ exit: ran.exit, graded, rows: rows.length, starved: problems.some((problem) => problem.includes('want of capacity')) })
+      .toEqual({ exit: 2, graded: 'not graded', rows: 0, starved: true });
   });
 
   // Dew's check-1 sites, 2026-11-02: a site's second-stage draws were drawn every run, and read only by a judge whose
