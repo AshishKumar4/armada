@@ -135,7 +135,11 @@ async function run(lost: number, {
     },
     stopped: async () => undefined,
     still: async () => true,
-    accept: async (_name: string, _index: number, exitCode: number) => { accepts.push(exitCode); return true; },
+    accept: async (_name: string, _index: number, exitCode: number) => {
+      accepts.push(exitCode);
+
+      return true;
+    },
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
     preempted: async (_name: string, gone: boolean) => { preempted.push(gone); },
@@ -407,6 +411,7 @@ describe('a finished task', () => {
 
   test('is red with 137 when its group killed a process for memory, though its last command exited 0, unless its own verdict holds the red', async () => {
     const kill = { exitCode: 0, stdout: '12884901888\n9000000\n1\n' };
+
     const runs = [await run(0, { usage: kill }), await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 1}]}' }),
       await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 0}]}' })];
 
