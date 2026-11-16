@@ -1897,7 +1897,7 @@ Date.now = () => now() + skipped;
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const starved = (item: Json) => nameOf(item) === 'a';
 
-    const ran = await run(['--json'], plan, {}, { taskConfig: { verdict: false }, lostOf: starved, endOf: (item) => starved(item) ? { capacity: true } : {} });
+    const ran = await run(['--json'], plan, {}, { taskConfig: { verdict: false }, exitOf: () => 0, lostOf: starved, endOf: (item) => starved(item) ? { capacity: true } : {} });
     const { graded, rows, problems } = v.parse(v.object({ graded: v.string(), rows: v.array(v.unknown()), problems: v.array(v.string()) }), JSON.parse(ran.stdout));
 
     expect({ exit: ran.exit, graded, rows: rows.length, starved: problems.some((problem) => problem.includes('want of capacity')) })
