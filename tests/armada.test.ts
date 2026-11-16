@@ -11,7 +11,7 @@ import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
-import { Armada, PACK_PART } from '../src/sdk';
+import { Armada, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
@@ -1342,6 +1342,9 @@ interface Runner {
   readonly refuse?: number;
   /** The task job, counted from 1, whose results the runner no longer has. */
   readonly lose?: number;
+  /** The task job, counted from 1, whose events the CLI cannot reach: each read of them fails its connection, as a
+   *  network down past a read's outage, on a clock each pause moves on by what it waits. */
+  readonly unreachable?: number;
   /** Run from a bare clone, with no checkout, as the webhook driver fetches a commit. */
   readonly bare?: boolean;
   /** Run from this directory of the checkout. */
@@ -1517,7 +1520,26 @@ describe('armada run', () => {
 
       runner.seeded?.(scratch);
 
-      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
+      // The CLI's own process given the unreachable job's failing reads and the clock its pauses move (`unreachable`).
+      const cut = runner.unreachable === undefined ? [] : ['--preload', join(scratch, 'unreachable.ts')];
+
+      if (runner.unreachable !== undefined) {
+        const job = runner.unreachable === 1 ? 'tasks' : `tasks-${String(runner.unreachable)}`;
+
+        writeFileSync(join(scratch, 'unreachable.ts'), `const fetched = globalThis.fetch;
+const slept = Bun.sleep;
+const now = Date.now;
+let skipped = 0;
+globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+  if (new URL(input instanceof Request ? input.url : input).pathname.startsWith('/jobs/${job}/events')) throw new Error('certificate has expired');
+  return await fetched(input, init);
+}, { preconnect: fetched.preconnect });
+Bun.sleep = async (ms: number | Date) => { skipped += ms instanceof Date ? 0 : ms; await slept(0); };
+Date.now = () => now() + skipped;
+`);
+      }
+
+      const cli = Bun.spawn(['bun', ...cut, join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: runner.bare === true ? join(scratch, 'repo.git') : join(repo, runner.within ?? ''), env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
@@ -1643,6 +1665,11 @@ describe('armada run', () => {
     expect([unknown, refused].map((ran) => ({ exit: ran.exit, started: taskJobs(ran.bodies).length, cancelled: ran.cancelled, graded: reportOf(ran.report).graded })))
       .toEqual([{ exit: 2, started: 0, cancelled: [], graded: 'not graded' }, { exit: 2, started: 2, cancelled: ['tasks'], graded: 'not graded' }]);
     expect({ exit: lost.exit, cancelled: lost.cancelled.toSorted((left, right) => left.localeCompare(right)) }).toEqual({ exit: 2, cancelled: ['tasks', 'tasks-2'] });
+    // The runner cannot be reached for the second job's results past a read's outage: the run is not graded, and its
+    // jobs are left to finish, a cancel reaching nothing.
+    const cut = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf, unreachable: 2 });
+
+    expect({ exit: cut.exit, cancelled: cut.cancelled }).toEqual({ exit: 2, cancelled: [] });
     expect(reportOf(unknown.report).problems.some((problem) => problem.includes('py399'))).toBe(true);
   });
 
@@ -2328,6 +2355,62 @@ describe('asking the runner', () => {
     } finally {
       globalThis.fetch = original;
       Bun.sleep = sleep;
+    }
+  });
+});
+
+describe('a read through an outage', () => {
+  test('is asked again while the runner cannot be reached, for READ_OUTAGE_MS from its first failure, said once, and a write is not', async () => {
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const now = Date.now;
+    const error = console.error;
+    const said: string[] = [];
+    let clock = 0;
+    let down = 0;
+    let asked = 0;
+
+    // Each pause moves the clock on by what it waits, so the outage is measured in wall time, not in asks.
+    Bun.sleep = async (ms: number | Date) => { clock += ms instanceof Date ? ms.getTime() - clock : ms; };
+
+    Date.now = () => clock;
+
+    console.error = (line: string) => { said.push(line); };
+
+    globalThis.fetch = fakeFetch(() => {
+      asked += 1;
+
+      if (clock < down) throw new Error('certificate has expired');
+
+      return Response.json({ ok: true });
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+
+      // Down 35 s: answered once it is back, the failure said once with its cause.
+      down = 35_000;
+      expect(await (await armada.call('/health')).json()).toEqual({ ok: true });
+      expect(clock).toBeGreaterThanOrEqual(35_000);
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain('certificate has expired');
+      said.length = 0;
+      // Down past READ_OUTAGE_MS: the read ends with the failure.
+      clock = 0;
+      down = READ_OUTAGE_MS + 60_000;
+      await expect(armada.call('/health')).rejects.toBeInstanceOf(Unreachable);
+      expect(clock).toBeGreaterThanOrEqual(READ_OUTAGE_MS);
+      // A write is asked once.
+      clock = 0;
+      down = 1_000;
+      asked = 0;
+      await expect(armada.post('/jobs', {})).rejects.toThrow('certificate has expired');
+      expect(asked).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+      Date.now = now;
+      console.error = error;
     }
   });
 });

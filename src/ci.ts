@@ -18,7 +18,7 @@ import { gangSchedule, listSchedule } from './dispatch';
 import { expectedOf, grade, greenOf, outcomeOf, PlanSchema, rowName, taskName, timedShort, underExit, VerdictFileSchema, type PlanEntry, type TaskAnswer, type VerdictRow } from './grade';
 import { ARTIFACTS_PATH, atOnce, describeUsage, errorOf, FILES_DIR, fill, INPUTS_DIR, fitSize, gangOf, itemValues, jsonOf, MAX_INPUT_JOBS, MAX_INPUT_RUNS, OUT_PATH, PACKER, SIZE_NAMES, TimingsSchema, usageOf, workdirOf, type Cpu, type JobStatus, type Size, type Timings } from './protocol';
 import { describeSummary, producing, retainRuns, RUNS, type Bounds } from './runs';
-import { describeBoots, type Armada, type Summary } from './sdk';
+import { describeBoots, Unreachable, type Armada, type Summary } from './sdk';
 import { commandTask, type Job, type Json, type Meta, type Recipe, type Result } from './task';
 
 /** Lines of a red row's output printed; the whole of it is in the report. */
@@ -929,14 +929,25 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     tailFreed = new Promise<void>((resolve) => { freed = resolve; });
   };
 
-  /** A job followed to its end, as `followed`; one that cannot be leaves the run without an answer, its jobs cancelled
-   *  and none started after. */
+  /** A job followed to its end, as `followed`; one that cannot be leaves the run without an answer and none started
+   *  after. Its jobs are cancelled, but where the runner could not be reached through a read's outage (`Unreachable`):
+   *  those are left to finish, each named, since a cancel would not reach it and its results stay readable
+   *  (2026-11-16: a 35 s outage cancelled 3,580 tasks that ran on to green, the cancels unanswered). */
   const ending = async (each: Parameters<typeof followed>[0]) => {
     try {
       return await followed(each);
     } catch (cause) {
       stopped ??= 'a task job could not be followed';
-      await cancelEach(started, stopped);
+
+      if (!(cause instanceof Unreachable)) {
+        await cancelEach(started, stopped);
+      } else {
+        const ids = await Promise.allSettled(started.map(async (job) => await job.id));
+
+        for (const id of ids) {
+          if (id.status === 'fulfilled') console.error(`armada: ${stopped}: job ${id.value} left to finish; read it with \`armada status ${id.value}\``);
+        }
+      }
 
       throw cause;
     }
