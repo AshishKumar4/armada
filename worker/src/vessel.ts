@@ -659,7 +659,10 @@ export class ArmadaVessel extends DurableObject<Env> {
       await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, limits, spec.tmpfs)), 'launch'], { env: rest, ms: EXEC_MS });
       await keep();
     } else {
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus)), 'launch'], { env: rest, ms: EXEC_MS });
+      // Capped as a slot is, its container's own memory left beside it; an earlier Worker's spec names no cap (0).
+      const memoryBytes = spec.slotMemoryBytes > 0 ? spec.slotMemoryBytes : undefined;
+
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus, memoryBytes)), 'launch'], { env: rest, ms: EXEC_MS });
     }
   }
 

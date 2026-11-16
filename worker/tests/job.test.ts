@@ -91,13 +91,14 @@ describe('a job of size large (#64)', () => {
 });
 
 describe('a container\'s slots (Dew, 2026-11-16)', () => {
-  test('leave its own memory beside them, packing or not: a task that fills its slots dies in its group, the container lives', async () => {
+  test('are capped with the container\'s own memory left beside them, packing or not, one slot or many', async () => {
     const fast = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast', slots: 2 });
     const alone = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast' });
     const packing = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'efficient' });
-    const held = SIZES.medium.memoryGiB * 2 ** 30;
+    const tasks = SIZES.medium.memoryGiB * 2 ** 30 - 512 * 2 ** 20;
 
-    expect([fast, alone, packing].map(({ specs }) => specs.map((spec) => (spec.slotMemoryBytes ?? held) * (spec.slots ?? 1) < held))).toEqual([[true], [true], [true]]);
+    expect([fast, alone, packing].map(({ specs }) => specs.map((spec) => [spec.slotMemoryBytes, spec.slots])))
+      .toEqual([[[Math.floor(tasks / 2), 2]], [[tasks, 1]], [[tasks, 1]]]);
   });
 });
 
