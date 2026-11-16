@@ -214,9 +214,12 @@ export function grade(answers: readonly TaskAnswer[]): Graded {
       const name = rowName(row);
       const owner = seen.get(name);
 
+      // A kill for memory is its task's, named by its task, which another task may share: no row of a test's to own.
+      const owned = row.kind !== MEMORY_KILL;
+
       if (name === '') flag(`${answer.name} reported a row with no name`, row);
-      else if (owner !== undefined) flag(`${name} was reported by both ${owner} and ${answer.name}`, row);
-      else seen.set(name, answer.name);
+      else if (owned && owner !== undefined) flag(`${name} was reported by both ${owner} and ${answer.name}`, row);
+      else if (owned) seen.set(name, answer.name);
       reported.push({ row, declared: files.get(name) ?? [] });
 
       for (const path of row.artifacts ?? []) {
