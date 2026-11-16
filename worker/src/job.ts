@@ -377,11 +377,17 @@ export class ArmadaJob extends DurableObject<Env> {
       return await this.cancel(`JobDeadlineExceeded: the job did not finish within ${String(deadline)} s${waiting}`, 'lost', waiting === '' ? 'none' : 'unplaced');
     }
 
-    // A pin no host met for PIN_WAIT_MS, while no container of the job works, ends it rather than waits on it.
+    // A pin no host met for PIN_WAIT_MS, while no container of the job works, ends it rather than waits on it: counted
+    // only while its starts keep landing on other hosts, the last within PIN_WAIT_MS, and the fleet has room for one of
+    // its containers. A job waiting for the fleet's capacity waits on that, to its deadline, its window started again
+    // (Dew, 2026-11-16: a job whose containers train CI recalled waited 8 minutes for room after one 25/1 start, and
+    // its 108 tasks ended as CpuUnavailable).
     const since = await this.ctx.storage.get<number>('misplacedSince');
     const held = await this.ctx.storage.get<Held>('heldBack');
+    const last = (await this.ctx.storage.get<number>('misplacedLast')) ?? since;
 
-    if (spec.cpu !== undefined && since !== undefined && held !== undefined && Date.now() - since >= PIN_WAIT_MS && this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length === 0) {
+    if (spec.cpu !== undefined && since !== undefined && held !== undefined && Date.now() - since >= PIN_WAIT_MS && this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length === 0
+      && !(await this.pinWaitRestarted(spec, last))) {
       return await this.cancel(`CpuUnavailable: no container of the job started on a host of ${cpuLabel(spec.cpu)} in ${String(PIN_WAIT_MS / 60_000)} min, the platform placing containers by region alone; the last started on ${hostLabel(held.host)}`, 'lost', 'unplaced');
     }
 
@@ -590,6 +596,17 @@ export class ArmadaJob extends DurableObject<Env> {
     return Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working') AND name != ?`, besides).one()['n']);
   }
 
+  /** Whether the job's wait on its pin is a wait for the fleet instead (`alarm`): its last misplaced start older than
+   *  PIN_WAIT_MS, or no room in the fleet for one of its containers now. Its window then starts again from now. */
+  private async pinWaitRestarted(spec: Kept, last: number | undefined): Promise<boolean> {
+    const room = await this.env.FLEET.getByName(SINGLE).room((await this.ctx.storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
+
+    if (room >= 1 && last !== undefined && Date.now() - last < PIN_WAIT_MS) return false;
+    await this.ctx.storage.put('misplacedSince', Date.now());
+
+    return true;
+  }
+
   /** The room the fleet could grant the job now (`ArmadaFleet.room`), read while it needs more vessels than it has
    *  granted, and kept for `wanted`. */
   private async askRoom(spec: Kept): Promise<void> {
@@ -626,7 +643,14 @@ export class ArmadaJob extends DurableObject<Env> {
     const containers = packs(spec) ? this.placement.containers(spec.recipe.size, { pool: spec.pool, hedged, only: admitted?.tasks ?? null })
       : Math.min(spec.pool, Math.ceil(((admitted?.ranks ?? Number(this.sql.exec(NEEDED).one()['n'])) + hedged) / spec.slots));
 
-    return Math.max(0, Math.min(containers, await this.capacity(spec)) - await heldBack(this.ctx.storage));
+    const kept = Math.min(containers, await this.capacity(spec));
+    // Its last place held back no longer than the first hold (MISPLACED_MS) after its latest such start, however many
+    // came in a row: a job of one container holding it for minutes only waits, the platform's placing beyond it (Main,
+    // 2026-11-16: a pool of one could hold its only place back for 480 s).
+    const last = (await this.ctx.storage.get<number>('misplacedLast')) ?? 0;
+    const least = Date.now() - last < MISPLACED_MS ? 0 : Math.min(kept, 1);
+
+    return Math.max(least, kept - await heldBack(this.ctx.storage));
   }
 
   /** The open tasks a budget runs at once, and their ranks: those started, and the queued ones, heaviest first, whose
@@ -694,7 +718,7 @@ export class ArmadaJob extends DurableObject<Env> {
    *  (`PIN_WAIT_MS`). */
   async onItsCpu(name: string): Promise<void> {
     if (this.sql.exec(`SELECT 1 AS n FROM vessels WHERE name = ? AND state IN ${ALIVE}`, name).toArray().length > 0) {
-      await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince']);
+      await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince', 'misplacedLast']);
     }
   }
 
@@ -702,7 +726,7 @@ export class ArmadaJob extends DurableObject<Env> {
    *  vessel). */
   async booted(name: string, bootMs: number, boot?: Boot): Promise<void> {
     // A host of its CPU had room: the places held back start again at the next growth.
-    await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince']);
+    await this.ctx.storage.delete(['misplacedInRow', 'heldBack', 'misplacedSince', 'misplacedLast']);
     this.sql.exec(`UPDATE vessels SET boot_ms = ?, boot = ?, state = ?, beat = ? WHERE name = ? AND state IN ${ALIVE}`, bootMs, boot === undefined ? null : JSON.stringify(boot), 'working', Date.now(), name);
   }
 
@@ -1315,7 +1339,7 @@ export class ArmadaJob extends DurableObject<Env> {
       // The first such start since one last booted on its CPU, from which the job waits PIN_WAIT_MS at most.
       const since = (await this.ctx.storage.get<number>('misplacedSince')) ?? now;
 
-      await this.ctx.storage.put({ misplacedInRow: inRow, heldBack: { places: places + 1, until, host: misplaced } satisfies Held, heldUntil, misplacedSince: since });
+      await this.ctx.storage.put({ misplacedInRow: inRow, heldBack: { places: places + 1, until, host: misplaced } satisfies Held, heldUntil, misplacedSince: since, misplacedLast: now });
     } else if (missing === undefined && live) {
       // Its place is refilled from its budget, a lost start's apart from a loss under a task; past it, the job forfeits
       // the place, and runs on with one vessel fewer (`grow`). Decided before anything below lets an alarm grow the
