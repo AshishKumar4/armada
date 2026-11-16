@@ -1342,6 +1342,9 @@ interface Runner {
   readonly refuse?: number;
   /** The task job, counted from 1, whose results the runner no longer has. */
   readonly lose?: number;
+  /** The task job, counted from 1, whose events the CLI cannot reach: each read of them fails its connection, as a
+   *  network down past a read's outage, on a clock each pause moves on by what it waits. */
+  readonly unreachable?: number;
   /** Run from a bare clone, with no checkout, as the webhook driver fetches a commit. */
   readonly bare?: boolean;
   /** Run from this directory of the checkout. */
@@ -1517,7 +1520,26 @@ describe('armada run', () => {
 
       runner.seeded?.(scratch);
 
-      const cli = Bun.spawn(['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
+      // The CLI's own process given the unreachable job's failing reads and the clock its pauses move (`unreachable`).
+      const cut = runner.unreachable === undefined ? [] : ['--preload', join(scratch, 'unreachable.ts')];
+
+      if (runner.unreachable !== undefined) {
+        const job = runner.unreachable === 1 ? 'tasks' : `tasks-${String(runner.unreachable)}`;
+
+        writeFileSync(join(scratch, 'unreachable.ts'), `const fetched = globalThis.fetch;
+const slept = Bun.sleep;
+const now = Date.now;
+let skipped = 0;
+globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+  if (new URL(input instanceof Request ? input.url : input).pathname.startsWith('/jobs/${job}/events')) throw new Error('certificate has expired');
+  return await fetched(input, init);
+}, { preconnect: fetched.preconnect });
+Bun.sleep = async (ms: number | Date) => { skipped += ms instanceof Date ? 0 : ms; await slept(0); };
+Date.now = () => now() + skipped;
+`);
+      }
+
+      const cli = Bun.spawn(['bun', ...cut, join(import.meta.dir, '..', 'src', 'cli.ts'), 'run', 'HEAD', ...args], {
         cwd: runner.bare === true ? join(scratch, 'repo.git') : join(repo, runner.within ?? ''), env: { ...scratchEnv(), HOME: scratch, ARMADA_URL: server.url.href, ARMADA_TOKEN: 't' }, stdout: 'pipe', stderr: 'pipe',
       });
 
@@ -1644,29 +1666,10 @@ describe('armada run', () => {
       .toEqual([{ exit: 2, started: 0, cancelled: [], graded: 'not graded' }, { exit: 2, started: 2, cancelled: ['tasks'], graded: 'not graded' }]);
     expect({ exit: lost.exit, cancelled: lost.cancelled.toSorted((left, right) => left.localeCompare(right)) }).toEqual({ exit: 2, cancelled: ['tasks', 'tasks-2'] });
     // The runner cannot be reached for the second job's results past a read's outage: the run is not graded, and its
-    // jobs are left to finish, a cancel reaching nothing. Each pause moves the clock on by what it waits.
-    const original = globalThis.fetch;
-    const sleep = Bun.sleep;
-    const now = Date.now;
-    let skipped = 0;
+    // jobs are left to finish, a cancel reaching nothing.
+    const cut = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf, unreachable: 2 });
 
-    globalThis.fetch = Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (new URL(input instanceof Request ? input.url : input).pathname.startsWith('/jobs/tasks-2/events')) throw new Error('certificate has expired');
-
-      return await original(input, init);
-    }, { preconnect: original.preconnect });
-    Bun.sleep = async (ms: number | Date) => { skipped += typeof ms === 'number' ? ms : 0; await sleep(0); };
-    Date.now = () => now() + skipped;
-
-    try {
-      const cut = await run([], { include: [{ name: 'a' }, { name: 'b', environment: 'py314' }] }, {}, { ...environments, taskConfig: { verdict: false }, exitOf });
-
-      expect({ exit: cut.exit, cancelled: cut.cancelled }).toEqual({ exit: 2, cancelled: [] });
-    } finally {
-      globalThis.fetch = original;
-      Bun.sleep = sleep;
-      Date.now = now;
-    }
+    expect({ exit: cut.exit, cancelled: cut.cancelled }).toEqual({ exit: 2, cancelled: [] });
     expect(reportOf(unknown.report).problems.some((problem) => problem.includes('py399'))).toBe(true);
   });
 
@@ -2368,7 +2371,7 @@ describe('a read through an outage', () => {
     let asked = 0;
 
     // Each pause moves the clock on by what it waits, so the outage is measured in wall time, not in asks.
-    Bun.sleep = async (ms: number | Date) => { clock += typeof ms === 'number' ? ms : ms.getTime() - clock; };
+    Bun.sleep = async (ms: number | Date) => { clock += ms instanceof Date ? ms.getTime() - clock : ms; };
     Date.now = () => clock;
     console.error = (line: string) => { said.push(line); };
     globalThis.fetch = fakeFetch(() => {
