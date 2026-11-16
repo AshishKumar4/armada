@@ -8,7 +8,7 @@ import { namespace, READY, runOf, state, world } from './harness';
 
 const GIB = 2 ** 30;
 
-/** Half a core and 2 GiB: four fit a medium container's 4 vCPUs and 85% of its 11.5 GiB. */
+/** Half a core and 2 GiB: four fit a medium container's 4 vCPUs and 85% of its 10 GiB. */
 const SMALL: Usage = { cores: 0.5, memory: 2 * GIB, disk: 1e6 };
 
 /** Each item's command: one class, `sim work`, whatever the item. */
@@ -235,7 +235,7 @@ describe('an efficient job', () => {
     const first = await packing([{ key: 'tests/test_serving.py#3/80', name: '3.12-17', weight: 5 }], made);
 
     await claimed(first.job, 'v1');
-    // Alone, it held 9 GiB: no task of the class's 2 GiB fits beside it in 85% of 11.5 GiB.
+    // Alone, it held 9 GiB: no task of the class's 2 GiB fits beside it in 85% of 10 GiB.
     await land(first.job, 'v1', ran(0, 'v1', 0, { peakMemory: 9 * GIB }));
     await first.job.alarm();
     const next = (key: Record<string, string>) => packing([{ ...key, name: '3.12-940', weight: 7 }, { name: 'c' }, { name: 'd' }], made);
