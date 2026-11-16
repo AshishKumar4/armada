@@ -1002,6 +1002,16 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
         const said = failed.map(([name, result]) => `${name} ${result === undefined ? 'never ran' : exitWord(result)}`);
         const tails = tailsOf(failed);
 
+        // Map tasks that never ran for want of capacity (their job's deadline came while they waited for the fleet)
+        // judged nothing: the run has no verdict, never a red judge for a test that never ran (Main, 2026-11-16: base
+        // d04750ec6's judges went red, every draw still waiting under the fleet's cap at 2499 s).
+        if (failed.length > 0 && failed.every(([, result]) => result?.kind === 'lost' && result.capacity === true)) {
+          stopped ??= `${nameOf(index)}'s map tasks never ran for want of capacity: ${said.join(', ')}`;
+          await cancelEach(started, stopped);
+
+          return { refused: stopped };
+        }
+
         if (failed.length > 0) unjudged.set(index, `its map tasks did not all pass: ${said.join(', ')}${tails === '' ? '' : `\n${tails}`}`);
       }
 
