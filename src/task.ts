@@ -146,8 +146,9 @@ export type Result<I, O> = { readonly index: number; readonly item: I; readonly 
   | { readonly ok: false; readonly kind: 'error'; readonly error: RemoteError }
   | { readonly ok: false; readonly kind: 'timeout' }
   | { readonly ok: false; readonly kind: 'cancelled'; readonly reason: string }
-  /** The platform lost it on every attempt. */
-  | { readonly ok: false; readonly kind: 'lost'; readonly reason: string }
+  /** The platform lost it on every attempt; `capacity` where it never ran to its end for want of capacity, not for
+   *  its code (`Outcome.capacity`). */
+  | { readonly ok: false; readonly kind: 'lost'; readonly reason: string; readonly capacity?: true }
 );
 
 export interface Meta {
@@ -879,7 +880,11 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
 
     const base = { index: outcome.index, item, meta };
 
-    if (outcome.kind === 'failed') return { ...base, ok: false, kind: outcome.reason === 'cancelled' ? 'cancelled' : 'lost', reason: outcome.tail };
+    if (outcome.kind === 'failed') {
+      if (outcome.reason === 'cancelled') return { ...base, ok: false, kind: 'cancelled', reason: outcome.tail };
+
+      return outcome.capacity === true ? { ...base, ok: false, kind: 'lost', reason: outcome.tail, capacity: true } : { ...base, ok: false, kind: 'lost', reason: outcome.tail };
+    }
 
     if (outcome.reason === 'timeout') return { ...base, ok: false, kind: 'timeout' };
     const answered = await answerOf(this.answering, outcome, async () => await this.armada.output(id, outcome.index));
