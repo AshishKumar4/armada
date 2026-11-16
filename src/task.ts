@@ -877,8 +877,9 @@ export class Job<I, O> implements AsyncIterable<Result<I, O>> {
     const base = { index: outcome.index, item, meta };
 
     if (outcome.kind === 'failed') {
-      return outcome.reason === 'cancelled' ? { ...base, ok: false, kind: 'cancelled', reason: outcome.tail }
-        : { ...base, ok: false, kind: 'lost', reason: outcome.tail, ...(outcome.capacity === true ? { capacity: true } : {}) };
+      if (outcome.reason === 'cancelled') return { ...base, ok: false, kind: 'cancelled', reason: outcome.tail };
+
+      return outcome.capacity === true ? { ...base, ok: false, kind: 'lost', reason: outcome.tail, capacity: true } : { ...base, ok: false, kind: 'lost', reason: outcome.tail };
     }
 
     if (outcome.reason === 'timeout') return { ...base, ok: false, kind: 'timeout' };
