@@ -397,11 +397,20 @@ describe('a container the platform is stopping', () => {
 describe('a finished task', () => {
   test('reports its cgroup\'s peak memory, CPU seconds and memory kills, and lands without them when they cannot be read', async () => {
     const [measured] = (await run(0, { usage: { exitCode: 0, stdout: '734003200\n2500000\n0\n' } })).completed;
-    const [killed] = (await run(0, { usage: { exitCode: 0, stdout: '12884901888\n9000000\n1\n' } })).completed;
     const [lost] = (await run(0, { usage: new Error('Network connection lost.') })).completed;
 
-    expect([measured, killed, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds, outcome.oomKilled ?? false]))
-      .toEqual([[0, 734003200, 2.5, false], [0, 12884901888, 9, true], [0, undefined, undefined, false]]);
+    expect([measured, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds, outcome.oomKilled ?? false]))
+      .toEqual([[0, 734003200, 2.5, false], [0, undefined, undefined, false]]);
+  });
+
+  test('is red with 137 when its group killed a process for memory, though its last command exited 0, unless its own verdict holds the red', async () => {
+    const kill = { exitCode: 0, stdout: '12884901888\n9000000\n1\n' };
+    const [killed] = (await run(0, { usage: kill })).completed;
+    const [said] = (await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 1}]}' })).completed;
+    const [green] = (await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 0}]}' })).completed;
+
+    expect([killed, said, green].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.oomKilled ?? false, outcome.redRow ?? false]))
+      .toEqual([[137, true, false], [0, true, true], [137, true, false]]);
   });
 });
 
