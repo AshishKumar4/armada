@@ -734,8 +734,8 @@ describe('a job holding places back after starts on another CPU', () => {
       const waited = (await open.events(0)).events.length;
 
       // Room again, and its starts keep landing on another CPU: 8 minutes of those end it.
-
       for (const holder of ['x/v1', 'x/v2', 'x/v3', 'x/v4']) await fleet.release(holder);
+
       for (let minute = 1; minute <= 9; minute += 1) {
         setSystemTime(start + (8 + minute) * 60_000 + 1_000);
         await open.alarm();
