@@ -761,8 +761,20 @@ describe('a job holding places back after starts on another CPU', () => {
       // The fleet's room, answered at once until a test holds its answer (`held`).
       let held: Promise<number> | null = null;
       let answer: (room: number) => void = () => undefined;
+      let enter: () => void = () => undefined;
 
-      const fleet = { acquire: async () => 'held', room: async () => await (held ?? 1), release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] };
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+
+      const room = async (): Promise<number> => {
+        if (held === null) return 1;
+        enter();
+
+        return await held;
+      };
+
+      const fleet = { acquire: async () => 'held', room, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] };
       const begun: string[] = [];
 
       const open = new ArmadaJob(state().ctx, world({
@@ -788,6 +800,8 @@ describe('a job holding places back after starts on another CPU', () => {
 
       const checking = open.alarm();
 
+      // Booted once the alarm has asked the fleet and waits on its answer.
+      await entered;
       await open.booted(begun.at(-1)?.split('/')[1] ?? 'v3', 1000);
       answer(1);
       await checking;
