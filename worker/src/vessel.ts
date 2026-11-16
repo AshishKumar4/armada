@@ -641,9 +641,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     await this.network(container, claim);
     const argv = argvOf(slot);
     // A slot's task gets its slot's cgroup, so its group reads and caps reach the slot's, not the single task group.
-    const env: typeof claim.env & { ARMADA_CGROUP: string; ARMADA_RESUME?: string } = { ...claim.env, ARMADA_CGROUP: layout.group };
+    const env: typeof claim.env & { ARMADA_CGROUP: string; ARMADA_RESUME?: string; ARMADA_TASK_MEMORY_MAX?: string } = { ...claim.env, ARMADA_CGROUP: layout.group };
 
     if (resume !== null) env.ARMADA_RESUME = RESUME_PATH;
+    // A single task's cap (`launchTask`), the Worker's alone: a job's env naming it is overridden, or dropped where an
+    // earlier Worker's spec names no cap (0). A slot's cap is its launch's own (`launchSlot`).
+    delete env.ARMADA_TASK_MEMORY_MAX;
+    if (!layout.isolated && spec.slotMemoryBytes > 0) env.ARMADA_TASK_MEMORY_MAX = String(spec.slotMemoryBytes);
     // Names a shell can export go in the file; any other stays in the exec, as before.
     const exported = Object.fromEntries(Object.entries(env).filter(([name]) => SHELL_NAME.test(name)));
     const rest = Object.fromEntries(Object.entries(env).filter(([name]) => !SHELL_NAME.test(name)));
@@ -659,10 +663,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchSlot(spec.workdir, slot, limits, spec.tmpfs)), 'launch'], { env: rest, ms: EXEC_MS });
       await keep();
     } else {
-      // Capped as a slot is, its container's own memory left beside it; an earlier Worker's spec names no cap (0).
-      const capped = spec.slotMemoryBytes > 0 ? { ...rest, ARMADA_TASK_MEMORY_MAX: String(spec.slotMemoryBytes) } : rest;
-
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus)), 'launch'], { env: capped, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus)), 'launch'], { env: rest, ms: EXEC_MS });
     }
   }
 
