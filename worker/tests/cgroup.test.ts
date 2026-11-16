@@ -59,7 +59,10 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
     const cap = 64 * 1024 * 1024;
 
     try {
-      expect(sh(launchTask(workdir, ALL, cap), 'dd', 'if=/dev/zero', 'of=/dev/null', 'bs=96M').exitCode).toBe(0);
+      const launched = Bun.spawnSync(['/bin/sh', '-c', launchTask(workdir, ALL), 'armada', 'dd', 'if=/dev/zero', 'of=/dev/null', 'bs=96M'],
+        { cwd: workdir, env: { PATH: process.env['PATH'] ?? '', ARMADA_TASK_MEMORY_MAX: String(cap) } });
+
+      expect(launched.exitCode).toBe(0);
       const exit = sh(WAIT, '20').stdout.toString().trim();
       const usage = usageFrom(sh(usageOf(TASK_GROUP)).stdout.toString());
 

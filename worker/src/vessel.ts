@@ -660,9 +660,9 @@ export class ArmadaVessel extends DurableObject<Env> {
       await keep();
     } else {
       // Capped as a slot is, its container's own memory left beside it; an earlier Worker's spec names no cap (0).
-      const memoryBytes = spec.slotMemoryBytes > 0 ? spec.slotMemoryBytes : undefined;
+      const capped = spec.slotMemoryBytes > 0 ? { ...rest, ARMADA_TASK_MEMORY_MAX: String(spec.slotMemoryBytes) } : rest;
 
-      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus, memoryBytes)), 'launch'], { env: rest, ms: EXEC_MS });
+      await must(container, 'the launch', ['/bin/sh', '-c', launchArgv(argv, launchTask(spec.workdir, cpus)), 'launch'], { env: capped, ms: EXEC_MS });
     }
   }
 
