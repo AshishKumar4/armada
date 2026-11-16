@@ -97,7 +97,7 @@ describe('a container\'s slots (Dew, 2026-11-16)', () => {
     const packing = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'efficient' });
     const held = SIZES.medium.memoryGiB * 2 ** 30;
 
-    expect([fast, alone, packing].map(({ specs }) => specs.map((spec) => spec.slotMemoryBytes * spec.slots < held))).toEqual([[true], [true], [true]]);
+    expect([fast, alone, packing].map(({ specs }) => specs.map((spec) => (spec.slotMemoryBytes ?? held) * (spec.slots ?? 1) < held))).toEqual([[true], [true], [true]]);
   });
 });
 
