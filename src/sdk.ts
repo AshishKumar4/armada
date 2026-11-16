@@ -8,12 +8,18 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { CONFIG_FILE, deploymentNamed } from './config';
-import { deadlineRefusal, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
+import { deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
-/** How often a read is asked of a runner whose gateway failed to answer it (`Armada.call`). */
-export const READ_ATTEMPTS = 5;
+/** How long a read is asked again of a runner it cannot reach, or whose gateway or Worker failed to answer it
+ *  (`Armada.call`): a network that drops for a while (2026-11-16: the PC's tunnel down 35 s, every read failing on a
+ *  certificate a captive path served) is ridden out, as a run that polls for hours should be, and a runner gone for
+ *  good still ends the read. */
+export const READ_OUTAGE_MS = 5 * 60_000;
+
+/** The longest pause between two asks of a read that failed (`Armada.call`). */
+export const READ_PAUSE_MS = 15_000;
 
 /** The longest a request the Worker refused while it is redeployed waits before it is asked again (`Armada.call`). */
 export const REDEPLOY_WAIT_MS = 15_000;
@@ -183,8 +189,9 @@ export class Armada {
   private spoken = PROTOCOL;
 
   /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, the Worker's own 500, or a
-   *  dropped connection, is asked again, up to READ_ATTEMPTS times a second apart more each time: the Worker answers it
-   *  again unchanged, and a `run` that polls for half an hour should not end on one. A Durable Object the runtime
+   *  connection that fails (dropped, refused, its TLS refused), is asked again for READ_OUTAGE_MS, a second apart more
+   *  each time up to READ_PAUSE_MS, the failure said once with its cause: the Worker answers it again unchanged, and a
+   *  `run` that polls for hours should not end on a network's blip. A write is asked once. A Durable Object the runtime
    *  restarted throws once under a read ("Worker threw exception"), and the next read is answered. Any request the
    *  Worker refuses while it is redeployed (`redeploying`), which made nothing of it, is asked again until the deploy is
    *  done, a second apart more each time up to REDEPLOY_WAIT_MS, said once: a job submitted during a deploy's drain
@@ -193,7 +200,18 @@ export class Armada {
   async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
-    const attempts = method === 'GET' || method === 'HEAD' ? READ_ATTEMPTS : 1;
+    const read = method === 'GET' || method === 'HEAD';
+    const began = Date.now();
+    let said = false;
+
+    // Whether a read that failed is asked again, the first failure said with its cause.
+    const again = (cause: string): boolean => {
+      if (!read || Date.now() - began >= READ_OUTAGE_MS || init.signal?.aborted === true) return false;
+      if (!said) console.error(`${method} ${path}: ${cause}; asked again for up to ${String(READ_OUTAGE_MS / 60_000)} min`);
+      said = true;
+
+      return true;
+    };
 
     headers.set('authorization', `Bearer ${this.connection.token}`);
     headers.set(PROTOCOL_HEADER, String(protocol));
@@ -204,14 +222,14 @@ export class Armada {
       try {
         sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }), init.signal);
       } catch (cause) {
-        // A connection that dropped is asked again, as a gateway's failure is; one its caller gave up on, never.
-        if (attempt >= attempts || init.signal?.aborted === true) throw cause;
-        await pause(attempt * 1000, init.signal);
+        // A connection that failed is asked again, as a gateway's failure is; one its caller gave up on, never.
+        if (!again(errorOf({ cause }).message)) throw cause;
+        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
       }
 
-      if ([500, 502, 503, 504].includes(sent.status) && attempt < attempts) {
-        await pause(attempt * 1000, init.signal);
+      if ([500, 502, 503, 504].includes(sent.status) && again(`answered ${String(sent.status)}`)) {
+        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
       }
 

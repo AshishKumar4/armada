@@ -11,7 +11,7 @@ import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
-import { Armada, PACK_PART } from '../src/sdk';
+import { Armada, PACK_PART, READ_OUTAGE_MS } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
@@ -2328,6 +2328,58 @@ describe('asking the runner', () => {
     } finally {
       globalThis.fetch = original;
       Bun.sleep = sleep;
+    }
+  });
+});
+
+describe('a read through an outage', () => {
+  test('is asked again while the runner cannot be reached, for READ_OUTAGE_MS of wall time, the failure said once, and a write is not', async () => {
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const now = Date.now;
+    const error = console.error;
+    const said: string[] = [];
+    let clock = 0;
+    let down = 0;
+    let asked = 0;
+
+    // Each pause moves the clock on by what it waits, so the outage is measured in wall time, not in asks.
+    Bun.sleep = (async (ms: number) => { clock += ms; }) as typeof Bun.sleep;
+    Date.now = () => clock;
+    console.error = (line: string) => { said.push(line); };
+    globalThis.fetch = fakeFetch(() => {
+      asked += 1;
+
+      if (clock < down) throw new Error('certificate has expired');
+
+      return Response.json({ ok: true });
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+
+      // Down 35 s: answered once it is back, the failure said once with its cause.
+      down = 35_000;
+      expect(await (await armada.call('/health')).json()).toEqual({ ok: true });
+      expect(clock).toBeGreaterThanOrEqual(35_000);
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain('certificate has expired');
+      // Down past READ_OUTAGE_MS: the read ends with the failure.
+      clock = 0;
+      down = READ_OUTAGE_MS + 60_000;
+      await expect(armada.call('/health')).rejects.toThrow('certificate has expired');
+      expect(clock).toBeGreaterThanOrEqual(READ_OUTAGE_MS);
+      // A write is asked once.
+      clock = 0;
+      down = 1_000;
+      asked = 0;
+      await expect(armada.post('/jobs', {})).rejects.toThrow('certificate has expired');
+      expect(asked).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+      Date.now = now;
+      console.error = error;
     }
   });
 });
