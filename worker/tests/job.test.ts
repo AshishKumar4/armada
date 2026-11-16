@@ -715,6 +715,7 @@ describe('a job holding places back after starts on another CPU', () => {
       setSystemTime(start);
       const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '16' }));
       const begun: string[] = [];
+
       const open = new ArmadaJob(state().ctx, world({
         FLEET: namespace(() => fleet),
         VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
@@ -725,6 +726,7 @@ describe('a job holding places back after starts on another CPU', () => {
       await open.alarm();
       // Its first container lands on another CPU; then another job takes every container of the fleet.
       await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+
       for (const holder of ['x/v1', 'x/v2', 'x/v3', 'x/v4']) await fleet.acquire(holder, 4, { deadlineAt: start + 3_600_000, priority: 10 });
 
       setSystemTime(start + 8 * 60_000 + 1_000);
@@ -732,6 +734,7 @@ describe('a job holding places back after starts on another CPU', () => {
       const waited = (await open.events(0)).events.length;
 
       // Room again, and its starts keep landing on another CPU: 8 minutes of those end it.
+
       for (const holder of ['x/v1', 'x/v2', 'x/v3', 'x/v4']) await fleet.release(holder);
       for (let minute = 1; minute <= 9; minute += 1) {
         setSystemTime(start + (8 + minute) * 60_000 + 1_000);
@@ -755,10 +758,13 @@ describe('a job holding places back after starts on another CPU', () => {
 
     try {
       setSystemTime(start);
-      let answer = (_room: number) => undefined as void;
-      const asked = new Promise<number>((resolve) => { answer = resolve; });
-      const fleet = { acquire: async () => 'held', room: async () => await asked, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] };
+      // The fleet's room, answered at once until a test holds its answer (`held`).
+      let held: Promise<number> | null = null;
+      let answer: (room: number) => void = () => undefined;
+
+      const fleet = { acquire: async () => 'held', room: async () => await (held ?? 1), release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] };
       const begun: string[] = [];
+
       const open = new ArmadaJob(state().ctx, world({
         FLEET: namespace(() => fleet),
         VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
@@ -776,6 +782,10 @@ describe('a job holding places back after starts on another CPU', () => {
 
       // Eight minutes on, the alarm asks the fleet; meanwhile a replacement boots on a host of its CPU.
       setSystemTime(start + 8 * 60_000 + 1_000);
+      held = new Promise<number>((resolve) => {
+        answer = resolve;
+      });
+
       const checking = open.alarm();
 
       await open.booted(begun.at(-1)?.split('/')[1] ?? 'v3', 1000);
