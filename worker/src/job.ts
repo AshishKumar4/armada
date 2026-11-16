@@ -163,13 +163,19 @@ async function heldBack(storage: DurableObjectStorage): Promise<number> {
  *  landed on 25/17). */
 const PIN_WAIT_MS = MISPLACED_MAX_MS;
 
-/** Whether a job's wait on its pin is a wait for the fleet instead (`ArmadaJob.alarm`): its last misplaced start older
- *  than PIN_WAIT_MS, or no room in the fleet for one of its containers now. Its window then starts again from now. A
- *  function of the module, not a method, so the Worker's declarations, its contract, stay as they were. */
-async function pinWaitRestarted(env: Env, storage: DurableObjectStorage, spec: Kept, last: number | undefined): Promise<boolean> {
+/** Whether a job's failed pin, its window opened at `since`, is no failure to end it for (`ArmadaJob.alarm`): its last
+ *  misplaced start older than PIN_WAIT_MS, or the fleet with no room for one of its containers while none of its own
+ *  starts (`starting`: its vessels granted and booting, which room() does not count) — a wait for the fleet, its
+ *  window then started again from now; or its pin state changed while the fleet was asked (a container booted on its
+ *  CPU, or one works), which the room's answer let in. A function of the module, not a method, so the Worker's
+ *  declarations, its contract, stay as they were. */
+async function pinWaitRestarted(env: Env, storage: DurableObjectStorage, spec: Kept, since: number, last: number | undefined,
+  starting: () => boolean, working: () => boolean): Promise<boolean> {
   const room = await env.FLEET.getByName(SINGLE).room((await storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
 
-  if (room >= 1 && last !== undefined && Date.now() - last < PIN_WAIT_MS) return false;
+  if ((await storage.get<number>('misplacedSince')) !== since || working()) return true;
+
+  if ((room >= 1 || starting()) && last !== undefined && Date.now() - last < PIN_WAIT_MS) return false;
   await storage.put('misplacedSince', Date.now());
 
   return true;
@@ -399,7 +405,9 @@ export class ArmadaJob extends DurableObject<Env> {
     const last = (await this.ctx.storage.get<number>('misplacedLast')) ?? since;
 
     if (spec.cpu !== undefined && since !== undefined && held !== undefined && Date.now() - since >= PIN_WAIT_MS && this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length === 0
-      && !(await pinWaitRestarted(this.env, this.ctx.storage, spec, last))) {
+      && !(await pinWaitRestarted(this.env, this.ctx.storage, spec, since, last,
+        () => this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'booting'").toArray().length > 0,
+        () => this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length > 0))) {
       return await this.cancel(`CpuUnavailable: no container of the job started on a host of ${cpuLabel(spec.cpu)} in ${String(PIN_WAIT_MS / 60_000)} min, the platform placing containers by region alone; the last started on ${hostLabel(held.host)}`, 'lost', 'unplaced');
     }
 

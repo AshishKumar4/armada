@@ -750,6 +750,44 @@ describe('a job holding places back after starts on another CPU', () => {
     }
   });
 
+  test('is not ended for its pin where a container boots on its CPU while the fleet is asked for room', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      let answer = (_room: number) => undefined as void;
+      const asked = new Promise<number>((resolve) => { answer = resolve; });
+      const fleet = { acquire: async () => 'held', room: async () => await asked, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] };
+      const begun: string[] = [];
+      const open = new ArmadaJob(state().ctx, world({
+        FLEET: namespace(() => fleet),
+        VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
+        ENVIRONMENTS: readyRegistry(),
+      }));
+
+      await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1, cpu }));
+      await open.alarm();
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 31_000);
+      await open.alarm();
+      await open.vesselFailed(begun.at(-1)?.split('/')[1] ?? 'v2', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 62_000);
+      await open.alarm();
+
+      // Eight minutes on, the alarm asks the fleet; meanwhile a replacement boots on a host of its CPU.
+      setSystemTime(start + 8 * 60_000 + 1_000);
+      const checking = open.alarm();
+
+      await open.booted(begun.at(-1)?.split('/')[1] ?? 'v3', 1000);
+      answer(1);
+      await checking;
+
+      expect((await open.events(0)).events.length).toBe(0);
+    } finally {
+      setSystemTime();
+    }
+  });
+
   test('lets a gang that forms while a place is held back wait for that rank, its start bound counted from the hold\'s end', async () => {
     const start = Date.now();
 
