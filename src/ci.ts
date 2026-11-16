@@ -1005,7 +1005,10 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
         // Map tasks that never ran for want of capacity (their job's deadline came while they waited for the fleet)
         // judged nothing: the run has no verdict, never a red judge for a test that never ran (Main, 2026-11-16: base
         // d04750ec6's judges went red, every draw still waiting under the fleet's cap at 2499 s).
-        if (failed.length > 0 && failed.every(([, result]) => result?.kind === 'lost' && result.capacity === true)) {
+        // A map task with no result at all never ran either; one lost for capacity says why.
+        const starved = failed.filter(([, result]) => result?.kind === 'lost' && result.capacity === true);
+
+        if (starved.length > 0 && failed.every(([, result]) => result === undefined || (result.kind === 'lost' && result.capacity === true))) {
           stopped ??= `${nameOf(index)}'s map tasks never ran for want of capacity: ${said.join(', ')}`;
           await cancelEach(started, stopped);
 
