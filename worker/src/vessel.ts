@@ -770,9 +770,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     const marker = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS })).stdout.trim();
     const [kind = '', error] = marker.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
+    // A process its group killed for want of memory fails the task whatever its last command exited (`cmd; echo`, a
+    // runner that outlives its worker): 137, as the kill's own exit reads. A task whose verdict already holds a red row
+    // said the failure itself, and its rows grade it, not an exit that would turn its green rows red (`underExit`).
+    const killed = usage.oomKilled === true && exitCode === 0 && redRow !== true;
 
     return {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
+      index, kind: 'exited', reason, exitCode: killed ? 137 : exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
       host: await this.ctx.storage.get<Host>('host'),
     };
   }
