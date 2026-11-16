@@ -220,6 +220,7 @@ ${tasksMemoryBytes === undefined ? '' : `echo ${String(tasksMemoryBytes)} > ${PA
 mkdir -p ${group}/runner
 echo '${CONTROLLERS}' > ${group}/cgroup.subtree_control
 ${memoryBytes === undefined ? '' : `echo ${String(memoryBytes)} > ${group}/memory.max
+[ ! -e ${group}/memory.swap.max ] || echo 0 > ${group}/memory.swap.max
 `}for owned in . cgroup.procs cgroup.threads cgroup.subtree_control runner runner/cgroup.procs runner/cgroup.threads runner/cgroup.subtree_control; do chown ci:ci "${group}/$owned"; done`;
 }
 
@@ -282,9 +283,9 @@ function peakOf(group: string): string {
  *  own session and a fresh `TASK_GROUP` delegated to the user, its output to the task's log, its exit code to the
  *  task's `exit`. A shell starts a background command with SIGINT and SIGQUIT ignored, and the task would inherit
  *  that; it gets their defaults back, as a GitHub runner's step has them, so a ^C it sends reaches what it runs. */
-export function launchTask(workdir: string, cpus: number): string {
+export function launchTask(workdir: string, cpus: number, memoryBytes?: number): string {
   return String.raw`set -eu
-${groupSetup(TASK_GROUP, { cpus })}
+${groupSetup(TASK_GROUP, { cpus, memoryBytes })}
 rm -rf ${TASK}
 mkdir -p ${TASK} ${ARTIFACTS_PATH}
 ${resumed(TASK, 0)}

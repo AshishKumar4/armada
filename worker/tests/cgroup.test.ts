@@ -55,6 +55,21 @@ id -u; cat /proc/self/cgroup "$ARMADA_CGROUP/case/memory.max"`);
       .toEqual({ exit: '0', log: '0::/armada/task/runner', left: [false, false], nested: false });
   });
 
+  test('past its memory cap is killed in its own group, a red, the processes beside it living on (Dew, 2026-11-16)', () => {
+    const cap = 64 * 1024 * 1024;
+
+    try {
+      expect(sh(launchTask(workdir, ALL, cap), 'dd', 'if=/dev/zero', 'of=/dev/null', 'bs=96M').exitCode).toBe(0);
+      const exit = sh(WAIT, '20').stdout.toString().trim();
+      const usage = usageFrom(sh(usageOf(TASK_GROUP)).stdout.toString());
+
+      expect({ exit, killed: usage.oomKilled, cap: readFileSync(`${TASK_GROUP}/memory.max`, 'utf8').trim() })
+        .toEqual({ exit: '137', killed: true, cap: String(cap) });
+    } finally {
+      sh(`echo max > ${TASK_GROUP}/memory.max`);
+    }
+  });
+
   test('runs on as many CPUs as its container has vCPUs, where the container shows more, so what counts CPUs counts those', () => {
     const one = taskOn(1, 'nproc');
     const all = taskOn(ALL, 'nproc');
