@@ -90,6 +90,17 @@ describe('a job of size large (#64)', () => {
   });
 });
 
+describe('a container\'s slots (Dew, 2026-11-16)', () => {
+  test('leave its own memory beside them, packing or not: a task that fills its slots dies in its group, the container lives', async () => {
+    const fast = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast', slots: 2 });
+    const alone = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'fast' });
+    const packing = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, mode: 'efficient' });
+    const held = SIZES.medium.memoryGiB * 2 ** 30;
+
+    expect([fast, alone, packing].map(({ specs }) => specs.map((spec) => spec.slotMemoryBytes * spec.slots < held))).toEqual([[true], [true], [true]]);
+  });
+});
+
 describe('a job\'s priority (#60)', () => {
   test('reaches every container it starts, which asks the fleet with it; a job that names none has 0', async () => {
     const urgent = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, priority: 5 });
