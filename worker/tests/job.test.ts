@@ -683,6 +683,135 @@ describe('a job holding places back after starts on another CPU', () => {
     }
   });
 
+  test('holds its last place back no longer than the first hold, however many starts in a row landed on another CPU', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const { job: open, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1, cpu });
+
+      // Five in a row: a hold that would grow to 480 s.
+      for (const [at, name] of [[0, 'v1'], [31_000, 'v2'], [62_000, 'v3'], [93_000, 'v4'], [124_000, 'v5']] as const) {
+        setSystemTime(start + at);
+        await open.alarm();
+        await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
+      }
+
+      const held = begun.length;
+
+      setSystemTime(start + 124_000 + 31_000);
+      await open.alarm();
+
+      expect({ held, after: begun.length }).toEqual({ held: 5, after: 6 });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('waiting for the fleet past 8 minutes after a start on another CPU is no CpuUnavailable: it waits to its deadline', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      const fleet = new ArmadaFleet(state().ctx, world({ FLEET_VCPUS: '16' }));
+      const begun: string[] = [];
+
+      const open = new ArmadaJob(state().ctx, world({
+        FLEET: namespace(() => fleet),
+        VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
+        ENVIRONMENTS: readyRegistry(),
+      }));
+
+      await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1, cpu }));
+      await open.alarm();
+      // Its first container lands on another CPU; then another job takes every container of the fleet.
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+
+      for (const holder of ['x/v1', 'x/v2', 'x/v3', 'x/v4']) await fleet.acquire(holder, 4, { deadlineAt: start + 3_600_000, priority: 10 });
+
+      setSystemTime(start + 8 * 60_000 + 1_000);
+      await open.alarm();
+      const waited = (await open.events(0)).events.length;
+
+      // Room again, and its starts keep landing on another CPU: 8 minutes of those end it.
+      for (const holder of ['x/v1', 'x/v2', 'x/v3', 'x/v4']) await fleet.release(holder);
+
+      for (let minute = 1; minute <= 9; minute += 1) {
+        setSystemTime(start + (8 + minute) * 60_000 + 1_000);
+        await open.alarm();
+        await open.vesselFailed(begun.at(-1)?.split('/')[1] ?? 'v1', 'its host is another', { misplaced: zen3 });
+      }
+
+      setSystemTime(start + 17 * 60_000 + 2_000);
+      await open.alarm();
+
+      const [ended] = (await open.events(0)).events;
+
+      expect({ waited, kind: ended?.outcome.kind, pin: ended?.outcome.tail.startsWith('CpuUnavailable') }).toEqual({ waited: 0, kind: 'failed', pin: true });
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test('is not ended for its pin where a container boots on its CPU while the fleet is asked for room', async () => {
+    const start = Date.now();
+
+    try {
+      setSystemTime(start);
+      // The fleet's room, answered at once until a test holds its answer (`held`).
+      let held: Promise<number> | null = null;
+      let answer: (room: number) => void = () => undefined;
+      let enter: () => void = () => undefined;
+
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+
+      const room = async (): Promise<number> => {
+        if (held === null) return 1;
+        enter();
+
+        return await held;
+      };
+
+      const fleet = { acquire: async () => 'held', room, release: async () => undefined, renews: async () => true, beat: async () => null, opened: async () => undefined, closed: async () => undefined, admits: async () => true, admitJob: async () => true, open: async () => [] };
+      const begun: string[] = [];
+
+      const open = new ArmadaJob(state().ctx, world({
+        FLEET: namespace(() => fleet),
+        VESSEL: namespace((name: string) => ({ begin: async () => { begun.push(name); } })),
+        ENVIRONMENTS: readyRegistry(),
+      }));
+
+      await open.create('j1', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 'a', argv: ['true'] }], run: { kind: 'command' }, pool: 1, cpu }));
+      await open.alarm();
+      await open.vesselFailed('v1', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 31_000);
+      await open.alarm();
+      await open.vesselFailed(begun.at(-1)?.split('/')[1] ?? 'v2', 'its host is another', { misplaced: zen3 });
+      setSystemTime(start + 62_000);
+      await open.alarm();
+
+      // Eight minutes on, the alarm asks the fleet; meanwhile a replacement boots on a host of its CPU.
+      setSystemTime(start + 8 * 60_000 + 1_000);
+      held = new Promise<number>((resolve) => {
+        answer = resolve;
+      });
+
+      const checking = open.alarm();
+
+      // Booted once the alarm has asked the fleet and waits on its answer.
+      await entered;
+      await open.booted(begun.at(-1)?.split('/')[1] ?? 'v3', 1000);
+      answer(1);
+      await checking;
+
+      expect((await open.events(0)).events.length).toBe(0);
+    } finally {
+      setSystemTime();
+    }
+  });
+
   test('lets a gang that forms while a place is held back wait for that rank, its start bound counted from the hold\'s end', async () => {
     const start = Date.now();
 
@@ -741,7 +870,7 @@ describe('a job holding places back after starts on another CPU', () => {
 
       for (const boots of [false, true, 'sets up'] as const) {
         setSystemTime(start);
-        const { job: open, stored } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu });
+        const { job: open, stored, begun } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2, cpu });
 
         // v1 boots on a host of its CPU first, where it does, and runs a task throughout.
         const running = boots === true ? await open.booted('v1', 1000).then(async () => await open.claim('v1')) : null;
@@ -750,10 +879,11 @@ describe('a job holding places back after starts on another CPU', () => {
           if (running !== null && !('waitMs' in running)) await open.still('v1', running.index, 0, running.attempt);
         };
 
-        for (const [at, name] of [[0, 'v2'], [31_000, 'v3'], [92_000, 'v4'], [213_000, 'v5'], [454_000, 'v6']] as const) {
+        // Each start its job made lands on another CPU, the latest each time.
+        for (const at of [0, 31_000, 92_000, 213_000, 454_000]) {
           setSystemTime(start + at);
           await working();
-          await open.vesselFailed(name, 'its host is another', { misplaced: zen3 });
+          await open.vesselFailed(begun.at(-1)?.split('/')[1] ?? 'v2', 'its host is another', { misplaced: zen3 });
           await open.alarm();
         }
 
