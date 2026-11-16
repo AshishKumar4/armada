@@ -176,6 +176,20 @@ describe('grading a CI run', () => {
     expect(underExit([row('one')], { exitCode: 0, tail: '' }, 'a')).toEqual([row('one')]);
   });
 
+  test('a task its kernel killed a process of for want of memory has the kill as a red row of its own, its green rows green', () => {
+    const killed = underExit([row('one'), row('two', 1)], { exitCode: 0, tail: 'Killed', oomKilled: true, peakMemory: 10 * 2 ** 30, seconds: 3 }, 'a', ['one', 'two']);
+
+    expect(killed.map((each) => [rowName(each), each.exitCode])).toEqual([['one', 0], ['two', 1], ['a: killed for memory', 137]]);
+    expect(killed[2]?.output).toContain('10.00 GiB');
+    expect(grade([{ name: 'a', entry: { rows: ['one', 'two'] }, rows: killed, artifacts: null }])).toMatchObject({ problems: [], reds: [killed[1], killed[2]] });
+    // Two tasks of one name, each killed, own their rows and each its kill.
+    const other = underExit([row('three')], { exitCode: 137, tail: 'Killed', oomKilled: true }, 'a', ['three']);
+    const both = grade([{ name: 'a', entry: { rows: ['one', 'two'] }, rows: killed, artifacts: null }, { name: 'a', entry: { rows: ['three'] }, rows: other, artifacts: null }]);
+
+    expect({ problems: both.problems, reds: both.reds.map((each) => [rowName(each), each.exitCode]) })
+      .toEqual({ problems: [], reds: [['two', 1], ['a: killed for memory', 137], ['three', 137], ['a: killed for memory', 137]] });
+  });
+
   test('a task that exits nonzero having reported no row is a red row of its own', () => {
     const exited = underExit([], { exitCode: 7, tail: 'Segmentation fault' }, 'a');
 

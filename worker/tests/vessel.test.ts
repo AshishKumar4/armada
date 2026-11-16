@@ -77,6 +77,8 @@ async function run(lost: number, {
   inputs, held = [], reading,
 }: Run = {}) {
   const completed: Outcome[] = [];
+  // The exit code each answer was weighed by against another copy's (`ArmadaJob.accept`).
+  const accepts: number[] = [];
   const failed: string[] = [];
   const misplaced: (Host | undefined)[] = [];
   const execs: (readonly string[])[] = [];
@@ -133,7 +135,11 @@ async function run(lost: number, {
     },
     stopped: async () => undefined,
     still: async () => true,
-    accept: async () => true,
+    accept: async (_name: string, _index: number, exitCode: number) => {
+      accepts.push(exitCode);
+
+      return true;
+    },
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
     preempted: async (_name: string, gone: boolean) => { preempted.push(gone); },
@@ -169,7 +175,7 @@ async function run(lost: number, {
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, preempted, stored: artifacts.objects, execs, envs, piped, started };
+  return { exits: completed.map((outcome) => outcome.exitCode), accepts, failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, preempted, stored: artifacts.objects, execs, envs, piped, started };
 }
 
 /** The first CPU of a host's /proc/cpuinfo, `flags` its flags. */
@@ -397,11 +403,21 @@ describe('a container the platform is stopping', () => {
 describe('a finished task', () => {
   test('reports its cgroup\'s peak memory, CPU seconds and memory kills, and lands without them when they cannot be read', async () => {
     const [measured] = (await run(0, { usage: { exitCode: 0, stdout: '734003200\n2500000\n0\n' } })).completed;
-    const [killed] = (await run(0, { usage: { exitCode: 0, stdout: '12884901888\n9000000\n1\n' } })).completed;
     const [lost] = (await run(0, { usage: new Error('Network connection lost.') })).completed;
 
-    expect([measured, killed, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds, outcome.oomKilled ?? false]))
-      .toEqual([[0, 734003200, 2.5, false], [0, 12884901888, 9, true], [0, undefined, undefined, false]]);
+    expect([measured, lost].map((outcome) => outcome === undefined ? null : [outcome.exitCode, outcome.peakMemory, outcome.cpuSeconds, outcome.oomKilled ?? false]))
+      .toEqual([[0, 734003200, 2.5, false], [0, undefined, undefined, false]]);
+  });
+
+  test('is red with 137 when its group killed a process for memory, though its last command exited 0, unless its own verdict holds the red', async () => {
+    const kill = { exitCode: 0, stdout: '12884901888\n9000000\n1\n' };
+
+    const runs = [await run(0, { usage: kill }), await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 1}]}' }),
+      await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 0}]}' })];
+
+    // Each weighed against another copy as the red it is, so a copy's held green never stands over it.
+    expect(runs.map(({ accepts, completed: [outcome] }) => [accepts, outcome?.exitCode, outcome?.oomKilled ?? false, outcome?.redRow ?? false]))
+      .toEqual([[[137], 137, true, false], [[137], 0, true, true], [[137], 137, true, false]]);
   });
 });
 

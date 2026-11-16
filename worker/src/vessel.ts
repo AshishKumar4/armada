@@ -741,13 +741,16 @@ export class ArmadaVessel extends DurableObject<Env> {
     // Every rank of a gang keeps its log: the cause of a gang's failure is often in another rank's.
     if (current.claim.gang !== undefined) await this.keepLog(spec, slot, current);
 
-    if (!(await job.accept(spec.name, index, exitCode, { slot, attempt }))) return null;
+    // What it used is a measurement, never a reason to lose the task; read first, as a kill for memory fails the run
+    // (`killed`) before its job weighs it against another copy's answer.
+    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, isolated ? slotRoot(slot) : undefined)]) ?? '');
+    const oom = usage.oomKilled === true && exitCode === 0;
+
+    if (!(await job.accept(spec.name, index, oom ? 137 : exitCode, { slot, attempt }))) return null;
     const seconds = (Date.now() - current.startedAt) / 1000;
 
     if (current.claim.gang === undefined) await this.keepLog(spec, slot, current);
     const tail = await run(container, ['/bin/sh', '-c', tailOf(dir)], { ms: EXEC_MS });
-    // What it used is a measurement, never a reason to lose the task.
-    const usage = usageFrom(await this.optional(container, 'usage', ['/bin/sh', '-c', usageOf(group, isolated ? slotRoot(slot) : undefined)]) ?? '');
 
     // The task ran to its exit, which its job has accepted: a packer that fails loses its artifacts, said on its outcome
     // with how much they held, never the run, which ran again would end the same way.
@@ -770,9 +773,13 @@ export class ArmadaVessel extends DurableObject<Env> {
     const marker = spec.bundle === null ? '' : (await run(container, ['head', '-c', '256', `${dir}/answer`], { ms: EXEC_MS })).stdout.trim();
     const [kind = '', error] = marker.split('\n');
     const answer = kind === 'value' || kind === 'command' ? kind : undefined;
+    // A process its group killed for want of memory fails the task whatever its last command exited (`cmd; echo`, a
+    // runner that outlives its worker): 137, as the kill's own exit reads. A task whose verdict already holds a red row
+    // said the failure itself, and its rows grade it, not an exit that would turn its green rows red (`underExit`).
+    const killed = oom && redRow !== true;
 
     return {
-      index, kind: 'exited', reason, exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
+      index, kind: 'exited', reason, exitCode: killed ? 137 : exitCode, seconds, vessel: spec.name, attempt, slot, tail: tail.stdout, output: out !== null, value, redRow, answer, artifacts: packed === null ? undefined : true, artifactsLost, error, ...usage,
       host: await this.ctx.storage.get<Host>('host'),
     };
   }
