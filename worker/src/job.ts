@@ -163,6 +163,18 @@ async function heldBack(storage: DurableObjectStorage): Promise<number> {
  *  landed on 25/17). */
 const PIN_WAIT_MS = MISPLACED_MAX_MS;
 
+/** Whether a job's wait on its pin is a wait for the fleet instead (`ArmadaJob.alarm`): its last misplaced start older
+ *  than PIN_WAIT_MS, or no room in the fleet for one of its containers now. Its window then starts again from now. A
+ *  function of the module, not a method, so the Worker's declarations, its contract, stay as they were. */
+async function pinWaitRestarted(env: Env, storage: DurableObjectStorage, spec: Kept, last: number | undefined): Promise<boolean> {
+  const room = await env.FLEET.getByName(SINGLE).room((await storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
+
+  if (room >= 1 && last !== undefined && Date.now() - last < PIN_WAIT_MS) return false;
+  await storage.put('misplacedSince', Date.now());
+
+  return true;
+}
+
 /** Why a job of CPUs `cpu` held its places back, where it did when it ended: since a container last booted on its CPU,
  *  its containers started on hosts of another (`heldBack`). */
 async function misplacedFor(storage: DurableObjectStorage, cpu: readonly Cpu[] | undefined): Promise<string> {
@@ -387,7 +399,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const last = (await this.ctx.storage.get<number>('misplacedLast')) ?? since;
 
     if (spec.cpu !== undefined && since !== undefined && held !== undefined && Date.now() - since >= PIN_WAIT_MS && this.sql.exec("SELECT 1 AS n FROM vessels WHERE state = 'working'").toArray().length === 0
-      && !(await this.pinWaitRestarted(spec, last))) {
+      && !(await pinWaitRestarted(this.env, this.ctx.storage, spec, last))) {
       return await this.cancel(`CpuUnavailable: no container of the job started on a host of ${cpuLabel(spec.cpu)} in ${String(PIN_WAIT_MS / 60_000)} min, the platform placing containers by region alone; the last started on ${hostLabel(held.host)}`, 'lost', 'unplaced');
     }
 
@@ -594,17 +606,6 @@ export class ArmadaJob extends DurableObject<Env> {
   /** The vessels granted, booting or working, but `besides`. */
   private granted(besides = ''): number {
     return Number(this.sql.exec(`SELECT COUNT(*) AS n FROM vessels WHERE state IN ('booting', 'working') AND name != ?`, besides).one()['n']);
-  }
-
-  /** Whether the job's wait on its pin is a wait for the fleet instead (`alarm`): its last misplaced start older than
-   *  PIN_WAIT_MS, or no room in the fleet for one of its containers now. Its window then starts again from now. */
-  private async pinWaitRestarted(spec: Kept, last: number | undefined): Promise<boolean> {
-    const room = await this.env.FLEET.getByName(SINGLE).room((await this.ctx.storage.get<string>('id')) ?? '', SIZES[spec.recipe.size].vcpus, spec.priority);
-
-    if (room >= 1 && last !== undefined && Date.now() - last < PIN_WAIT_MS) return false;
-    await this.ctx.storage.put('misplacedSince', Date.now());
-
-    return true;
   }
 
   /** The room the fleet could grant the job now (`ArmadaFleet.room`), read while it needs more vessels than it has
