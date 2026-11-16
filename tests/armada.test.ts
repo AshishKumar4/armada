@@ -2372,8 +2372,11 @@ describe('a read through an outage', () => {
 
     // Each pause moves the clock on by what it waits, so the outage is measured in wall time, not in asks.
     Bun.sleep = async (ms: number | Date) => { clock += ms instanceof Date ? ms.getTime() - clock : ms; };
+
     Date.now = () => clock;
+
     console.error = (line: string) => { said.push(line); };
+
     globalThis.fetch = fakeFetch(() => {
       asked += 1;
 

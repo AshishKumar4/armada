@@ -217,6 +217,7 @@ export class Armada {
     // Whether a read that failed is asked again, the first failure said with its cause.
     const again = (cause: string): boolean => {
       if (!read || init.signal?.aborted === true) return false;
+
       if (began === null) {
         began = Date.now();
         console.error(`${method} ${path}: ${cause}; asked again for up to ${String(READ_OUTAGE_MS / 1000)} s`);
@@ -236,6 +237,7 @@ export class Armada {
       } catch (cause) {
         // A connection that failed is asked again, as a gateway's failure is; one its caller gave up on, never.
         if (init.signal?.aborted === true) throw cause;
+
         if (!again(errorOf({ cause }).message)) throw new Unreachable(`${method} ${path}`, { cause });
         await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
