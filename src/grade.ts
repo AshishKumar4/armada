@@ -95,13 +95,33 @@ export interface TaskExit {
   /** The end of its output. */
   readonly tail: string;
   readonly seconds?: number;
+  /** The kernel killed a process of the task's for want of memory (`Outcome.oomKilled`), its cgroup's peak then. */
+  readonly oomKilled?: boolean;
+  readonly peakMemory?: number;
 }
+
+/** A verdict row's `kind` for its task's kill for memory (`underExit`): its own red, which no plan entry names. */
+export const MEMORY_KILL = 'memory';
 
 /** A verdict file's rows under its task's exit: a task that exited nonzero failed, so every row it reported green is
  *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's.
  *  A task that exited nonzero having reported no row, cut off at its timeout or killed before it wrote one, is red in
- *  every row its plan entry names (`expected`), or in a row of its own under its name when the entry names none. */
+ *  every row its plan entry names (`expected`), or in a row of its own under its name when the entry names none.
+ *  A task its kernel killed a process of for want of memory has that kill as a red row of its own beside its rows: a
+ *  test the kill took may have reported none, and a red row of another's must not hide why it is missing. */
 export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
+  const graded = gradedUnderExit(rows, exit, task, expected);
+
+  if (exit.oomKilled !== true) return graded;
+  const peak = exit.peakMemory === undefined ? '' : `, its peak ${(exit.peakMemory / 2 ** 30).toFixed(2)} GiB`;
+
+  return [...graded, {
+    name: `${task}: killed for memory`, exitCode: 137, seconds: exit.seconds ?? 0, kind: MEMORY_KILL,
+    output: `the kernel killed a process of the task for want of memory${peak}; a test it took may have reported no row\n${exit.tail}`,
+  }];
+}
+
+function gradedUnderExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
   if (rows.length === 0 && exit.exitCode !== 0) {
     const output = `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}`;
     const names = expected === undefined || expected.length === 0 ? [task] : expected.map((want) => expectedOf(want).name);
@@ -251,5 +271,7 @@ function coverage(answer: TaskAnswer, flag: Flag): void {
     }
   }
 
-  for (const [extra, row] of reported) flag(`${answer.name} reported ${extra}, which its plan entry does not name`, row);
+  for (const [extra, row] of reported) {
+    if (row.kind !== MEMORY_KILL) flag(`${answer.name} reported ${extra}, which its plan entry does not name`, row);
+  }
 }
