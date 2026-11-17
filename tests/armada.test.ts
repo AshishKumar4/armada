@@ -180,6 +180,8 @@ describe('grading a CI run', () => {
     const killed = underExit([row('one'), row('two', 1)], { exitCode: 0, tail: 'Killed', oomKilled: true, peakMemory: 10 * 2 ** 30, seconds: 3 }, 'a', ['one', 'two']);
 
     expect(killed.map((each) => [rowName(each), each.exitCode])).toEqual([['one', 0], ['two', 1], ['a: killed for memory', 137]]);
+    // It names the rows its plan entry names, whose tests the kill may have taken.
+    expect(killed[2]?.['rows']).toEqual(['one', 'two']);
     expect(killed[2]?.output).toContain('10.00 GiB');
     expect(grade([{ name: 'a', entry: { rows: ['one', 'two'] }, rows: killed, artifacts: null }])).toMatchObject({ problems: [], reds: [killed[1], killed[2]] });
     // Two tasks of one name, each killed, own their rows and each its kill.
