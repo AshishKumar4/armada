@@ -164,7 +164,19 @@ describe('the open jobs are read whole or not at all', () => {
       return await Promise.resolve(path.includes('before=') ? page(['last'], new Set()) : page(first, new Set(['j0'])));
     });
 
-    expect([open.length, asked.length, asked[1]]).toEqual([100, 2, '/jobs?limit=100&before=j99']);
+    expect([open.length, asked]).toEqual([100, ['/jobs?open', '/jobs?limit=100', '/jobs?limit=100&before=j99']]);
+  });
+
+  test('the whole open set is read in one ask where the Worker gives it, its pages never', async () => {
+    const asked: string[] = [];
+
+    const open = await openJobs(async (path) => {
+      asked.push(path);
+
+      return await Promise.resolve(Response.json({ jobs: [{ id: 'old', label: '', phase: 'running', createdAt: 0 }], open: true }));
+    });
+
+    expect([open.map((job) => job.id), asked]).toEqual([['old'], ['/jobs?open']]);
   });
 
   test('a listing that repeats an id, or that no Worker answers, is refused', async () => {

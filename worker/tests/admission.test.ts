@@ -3,7 +3,7 @@ import * as v from 'valibot';
 import { Armada } from '../../src/sdk';
 import { JOB_LEASE_SECONDS, MAX_INPUT_JOBS, PROTOCOL } from '../../src/protocol';
 import type { Env } from '../src/env';
-import { ArmadaFleet, DRAIN_MS } from '../src/fleet';
+import { ArmadaFleet, DRAIN_MS, RECENT } from '../src/fleet';
 import { ArmadaJob } from '../src/job';
 import type { VesselSpec } from '../src/vessel';
 import worker from '../src/worker';
@@ -257,6 +257,23 @@ describe('a drained version', () => {
     } finally {
       setSystemTime();
     }
+  });
+
+  test('names every job it counts open, one older than the recent jobs it lists among them', async () => {
+    const { armada, fleet } = deployment();
+    const old = await armada.create(spec);
+
+    // As many jobs made and done after it as the recent ones hold (2026-11-17: a drain waited its whole bound on a
+    // job past them, naming none).
+    for (let index = 0; index < RECENT; index += 1) {
+      const later = `20991231000000-${String(index).padStart(8, '0')}`;
+
+      await fleet.opened(later);
+      await fleet.closed(later);
+    }
+
+    expect({ recent: (await fleet.recent(RECENT)).includes(old), counted: await armada.drain(), named: (await armada.openJobs()).map((job) => job.id) })
+      .toEqual({ recent: false, counted: 1, named: [old] });
   });
 
   test('lapses by itself when the deploy that drained it stops asking, as one killed mid-deploy does', async () => {
