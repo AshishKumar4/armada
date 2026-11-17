@@ -54,6 +54,20 @@ async function finish({ job, id, artifacts }: Pick<Awaited<ReturnType<typeof cac
 
 const brief = (outcome: Outcome) => ({ index: outcome.index, cached: outcome.cached ?? false, value: outcome.value });
 
+describe('a task\'s last outcome', () => {
+  test('is read through the events\' index by task, never a scan of every event, as each of a train\'s reads of its artifacts makes it', async () => {
+    const stored = state();
+    const job = new ArmadaJob(stored.ctx, world({ ARTIFACTS: bucket(), VESSEL: namespace(() => ({ begin: async () => undefined, stop: async () => undefined })), ENVIRONMENTS: readyRegistry() }));
+
+    await job.create('j', v.parse(JobSpecSchema, { recipe: {}, items: [{ item: 1 }], run: { kind: 'task', id: 'square', bundle }, cache: { days: 7 }, pool: 1 }));
+    // The query `fileOf` and `taskStatus` make, as SQLite plans it (Dew 2026-11-17: each read scanned a 3532-task
+    // job's whole log, and one went five minutes unanswered).
+    const plan = stored.ctx.storage.sql.exec<{ detail: string }>(`EXPLAIN QUERY PLAN SELECT outcome FROM events WHERE json_extract(outcome, '$.index') = ? ORDER BY seq DESC LIMIT 1`, 3).toArray();
+
+    expect(plan.map((step) => step.detail).join('; ')).toContain('USING INDEX events_by_task');
+  });
+});
+
 describe('a cached task', () => {
   test('answers an item it answered green before, its keys in any order, with nothing run; a red answer and an expired one run again', async () => {
     const artifacts = bucket();
