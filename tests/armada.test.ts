@@ -2398,6 +2398,7 @@ describe('a read that is not answered', () => {
     let asked = 0;
 
     Bun.sleep = async () => { await Promise.resolve(); };
+
     console.error = (line: string) => { said.push(line); };
 
     // Each ask waits for its abort: the first never answers, the second answers its headers and never its body, the
