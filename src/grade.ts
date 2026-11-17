@@ -117,11 +117,14 @@ export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: str
   if (exit.oomKilled !== true) return graded;
   const peak = exit.peakMemory === undefined ? '' : `, its peak ${(exit.peakMemory / 2 ** 30).toFixed(2)} GiB`;
 
-  return [...graded, {
+  const killed: VerdictRow = {
     name: `${task}: killed for memory`, exitCode: 137, seconds: exit.seconds ?? 0, kind: MEMORY_KILL,
-    ...(expected === undefined ? {} : { rows: expected.map((want) => expectedOf(want).name) }),
     output: `the kernel killed a process of the task for want of memory${peak}; a test it took may have reported no row\n${exit.tail}`,
-  }];
+  };
+
+  if (expected === undefined) return [...graded, killed];
+
+  return [...graded, { ...killed, rows: expected.map((want) => expectedOf(want).name) }];
 }
 
 function gradedUnderExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
