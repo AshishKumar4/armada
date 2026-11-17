@@ -2389,6 +2389,55 @@ describe('asking the runner', () => {
   });
 });
 
+describe('a read that is not answered', () => {
+  test('is asked again once its ask waits past its bound, its headers or its body, and a task\'s artifacts come whole', async () => {
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const error = console.error;
+    const said: string[] = [];
+    let asked = 0;
+
+    Bun.sleep = async () => { await Promise.resolve(); };
+    console.error = (line: string) => { said.push(line); };
+
+    // Each ask waits for its abort: the first never answers, the second answers its headers and never its body, the
+    // third answers whole (2026-11-17: an artifacts read waited five minutes on a connection that never answered).
+    globalThis.fetch = fakeFetch(async (request: Request) => {
+      asked += 1;
+
+      if (asked === 1) {
+        return await new Promise<Response>((_, refused) => {
+          request.signal.addEventListener('abort', () => { refused(request.signal.reason); });
+        });
+      }
+
+      if (asked === 2) {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]));
+            request.signal.addEventListener('abort', () => { controller.error(request.signal.reason); });
+          },
+        }));
+      }
+
+      return new Response(new Uint8Array([1, 2, 3]));
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' }, 50);
+
+      expect(await armada.artifacts('j', 3)).toEqual(new Uint8Array([1, 2, 3]));
+      expect(asked).toBe(3);
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain('GET /jobs/j/tasks/3/artifacts');
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+      console.error = error;
+    }
+  });
+});
+
 describe('a read through an outage', () => {
   test('is asked again while the runner cannot be reached, for READ_OUTAGE_MS from its first failure, said once, and a write is not', async () => {
     const original = globalThis.fetch;
