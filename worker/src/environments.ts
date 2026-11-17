@@ -541,7 +541,9 @@ const preparationMs = (size: Size): number => Object.keys(NEXT).length * stepMs(
 
 export class ArmadaPreparer extends DurableObject<Env> {
   async begin(key: string, since: number, { recipe, sha, packer, shallow, cpu }: Inputs): Promise<void> {
-    await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, shallow, ...(cpu === undefined ? {} : { cpu }), phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
+    const preparation: Preparation = { key, since, recipe, sha, packer, shallow, phase: 'base', seconds: {}, snapshot: null };
+
+    await this.ctx.storage.put('preparation', cpu === undefined ? preparation : { ...preparation, cpu });
     await this.ctx.storage.setAlarm(Date.now());
   }
 
@@ -608,8 +610,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
       if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
       // A retry prepares for the same pin, if any.
       const { recipe, sha, packer, shallow, cpu } = preparation;
+      const again: Inputs = { recipe, sha, packer, shallow };
 
-      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? { recipe, sha, packer, shallow, ...(cpu === undefined ? {} : { cpu }) } : undefined);
+      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? (cpu === undefined ? again : { ...again, cpu }) : undefined);
     }
   }
 
