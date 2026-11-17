@@ -119,7 +119,7 @@ export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: str
 
   return [...graded, {
     name: `${task}: killed for memory`, exitCode: 137, seconds: exit.seconds ?? 0, kind: MEMORY_KILL,
-    ...(expected === undefined ? {} : { rows: [...expected] }),
+    ...(expected === undefined ? {} : { rows: expected.map((want) => expectedOf(want).name) }),
     output: `the kernel killed a process of the task for want of memory${peak}; a test it took may have reported no row\n${exit.tail}`,
   }];
 }
