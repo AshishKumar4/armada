@@ -5,13 +5,12 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, type JobBrief, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
 import { driverSpec, eventOf } from './hooks';
-import type { ListedJob } from '../../src/drain';
 import type { ArmadaFleet } from './fleet';
 import { fleetRefusal, VESSEL_NAME, type ArmadaJob } from './job';
 import type { Input } from './vessel';
@@ -612,6 +611,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   return await ROUTES.get(head)?.(request, env, path, url) ?? notFound();
 }
 
+/** An open job as a drain names it: a client's `ListedJob`, of the protocol's own brief (the client's drain module is
+ *  no part of the Worker, whose contract its declarations would change). */
+type Opened = Pick<JobBrief, 'id' | 'label' | 'phase' | 'createdAt'>;
+
 /** How long a job admitted but not yet made is counted open on the word of its admission alone. */
 const MAKING_MS = 10 * 60_000;
 
@@ -619,9 +622,9 @@ const MAKING_MS = 10 * 60_000;
  *  is preparing. One whose record is done, or that has none `MAKING_MS` after it was admitted, concluded or was never
  *  made without being counted closed, by a version that leaked it or a race, and a drain would wait on it for ever
  *  (three held armada-dew2's on 2026-10-10): it is counted closed here. */
-async function stillOpen(env: Env, fleet: DurableObjectStub<ArmadaFleet>): Promise<ListedJob[]> {
+async function stillOpen(env: Env, fleet: DurableObjectStub<ArmadaFleet>): Promise<Opened[]> {
   const now = Date.now();
-  const open: ListedJob[] = [];
+  const open: Opened[] = [];
 
   for (const { id, at } of await fleet.openSince()) {
     const status = await env.JOB.getByName(id).status();
