@@ -302,6 +302,7 @@ async function runsOf(env: Env, id: string, index: number): Promise<TaskRun[]> {
 const jobs: Handler = async (request, env, [id, tail, index, leaf, run, file], url) => {
   if (id === undefined) {
     if (request.method !== 'GET') return undefined;
+
     // `?open`: every job the fleet counts open, as a drain counts them, however old: the recent ones below hold the
     // newest LISTED alone (2026-11-17: a drain waited its whole bound on a job past them, naming none). `open: true`
     // says the whole set, which a Worker without it never answers.

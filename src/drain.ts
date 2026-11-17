@@ -33,9 +33,9 @@ export async function openJobs(call: (path: string) => Promise<Response>): Promi
   const whole = await call('/jobs?open');
 
   if (whole.status === 404) throw new Unlisted('unavailable');
-  const answer = v.parse(v.object({ jobs: v.array(ListedJobSchema), open: v.optional(v.boolean()) }), await whole.json());
+  const given = v.parse(v.object({ jobs: v.array(ListedJobSchema), open: v.optional(v.boolean()) }), await whole.json());
 
-  if (answer.open === true) return answer.jobs.filter((job) => job.phase !== 'done');
+  if (given.open === true) return given.jobs.filter((job) => job.phase !== 'done');
   const open: ListedJob[] = [];
   const seen = new Set<string>();
   let before: string | undefined;

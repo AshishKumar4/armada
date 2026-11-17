@@ -30,6 +30,8 @@ class Fleet implements DestroyIO {
   ];
   jobs: { id: string; label: string; phase: 'done' | 'running' | 'preparing' }[] = [];
   admitDuringRead = false;
+  /** Whether it answers `GET /jobs?open` with its whole open set, as a Worker since the drain names them does. */
+  wholeOpen = true;
   inventoryAvailable = true;
   protocol = PROTOCOL;
   jobStatus = 200;
@@ -174,14 +176,15 @@ class Fleet implements DestroyIO {
       if (this.jobStatus !== 200) return new Response(null, { status: this.jobStatus });
       const before = url.searchParams.get('before');
       const start = before === null ? 0 : this.jobs.findIndex((job) => job.id === before) + 1;
-      const jobs = this.jobs.slice(start, start + 100);
+      const whole = this.wholeOpen && url.searchParams.has('open');
+      const jobs = whole ? this.jobs.filter((job) => job.phase !== 'done') : this.jobs.slice(start, start + 100);
 
       if (this.admitDuringRead) {
         this.admitDuringRead = false;
         this.jobs.unshift({ id: 'raced', label: 'new arrival', phase: 'preparing' });
       }
 
-      return Response.json({ jobs });
+      return Response.json(whole ? { jobs, open: true } : { jobs });
     }
 
     if (url.pathname === '/drain') return this.protocol < 2 ? new Response(null, { status: 404 }) : Response.json({ jobs: this.jobs.filter((job) => job.phase !== 'done').length });
@@ -245,9 +248,10 @@ describe('destroy, against a fake wrangler and fake named deployment only', () =
     expect(fleet.applications.map((application) => application.id)).toEqual(['app-other']);
   });
 
-  test('pages through completed jobs to find an open job on a later page', async () => {
+  test('pages through completed jobs to find an open job on a later page, of a Worker that gives no whole open set', async () => {
     const fleet = new Fleet();
 
+    fleet.wholeOpen = false;
     fleet.jobs = Array.from({ length: 100 }, (_, index) => ({ id: `done-${String(index)}`, label: '', phase: 'done' }));
     fleet.jobs.push({ id: 'older-open', label: '', phase: 'running' });
     expect(await settled(destroyDeployment(NAME, ACCOUNT, false, fleet))).toContain('older-open');

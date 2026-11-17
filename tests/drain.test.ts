@@ -169,6 +169,7 @@ describe('the open jobs are read whole or not at all', () => {
 
   test('the whole open set is read in one ask where the Worker gives it, its pages never', async () => {
     const asked: string[] = [];
+
     const open = await openJobs(async (path) => {
       asked.push(path);
 
