@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { boundaryOf, cpusOf, failureTail, hasCpu, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
+import { boundaryOf, cpusOf, failureTail, hasCpu, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type Cpu, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AccountFull, AS_USER, CPU_INFO, EXEC_MS, hostOf, Misplaced, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
@@ -88,9 +88,16 @@ export class ArmadaEnvironments extends ArmadaSingle {
   /** The key's environment, or its preparation begun, for a job `made` then; a repository recipe prepares only from a
    *  `root` pack. A failed preparation fails the jobs made by the time it failed, which waited on it; a job made after it
    *  prepares the environment again, as the failure may have been the platform's or the network's for a moment (#57).
-   *  Each ask while it is prepared says a job still waits on it (`wanted`). */
-  async ensure(key: string, recipe: Recipe, commit: Commit | null, { now = Date.now(), made = now }: { readonly made?: number; readonly now?: number } = {}): Promise<Readiness> {
-    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
+   *  Each ask while it is prepared says a job still waits on it (`wanted`). A job pinned to `cpu` is never handed a
+   *  snapshot taken on a host of none of them (its preparation gave up on its pin, `PREPARE_PIN_MS`): its containers
+   *  start where that snapshot lives, every one refused, so the snapshot goes and the environment is prepared again
+   *  (Dew, 2026-11-17: b6bd6607b's, taken on an EPYC 7713 25/1, ended four pinned jobs CpuUnavailable). */
+  async ensure(key: string, recipe: Recipe, commit: Commit | null, { now = Date.now(), made = now, cpu }: { readonly made?: number; readonly now?: number; readonly cpu?: readonly Cpu[] } = {}): Promise<Readiness> {
+    const held = await this.ctx.storage.get<Entry>(`env:${key}`);
+    const misplaced = held?.state === 'ready' && cpu !== undefined && held.generation.snapshot.host !== undefined && !hasCpu(held.generation.snapshot.host, cpu);
+
+    if (misplaced) await this.forget(key);
+    const entry = misplaced ? undefined : held;
 
     if (entry?.state === 'ready') {
       await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: now } satisfies Entry);

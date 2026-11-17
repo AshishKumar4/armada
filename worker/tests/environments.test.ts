@@ -491,6 +491,26 @@ describe('a preparation under way', () => {
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
   });
 
+  // Dew, 2026-11-17: b6bd6607b's snapshot, taken on an EPYC 7713 25/1 when its preparation gave up on its pin, ended
+  // four pinned jobs CpuUnavailable, every container started from it landing on 25/1.
+  test('hands a pinned job no snapshot taken off its pin: the snapshot is owed for deletion, and the environment prepared again', async () => {
+    const stored = state();
+    let begun = 0;
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+    const recipe = v.parse(RecipeSchema, {});
+    const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+    const host = (model: number) => ({ vendor: 'AuthenticAMD', family: 25, model, name: 'EPYC', level: 3 });
+
+    await environments.prepared({ ...generation('on'), snapshot: { id: 'snapshot-on', size: 1, host: host(17) } });
+    await environments.prepared({ ...generation('off'), snapshot: { id: 'snapshot-off', size: 1, host: host(1) } });
+    const unpinnedOff = await environments.ensure('off', recipe, null);
+    const pinnedOn = await environments.ensure('on', recipe, null, { cpu: pinned });
+    const pinnedOff = await environments.ensure('off', recipe, null, { cpu: pinned });
+
+    expect({ unpinnedOff: unpinnedOff.kind, pinnedOn: pinnedOn.kind, pinnedOff: pinnedOff.kind, begun, owed: [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()] })
+      .toEqual({ unpinnedOff: 'ready', pinnedOn: 'ready', pinnedOff: 'preparing', begun: 1, owed: ['debt:snapshot-off'] });
+  });
+
   // #57: a failed pre-warm turned the grading run made after it into "not graded" for five minutes.
   test('fails the jobs made before its failure, and is prepared again for a job made after it', async () => {
     const stored = state();
