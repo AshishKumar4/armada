@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -493,10 +493,10 @@ const environments: Handler = async (request, env, [key]) => {
   if (key === 'inventory' && request.method === 'GET') return Response.json({ snapshots: await registry.inventory(), credentialsExpire: env.REGISTRY_CREDENTIALS_EXPIRE });
 
   if (key === 'resolve' && request.method === 'POST') {
-    const { recipe } = v.parse(v.object({ recipe: RecipeSchema }), await request.json());
+    const { recipe, cpu } = v.parse(v.object({ recipe: RecipeSchema, cpu: v.optional(CpusSchema) }), await request.json());
     const resolved = await environmentKey(recipe);
 
-    return Response.json({ key: resolved, base: await registry.base(resolved, recipe.repo?.history ?? 'full') });
+    return Response.json({ key: resolved, base: await registry.base(resolved, recipe.repo?.history ?? 'full', cpu) });
   }
 
   if (key === 'prune' && request.method === 'POST') {

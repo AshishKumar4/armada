@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { boundaryOf, cpusOf, failureTail, hasCpu, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type Cpu, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
+import { boundaryOf, cpuLabel, cpusOf, failureTail, hasCpu, hostLabel, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type Cpu, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AccountFull, AS_USER, CPU_INFO, EXEC_MS, hostOf, Misplaced, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
@@ -43,7 +43,12 @@ const WANTED_MS = 2 * 60_000;
 const PREPARE_ATTEMPTS = 3;
 
 /** What a preparation starts from, which a fresh attempt is given again. */
-type Inputs = Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow'>;
+type Inputs = Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow' | 'cpu'>;
+
+/** Whether `generation`'s snapshot was taken on a host of none of `cpu`, where both are known. */
+function offPin(generation: Generation, cpu: readonly Cpu[] | undefined): boolean {
+  return cpu !== undefined && generation.snapshot.host !== undefined && !hasCpu(generation.snapshot.host, cpu);
+}
 
 /** A preparation the platform failed rather than its recipe: its container would not start, the platform lost three of
  *  its execs in a row, or it would not snapshot it. */
@@ -72,9 +77,12 @@ export class ArmadaEnvironments extends ArmadaSingle {
    *  shallow environment holds nothing before its commit's boundary, so a pack of `full` history, which leaves out all
    *  its base's history holds, goes from the root (#34). Asked of a ready environment, it counts as a use: the client's
    *  job opens on it once its plan and its upload are done, and no room is made from it meanwhile (`makeRoom`). */
-  async base(key: string, history: 'full' | 'commit'): Promise<string> {
+  async base(key: string, history: 'full' | 'commit', cpu?: readonly Cpu[]): Promise<string> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
     const of = (sha: string | null, shallow: boolean) => sha === null || (shallow && history === 'full') ? 'root' : sha;
+
+    // A snapshot taken off a pinned job's CPUs is prepared again for it (`ensure`), from a root pack.
+    if (entry?.state === 'ready' && offPin(entry.generation, cpu)) return 'root';
 
     if (entry?.state === 'ready') {
       await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: Date.now() } satisfies Entry);
@@ -94,7 +102,7 @@ export class ArmadaEnvironments extends ArmadaSingle {
    *  (Dew, 2026-11-17: b6bd6607b's, taken on an EPYC 7713 25/1, ended four pinned jobs CpuUnavailable). */
   async ensure(key: string, recipe: Recipe, commit: Commit | null, { now = Date.now(), made = now, cpu }: { readonly made?: number; readonly now?: number; readonly cpu?: readonly Cpu[] } = {}): Promise<Readiness> {
     const held = await this.ctx.storage.get<Entry>(`env:${key}`);
-    const misplaced = held?.state === 'ready' && cpu !== undefined && held.generation.snapshot.host !== undefined && !hasCpu(held.generation.snapshot.host, cpu);
+    const misplaced = held?.state === 'ready' && offPin(held.generation, cpu);
 
     if (misplaced) await this.forget(key);
     const entry = misplaced ? undefined : held;
@@ -116,7 +124,8 @@ export class ArmadaEnvironments extends ArmadaSingle {
     if (recipe.repo !== undefined && commit?.base !== 'root') return { kind: 'failed', reason: 'the environment this job was packed against is gone; run again, which packs from the root' };
     const shallow = recipe.repo !== undefined && commit !== null && boundaryOf(commit, recipe.repo.history).length > 0;
 
-    return await this.attempt(key, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow }, { shallow, attempt: 1 }, now);
+    // Prepared on the job's own CPUs where it names some, failing rather than snapshot off them (`placed`).
+    return await this.attempt(key, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow, ...(cpu === undefined ? {} : { cpu }) }, { shallow, attempt: 1 }, now);
   }
 
   /** Attempt number `attempt` at `key`'s environment from `inputs`, begun `since`, on an object of its own, named and
@@ -470,6 +479,9 @@ export interface Preparation {
   readonly room?: Room | 'failed';
   /** When its container first started on a host of none of the deployment's PREPARE_CPU; absent until then. */
   readonly misplaced?: number;
+  /** The CPUs of the pinned job it is prepared for, which it is prepared on or fails (`placed`); absent for an unpinned
+   *  job's, prepared on PREPARE_CPU where it can be, else where it is. */
+  readonly cpu?: readonly Cpu[];
 }
 
 /** How long a preparation starts its container again for one on a host of the deployment's PREPARE_CPU, as a pinned
@@ -528,8 +540,8 @@ const holderOf = ({ key, since }: Pick<Preparation, 'key' | 'since'>): string =>
 const preparationMs = (size: Size): number => Object.keys(NEXT).length * stepMs(size) + ROOM_WAIT_MS;
 
 export class ArmadaPreparer extends DurableObject<Env> {
-  async begin(key: string, since: number, { recipe, sha, packer, shallow }: Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow'>): Promise<void> {
-    await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, shallow, phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
+  async begin(key: string, since: number, { recipe, sha, packer, shallow, cpu }: Inputs): Promise<void> {
+    await this.ctx.storage.put('preparation', { key, since, recipe, sha, packer, shallow, ...(cpu === undefined ? {} : { cpu }), phase: 'base', seconds: {}, snapshot: null } satisfies Preparation);
     await this.ctx.storage.setAlarm(Date.now());
   }
 
@@ -676,14 +688,18 @@ export class ArmadaPreparer extends DurableObject<Env> {
    *  it again for one as long as `PREPARE_PIN_MS` allows: `Misplaced` otherwise, which `alarm` answers by starting it
    *  again in a moment. */
   private async placed(preparation: Preparation): Promise<void> {
-    const required = this.env.PREPARE_CPU === undefined || this.env.PREPARE_CPU === '' ? undefined : cpusOf(this.env.PREPARE_CPU, 'PREPARE_CPU');
+    const required = preparation.cpu ?? (this.env.PREPARE_CPU === undefined || this.env.PREPARE_CPU === '' ? undefined : cpusOf(this.env.PREPARE_CPU, 'PREPARE_CPU'));
 
     if (required === undefined) return;
     const host = hostOf((await must(this.container(), 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
 
-    if (hasCpu(host, required) || Date.now() - (preparation.misplaced ?? Date.now()) >= PREPARE_PIN_MS) return;
+    if (hasCpu(host, required)) return;
 
-    throw new Misplaced(host, required);
+    if (Date.now() - (preparation.misplaced ?? Date.now()) < PREPARE_PIN_MS) throw new Misplaced(host, required);
+
+    // A pinned job's preparation fails rather than snapshot off its CPUs, which no container of it could start from:
+    // its jobs end, and a later one prepares it again (Dew, 2026-11-17: re-prepared off its pin, it would loop).
+    if (preparation.cpu !== undefined) throw new Error(`no container started on a host of ${cpuLabel(preparation.cpu)} in ${String(PREPARE_PIN_MS / 60_000)} min, the last on ${hostLabel(host)}`);
   }
 
   /** The account's snapshot storage is full: the registry frees what this deployment can (`makeRoom`), and the snapshot

@@ -366,7 +366,8 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
     size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, environment) },
   };
 
-  const resolved = await armada.resolve(recipe);
+  // Its jobs' pin, so an environment snapshot taken off it is packed against from the root (environments.ts `base`).
+  const resolved = await armada.resolve(recipe, config.task.cpu);
   const base = packBase(repo, resolved.base);
   const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
   const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs, cpu: config.task.cpu };
