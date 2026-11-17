@@ -108,7 +108,9 @@ export const MEMORY_KILL = 'memory';
  *  A task that exited nonzero having reported no row, cut off at its timeout or killed before it wrote one, is red in
  *  every row its plan entry names (`expected`), or in a row of its own under its name when the entry names none.
  *  A task its kernel killed a process of for want of memory has that kill as a red row of its own beside its rows: a
- *  test the kill took may have reported none, and a red row of another's must not hide why it is missing. */
+ *  test the kill took may have reported none, and a red row of another's must not hide why it is missing. It names
+ *  the rows its plan entry names (`rows`), where it names any, so a reader knows whose tests the kill took (Dew,
+ *  2026-11-17: a reader found no file in the row's task name and could not read the verdict). */
 export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
   const graded = gradedUnderExit(rows, exit, task, expected);
 
@@ -117,6 +119,7 @@ export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: str
 
   return [...graded, {
     name: `${task}: killed for memory`, exitCode: 137, seconds: exit.seconds ?? 0, kind: MEMORY_KILL,
+    ...(expected === undefined ? {} : { rows: [...expected] }),
     output: `the kernel killed a process of the task for want of memory${peak}; a test it took may have reported no row\n${exit.tail}`,
   }];
 }
