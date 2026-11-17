@@ -215,6 +215,15 @@ export class Armada {
    *  starts after it, never fails on it (Main, 2026-11-06: a drain refused every lane's run). The deploy bounds that
    *  wait: its drain lasts while its open jobs finish, each within its deadline, and lapses if the deploy dies. */
   async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
+    return await this.asked(path, init, protocol, false);
+  }
+
+  /** `call`'s request, its answer read whole within each ask where `whole` (its bytes held in the Response it gives):
+   *  each ask of a read, and its body with it where `whole`, bounded by `answerMs` from its sending, one past it a
+   *  failed read asked again within the read's one outage budget; a redeploy's refusals waited outside every ask's
+   *  bound (review: a bound around the redeploy wait cut it short, and a body's bound around the read restarted its
+   *  outage budget). */
+  private async asked(path: string, init: RequestInit, protocol: number, whole: boolean): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const read = method === 'GET' || method === 'HEAD';
@@ -238,23 +247,33 @@ export class Armada {
 
     for (let attempt = 1; ; attempt += 1) {
       let sent: Response;
-      // A read's ask answered within READ_ANSWER_MS, or a failure asked again (its body, which its caller reads,
-      // bounded by `whole` where it takes long).
-      const bounded = new AbortController();
-      const timer = read ? setTimeout(() => { bounded.abort(new Error(`no answer in ${String(this.answerMs / 1000)} s`)); }, this.answerMs) : undefined;
-      const signal = init.signal === undefined || init.signal === null ? bounded.signal : AbortSignal.any([init.signal, bounded.signal]);
+
+      // One ask: a read's answered within `answerMs` (its body too, where `whole`), or failed with why.
+      const send = async (): Promise<Response> => {
+        const bounded = new AbortController();
+        const timer = read ? setTimeout(() => { bounded.abort(new Error(`no answer in ${String(this.answerMs / 1000)} s`)); }, this.answerMs) : undefined;
+        const signal = init.signal === undefined || init.signal === null ? bounded.signal : AbortSignal.any([init.signal, bounded.signal]);
+
+        try {
+          const answer = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers, signal });
+
+          return whole ? new Response(await answer.bytes(), { status: answer.status, headers: answer.headers }) : answer;
+        } catch (cause) {
+          throw bounded.signal.aborted && init.signal?.aborted !== true ? bounded.signal.reason : cause;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
 
       try {
-        sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers, signal }), init.signal);
+        sent = await deployed(`${method} ${path}`, send, init.signal);
       } catch (cause) {
         // A connection that failed is asked again, as a gateway's failure is; one its caller gave up on, never.
         if (init.signal?.aborted === true) throw cause;
 
-        if (!again(errorOf({ cause: bounded.signal.aborted ? bounded.signal.reason : cause }).message)) throw new Unreachable(`${method} ${path}`, { cause });
+        if (!again(errorOf({ cause }).message)) throw new Unreachable(`${method} ${path}`, { cause });
         await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
-      } finally {
-        clearTimeout(timer);
       }
 
       if ([500, 502, 503, 504].includes(sent.status) && again(`answered ${String(sent.status)}`)) {
@@ -527,33 +546,11 @@ export class Armada {
   }
 
   /** A read's whole answer, its bytes, or null where the Worker says it is absent: each ask bounded from its sending
-   *  to its last byte by READ_ANSWER_MS, and one past it asked again as a failed read is (`call`), for READ_OUTAGE_MS
-   *  from its first failure, said once. */
+   *  to its last byte (`asked`). */
   async whole(path: string): Promise<Uint8Array | null> {
-    let began: number | null = null;
+    const answer = await this.asked(path, {}, PROTOCOL, true);
 
-    for (let attempt = 1; ; attempt += 1) {
-      const bounded = new AbortController();
-      const timer = setTimeout(() => { bounded.abort(new Error(`not answered whole in ${String(this.answerMs / 1000)} s`)); }, this.answerMs);
-
-      try {
-        const answer = await this.call(path, { signal: bounded.signal });
-
-        return answer.status === 404 ? null : await new Response(answer.body).bytes();
-      } catch (cause) {
-        if (!bounded.signal.aborted) throw cause;
-
-        if (began === null) {
-          began = Date.now();
-          console.error(`GET ${path}: ${errorOf({ cause: bounded.signal.reason }).message}; asked again for up to ${String(READ_OUTAGE_MS / 1000)} s`);
-        }
-
-        if (Date.now() - began >= READ_OUTAGE_MS) throw new Unreachable(`GET ${path}`, { cause: bounded.signal.reason });
-        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), undefined);
-      } finally {
-        clearTimeout(timer);
-      }
-    }
+    return answer.status === 404 ? null : await answer.bytes();
   }
 }
 

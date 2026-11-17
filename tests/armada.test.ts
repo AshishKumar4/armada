@@ -2431,6 +2431,19 @@ describe('a read that is not answered', () => {
       expect(asked).toBe(3);
       expect(said).toHaveLength(1);
       expect(said[0]).toContain('GET /jobs/j/tasks/3/artifacts');
+      // A redeploy's refusals, each answered within the bound and longer than it together, are waited out as a
+      // redeploy, never cut short as an outage (review).
+      said.length = 0;
+      let refusals = 0;
+
+      globalThis.fetch = fakeFetch(async () => {
+        refusals += 1;
+        await new Promise((resolve) => { setTimeout(resolve, 30); });
+
+        return refusals <= 3 ? Response.json({ error: 'redeploying' }, { status: 503 }) : Response.json({ ok: true });
+      });
+      expect(await (await armada.call('/health')).json()).toEqual({ ok: true });
+      expect([refusals, said.some((line) => line.includes('asked again for up to'))]).toEqual([4, false]);
     } finally {
       globalThis.fetch = original;
       Bun.sleep = sleep;
