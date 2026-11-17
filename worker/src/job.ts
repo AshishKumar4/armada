@@ -261,6 +261,11 @@ export class ArmadaJob extends DurableObject<Env> {
       attempts INTEGER NOT NULL DEFAULT 0, infra INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0, not_before INTEGER NOT NULL DEFAULT 0,
       vessel TEXT, started INTEGER, dup TEXT)`);
     this.sql.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, outcome TEXT NOT NULL, at INTEGER)');
+    // A task's last outcome read by its index (`fileOf`, `taskStatus`) through an index, not a scan of every event:
+    // a train's CI reads each of its thousands of tasks' artifacts so, one object answering them in turn (Dew
+    // 2026-11-17: 5487 reads of a 3532-task job each scanned its whole log, the collection slowed eightfold and one
+    // read went five minutes unanswered).
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS events_by_task ON events (json_extract(outcome, '$.index'), seq)`);
     // Each run whose answer a vessel gave, by its task, attempt, vessel and slot: counted on its vessel once.
     this.sql.exec('CREATE TABLE IF NOT EXISTS answered (run TEXT PRIMARY KEY)');
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vessels (name TEXT PRIMARY KEY, state TEXT NOT NULL, tasks INTEGER NOT NULL DEFAULT 0,

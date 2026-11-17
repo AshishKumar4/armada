@@ -19,6 +19,12 @@ export const CONFIG_DIR = join(homedir(), '.config', 'armada');
  *  client still waits on the runner. */
 export const READ_OUTAGE_MS = 120_000;
 
+/** How long one ask of a read waits for its whole answer before it is a failure, asked again as one (`Armada.call`,
+ *  `Armada.whole`): a read with no bound waited on a connection that never answered, for five minutes before it
+ *  failed, at the end of a train's CI with every task done (2026-11-17: one task's artifacts, a 462-byte archive the
+ *  Worker gives in a third of a second). */
+export const READ_ANSWER_MS = 60_000;
+
 /** The longest pause between two asks of a read that failed (`Armada.call`). */
 export const READ_PAUSE_MS = 15_000;
 
@@ -192,7 +198,8 @@ export class RequestError extends Error {
 }
 
 export class Armada {
-  constructor(readonly connection: Connection) {}
+  /** `answerMs`: how long one ask of a read waits for its whole answer (READ_ANSWER_MS). */
+  constructor(readonly connection: Connection, readonly answerMs = READ_ANSWER_MS) {}
 
   /** The wire's version this client speaks to the deployment: its own, or an older one a drain found the deployed
    *  Worker speaks, for the drain, the health and the admit, which are the same in every version. */
@@ -208,6 +215,15 @@ export class Armada {
    *  starts after it, never fails on it (Main, 2026-11-06: a drain refused every lane's run). The deploy bounds that
    *  wait: its drain lasts while its open jobs finish, each within its deadline, and lapses if the deploy dies. */
   async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
+    return await this.asked(path, init, protocol, false);
+  }
+
+  /** `call`'s request, its answer read whole within each ask where `whole` (its bytes held in the Response it gives):
+   *  each ask of a read, and its body with it where `whole`, bounded by `answerMs` from its sending, one past it a
+   *  failed read asked again within the read's one outage budget; a redeploy's refusals waited outside every ask's
+   *  bound (review: a bound around the redeploy wait cut it short, and a body's bound around the read restarted its
+   *  outage budget). */
+  private async asked(path: string, init: RequestInit, protocol: number, whole: boolean): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const read = method === 'GET' || method === 'HEAD';
@@ -232,8 +248,25 @@ export class Armada {
     for (let attempt = 1; ; attempt += 1) {
       let sent: Response;
 
+      // One ask: a read's answered within `answerMs` (its body too, where `whole`), or failed with why.
+      const send = async (): Promise<Response> => {
+        const bounded = new AbortController();
+        const timer = read ? setTimeout(() => { bounded.abort(new Error(`no answer in ${String(this.answerMs / 1000)} s`)); }, this.answerMs) : undefined;
+        const signal = init.signal === undefined || init.signal === null ? bounded.signal : AbortSignal.any([init.signal, bounded.signal]);
+
+        try {
+          const answer = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers, signal });
+
+          return whole ? new Response(await answer.bytes(), { status: answer.status, headers: answer.headers }) : answer;
+        } catch (cause) {
+          throw bounded.signal.aborted && init.signal?.aborted !== true ? bounded.signal.reason : cause;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+
       try {
-        sent = await deployed(`${method} ${path}`, async () => await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers }), init.signal);
+        sent = await deployed(`${method} ${path}`, send, init.signal);
       } catch (cause) {
         // A connection that failed is asked again, as a gateway's failure is; one its caller gave up on, never.
         if (init.signal?.aborted === true) throw cause;
@@ -509,9 +542,15 @@ export class Armada {
 
   /** A task's artifacts directory as its stored tar.gz, or null. */
   async artifacts(id: string, index: number): Promise<Uint8Array | null> {
-    const response = await this.call(`/jobs/${id}/tasks/${String(index)}/artifacts`);
+    return await this.whole(`/jobs/${id}/tasks/${String(index)}/artifacts`);
+  }
 
-    return response.status === 404 ? null : await new Response(response.body).bytes();
+  /** A read's whole answer, its bytes, or null where the Worker says it is absent: each ask bounded from its sending
+   *  to its last byte (`asked`). */
+  async whole(path: string): Promise<Uint8Array | null> {
+    const answer = await this.asked(path, {}, PROTOCOL, true);
+
+    return answer.status === 404 ? null : await answer.bytes();
   }
 }
 
