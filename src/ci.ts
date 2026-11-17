@@ -343,12 +343,12 @@ function sizeOf(config: Config, timings: Timings): Size {
 
 /** A commit and its `.armada.json`: its environment at `sized`, else at its run's size, its job fields, and the upload
  *  of its pack, which sends nothing when the runner has it. */
-async function commitOf(armada: Armada, target: string, sized?: Size) {
+async function commitOf(armada: Armada, target: string, sized?: Size, cpu?: readonly Cpu[]) {
   const { sha, repo } = resolveCommit(target);
   const config = parseConfig(git(repo, ['show', `${sha}:${CONFIG_FILE}`]).toString());
   const timings = v.parse(TimingsSchema, await (await armada.call(`/timings/${config.name}`)).json());
   const base = sized ?? sizeOf(config, timings);
-  const of = async (name: string | undefined, size = base) => await prepared(armada, { repo, sha, config, size, name });
+  const of = async (name: string | undefined, size = base) => await prepared(armada, { repo, sha, config, size, name, cpu });
 
   return { sha, repo, config, timings, base, of, ...await of(undefined) };
 }
@@ -356,7 +356,7 @@ async function commitOf(armada: Armada, target: string, sized?: Size) {
 /** One of the commit's environments, the project's or one `environments` names: its key and base as the deployment
  *  resolves them, its job fields, and the upload of its pack against that base, which sends nothing when the runner has
  *  it. */
-async function prepared(armada: Armada, { repo, sha, config, size, name }: { readonly repo: string; readonly sha: string; readonly config: Config; readonly size: Size; readonly name: string | undefined }) {
+async function prepared(armada: Armada, { repo, sha, config, size, name, cpu = config.task.cpu }: { readonly repo: string; readonly sha: string; readonly config: Config; readonly size: Size; readonly name: string | undefined; readonly cpu?: readonly Cpu[] | undefined }) {
   const environment = environmentOf(config, name);
   // The recipe, its scripts read from the commit as text.
   const text = (path: string | undefined) => path === undefined ? '' : git(repo, ['show', `${sha}:${path}`]).toString();
@@ -366,18 +366,20 @@ async function prepared(armada: Armada, { repo, sha, config, size, name }: { rea
     size, repo: { project: config.name, checkout: checkoutOf(config), history: config.history, manifest: manifestOf(repo, sha, environment) },
   };
 
-  const resolved = await armada.resolve(recipe);
+  // Its jobs' pin (the command line's over the project's), so an environment snapshot taken off it is packed against
+  // from the root (environments.ts `base`).
+  const resolved = await armada.resolve(recipe, cpu);
   const base = packBase(repo, resolved.base);
   const commit = { sha, base, packer: PACKER, shallow: shallowOf(repo, sha, config.history) };
-  const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs, cpu: config.task.cpu };
+  const spec: OnCommit = { recipe: { ...recipe, commit }, env: config.env, tmpfs: config.tmpfs, cpu };
 
   return { environment: resolved, spec, upload: async () => await uploadPack(armada, config.name, commit, async (file, held) => { await packTo(repo, { sha, base, history: config.history }, file, held); }) };
 }
 
 /** A commit's job fields at `size`, else at its run's size, its pack uploaded against that environment's base: a job
  *  resized after its environment was resolved packs against another environment's base, which its own never had. */
-export async function onCommit(armada: Armada, target: string, size?: Size): Promise<OnCommit> {
-  const commit = await commitOf(armada, target, size);
+export async function onCommit(armada: Armada, target: string, size?: Size, cpu?: readonly Cpu[]): Promise<OnCommit> {
+  const commit = await commitOf(armada, target, size, cpu);
 
   await commit.upload();
 
@@ -787,7 +789,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       if (sent !== null) note(`uploaded its pack${said === '' ? ' again' : ` for ${said}`}, ${(sent / 1e6).toFixed(1)} MB`);
     }));
 
-    const moved = (await Promise.all(owns.map(async (own, at) => (await armada.resolve(own.spec.recipe)).base === own.environment.base ? [] : [at]))).flat();
+    const moved = (await Promise.all(owns.map(async (own, at) => (await armada.resolve(own.spec.recipe, own.spec.cpu)).base === own.environment.base ? [] : [at]))).flat();
 
     if (moved.length === 0) break;
 

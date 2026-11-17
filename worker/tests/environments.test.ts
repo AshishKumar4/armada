@@ -491,6 +491,42 @@ describe('a preparation under way', () => {
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
   });
 
+  // Dew, 2026-11-17: b6bd6607b's snapshot, taken on an EPYC 7713 25/1 when its preparation gave up on its pin, ended
+  // four pinned jobs CpuUnavailable, every container started from it landing on 25/1.
+  test('hands a pinned job no snapshot taken off its pin: the snapshot is owed for deletion, and the environment prepared again', async () => {
+    const stored = state();
+    let begun = 0;
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+    const recipe = v.parse(RecipeSchema, {});
+    const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+    const host = (model: number) => ({ vendor: 'AuthenticAMD', family: 25, model, name: 'EPYC', level: 3 });
+
+    await environments.prepared({ ...generation('on'), snapshot: { id: 'snapshot-on', size: 1, host: host(17) } });
+    await environments.prepared({ ...generation('off'), snapshot: { id: 'snapshot-off', size: 1, host: host(1) } });
+    const unpinnedOff = await environments.ensure('off', recipe, null);
+    const pinnedOn = await environments.ensure('on', recipe, null, { cpu: pinned });
+    const pinnedOff = await environments.ensure('off', recipe, null, { cpu: pinned });
+
+    expect({ unpinnedOff: unpinnedOff.kind, pinnedOn: pinnedOn.kind, pinnedOff: pinnedOff.kind, begun, owed: [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()] })
+      .toEqual({ unpinnedOff: 'ready', pinnedOn: 'ready', pinnedOff: 'preparing', begun: 1, owed: ['debt:snapshot-off'] });
+  });
+
+  test('packs a pinned job against the root where its environment\'s snapshot was taken off its pin, and prepares it for that pin', async () => {
+    const stored = state();
+    const inputs: { readonly cpu?: unknown }[] = [];
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async (_key: string, _since: number, given: { readonly cpu?: unknown }) => { inputs.push(given); } })) }));
+    const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+    const off = { ...generation('off'), sha: 'a'.repeat(40), snapshot: { id: 'snapshot-off', size: 1, host: { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'EPYC', level: 3 } } };
+
+    await environments.prepared(off);
+    const unpinned = await environments.base('off', 'commit');
+    const forPin = await environments.base('off', 'commit', pinned);
+
+    await environments.ensure('off', v.parse(RecipeSchema, {}), null, { cpu: pinned });
+    expect({ unpinned, forPin, prepared: inputs.map((given) => given.cpu) })
+      .toEqual({ unpinned: 'a'.repeat(40), forPin: 'root', prepared: [pinned] });
+  });
+
   // #57: a failed pre-warm turned the grading run made after it into "not graded" for five minutes.
   test('fails the jobs made before its failure, and is prepared again for a job made after it', async () => {
     const stored = state();
@@ -894,20 +930,26 @@ describe('a pack base (#34)', () => {
 
 /** The generations a preparation of an empty recipe records, its container's execs answered by `answer`, on a
  *  deployment that prepares on `prepareCpu` where given. */
-async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string }, prepareCpu?: string): Promise<Generation[]> {
+async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string }, prepareCpu?: string,
+  { cpu, failed = [], tick }: { readonly cpu?: readonly { vendor: string; family: number; model: number }[]; readonly failed?: string[]; readonly tick?: () => void } = {}): Promise<Generation[]> {
   const recorded: Generation[] = [];
   const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
 
   const environments = namespace(() => ({
-    beat: async () => undefined, wanted: async () => true, preparationFailed: async () => undefined,
+    beat: async () => undefined, wanted: async () => true, preparationFailed: async (_key: string, _since: number, reason: string) => { failed.push(reason); },
     prepared: async (made: Generation) => { recorded.push(made); },
   }));
 
   const preparer = new ArmadaPreparer(stored.ctx, world(prepareCpu === undefined ? { ENVIRONMENTS: environments } : { ENVIRONMENTS: environments, PREPARE_CPU: prepareCpu }));
 
-  await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null });
+  const inputs = { recipe: v.parse(RecipeSchema, {}), sha: null };
 
-  for (let alarm = 0; alarm < 30 && recorded.length === 0; alarm += 1) await preparer.alarm();
+  await preparer.begin('k'.repeat(64), Date.now(), cpu === undefined ? inputs : { ...inputs, cpu });
+
+  for (let alarm = 0; alarm < 30 && recorded.length === 0 && failed.length === 0; alarm += 1) {
+    tick?.();
+    await preparer.alarm();
+  }
 
   return recorded;
 }
@@ -942,5 +984,23 @@ describe('an environment\'s snapshot', () => {
 
     // Three starts' hosts read, then the snapshot's: the one it prepared on.
     expect({ read, host: recorded.map(({ snapshot }) => snapshot.host?.model) }).toEqual({ read: 4, host: [17] });
+  });
+
+  test('prepared for a pinned job fails rather than be taken off its pin, where a deployment\'s own falls back', async () => {
+    const start = Date.now();
+    let now = start;
+    const failed: string[] = [];
+    const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+
+    try {
+      // Every start on 25/1, the clock past the pin's window after the first.
+      const recorded = await preparedWith(onHost(() => 1), undefined, { cpu: pinned, failed, tick: () => { setSystemTime(now); now += 5 * MINUTE; } });
+      const fallen = await preparedWith(onHost(() => 1), 'AuthenticAMD/25/17', { tick: () => { setSystemTime(now); now += 5 * MINUTE; } });
+
+      expect({ pinned: recorded.length, failed: failed.length === 1 && failed[0]?.includes('AuthenticAMD/25/17'), fallen: fallen.map(({ snapshot }) => snapshot.host?.model) })
+        .toEqual({ pinned: 0, failed: true, fallen: [1] });
+    } finally {
+      setSystemTime();
+    }
   });
 });

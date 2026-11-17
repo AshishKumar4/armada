@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { CONFIG_FILE, deploymentNamed } from './config';
-import { deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
+import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -317,8 +317,10 @@ export class Armada {
   }
 
   /** A recipe's environment key, and what a commit for it should be packed against. */
-  async resolve(recipe: Recipe): Promise<{ readonly key: string; readonly base: string }> {
-    return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe: ownPacker(recipe) }));
+  async resolve(recipe: Recipe, cpu?: readonly Cpu[]): Promise<{ readonly key: string; readonly base: string }> {
+    const asked = { recipe: ownPacker(recipe) };
+
+    return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', cpu === undefined ? asked : { ...asked, cpu }));
   }
 
   /** Where the runner keeps a commit's pack, under this client's `PACKER` and its shallow boundary (`CommitSchema`). */

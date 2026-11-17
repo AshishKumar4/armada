@@ -248,7 +248,7 @@ async function map(): Promise<number> {
   const size = given === undefined ? undefined : v.parse(SizeSchema, given);
   const file = recipe(recipeFrom(option('env')));
   // A commit's environment is resolved at the size the job runs at, as its pack's base is that environment's.
-  const where = target === undefined ? { recipe: (size === undefined ? file : file.size(size)).spec, env: {}, tmpfs: undefined, cpu: undefined } : await onCommit(armada, target, size);
+  const where = target === undefined ? { recipe: (size === undefined ? file : file.size(size)).spec, env: {}, tmpfs: undefined, cpu: undefined } : await onCommit(armada, target, size, cpuOf(option('cpu')));
   const argv = argvOf(rest, where.recipe);
   const taskOptions = { speculative: flag('speculative'), fresh: flag('fresh'), hedge: whole('hedge', 0), timeout, secrets: option('secrets')?.split(',').filter(Boolean) };
   const all: Json[] = times === undefined ? itemsFrom(items ?? '-') : Array.from({ length: times }, (_, index) => index + 1);
