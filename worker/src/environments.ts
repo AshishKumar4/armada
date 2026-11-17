@@ -125,7 +125,9 @@ export class ArmadaEnvironments extends ArmadaSingle {
     const shallow = recipe.repo !== undefined && commit !== null && boundaryOf(commit, recipe.repo.history).length > 0;
 
     // Prepared on the job's own CPUs where it names some, failing rather than snapshot off them (`placed`).
-    return await this.attempt(key, { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow, ...(cpu === undefined ? {} : { cpu }) }, { shallow, attempt: 1 }, now);
+    const inputs: Inputs = { recipe, sha: commit?.sha ?? null, packer: commit?.packer, shallow: commit?.shallow };
+
+    return await this.attempt(key, cpu === undefined ? inputs : { ...inputs, cpu }, { shallow, attempt: 1 }, now);
   }
 
   /** Attempt number `attempt` at `key`'s environment from `inputs`, begun `since`, on an object of its own, named and
@@ -611,8 +613,9 @@ export class ArmadaPreparer extends DurableObject<Env> {
       // A retry prepares for the same pin, if any.
       const { recipe, sha, packer, shallow, cpu } = preparation;
       const again: Inputs = { recipe, sha, packer, shallow };
+      const pinned = cpu === undefined ? again : { ...again, cpu };
 
-      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? (cpu === undefined ? again : { ...again, cpu }) : undefined);
+      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? pinned : undefined);
     }
   }
 

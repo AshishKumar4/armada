@@ -318,7 +318,9 @@ export class Armada {
 
   /** A recipe's environment key, and what a commit for it should be packed against. */
   async resolve(recipe: Recipe, cpu?: readonly Cpu[]): Promise<{ readonly key: string; readonly base: string }> {
-    return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', { recipe: ownPacker(recipe), ...(cpu === undefined ? {} : { cpu }) }));
+    const asked = { recipe: ownPacker(recipe) };
+
+    return v.parse(v.object({ key: v.string(), base: v.string() }), await this.post('/environments/resolve', cpu === undefined ? asked : { ...asked, cpu }));
   }
 
   /** Where the runner keeps a commit's pack, under this client's `PACKER` and its shallow boundary (`CommitSchema`). */

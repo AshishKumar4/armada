@@ -513,8 +513,8 @@ describe('a preparation under way', () => {
 
   test('packs a pinned job against the root where its environment\'s snapshot was taken off its pin, and prepares it for that pin', async () => {
     const stored = state();
-    const inputs: unknown[] = [];
-    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async (_key: string, _since: number, given: unknown) => { inputs.push(given); } })) }));
+    const inputs: { readonly cpu?: unknown }[] = [];
+    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async (_key: string, _since: number, given: { readonly cpu?: unknown }) => { inputs.push(given); } })) }));
     const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
     const off = { ...generation('off'), sha: 'a'.repeat(40), snapshot: { id: 'snapshot-off', size: 1, host: { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'EPYC', level: 3 } } };
 
@@ -523,7 +523,7 @@ describe('a preparation under way', () => {
     const forPin = await environments.base('off', 'commit', pinned);
 
     await environments.ensure('off', v.parse(RecipeSchema, {}), null, { cpu: pinned });
-    expect({ unpinned, forPin, prepared: inputs.map((given) => v.parse(v.object({ cpu: v.optional(v.unknown()) }), given).cpu) })
+    expect({ unpinned, forPin, prepared: inputs.map((given) => given.cpu) })
       .toEqual({ unpinned: 'a'.repeat(40), forPin: 'root', prepared: [pinned] });
   });
 
@@ -942,7 +942,9 @@ async function preparedWith(answer: (argv: readonly string[]) => { readonly exit
 
   const preparer = new ArmadaPreparer(stored.ctx, world(prepareCpu === undefined ? { ENVIRONMENTS: environments } : { ENVIRONMENTS: environments, PREPARE_CPU: prepareCpu }));
 
-  await preparer.begin('k'.repeat(64), Date.now(), { recipe: v.parse(RecipeSchema, {}), sha: null, ...(cpu === undefined ? {} : { cpu }) });
+  const inputs = { recipe: v.parse(RecipeSchema, {}), sha: null };
+
+  await preparer.begin('k'.repeat(64), Date.now(), cpu === undefined ? inputs : { ...inputs, cpu });
 
   for (let alarm = 0; alarm < 30 && recorded.length === 0 && failed.length === 0; alarm += 1) {
     tick?.();
