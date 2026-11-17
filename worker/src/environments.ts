@@ -606,9 +606,10 @@ export class ArmadaPreparer extends DurableObject<Env> {
       console.error(JSON.stringify({ preparation: preparation.key, phase: preparation.phase, error: said({ cause }) }));
 
       if (made !== null) await this.env.ENVIRONMENTS.getByName(SINGLE).orphaned(made.id, preparation.key);
-      const { recipe, sha, packer, shallow } = preparation;
+      // A retry prepares for the same pin, if any.
+      const { recipe, sha, packer, shallow, cpu } = preparation;
 
-      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? { recipe, sha, packer, shallow } : undefined);
+      await this.env.ENVIRONMENTS.getByName(SINGLE).preparationFailed(preparation.key, preparation.since, `${preparation.phase}: ${said({ cause })}`, cause instanceof PlatformFailed ? { recipe, sha, packer, shallow, ...(cpu === undefined ? {} : { cpu }) } : undefined);
     }
   }
 
