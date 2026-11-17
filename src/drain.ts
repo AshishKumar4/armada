@@ -24,9 +24,18 @@ export class Unlisted extends Error {
   }
 }
 
-/** Every job of a deployment that is not done, each page of `GET /jobs` read through `call` (a path to its answer);
- *  a listing it cannot complete is refused (`Unlisted`), never read as fewer open jobs. */
+/** Every job of a deployment that is not done, read through `call` (a path to its answer): the open set `GET /jobs?open`
+ *  gives whole, else each page of `GET /jobs`; a listing it cannot complete is refused (`Unlisted`), never read as fewer
+ *  open jobs. */
 export async function openJobs(call: (path: string) => Promise<Response>): Promise<ListedJob[]> {
+  // The whole open set where the Worker gives it (`open: true`); a Worker without it answers its recent jobs alone,
+  // the newest few hundred, so they are paged instead.
+  const whole = await call('/jobs?open');
+
+  if (whole.status === 404) throw new Unlisted('unavailable');
+  const answer = v.parse(v.object({ jobs: v.array(ListedJobSchema), open: v.optional(v.boolean()) }), await whole.json());
+
+  if (answer.open === true) return answer.jobs.filter((job) => job.phase !== 'done');
   const open: ListedJob[] = [];
   const seen = new Set<string>();
   let before: string | undefined;

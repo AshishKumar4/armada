@@ -11,6 +11,7 @@ import {
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
 import { retentionOf } from './environments';
 import { driverSpec, eventOf } from './hooks';
+import type { ListedJob } from '../../src/drain';
 import type { ArmadaFleet } from './fleet';
 import { fleetRefusal, VESSEL_NAME, type ArmadaJob } from './job';
 import type { Input } from './vessel';
@@ -301,6 +302,10 @@ async function runsOf(env: Env, id: string, index: number): Promise<TaskRun[]> {
 const jobs: Handler = async (request, env, [id, tail, index, leaf, run, file], url) => {
   if (id === undefined) {
     if (request.method !== 'GET') return undefined;
+    // `?open`: every job the fleet counts open, as a drain counts them, however old: the recent ones below hold the
+    // newest LISTED alone (2026-11-17: a drain waited its whole bound on a job past them, naming none). `open: true`
+    // says the whole set, which a Worker without it never answers.
+    if (url.searchParams.has('open')) return Response.json({ jobs: await stillOpen(env, env.FLEET.getByName(SINGLE)), open: true });
     // `?before=<id>` pages back from a job the last page ended with.
     const limit = Math.min(LISTED, Math.max(1, Number(url.searchParams.get('limit') ?? '30') || 30));
     const before = url.searchParams.get('before') ?? undefined;
@@ -570,7 +575,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
     // JSON leaves out what this Worker has not: its commit, and a `--keep` deploy's credentials.
     return Response.json({
-      ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: await stillOpen(env, fleet), sha: env.ARMADA_SHA === '' ? undefined : env.ARMADA_SHA,
+      ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: await fleet.used(), jobs: (await stillOpen(env, fleet)).length, sha: env.ARMADA_SHA === '' ? undefined : env.ARMADA_SHA,
       contract: env.ARMADA_CONTRACT === '' ? undefined : env.ARMADA_CONTRACT, keepUntil,
       prepareCpu: env.PREPARE_CPU === '' ? undefined : env.PREPARE_CPU,
     } satisfies Health);
@@ -578,7 +583,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // `armada deploy` drains the deployed version first: it admits no new job, and the open ones finish.
   if (head === 'drain' && request.method === 'POST') {
-    return Response.json({ jobs: (await fleet.drain(env.VERSION.id)) === 0 ? 0 : await stillOpen(env, fleet) });
+    return Response.json({ jobs: (await fleet.drain(env.VERSION.id)) === 0 ? 0 : (await stillOpen(env, fleet)).length });
   }
 
   if (head === 'drain' && request.method === 'DELETE') {
@@ -609,22 +614,22 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** How long a job admitted but not yet made is counted open on the word of its admission alone. */
 const MAKING_MS = 10 * 60_000;
 
-/** How many of the fleet's open jobs are still running by their own record. One whose record is done, or that has
- *  none `MAKING_MS` after it was admitted, concluded or was never made without being counted closed, by a version that
- *  leaked it or a race, and a drain would wait on it for ever (three held armada-dew2's on 2026-10-10): it is counted
- *  closed here. */
-async function stillOpen(env: Env, fleet: DurableObjectStub<ArmadaFleet>): Promise<number> {
+/** The fleet's open jobs still running by their own record, each as a drain names it: one admitted and not yet made
+ *  is preparing. One whose record is done, or that has none `MAKING_MS` after it was admitted, concluded or was never
+ *  made without being counted closed, by a version that leaked it or a race, and a drain would wait on it for ever
+ *  (three held armada-dew2's on 2026-10-10): it is counted closed here. */
+async function stillOpen(env: Env, fleet: DurableObjectStub<ArmadaFleet>): Promise<ListedJob[]> {
   const now = Date.now();
-  let left = 0;
+  const open: ListedJob[] = [];
 
   for (const { id, at } of await fleet.openSince()) {
     const status = await env.JOB.getByName(id).status();
 
     if (status?.phase === 'done' || (status === null && now - at > MAKING_MS)) await fleet.closed(id);
-    else left += 1;
+    else open.push(status === null ? { id, label: '', phase: 'preparing', createdAt: at } : { id, label: status.label, phase: status.phase, createdAt: status.createdAt });
   }
 
-  return left;
+  return open;
 }
 
 /** Whether `signature` is GitHub's `X-Hub-Signature-256` for `body` under `secret`, timed-safe. */
