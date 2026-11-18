@@ -45,11 +45,6 @@ const PREPARE_ATTEMPTS = 3;
 /** What a preparation starts from, which a fresh attempt is given again. */
 type Inputs = Pick<Preparation, 'recipe' | 'sha' | 'packer' | 'shallow' | 'cpu'>;
 
-/** Whether `generation`'s snapshot was taken on a host of none of `cpu`, where both are known. */
-function offPin(generation: Generation, cpu: readonly Cpu[] | undefined): boolean {
-  return cpu !== undefined && generation.snapshot.host !== undefined && !hasCpu(generation.snapshot.host, cpu);
-}
-
 /** A preparation the platform failed rather than its recipe: its container would not start, the platform lost three of
  *  its execs in a row, or it would not snapshot it. */
 class PlatformFailed extends Error {}
@@ -77,12 +72,9 @@ export class ArmadaEnvironments extends ArmadaSingle {
    *  shallow environment holds nothing before its commit's boundary, so a pack of `full` history, which leaves out all
    *  its base's history holds, goes from the root (#34). Asked of a ready environment, it counts as a use: the client's
    *  job opens on it once its plan and its upload are done, and no room is made from it meanwhile (`makeRoom`). */
-  async base(key: string, history: 'full' | 'commit', cpu?: readonly Cpu[]): Promise<string> {
+  async base(key: string, history: 'full' | 'commit'): Promise<string> {
     const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
     const of = (sha: string | null, shallow: boolean) => sha === null || (shallow && history === 'full') ? 'root' : sha;
-
-    // A snapshot taken off a pinned job's CPUs is prepared again for it (`ensure`), from a root pack.
-    if (entry?.state === 'ready' && offPin(entry.generation, cpu)) return 'root';
 
     if (entry?.state === 'ready') {
       await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: Date.now() } satisfies Entry);
@@ -96,16 +88,11 @@ export class ArmadaEnvironments extends ArmadaSingle {
   /** The key's environment, or its preparation begun, for a job `made` then; a repository recipe prepares only from a
    *  `root` pack. A failed preparation fails the jobs made by the time it failed, which waited on it; a job made after it
    *  prepares the environment again, as the failure may have been the platform's or the network's for a moment (#57).
-   *  Each ask while it is prepared says a job still waits on it (`wanted`). A job pinned to `cpu` is never handed a
-   *  snapshot taken on a host of none of them (its preparation gave up on its pin, `PREPARE_PIN_MS`): its containers
-   *  start where that snapshot lives, every one refused, so the snapshot goes and the environment is prepared again
-   *  (Dew, 2026-11-17: b6bd6607b's, taken on an EPYC 7713 25/1, ended four pinned jobs CpuUnavailable). */
+   *  Each ask while it is prepared says a job still waits on it (`wanted`). A job pinned to `cpu` has a key of its own
+   *  pin (`environmentKey`), prepared on one of its CPUs or failed (`ArmadaPreparer.placed`), so no snapshot of it is
+   *  off its pin (Dew, 2026-11-17: b6bd6607b's, taken on an EPYC 7713 25/1, ended four pinned jobs CpuUnavailable). */
   async ensure(key: string, recipe: Recipe, commit: Commit | null, { now = Date.now(), made = now, cpu }: { readonly made?: number; readonly now?: number; readonly cpu?: readonly Cpu[] } = {}): Promise<Readiness> {
-    const held = await this.ctx.storage.get<Entry>(`env:${key}`);
-    const misplaced = held?.state === 'ready' && offPin(held.generation, cpu);
-
-    if (misplaced) await this.forget(key);
-    const entry = misplaced ? undefined : held;
+    const entry = await this.ctx.storage.get<Entry>(`env:${key}`);
 
     if (entry?.state === 'ready') {
       await this.ctx.storage.put(`env:${key}`, { ...entry, lastUsed: now } satisfies Entry);

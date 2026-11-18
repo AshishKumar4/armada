@@ -499,9 +499,9 @@ const environments: Handler = async (request, env, [key]) => {
 
   if (key === 'resolve' && request.method === 'POST') {
     const { recipe, cpu } = v.parse(v.object({ recipe: RecipeSchema, cpu: v.optional(CpusSchema) }), await request.json());
-    const resolved = await environmentKey(recipe);
+    const resolved = await environmentKey(recipe, cpu);
 
-    return Response.json({ key: resolved, base: await registry.base(resolved, recipe.repo?.history ?? 'full', cpu) });
+    return Response.json({ key: resolved, base: await registry.base(resolved, recipe.repo?.history ?? 'full') });
   }
 
   if (key === 'prune' && request.method === 'POST') {

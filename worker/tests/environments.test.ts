@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, setSystemTime, test } from 'bun:test';
 import * as v from 'valibot';
-import { JobSpecSchema, PACKER, RecipeSchema, sha256 } from '../../src/protocol';
+import { environmentKey, JobSpecSchema, PACKER, RecipeSchema, sha256 } from '../../src/protocol';
 import { fakeFetch } from '../../tests/fakes';
 import { ArmadaEnvironments, ArmadaPreparer, expired, retentionOf, type Generation } from '../src/environments';
 import { ArmadaJob } from '../src/job';
@@ -491,40 +491,30 @@ describe('a preparation under way', () => {
     expect({ beating: beating.kind, silent: silent.kind, begun }).toEqual({ beating: 'preparing', silent: 'preparing', begun: 2 });
   });
 
-  // Dew, 2026-11-17: b6bd6607b's snapshot, taken on an EPYC 7713 25/1 when its preparation gave up on its pin, ended
-  // four pinned jobs CpuUnavailable, every container started from it landing on 25/1.
-  test('hands a pinned job no snapshot taken off its pin: the snapshot is owed for deletion, and the environment prepared again', async () => {
-    const stored = state();
-    let begun = 0;
-    const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async () => { begun += 1; } })) }));
+  // Dew, 2026-11-17: b6bd6607b's snapshot, taken on an EPYC 7713 25/1, ended four pinned jobs CpuUnavailable; the armada
+  // audit, 2026-11-18: two pins sharing one key's generation each displaced the other's.
+  test('keys a pinned job\'s environment by its pin: jobs of other pins, or none, never share or displace its generation', async () => {
     const recipe = v.parse(RecipeSchema, {});
-    const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
-    const host = (model: number) => ({ vendor: 'AuthenticAMD', family: 25, model, name: 'EPYC', level: 3 });
+    const one = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
+    const other = [{ vendor: 'AuthenticAMD', family: 25, model: 1 }];
+    const keys = [await environmentKey(recipe), await environmentKey(recipe, one), await environmentKey(recipe, [...one]), await environmentKey(recipe, other),
+      await environmentKey(recipe, [...other, ...one]), await environmentKey(recipe, [...one, ...other])];
 
-    await environments.prepared({ ...generation('on'), snapshot: { id: 'snapshot-on', size: 1, host: host(17) } });
-    await environments.prepared({ ...generation('off'), snapshot: { id: 'snapshot-off', size: 1, host: host(1) } });
-    const unpinnedOff = await environments.ensure('off', recipe, null);
-    const pinnedOn = await environments.ensure('on', recipe, null, { cpu: pinned });
-    const pinnedOff = await environments.ensure('off', recipe, null, { cpu: pinned });
+    expect({ unpinned: keys[0] !== keys[1], same: keys[1] === keys[2], other: keys[1] !== keys[3], order: keys[4] === keys[5], both: new Set(keys).size }).toEqual({ unpinned: true, same: true, other: true, order: true, both: 4 });
 
-    expect({ unpinnedOff: unpinnedOff.kind, pinnedOn: pinnedOn.kind, pinnedOff: pinnedOff.kind, begun, owed: [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()] })
-      .toEqual({ unpinnedOff: 'ready', pinnedOn: 'ready', pinnedOff: 'preparing', begun: 1, owed: ['debt:snapshot-off'] });
-  });
-
-  test('packs a pinned job against the root where its environment\'s snapshot was taken off its pin, and prepares it for that pin', async () => {
     const stored = state();
     const inputs: { readonly cpu?: unknown }[] = [];
     const environments = new ArmadaEnvironments(stored.ctx, world({ PREPARER: namespace(() => ({ begin: async (_key: string, _since: number, given: { readonly cpu?: unknown }) => { inputs.push(given); } })) }));
-    const pinned = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
-    const off = { ...generation('off'), sha: 'a'.repeat(40), snapshot: { id: 'snapshot-off', size: 1, host: { vendor: 'AuthenticAMD', family: 25, model: 1, name: 'EPYC', level: 3 } } };
+    const [plain = '', pinned = '', , elsewhere = ''] = keys;
 
-    await environments.prepared(off);
-    const unpinned = await environments.base('off', 'commit');
-    const forPin = await environments.base('off', 'commit', pinned);
+    // The unpinned environment ready, a pinned job's own prepares on its pin, and the unpinned one stays as it was.
+    await environments.prepared({ ...generation(plain), sha: 'a'.repeat(40) });
+    const forPin = await environments.base(pinned, 'commit');
+    const readiness = await environments.ensure(pinned, recipe, null, { cpu: one });
 
-    await environments.ensure('off', v.parse(RecipeSchema, {}), null, { cpu: pinned });
-    expect({ unpinned, forPin, prepared: inputs.map((given) => given.cpu) })
-      .toEqual({ unpinned: 'a'.repeat(40), forPin: 'root', prepared: [pinned] });
+    await environments.ensure(elsewhere, recipe, null, { cpu: other });
+    expect({ forPin, readiness: readiness.kind, plain: await environments.base(plain, 'commit'), prepared: inputs.map((given) => given.cpu), owed: [...(await stored.ctx.storage.list({ prefix: 'debt:' })).keys()] })
+      .toEqual({ forPin: 'root', readiness: 'preparing', plain: 'a'.repeat(40), prepared: [one, other], owed: [] });
   });
 
   // #57: a failed pre-warm turned the grading run made after it into "not graded" for five minutes.

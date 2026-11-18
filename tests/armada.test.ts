@@ -10,7 +10,7 @@ import { uploadPack } from '../src/packs';
 import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
-import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
+import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, tasksMemoryOf, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
@@ -413,11 +413,16 @@ describe('armada deploy', () => {
 describe('a size', () => {
   const GiB = 2 ** 30;
 
-  test('fits the most a task used with a quarter to spare, and goes up when a task filled its vCPUs', () => {
+  test('fits the most a task used under its task memory cap with a quarter to spare, and goes up when a task filled its vCPUs', () => {
     expect([
-      fitSize({ memory: 0.5 * GiB, cores: 0.3 }), fitSize({ memory: 0.5 * GiB, cores: 0.6 }), fitSize({ memory: 5 * GiB, cores: 0.3 }),
+      fitSize({ memory: 0.5 * GiB, cores: 0.3 }), fitSize({ memory: 0.5 * GiB, cores: 0.6 }), fitSize({ memory: 4 * GiB, cores: 0.3 }),
       fitSize({ memory: 2 * GiB, cores: 1.9 }), fitSize({ memory: 10 * GiB, cores: 1 }), fitSize({ memory: GiB, cores: 3.5 }),
     ]).toEqual(['micro', 'mini', 'small', 'medium', 'medium', 'medium']);
+    // The audit's case: 2.5 GiB at 0.3 cores went to micro, whose task cap is 2 GiB; every fitted size's cap holds it.
+    const used = [0.5, 1.5, 2.5, 3, 4.5, 7.5].map((memory) => ({ memory: memory * GiB, cores: 0.3 }));
+
+    expect(fitSize({ memory: 2.5 * GiB, cores: 0.3 })).toBe('mini');
+    expect(used.every((usage) => usage.memory <= tasksMemoryOf(fitSize(usage)))).toBe(true);
     // A task's own size goes up from its run's, as far as large: 8 vCPUs, and medium's 12 GiB (#64).
     expect([fitSize({ memory: GiB, cores: 3.5 }, { from: 'medium', to: 'large' }), fitSize({ memory: GiB, cores: 0.3 }, { from: 'medium', to: 'large' })]).toEqual(['large', 'medium']);
   });
@@ -2488,11 +2493,13 @@ describe('a read through an outage', () => {
       expect(said).toHaveLength(1);
       expect(said[0]).toContain('certificate has expired');
       said.length = 0;
-      // Down past READ_OUTAGE_MS: the read ends with the failure.
+      // Down past READ_OUTAGE_MS: the read ends with the failure, within the budget its first ask began (the armada
+      // audit, 2026-11-18: a pause could pass its end, and a full ask start after it).
       clock = 0;
       down = READ_OUTAGE_MS + 60_000;
       await expect(armada.call('/health')).rejects.toBeInstanceOf(Unreachable);
       expect(clock).toBeGreaterThanOrEqual(READ_OUTAGE_MS);
+      expect(clock).toBeLessThanOrEqual(READ_OUTAGE_MS + 1_000);
       // A write is asked once.
       clock = 0;
       down = 1_000;
@@ -2524,6 +2531,7 @@ describe('a read through an outage', () => {
       refusing = Infinity;
       await expect(armada.post('/jobs', {})).rejects.toThrow('the fleet took no new job, loaded');
       expect(clock).toBeGreaterThanOrEqual(READ_OUTAGE_MS);
+      expect(clock).toBeLessThanOrEqual(READ_OUTAGE_MS + 1_000);
       expect(said.filter((line) => line.includes('nothing made'))).toHaveLength(1);
       expect(said.some((line) => line.includes('until the deploy is done'))).toBe(false);
       asked = 0;

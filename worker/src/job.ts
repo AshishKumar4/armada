@@ -25,13 +25,13 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, tasksMemoryOf, weightOf, workdirOf,
   type Boot, type Cpu, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
 import { gangToken, runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { classOf, itemKey, tasksMemoryOf } from './estimates';
+import { classOf, itemKey } from './estimates';
 import { costOf, Placement, ranksOf, type Load } from './placement';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
@@ -298,7 +298,7 @@ export class ArmadaJob extends DurableObject<Env> {
   async create(id: string, spec: JobSpec, origin = '', inputs: readonly Input[] = []): Promise<void> {
     if (await this.ctx.storage.get('spec')) throw new Error(`job ${id} exists`);
     const { items, env, open, ...kept } = spec;
-    const key = await environmentKey(spec.recipe);
+    const key = await environmentKey(spec.recipe, spec.cpu);
 
     await this.insert(items, kept, key);
     await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key, createdAt: Date.now(), problems: [], replaced: 0, inputs });

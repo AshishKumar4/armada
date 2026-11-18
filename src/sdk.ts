@@ -232,8 +232,12 @@ export class Armada {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const read = method === 'GET' || method === 'HEAD';
-    // When the outage began, at the read's first failure: a redeploy's wait (`deployed`) before it is no outage.
+    // When the outage began: when the ask that first failed was sent, its own wait counted (a redeploy's wait before it,
+    // `deployed`, is no outage). Every later ask and pause ends within the budget it leaves (the armada audit,
+    // 2026-11-18: a pause could pass the budget's end, and a full ask start after it).
     let began: number | null = null;
+    let asking = Date.now();
+    const remaining = (): number => began === null ? Infinity : began + READ_OUTAGE_MS - Date.now();
 
     // Whether a read that failed, or a write the runtime refused unmade, is asked again, the first failure said with its
     // cause.
@@ -241,11 +245,11 @@ export class Armada {
       if ((!read && !unmade) || init.signal?.aborted === true) return false;
 
       if (began === null) {
-        began = Date.now();
+        began = asking;
         console.error(`${method} ${path}: ${cause}; asked again for up to ${String(READ_OUTAGE_MS / 1000)} s`);
       }
 
-      return Date.now() - began < READ_OUTAGE_MS;
+      return remaining() > 0;
     };
 
     headers.set('authorization', `Bearer ${this.connection.token}`);
@@ -257,7 +261,10 @@ export class Armada {
       // One ask: a read's answered within `answerMs` (its body too, where `whole`), or failed with why.
       const send = async (): Promise<Response> => {
         const bounded = new AbortController();
-        const timer = read ? setTimeout(() => { bounded.abort(new Error(`no answer in ${String(this.answerMs / 1000)} s`)); }, this.answerMs) : undefined;
+        const bound = Math.max(1, Math.min(this.answerMs, remaining()));
+
+        asking = Date.now();
+        const timer = read ? setTimeout(() => { bounded.abort(new Error(`no answer in ${String(Math.round(bound / 1000))} s`)); }, bound) : undefined;
         const signal = init.signal === undefined || init.signal === null ? bounded.signal : AbortSignal.any([init.signal, bounded.signal]);
 
         try {
@@ -278,17 +285,17 @@ export class Armada {
         if (init.signal?.aborted === true) throw cause;
 
         if (!again(errorOf({ cause }).message)) throw new Unreachable(`${method} ${path}`, { cause });
-        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
+        await pause(Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
         continue;
       }
 
       if ([500, 502, 503, 504].includes(sent.status) && again(`answered ${String(sent.status)}`)) {
-        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
+        await pause(Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
         continue;
       }
 
       if (!read && sent.headers.get(UNMADE_HEADER) === '1' && again(`answered ${String(sent.status)}, nothing made`, true)) {
-        await pause(Math.random() * Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
+        await pause(Math.random() * Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
         continue;
       }
 

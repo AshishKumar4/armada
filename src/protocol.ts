@@ -794,7 +794,7 @@ export async function cacheKey(bundle: string, task: string, environment: string
 }
 
 /** One environment per driver and recipe: base, scripts, size and, for a repository, its key files. */
-export async function environmentKey(recipe: Recipe): Promise<string> {
+export async function environmentKey(recipe: Recipe, cpu?: readonly Cpu[]): Promise<string> {
   const repo = recipe.repo === undefined ? null : {
     ...recipe.repo,
     manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map((entry) => `${entry.path} ${entry.id}`),
@@ -804,7 +804,12 @@ export async function environmentKey(recipe: Recipe): Promise<string> {
   // sizes of one disk share an environment, keyed as the smallest of them by its instance type, as the instance type
   // did before sizes were named.
   const shared = SIZE_NAMES.find((size) => SIZES[size].diskGB === SIZES[recipe.size].diskGB) ?? recipe.size;
-  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[shared].instance, repo];
+  // A job pinned to CPUs (`JobSpec.cpu`) has an environment of its own pin, prepared on one of them or not at all: the
+  // platform may start a snapshot's containers only where it was taken, so one environment serves only the jobs its
+  // snapshot's host serves (the armada audit, 2026-11-18: two pins sharing one key's generation each displaced the
+  // other's, and a job packed against one was refused by the next). An unpinned job's is keyed as it always was.
+  const pin = cpu === undefined ? [] : [cpu.map(cpuLabel).toSorted().join(',')];
+  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[shared].instance, repo, ...pin];
 
   return await sha256(JSON.stringify(inputs));
 }
@@ -883,13 +888,25 @@ export function usageOf(outcomes: readonly { readonly seconds: number; readonly 
   };
 }
 
-/** The smallest size `from` to `to` whose memory and vCPUs this usage fills to three quarters at most, else `to`. Measured
+/** The memory a container keeps for itself beside its tasks: its main process, the runner's execs, a gang's relay, and
+ *  the room its kernel and the platform's agent need while a task thrashes at its cap. 512 MiB did not hold: a medium
+ *  container whose task sat at its 11.5 GiB cap, 600 MiB free, died to the platform's "internal error" (Dew,
+ *  2026-11-16: the task's 33 MiB/s leak lost 64 vessels in 3.7 h). */
+const SYSTEM_MEMORY = 2 * 2 ** 30;
+
+/** The memory every task of a container holds together, at most: the cgroup over all of them is capped at it, so a
+ *  container whose tasks outgrew their estimates has one of them killed, never its own processes (worker/src/container.ts); a lone task's own cap, and what `fitSize` sizes a task by. */
+export const tasksMemoryOf = (size: Size): number => SIZES[size].memoryGiB * 2 ** 30 - SYSTEM_MEMORY;
+
+/** The smallest size `from` to `to` whose task memory (`tasksMemoryOf`, the cap a task runs under) and vCPUs this usage
+ *  fills to three quarters at most, else `to` (the armada audit, 2026-11-18: sized by the container's whole memory, a
+ *  2.5 GiB task went to micro and its 2 GiB cap killed it). Measured
  *  on a smaller size, a task held to its vCPUs fills them, so the next run goes a size up. A run's sizes stop at medium;
  *  a task's own may go to large (#64). */
 export function fitSize(usage: Usage, { from = SIZE_NAMES[0], to = 'medium' }: { readonly from?: Size; readonly to?: Size } = {}): Size {
   const sizes = SIZE_NAMES.slice(SIZE_NAMES.indexOf(from), SIZE_NAMES.indexOf(to) + 1);
 
-  return sizes.find((size) => usage.memory <= SIZES[size].memoryGiB * 2 ** 30 * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? to;
+  return sizes.find((size) => usage.memory <= tasksMemoryOf(size) * 0.75 && usage.cores <= SIZES[size].vcpus * 0.75) ?? to;
 }
 
 export const describeUsage = (usage: Usage): string => `${(usage.memory / 2 ** 30).toFixed(2)} GiB and ${usage.cores.toFixed(2)} cores`;

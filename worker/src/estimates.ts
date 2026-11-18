@@ -6,7 +6,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
-import { canonical, sha256, SIZES, type Json, type JobSpec, type Size, type Task } from '../../src/protocol';
+import { canonical, sha256, SIZES, tasksMemoryOf, type Json, type JobSpec, type Size, type Task } from '../../src/protocol';
 import type { Env } from './env';
 
 /** What a task used, or is expected to use: its cores (CPU seconds over wall seconds), its peak memory and its disk, in
@@ -63,12 +63,6 @@ const ITEMS = 20_000;
 /** The fewest samples a class is estimated from: below it, a task of the class runs alone and is measured. */
 export const MIN_SAMPLES = 8;
 
-/** The memory a container keeps for itself beside its tasks: its main process, the runner's execs, a gang's relay, and
- *  the room its kernel and the platform's agent need while a task thrashes at its cap. 512 MiB did not hold: a medium
- *  container whose task sat at its 11.5 GiB cap, 600 MiB free, died to the platform's "internal error" (Dew,
- *  2026-11-16: the task's 33 MiB/s leak lost 64 vessels in 3.7 h). */
-const SYSTEM_MEMORY = 2 * 2 ** 30;
-
 /** The class of `task` in a job of `spec` on environment `key`: a pushed task's id, else its command's program and first
  *  argument, under the environment. */
 export function classOf(spec: Pick<JobSpec, 'run'>, task: Task, key: string): string {
@@ -92,10 +86,6 @@ export async function itemKey(task: Task): Promise<string> {
 
   return await sha256(canonical(stated === null ? { item: task.item, argv: task.argv === undefined ? null : [...task.argv] } : { key: stated }));
 }
-
-/** The memory every task of a container holds together, at most: the cgroup over all of them is capped at it, so a
- *  container whose tasks outgrew their estimates has one of them killed, never its own processes (`container.ts`). */
-export const tasksMemoryOf = (size: Size): number => SIZES[size].memoryGiB * 2 ** 30 - SYSTEM_MEMORY;
 
 /** What a container's tasks may be estimated to use together: every vCPU, since estimates are of cores at their 90th
  *  percentile; and of memory and disk, a margin under what it holds, since a task's use varies from its class's. */
