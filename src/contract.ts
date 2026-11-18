@@ -96,9 +96,9 @@ function modulesOf(files: ReadonlyMap<string, string>): ReadonlyMap<string, Modu
 
       if (named !== null) {
         for (const part of (named[1] ?? '').split(',').map((each) => each.trim().replace(/^type\s+/u, '')).filter((each) => each !== '')) {
-          const [name = '', local = name] = part.split(/\s+as\s+/u);
+          const [exported = '', local = exported] = part.split(/\s+as\s+/u);
 
-          imported.set(local, { from: target(named[2] ?? ''), name });
+          imported.set(local, { from: target(named[2] ?? ''), name: exported });
         }
       } else if (whole?.[1] !== undefined) {
         namespaces.set(whole[1], target(whole[2] ?? ''));
