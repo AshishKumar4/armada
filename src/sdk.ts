@@ -197,6 +197,10 @@ export class RequestError extends Error {
   }
 }
 
+/** The runtime's refusal of a request to a Durable Object whose queue was too long: the object never took it, so it made
+ *  nothing (Cloudflare's "Durable Object is overloaded. Requests queued for too long."). */
+const OVERLOADED = /Durable Object is overloaded/u;
+
 export class Armada {
   /** `answerMs`: how long one ask of a read waits for its whole answer (READ_ANSWER_MS). */
   constructor(readonly connection: Connection, readonly answerMs = READ_ANSWER_MS) {}
@@ -208,7 +212,10 @@ export class Armada {
   /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, the Worker's own 500, or a
    *  connection that fails (dropped, refused, its TLS refused), is asked again for READ_OUTAGE_MS, a second apart more
    *  each time up to READ_PAUSE_MS, the failure said once with its cause: the Worker answers it again unchanged, and a
-   *  `run` that polls for hours should not end on a network's blip. A write is asked once. A Durable Object the runtime
+   *  `run` that polls for hours should not end on a network's blip. A write is asked once, but where the runtime refused
+   *  it unmade, a Durable Object it reached overloaded (OVERLOADED: its requests queued too long, so the object never
+   *  took this one), which is asked again as a read is (Dew, 2026-11-18: five of a reach's 50 maps failed their
+   *  POST /jobs so, and 133 tasks had no outcome). A Durable Object the runtime
    *  restarted throws once under a read ("Worker threw exception"), and the next read is answered. Any request the
    *  Worker refuses while it is redeployed (`redeploying`), which made nothing of it, is asked again until the deploy is
    *  done, a second apart more each time up to REDEPLOY_WAIT_MS, said once: a job submitted during a deploy's drain
@@ -230,9 +237,10 @@ export class Armada {
     // When the outage began, at the read's first failure: a redeploy's wait (`deployed`) before it is no outage.
     let began: number | null = null;
 
-    // Whether a read that failed is asked again, the first failure said with its cause.
-    const again = (cause: string): boolean => {
-      if (!read || init.signal?.aborted === true) return false;
+    // Whether a read that failed, or a write the runtime refused unmade, is asked again, the first failure said with its
+    // cause.
+    const again = (cause: string, unmade = false): boolean => {
+      if ((!read && !unmade) || init.signal?.aborted === true) return false;
 
       if (began === null) {
         began = Date.now();
@@ -277,6 +285,12 @@ export class Armada {
       }
 
       if ([500, 502, 503, 504].includes(sent.status) && again(`answered ${String(sent.status)}`)) {
+        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
+        continue;
+      }
+
+      if (sent.status === 500 && !read && OVERLOADED.test(await sent.clone().text())
+        && again(`answered 500, ${OVERLOADED.source}`, true)) {
         await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
       }
