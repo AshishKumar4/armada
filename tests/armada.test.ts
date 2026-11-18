@@ -2519,7 +2519,11 @@ describe('a read through an outage', () => {
       expect(await armada.post('/jobs', {})).toEqual({ id: 'made' });
       expect(asked).toBe(3);
       asked = 0;
-      globalThis.fetch = fakeFetch(() => { asked += 1; return new Response('an exception', { status: 500 }); });
+      globalThis.fetch = fakeFetch(() => {
+        asked += 1;
+
+        return new Response('an exception', { status: 500 });
+      });
       await expect(armada.post('/jobs', {})).rejects.toThrow('an exception');
       expect(asked).toBe(1);
     } finally {
