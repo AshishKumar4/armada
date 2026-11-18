@@ -704,6 +704,9 @@ export const HealthSchema = v.object({
   /** The fingerprint of the interface its Durable Objects call each other by (`contractOf`), `armada deploy`'s
    *  ARMADA_CONTRACT var — absent on a Worker before it. */
   contract: v.optional(v.string()),
+  /** The fingerprint of what a client and the Worker each derive (`derivedOf`), `armada deploy`'s ARMADA_DERIVED var
+   *  — absent on a Worker before it. */
+  derived: v.optional(v.string()),
   /** When the registry credentials a `--keep` deploy gave the Worker expire, an ISO date; absent without them. */
   keepUntil: v.optional(v.string()),
 });
@@ -737,6 +740,18 @@ export function drainReasons(health: Health | null, force: boolean, contract: st
     ...(health.driver !== DRIVER ? [`its containers run driver ${String(health.driver)}, not ${String(DRIVER)}`] : []),
     ...(health.contract !== contract ? [`its objects call each other by another interface (${health.contract ?? 'unsaid'})`] : []),
   ];
+}
+
+/** Why a version deriving `derived` (`derivedOf`) may not replace the deployed Worker of `health`: what a client
+ *  derives changed while this wire still serves the clients that derive it the earlier way, whose jobs the new Worker
+ *  would refuse mid-job (2026-11-18: a pinned job's environment re-keyed, every job of the pinned client refused).
+ *  Raising OLDEST_CLIENT past the deployed Worker's floor has it refuse them at their first request, with an update;
+ *  null where the deploy may go on, a deployed Worker that does not say what it derives among them. */
+export function clientRefusal(health: Health | null, derived: string): string | null {
+  if (health?.derived === undefined || health.derived === derived || servedFloor(health) < OLDEST_CLIENT) return null;
+
+  return `what a client derives changed (${health.derived.slice(0, 12)} deployed, ${derived.slice(0, 12)} here) while this version still serves the clients of wire `
+    + `${String(servedFloor(health))} and up that derive it the earlier way: raise OLDEST_CLIENT past ${String(servedFloor(health))}, so a client not moved with it is refused with an update before it makes a job`;
 }
 
 const UsageSchema = v.object({ memory: v.number(), cores: v.number() });

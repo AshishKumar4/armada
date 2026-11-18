@@ -38,6 +38,8 @@ export interface Env {
   readonly ARMADA_SHA?: string;
   /** The interface its Durable Objects call each other by (`contractOf`), written into the deployed vars. */
   readonly ARMADA_CONTRACT?: string;
+  /** What a client and this Worker each derive (`derivedOf`), as `armada deploy` gives it; empty or absent before. */
+  readonly ARMADA_DERIVED?: string;
   /** The deployment's name and its account, written into the deployed vars: its own container apps are named for it. */
   readonly ARMADA_NAME?: string;
   readonly ARMADA_ACCOUNT?: string;

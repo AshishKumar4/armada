@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { DrainBound, drainWithin, openJobs, Unlisted, type Drainable, type ListedJob } from '../src/drain';
-import { DRIVER, drainReasons, PROTOCOL, type Health } from '../src/protocol';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { derivedOf } from '../src/contract';
+import { clientRefusal, DRIVER, drainReasons, OLDEST_CLIENT, PROTOCOL, type Health } from '../src/protocol';
 
 const MINUTE = 60_000;
 
@@ -184,5 +188,53 @@ describe('the open jobs are read whole or not at all', () => {
 
     await expect(openJobs(async () => await Promise.resolve(page(repeated)))).rejects.toEqual(new Unlisted('repeated'));
     await expect(openJobs(async () => await Promise.resolve(new Response(null, { status: 404 })))).rejects.toEqual(new Unlisted('unavailable'));
+  });
+});
+
+// 2026-11-18: the deploy re-keyed a pinned job's environment behind the same types, and every job of the pinned
+// client was refused mid-job until it moved.
+describe('a deploy whose clients derive differently', () => {
+  const health = (fields: Partial<Health>): Health => ({ ok: true, driver: DRIVER, protocol: PROTOCOL, oldest: OLDEST_CLIENT, vcpus: 1, jobs: 0, contract: 'this', ...fields });
+
+  test('is refused while its wire still serves the clients that derive it the earlier way, and goes on once it does not', () => {
+    const deployed = health({ derived: 'a'.repeat(64), oldest: OLDEST_CLIENT });
+
+    expect({
+      changed: clientRefusal(deployed, 'b'.repeat(64)) !== null,
+      same: clientRefusal(deployed, 'a'.repeat(64)),
+      raised: clientRefusal(health({ derived: 'a'.repeat(64), oldest: OLDEST_CLIENT - 1 }), 'b'.repeat(64)),
+      unsaid: clientRefusal(health({}), 'b'.repeat(64)),
+      none: clientRefusal(null, 'b'.repeat(64)),
+    }).toEqual({ changed: true, same: null, raised: null, unsaid: null, none: null });
+  });
+
+  test('derives a new fingerprint from a shared derivation\'s body, and none from a comment, formatting or the Worker alone', () => {
+    const root = mkdtempSync(join(tmpdir(), 'armada-derived-'));
+
+    try {
+      const write = (protocol: string, worker = 'export const x = 1;\n') => {
+        mkdirSync(join(root, 'src'), { recursive: true });
+        mkdirSync(join(root, 'worker', 'src'), { recursive: true });
+        writeFileSync(join(root, 'src', 'protocol.ts'), protocol);
+        writeFileSync(join(root, 'src', 'sdk.ts'), "import { keyOf } from './protocol';\nexport const k = keyOf;\n");
+        writeFileSync(join(root, 'worker', 'src', 'worker.ts'), `import { keyOf, helper } from '../../src/protocol';\n${worker}`);
+
+        return derivedOf(root);
+      };
+      const base = 'const SALT = 1;\n\n/** The key. */\nexport function keyOf(a: number): number {\n  return a + SALT;\n}\n\nexport function helper(): number {\n  return 2;\n}\n';
+      const first = write(base);
+
+      expect({
+        comment: write(base.replace('return a + SALT;', '// why\n  return a + SALT; // and how')),
+        formatting: write(base.replace('return a + SALT;', 'return   a +\n    SALT;')),
+        worker: write(base, 'export const x = 2;\n'),
+        // A function the client does not import, though the Worker does: no derivation they share.
+        unshared: write(base.replace('return 2;', 'return 3;')),
+        body: write(base.replace('return a + SALT;', 'return a * SALT;')),
+        reached: write(base.replace('const SALT = 1;', 'const SALT = 2;')),
+      }).toEqual({ comment: first, formatting: first, worker: first, unshared: first, body: expect.not.stringMatching(first), reached: expect.not.stringMatching(first) });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

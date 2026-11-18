@@ -11,7 +11,7 @@ import { drainWithin } from './drain';
 import { argvOf, cancelOnInterrupt, extractTar, onCommit, runCI, verdictCI } from './ci';
 import { buildDashboard, dashboardUrl, everyDashboardUrl, openInBrowser, serveDashboard } from './dashboard';
 import { DeploymentName } from './config';
-import { contractOf } from './contract';
+import { contractOf, derivedOf } from './contract';
 import { deploymentConfig, fleetCap } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
@@ -19,7 +19,7 @@ import { findProject, push } from './push';
 import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
 import { boundsOf, RetentionSchema, type Retention } from './runs';
 import { retentionOf, runsCommand } from './runs-command';
-import { BaseSchema, cpusOf, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, drainReasons, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
+import { BaseSchema, clientRefusal, cpusOf, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, drainReasons, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
 import { commandTask, recipe, type Json, type Meta } from './task';
 
 const ROOT = join(import.meta.dir, '..');
@@ -502,6 +502,9 @@ async function deploy(name: string, { vcpus, memoryGiB, keep }: { readonly vcpus
     // and takes its first job once they run its own (`ArmadaFleet.admitJob`).
     const health = deployed === null ? null : await healthOf(name, deployed);
 
+    const refused = deployed === null ? null : clientRefusal(health, derivedOf(ROOT));
+
+    if (refused !== null) throw new Error(`armada deploy: ${refused}`);
     const reasons = deployed === null ? [] : drainReasons(health, forceDrain, contractOf(ROOT));
 
     if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, held: (held) => { drained = held; } });
@@ -638,7 +641,7 @@ async function install(account: string, name: string, file: string, { vcpus, mem
   await buildDashboard(DASHBOARD);
   // Read from the checkout as it is deployed, as its commit is, not as it was before a drain that may have taken hours.
   writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
-    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT), derived: derivedOf(ROOT),
   }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));

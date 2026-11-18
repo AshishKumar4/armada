@@ -395,12 +395,12 @@ describe('a deployment\'s wrangler config', () => {
     const template = readFileSync(join(import.meta.dir, '..', 'worker', 'wrangler.jsonc'), 'utf8');
     // The same template laid out otherwise: no comments, its keys in another order, one line.
     const reordered = JSON.stringify(Object.fromEntries(Object.entries(v.parse(v.record(v.string(), JsonSchema), Bun.JSONC.parse(template))).reverse()));
-    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/home/o\'brien/"armada"\\worker.ts', dashboard: '/tmp/dash', bucket: 'armada-x-artifacts', vcpus: 64, sha: 'b'.repeat(40), contract: 'c'.repeat(64) };
+    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/home/o\'brien/"armada"\\worker.ts', dashboard: '/tmp/dash', bucket: 'armada-x-artifacts', vcpus: 64, sha: 'b'.repeat(40), contract: 'c'.repeat(64), derived: 'd'.repeat(64) };
     const read = (text: string) => v.parse(v.looseObject({ name: v.string(), account_id: v.string(), main: v.string(), assets: v.looseObject({ directory: v.string() }), vars: v.record(v.string(), v.string()), r2_buckets: v.array(v.looseObject({ bucket_name: v.string() })), durable_objects: JsonSchema }), JSON.parse(deploymentConfig(text, deployment)));
     const [laid, other] = [read(template), read(reordered)];
 
     expect({ same: laid, name: laid.name, account: laid.account_id, main: laid.main, assets: laid.assets.directory, vars: laid.vars, buckets: laid.r2_buckets.map((each) => each.bucket_name), schema: '$schema' in laid })
-      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
+      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_DERIVED: 'd'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
   });
 });
 

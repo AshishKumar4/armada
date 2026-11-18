@@ -44,6 +44,75 @@ export function contractOf(root: string): string {
   }
 }
 
+/** The fingerprint of what a client and the Worker each derive and must agree on, as src/protocol.ts derives it: every
+ *  function protocol.ts exports that both the Worker (worker/src/) and the client (src/, beside protocol.ts) import,
+ *  with every declaration of protocol.ts its source names, and those name in turn, as source text with comments and
+ *  whitespace taken out, so a change to how one is computed changes it and formatting alone does not. The contract
+ *  (`contractOf`) reads declared types alone, never a body: 2026-11-18's deploy re-keyed a pinned job's environment
+ *  (`environmentKey`) behind the same types, and every job of the pinned client was refused until it moved. `armada
+ *  deploy` refuses a version whose fingerprint differs from the deployed one's unless its wire's floor is raised
+ *  past it (`clientRefusal`), so a pinned client is refused at its first request with an update, never mid-job. */
+export function derivedOf(root: string): string {
+  const source = readFileSync(join(root, 'src', 'protocol.ts'), 'utf8');
+  const declared = new Map<string, string[]>();
+
+  for (const chunk of source.split(/\n(?=[^\s}\])])/u)) {
+    const name = SOURCE_DECLARED.exec(chunk)?.[1];
+
+    if (name !== undefined) declared.set(name, [...declared.get(name) ?? [], chunk]);
+  }
+
+  const importers = (directory: string, module: RegExp, skip?: string): Set<string> => new Set(readdirSync(join(root, directory)).filter((file) => file.endsWith('.ts') && file !== skip)
+    .flatMap((file) => [...readFileSync(join(root, directory, file), 'utf8').matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*'${module.source}'`, 'gu'))])
+    .flatMap((match) => (match[1] ?? '').split(',').map((part) => part.trim().split(/\s+as\s+/u)[0] ?? '').filter((part) => part !== '' && !part.startsWith('type '))));
+  const worker = importers(join('worker', 'src'), /\.\.\/\.\.\/src\/protocol/u);
+  const client = importers('src', /\.\/protocol/u, 'protocol.ts');
+  const roots = [...worker].filter((name) => client.has(name) && (declared.get(name) ?? []).some((chunk) => /^(?:export )?(?:async )?function /u.test(chunk)));
+
+  const kept = new Set<string>();
+  const seen = new Set<string>();
+
+  const reach = (name: string): void => {
+    if (seen.has(name)) return;
+
+    seen.add(name);
+
+    for (const chunk of declared.get(name) ?? []) {
+      const text = uncommented(chunk);
+
+      kept.add(text);
+
+      for (const word of text.matchAll(/[A-Za-z_$][\w$]*/gu)) if (word[0] !== name) reach(word[0]);
+    }
+  };
+
+  for (const root of roots) reach(root);
+  const hash = createHash('sha256');
+
+  for (const text of [...kept].toSorted()) hash.update(`${text}\n`);
+
+  return hash.digest('hex');
+}
+
+/** A top-level declaration's name in TypeScript source. */
+const SOURCE_DECLARED = /^(?:export )?(?:declare )?(?:abstract )?(?:async )?(?:class|interface|type|const|function|enum|let|var|namespace) +([\w$]+)/u;
+
+/** `text` without its comments (a line's from `//`, a block's) and with its whitespace one space: a comment or
+ *  formatting alone derives nothing. A `//` within a string is kept, as a line comment starts only past code that is
+ *  no string's: the quote count before it is even. */
+function uncommented(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//gu, ' ')
+    .split('\n').map((line) => {
+      for (let at = line.indexOf('//'); at !== -1; at = line.indexOf('//', at + 2)) {
+        const before = line.slice(0, at);
+
+        if (((before.match(/'/gu) ?? []).length % 2) === 0 && ((before.match(/`/gu) ?? []).length % 2) === 0 && ((before.match(/"/gu) ?? []).length % 2) === 0) return before;
+      }
+
+      return line;
+    }).join('\n').replace(/\s+/gu, ' ').trim();
+}
+
 /** The Durable Object classes `root`'s Worker config binds. */
 function bound(root: string): readonly string[] {
   return [...readFileSync(join(root, 'worker', 'wrangler.jsonc'), 'utf8').matchAll(/"class_name":\s*"(\w+)"/gu)].map((match) => match[1] ?? '');

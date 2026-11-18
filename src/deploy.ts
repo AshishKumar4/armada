@@ -8,7 +8,7 @@ import * as v from 'valibot';
 /** The template's fields a deployment sets; every other field is the template's own. */
 const TemplateSchema = v.looseObject({
   assets: v.looseObject({ directory: v.string() }),
-  vars: v.looseObject({ ARMADA_SHA: v.string(), ARMADA_CONTRACT: v.string() }),
+  vars: v.looseObject({ ARMADA_SHA: v.string(), ARMADA_CONTRACT: v.string(), ARMADA_DERIVED: v.string() }),
   r2_buckets: v.array(v.looseObject({ binding: v.string(), bucket_name: v.string() })),
 });
 
@@ -25,16 +25,18 @@ export interface Deployment {
   readonly sha: string;
   /** The interface its Durable Objects call each other by (`contractOf`). */
   readonly contract: string;
+  /** What a client and its Worker each derive (`derivedOf`). */
+  readonly derived: string;
 }
 
 /** `template`, a wrangler.jsonc, as `deployment`'s config, JSON. Its `$schema` is a path relative to the template, so
  *  it is left out. */
-export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, memoryMib, sha, contract }: Deployment): string {
+export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, memoryMib, sha, contract, derived }: Deployment): string {
   const { $schema: _schema, ...parsed } = v.parse(v.looseObject({ ...TemplateSchema.entries, $schema: v.optional(v.string()) }), Bun.JSONC.parse(template));
 
   // Its name and account also name its own container apps among the account's (`readAccount`); FLEET_MEMORY_MIB the
   // fleet's memory, where the deploy read the account's.
-  const vars = new Map(Object.entries({ ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account }));
+  const vars = new Map(Object.entries({ ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_DERIVED: derived, ARMADA_NAME: name, ARMADA_ACCOUNT: account }));
 
   if (memoryMib !== undefined) vars.set('FLEET_MEMORY_MIB', String(memoryMib));
 
