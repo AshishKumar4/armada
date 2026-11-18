@@ -52,21 +52,6 @@ export function remainingDeadline(deadlineAt: number): number | null {
   return remaining > 0 ? remaining : null;
 }
 
-/** How long a later wave's jobs (judges', later map tasks') are given besides one task's timeout: their containers'
- *  start, which a busy fleet makes minutes. */
-export const LATER_START_SECONDS = 600;
-
-/** When a run's later waves (judges', later map tasks') must end, together: one task's `timeout` and
- *  `LATER_START_SECONDS` past the run's deadline (`deadlineAt`), so a judged run whose first wave ran long still
- *  judges what it drew (Dew's train 795, 2026-11-13: its judges' job started with 192 s of the run's 2,700 left, ran
- *  out, and the run ended ungraded); never past `by`, the time by which whoever runs it needs its answer (`--by`: a
- *  webhook's driver, whose job ends then), which bounds the deadline itself too (`runGraded`). */
-export function laterEnd(deadlineAt: number, timeout: number | null | undefined, by: number | undefined): number {
-  const later = deadlineAt + ((timeout ?? 0) + LATER_START_SECONDS) * 1000;
-
-  return by === undefined ? later : Math.min(later, by);
-}
-
 /** Why a run that could start no further job is ungraded. */
 const PASSED = (next: string) => `CiDeadlineExceeded: the CI run passed its deadline before its ${next} could start`;
 
@@ -524,7 +509,7 @@ export function lanesFor(estimates: readonly (number | undefined)[], weights: re
 export interface RunOptions {
   /** The whole run's bound in seconds; the commit's config (1800 by default) when absent. */
   readonly deadline?: number;
-  /** When, in seconds since the epoch, whoever runs it needs its answer: its later waves end by then (`laterEnd`). */
+  /** When, in seconds since the epoch, whoever runs it needs its answer: the run, every wave of it, ends by then. */
   readonly by?: number;
   /** The most containers the run takes at once, within the commit's config `pool`: a run beside others on one
    *  deployment, bounded so they share its fleet. What it runs, and so its verdict, is the commit's either way. */
@@ -616,10 +601,10 @@ export async function runCI(armada: Armada, target: string, options: RunOptions)
 async function runGraded(armada: Armada, target: string, { deadline, by, pool: bound, priority, label, planArgs, secrets }: RunOptions, note: (line: string) => void): Promise<RunResult> {
   const began = Date.now();
   const { sha, repo, config, timings, base, environment, spec, upload, of } = await commitOf(armada, target);
-  // Its deadline, never past when its caller needs the answer (`by`), and when its later waves must end (`laterEnd`).
+  // Its one end, by which every wave ends, never past when its caller needs the answer (`by`): a later wave (judges',
+  // later map tasks') starts as its inputs are ready and gets what remains of it.
   const byAt = by === undefined ? undefined : by * 1000;
   const deadlineAt = Math.min(began + (deadline ?? config.deadline) * 1000, byAt ?? Infinity);
-  const laterAt = laterEnd(deadlineAt, config.task.timeout, byAt);
 
   note(`${config.name} ${sha}, environment ${environment.key.slice(0, 12)}${environment.base === 'root' ? ' (to prepare)' : ''}`);
 
@@ -962,8 +947,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
     let bounded = within();
 
     // A wave the pool's rest cannot hold waits for running jobs to end, each end a look again, then starts within its
-    // bound as it stands then: what is left of the run's deadline (#37), or not at all; a later wave's of its own
-    // (`laterEnd`).
+    // bound as it stands then: what is left of the run's deadline (#37), or not at all.
     // Room for each job's widest gang among the containers no running job holds, or the wait goes on.
     const fits = () => groupsOf.reduce((sum, { indexes }) => sum + Math.max(1, ...indexes.map((index) => ranks[index] ?? 1)), 0)
       <= containers - [...tail.values()].reduce((sum, each) => sum + each, 0);
@@ -1086,7 +1070,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
 
       if (judging.length === 0) return null;
 
-      return await wave(judging, () => remainingDeadline(laterAt), 'judges\' jobs');
+      return await wave(judging, () => remainingDeadline(deadlineAt), 'judges\' jobs');
     };
 
     // Each judge judged first once its first-stage map tasks have all landed, as each map job ends; any whose did not
@@ -1125,7 +1109,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
         const indexes = group.later ? group.indexes.filter((index) => wanted.has(index)) : [];
 
         return indexes.length === 0 ? [] : [{ at, indexes }];
-      }), () => remainingDeadline(laterAt), 'later map tasks\' jobs');
+      }), () => remainingDeadline(deadlineAt), 'later map tasks\' jobs');
 
       if ('refused' in drawnLater) return drawnLater;
       landed = [...landed, ...drawnLater.landed];

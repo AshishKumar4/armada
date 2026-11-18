@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, closeSync, cpSync, existsSync, mkdirSync, mk
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as v from 'valibot';
-import { extractTar, judgeChunks, LATER_START_SECONDS, laterEnd, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
+import { extractTar, judgeChunks, lanesFor, poolFor, remainingDeadline, sharesFor } from '../src/ci';
 import { manifestOf, packBase, packTo } from '../src/git';
 import { uploadPack } from '../src/packs';
 import { parseConfig } from '../src/config';
@@ -306,7 +306,7 @@ describe('a deploy', () => {
     ]).toEqual([true, true, true, true, false, false, false, true, true, true, true]);
   });
 
-  test('fingerprints the interface its Durable Objects call each other by and the shapes they store, with only Bun installed: the same for a comment or a method\'s body, another for a public method\'s arguments or a stored field', () => {
+  test('fingerprints the interface its Durable Objects call each other by, with only Bun installed: the same for a comment, a method\'s body or an export no call names, another for a public method\'s arguments or a type a call takes', () => {
     const copy = mkdtempSync(join(tmpdir(), 'armada-contract-'));
     const root = join(import.meta.dir, '..');
 
@@ -332,15 +332,38 @@ describe('a deploy', () => {
       writeFileSync(fleet, original.replace('async release(holder: string, afterMs = 0): Promise<void> {', 'async release(holder: string, afterMs = 0, why = \'\'): Promise<void> {\n    void why;'));
       const outer = contract();
 
-      // The fleet's holds and its drain, each kept until a time, kept under another name.
-      writeFileSync(fleet, original.replaceAll('until: ', 'till: ').replaceAll('.until', '.till'));
+      writeFileSync(fleet, original);
+      // Exports no call names, each of 2026-11-17's groups that drained by one alone (the armada audit of 2026-11-18): a
+      // client's HTTP header (T), a webhook driver's constant (A), a deployment's setting (E), a client's helper (I).
+      const edits: readonly (readonly [string, string, string])[] = [
+        ['src/protocol.ts', 'export function drainReasons(', 'export const UNMADE = \'armada-unmade\';\nexport function drainReasons('],
+        ['worker/src/hooks.ts', 'export const REPORT_SECONDS = 5 * 60;', 'export const REPORT_SECONDS = 6 * 60;\nexport const LATER_SECONDS = 600;'],
+        ['worker/src/env.ts', 'export interface Env {', 'export interface Env {\n  readonly PREPARE_CPU?: string;'],
+        ['src/protocol.ts', 'export function drainReasons(', 'export function drainFor(force: boolean): string[] {\n  return force ? [\'asked\'] : [];\n}\nexport function drainReasons('],
+      ];
+      const exported = edits.map(([file, from, to]) => {
+        const path = join(copy, file);
+        const was = readFileSync(path, 'utf8');
 
-      expect({ inner: inner === before, outer: outer === before, stored: contract() === before }).toEqual({ inner: true, outer: false, stored: false });
+        writeFileSync(path, was.replace(from, to));
+        const found = contract();
+
+        writeFileSync(path, was);
+
+        return found === before;
+      });
+      // A type a call takes: what a preparation begins from (Q's preparer input).
+      const environments = join(copy, 'worker', 'src', 'environments.ts');
+
+      writeFileSync(environments, readFileSync(environments, 'utf8').replace('type Inputs = Pick<Preparation, \'recipe\' | \'sha\' | \'packer\' | \'shallow\' | \'cpu\'>;', 'type Inputs = Pick<Preparation, \'recipe\' | \'sha\' | \'packer\' | \'shallow\' | \'cpu\'> & { readonly why?: string };'));
+
+      expect({ inner: inner === before, outer: outer === before, exported, taken: contract() === before })
+        .toEqual({ inner: true, outer: false, exported: [true, true, true, true], taken: false });
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }
-    // Four Bun processes, each a TypeScript program over the objects: 1 s on a desktop, past 5 s on an AMD 25/1 host.
-  }, 30_000);
+    // Eight Bun processes, each a TypeScript program over the objects: 2 s on a desktop, past 10 s on an AMD 25/1 host.
+  }, 60_000);
 });
 
 describe('a deployment\'s wrangler config', () => {
@@ -354,16 +377,6 @@ describe('a deployment\'s wrangler config', () => {
 
     expect({ same: laid, name: laid.name, account: laid.account_id, main: laid.main, assets: laid.assets.directory, vars: laid.vars, buckets: laid.r2_buckets.map((each) => each.bucket_name), schema: '$schema' in laid })
       .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
-  });
-});
-
-describe('a deployment\'s preparation CPUs', () => {
-  test('are in its config where it names them, and nowhere where it names none', () => {
-    const template = readFileSync(join(import.meta.dir, '..', 'worker', 'wrangler.jsonc'), 'utf8');
-    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/w.ts', dashboard: '/tmp/dash', bucket: 'b', vcpus: 64, sha: 'b'.repeat(40), contract: 'c'.repeat(64) };
-    const vars = (prepareCpu?: string) => v.parse(v.looseObject({ vars: v.record(v.string(), v.string()) }), JSON.parse(deploymentConfig(template, { ...deployment, prepareCpu }))).vars['PREPARE_CPU'];
-
-    expect([vars('AuthenticAMD/25/17,AuthenticAMD/26/17'), vars()]).toEqual(['AuthenticAMD/25/17,AuthenticAMD/26/17', undefined]);
   });
 });
 
@@ -2053,10 +2066,9 @@ Date.now = () => now() + skipped;
     expect({ exit: ran.exit, held: slow + judging <= 4, judging: judging > 0 }).toEqual({ exit: 0, held: true, judging: true });
   }, 30_000);
 
-  // A wave that waits on the first wave's tail for room starts within its own bound as it stands then (#37): a judges'
-  // job's is never less than a task's timeout and a start's allowance, however little of the run's deadline is left
-  // (Dew's train 795, 2026-11-13: its judges got 192 s, and the run ended ungraded).
-  test('a judges\' job that waits on the first wave\'s tail for room starts within its own bound', async () => {
+  // A wave that waits on the first wave's tail for room starts within the run's one end as it stands then (#37): what
+  // is left of the run's deadline when it starts, never what was left when it asked, and never more.
+  test('a judges\' job that waits on the first wave\'s tail for room starts within what is left of the run', async () => {
     const plan: Json = { include: [{ name: 'a' }, { name: 'c' }, { name: 'slow1' }, { name: 'slow2' }, { name: 'slow3' }, { name: 'j', after: ['a'], size: 'large' }, { name: 'k', after: ['c'] }] };
     const nameOf = (item: Json) => v.parse(v.object({ name: v.string() }), item).name;
     const drawn = mkdtempSync(join(tmpdir(), 'armada-draws-'));
@@ -2068,8 +2080,7 @@ Date.now = () => now() + skipped;
     const from = Date.now();
     const heldOf = (item: Json) => nameOf(item).startsWith('slow') && Date.now() - from < 5_000;
     const verdictOf = (item: Json): Json => ({ rows: [{ name: nameOf(item), exitCode: 0 }] });
-    // A task's timeout of 1 s puts the later waves' end 601 s past the run's 900 s, so the judges' jobs start within
-    // what is left of 1,501 s once the tail has run its 5 s: at most 1,496 s, never what was left when they asked.
+    // The judges' jobs start within what is left of the run's 900 s once the tail has run its 5 s: at most 895 s.
     const ran = await run(['--json', '--deadline=900', '--pool=3'], plan, {}, { exitOf: () => 0, verdictOf, heldOf, artifacts: [draws, draws, draws], taskConfig: { timeout: 1 } });
 
     rmSync(drawn, { recursive: true, force: true });
@@ -2077,7 +2088,7 @@ Date.now = () => now() + skipped;
     const judging = ran.bodies.slice(1).map((body) => v.parse(v.object({ items: v.array(v.object({ item: JsonSchema })), deadline: v.number() }), body))
       .filter(({ items }) => items.some(({ item }) => ['j', 'k'].includes(nameOf(item))));
 
-    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline > 1400 && deadline <= 1496) }).toEqual({ jobs: 2, within: true });
+    expect({ jobs: judging.length, within: judging.every(({ deadline }) => deadline > 880 && deadline <= 895) }).toEqual({ jobs: 2, within: true });
   }, 30_000);
 
   // Dew's base/kernels, 2026-11-02: its check-1 sites' judges read 1,050 map tasks, past the 1,000 runs a job takes, and
@@ -2337,17 +2348,6 @@ describe('a CI deadline', () => {
     } finally {
       setSystemTime();
     }
-  });
-});
-
-describe('a later wave\'s end', () => {
-  test('is a task\'s timeout and a start\'s allowance past the run\'s deadline, never past when its caller needs it', () => {
-    // Dew's train 795: a 2,700 s run of 1,800 s tasks; its judges, 192 s before the deadline, get 2,592 s more.
-    expect(laterEnd(2700_000, 1800, undefined)).toBe((2700 + 1800 + LATER_START_SECONDS) * 1000);
-    // A caller that needs the answer sooner (a webhook's driver, `--by`) has it by then.
-    expect(laterEnd(1800_000, 21600, 9000_000)).toBe(9000_000);
-    // A caller's time bounds the run's deadline too (`runGraded`), and the later waves end no later.
-    expect(laterEnd(5000_000, 1800, 5000_000)).toBe(5000_000);
   });
 });
 

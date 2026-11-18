@@ -25,20 +25,16 @@ export interface Deployment {
   readonly sha: string;
   /** The interface its Durable Objects call each other by (`contractOf`). */
   readonly contract: string;
-  /** The CPUs it prepares environments on (`cpusOf`'s form); absent for whatever host each is given. */
-  readonly prepareCpu?: string | undefined;
 }
 
 /** `template`, a wrangler.jsonc, as `deployment`'s config, JSON. Its `$schema` is a path relative to the template, so
  *  it is left out. */
-export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, memoryMib, sha, contract, prepareCpu }: Deployment): string {
+export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, memoryMib, sha, contract }: Deployment): string {
   const { $schema: _schema, ...parsed } = v.parse(v.looseObject({ ...TemplateSchema.entries, $schema: v.optional(v.string()) }), Bun.JSONC.parse(template));
 
   // Its name and account also name its own container apps among the account's (`readAccount`); FLEET_MEMORY_MIB the
   // fleet's memory, where the deploy read the account's.
   const vars = new Map(Object.entries({ ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_NAME: name, ARMADA_ACCOUNT: account }));
-
-  if (prepareCpu !== undefined) vars.set('PREPARE_CPU', prepareCpu);
 
   if (memoryMib !== undefined) vars.set('FLEET_MEMORY_MIB', String(memoryMib));
 

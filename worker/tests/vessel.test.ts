@@ -7,7 +7,7 @@ import { argvOf, CPU_INFO, INACTIVITY_MS, KEEP_MASK, MASK, MASK_VALUES, STOPPED,
 import { ArmadaFleet } from '../src/fleet';
 import type { Claim, Gang } from '../src/job';
 import { GANG_DOWN, GANG_UP, RELAY_LOG, RELAY_PY } from '../src/relay';
-import { ArmadaVessel, INPUTS_AT_ONCE, redRowIn, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
+import { ArmadaVessel, INPUTS_AT_ONCE, TAIL_BYTES, tailOf, type VesselSpec } from '../src/vessel';
 import { bundleKey, runKey } from '../src/env';
 import { bucket, container, namespace, state, world } from './harness';
 
@@ -409,15 +409,17 @@ describe('a finished task', () => {
       .toEqual([[0, 734003200, 2.5, false], [0, undefined, undefined, false]]);
   });
 
-  test('is red with 137 when its group killed a process for memory, though its last command exited 0, unless its own verdict holds the red', async () => {
+  test('is red with 137 when its group killed a process for memory, though its last command exited 0, whatever its output says', async () => {
     const kill = { exitCode: 0, stdout: '12884901888\n9000000\n1\n' };
 
     const runs = [await run(0, { usage: kill }), await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 1}]}' }),
       await run(0, { usage: kill, out: '{"rows": [{"name": "t", "exitCode": 0}]}' })];
 
-    // Each weighed against another copy as the red it is, so a copy's held green never stands over it.
-    expect(runs.map(({ accepts, completed: [outcome] }) => [accepts, outcome?.exitCode, outcome?.oomKilled ?? false, outcome?.redRow ?? false]))
-      .toEqual([[[137], 137, true, false], [[137], 0, true, true], [[137], 137, true, false]]);
+    // Each weighed against another copy as the red it is, so a copy's held green never stands over it; its output is
+    // its caller's to read, kept as it was written.
+    expect(runs.map(({ accepts, completed: [outcome] }) => [accepts, outcome?.exitCode, outcome?.oomKilled ?? false, outcome?.value]))
+      .toEqual([[[137], 137, true, undefined], [[137], 137, true, '{"rows": [{"name": "t", "exitCode": 1}]}'],
+        [[137], 137, true, '{"rows": [{"name": "t", "exitCode": 0}]}']]);
   });
 });
 
@@ -991,14 +993,5 @@ describe('a vessel\'s boot', () => {
     await vessel.alarm();
 
     expect(booted.map((boot) => boot.restarts)).toEqual([['killed as it came up (137)', 'this vessel restarted during the start']]);
-  });
-});
-
-describe('a verdict\'s red row', () => {
-  test('is a row of its verdict that exited other than 0, however the JSON is spaced, never a field outside its rows', () => {
-    expect([
-      redRowIn('{"rows": [{"name": "a", "exitCode":  1}]}'), redRowIn('{"rows":[{"exitCode"\n: -1}]}'),
-      redRowIn('{"exitCode": 1, "rows": [{"exitCode": 0}]}'), redRowIn('not a verdict'), redRowIn(undefined),
-    ]).toEqual([true, true, false, false, false]);
   });
 });

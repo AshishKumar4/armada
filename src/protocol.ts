@@ -504,9 +504,6 @@ export const OutcomeSchema = v.object({
   /** The most cores the run kept busy in one short window while it ran (its cgroup's CPU time read every few seconds):
    *  a pool of processes that work together reads as all of them, where `cpuSeconds` over the wall averages them down. */
   peakCores: v.optional(v.number()),
-  /** The task's output is a verdict holding a row that exited other than 0 (a CI's task writes its red rows and exits
-   *  0), read from the output whatever its size. */
-  redRow: v.optional(v.literal(true)),
   /** The kernel killed a process of the task's for want of memory. */
   oomKilled: v.optional(v.boolean()),
   /** It ran beside other tasks in its container and ended other than green, so it ran again alone, and this is that run:
@@ -709,8 +706,6 @@ export const HealthSchema = v.object({
   contract: v.optional(v.string()),
   /** When the registry credentials a `--keep` deploy gave the Worker expire, an ISO date; absent without them. */
   keepUntil: v.optional(v.string()),
-  /** The CPUs it prepares environments on (`--prepare-cpu`, PREPARE_CPU); absent where it names none. */
-  prepareCpu: v.optional(v.string()),
 });
 
 export type Health = v.InferOutput<typeof HealthSchema>;

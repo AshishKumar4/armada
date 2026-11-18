@@ -109,7 +109,6 @@ deploy options:
   --name=<name>        a separate armada with its own Worker, <name>-artifacts bucket, fleet
                        and connection file, ~/.config/armada/<name>.json (default armada)
   --vcpus=N            the most vCPUs its fleet runs at once (a first deploy names it; a redeploy keeps its own)
-  --prepare-cpu=CPUS   the CPUs it prepares environments on, as --cpu takes them ('' for any; a redeploy keeps its own)
   --memory=GiB         the most memory its fleet holds at once (default: the account's, in --vcpus's share of
                        its vCPUs, where the deploy has the account token; none without)
   --drain              wait for the open jobs first; automatic when this Worker would refuse a
@@ -138,7 +137,7 @@ verdict exits 1 when a row is red, and 2 when the commit has none; with --json i
 /** Each command's options, where a name ending in `=` takes a value, and how many words it takes before `--`. Every
  *  command also takes `--connection=`. */
 const COMMANDS: ReadonlyMap<string, { readonly options: readonly string[]; readonly words: number }> = new Map([
-  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'memory=', 'drain', 'drain-bound=', 'keep=', 'prepare-cpu='], words: 0 }],
+  ['deploy', { options: ['account=', 'name=', 'vcpus=', 'memory=', 'drain', 'drain-bound=', 'keep='], words: 0 }],
   ['destroy', { options: ['account=', 'name=', 'force'], words: 0 }],
   ['map', { options: ['times=', 'items=', 'env=', 'commit=', 'size=', 'pool=', 'slots=', 'budget=', 'mode=', 'cpu=', 'priority=', 'inputs=', 'timeout=', 'deadline=', 'gang-start-timeout=', 'output', 'speculative', 'fresh', 'hedge=', 'secrets=', 'json', 'label=', 'artifacts='], words: 0 }],
   ['run', { options: ['deadline=', 'by=', 'pool=', 'priority=', 'label=', 'secrets=', 'json'], words: 1 }],
@@ -438,7 +437,7 @@ async function deployedCap(name: string, deployed: Armada): Promise<number> {
  *  the connection file. A version that still serves every client the deployed one does, on the same driver, takes over
  *  the running jobs; `--drain`, an unreachable one, or one this would serve a client less than, is drained first, and
  *  a deploy that fails or is interrupted lets the drained one admit jobs again. */
-async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked, keep }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined; readonly prepareCpu: string | undefined; readonly keep: number }, { force: forceDrain, boundMin: drainBound }: { readonly force: boolean; readonly boundMin: number }): Promise<number> {
+async function deploy(name: string, { vcpus, memoryGiB, keep }: { readonly vcpus: number | undefined; readonly memoryGiB: number | undefined; readonly keep: number }, { force: forceDrain, boundMin: drainBound }: { readonly force: boolean; readonly boundMin: number }): Promise<number> {
   const account = accountOf();
   const file = connectionFile(name);
   // One read of the deployment as this machine knows it, for both its preflight and its bearer: a connection of another
@@ -506,11 +505,7 @@ async function deploy(name: string, { vcpus, memoryGiB, prepareCpu: asked, keep 
     const reasons = deployed === null ? [] : drainReasons(health, forceDrain, contractOf(ROOT));
 
     if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, held: (held) => { drained = held; } });
-    // The CPUs it prepares on: the ones asked (`--prepare-cpu`, '' for none), else the deployed Worker's own.
-    const prepareCpu = asked ?? health?.prepareCpu;
-
-    if (prepareCpu !== undefined && prepareCpu !== '') cpusOf(prepareCpu, '--prepare-cpu');
-    await install(account, name, file, { vcpus: cap, memoryMib, prepareCpu: prepareCpu === '' ? undefined : prepareCpu, token: known?.token, accountToken, retention: known?.retention, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
+    await install(account, name, file, { vcpus: cap, memoryMib, token: known?.token, accountToken, retention: known?.retention, secrets: { REGISTRY_CREDENTIALS: registry.credentials, REGISTRY_CREDENTIALS_EXPIRE: registry.until, KEEP_ENVIRONMENTS: String(keep) } });
     // The drain names the version it replaced, which may still answer for a moment, so it stays drained.
     drained = false;
     console.log(`${name} keeps the snapshots of its open jobs' environments, its ${String(keep)} most recently used others and any used in the last hour; its registry credentials last until ${registry.until}`);
@@ -613,7 +608,6 @@ const DASHBOARD = join(ROOT, 'dist', 'dashboard');
  *  undefined), and its secrets. */
 interface Given {
   readonly vcpus: number;
-  readonly prepareCpu: string | undefined;
   readonly memoryMib: number | undefined;
   readonly token: string | undefined;
   /** The token its fleet reads the account with, which the connection file keeps for the next deploy. */
@@ -623,7 +617,7 @@ interface Given {
   readonly secrets: Readonly<Record<string, string>>;
 }
 
-async function install(account: string, name: string, file: string, { vcpus, memoryMib, prepareCpu, token: kept, accountToken, retention, secrets }: Given): Promise<void> {
+async function install(account: string, name: string, file: string, { vcpus, memoryMib, token: kept, accountToken, retention, secrets }: Given): Promise<void> {
   const bucket = `${name}-artifacts`;
 
   if (!hasBucket(account, bucket)) wrangler(['r2', 'bucket', 'create', bucket], account);
@@ -644,7 +638,7 @@ async function install(account: string, name: string, file: string, { vcpus, mem
   await buildDashboard(DASHBOARD);
   // Read from the checkout as it is deployed, as its commit is, not as it was before a drain that may have taken hours.
   writeFileSync(config, deploymentConfig(readFileSync(join(ROOT, 'worker', 'wrangler.jsonc'), 'utf8'), {
-    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT), prepareCpu,
+    name, account, main: join(ROOT, 'worker', 'src', 'worker.ts'), dashboard: DASHBOARD, bucket, vcpus, memoryMib, sha: sourceSha(), contract: contractOf(ROOT),
   }));
 
   const token = kept ?? hex(crypto.getRandomValues(new Uint8Array(32)));
@@ -992,7 +986,7 @@ async function main(): Promise<number> {
 
       if (!v.safeParse(DeploymentName, name).success) throw new Error(`--name=${name}: a Worker's name, lowercase letters, digits and dashes`);
 
-      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory'), prepareCpu: option('prepare-cpu'), keep: whole('keep', 0) ?? KEPT_ENVIRONMENTS }, { force: flag('drain'), boundMin: whole('drain-bound') ?? DRAIN_BOUND_MIN });
+      return await deploy(name, { vcpus: whole('vcpus'), memoryGiB: whole('memory'), keep: whole('keep', 0) ?? KEPT_ENVIRONMENTS }, { force: flag('drain'), boundMin: whole('drain-bound') ?? DRAIN_BOUND_MIN });
     }
 
     case 'destroy':

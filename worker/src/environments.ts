@@ -479,15 +479,15 @@ export interface Preparation {
    *  absent until then. */
   readonly refused?: number;
   readonly room?: Room | 'failed';
-  /** When its container first started on a host of none of the deployment's PREPARE_CPU; absent until then. */
+  /** When its container first started on a host of none of its job's pinned CPUs; absent until then. */
   readonly misplaced?: number;
   /** The CPUs of the pinned job it is prepared for, which it is prepared on or fails (`placed`); absent for an unpinned
-   *  job's, prepared on PREPARE_CPU where it can be, else where it is. */
+   *  job's, prepared wherever its container starts. */
   readonly cpu?: readonly Cpu[];
 }
 
-/** How long a preparation starts its container again for one on a host of the deployment's PREPARE_CPU, as a pinned
- *  job does for its own (job.ts `PIN_WAIT_MS`); past it, it prepares where it is, its snapshot's host recorded. */
+/** How long a pinned job's preparation starts its container again for one on a host of its CPUs, as the job does for
+ *  its own (job.ts `PIN_WAIT_MS`); past it, the preparation fails. */
 const PREPARE_PIN_MS = 8 * 60_000;
 
 /** How soon a misplaced preparation starts its container again. */
@@ -691,11 +691,11 @@ export class ArmadaPreparer extends DurableObject<Env> {
     }
   }
 
-  /** Its container is on a host of the deployment's PREPARE_CPU, where it names some, or the preparation has started
-   *  it again for one as long as `PREPARE_PIN_MS` allows: `Misplaced` otherwise, which `alarm` answers by starting it
+  /** Its container is on a host of its pinned job's CPUs, where the job names some, or the preparation has started it
+   *  again for one as long as `PREPARE_PIN_MS` allows: `Misplaced` otherwise, which `alarm` answers by starting it
    *  again in a moment. */
   private async placed(preparation: Preparation): Promise<void> {
-    const required = preparation.cpu ?? (this.env.PREPARE_CPU === undefined || this.env.PREPARE_CPU === '' ? undefined : cpusOf(this.env.PREPARE_CPU, 'PREPARE_CPU'));
+    const required = preparation.cpu;
 
     if (required === undefined) return;
     const host = hostOf((await must(this.container(), 'the host\'s CPU', ['/bin/sh', '-c', CPU_INFO], { ms: EXEC_MS })).stdout);
@@ -706,7 +706,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
     // A pinned job's preparation fails rather than snapshot off its CPUs, which no container of it could start from:
     // its jobs end, and a later one prepares it again (Dew, 2026-11-17: re-prepared off its pin, it would loop).
-    if (preparation.cpu !== undefined) throw new Error(`no container started on a host of ${cpuLabel(preparation.cpu)} in ${String(PREPARE_PIN_MS / 60_000)} min, the last on ${hostLabel(host)}`);
+    throw new Error(`no container started on a host of ${cpuLabel(preparation.cpu)} in ${String(PREPARE_PIN_MS / 60_000)} min, the last on ${hostLabel(host)}`);
   }
 
   /** The account's snapshot storage is full: the registry frees what this deployment can (`makeRoom`), and the snapshot

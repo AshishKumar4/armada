@@ -928,9 +928,9 @@ describe('a pack base (#34)', () => {
 });
 
 
-/** The generations a preparation of an empty recipe records, its container's execs answered by `answer`, on a
- *  deployment that prepares on `prepareCpu` where given. */
-async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string }, prepareCpu?: string,
+/** The generations a preparation of an empty recipe records, its container's execs answered by `answer`, for a job
+ *  pinned to `cpu` where given. */
+async function preparedWith(answer: (argv: readonly string[]) => { readonly exitCode: number; readonly stdout: string },
   { cpu, failed = [], tick }: { readonly cpu?: readonly { vendor: string; family: number; model: number }[]; readonly failed?: string[]; readonly tick?: () => void } = {}): Promise<Generation[]> {
   const recorded: Generation[] = [];
   const stored = state(Object.assign(container(answer), { snapshotContainer: async () => ({ id: 'snapshot', size: 1 }) }));
@@ -940,7 +940,7 @@ async function preparedWith(answer: (argv: readonly string[]) => { readonly exit
     prepared: async (made: Generation) => { recorded.push(made); },
   }));
 
-  const preparer = new ArmadaPreparer(stored.ctx, world(prepareCpu === undefined ? { ENVIRONMENTS: environments } : { ENVIRONMENTS: environments, PREPARE_CPU: prepareCpu }));
+  const preparer = new ArmadaPreparer(stored.ctx, world({ ENVIRONMENTS: environments }));
 
   const inputs = { recipe: v.parse(RecipeSchema, {}), sha: null };
 
@@ -976,17 +976,18 @@ describe('an environment\'s snapshot', () => {
     expect(recorded.map(({ snapshot }) => [snapshot.host?.family, snapshot.host?.model])).toEqual([[25, 17]]);
   });
 
-  test('of a deployment that names its CPUs is taken on one: its container starts again until it is on a host of one', async () => {
+  test('for a pinned job is taken on one of its CPUs: its container starts again until it is on a host of one', async () => {
     // Each read of its host is on the next: two of 25/1, then 25/17.
     const hosts = [1, 1, 17];
     let read = 0;
-    const recorded = await preparedWith(onHost(() => hosts[Math.min(++read, hosts.length) - 1] ?? 17), 'AuthenticAMD/25/17,AuthenticAMD/26/17');
+    const cpu = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }, { vendor: 'AuthenticAMD', family: 26, model: 17 }];
+    const recorded = await preparedWith(onHost(() => hosts[Math.min(++read, hosts.length) - 1] ?? 17), { cpu });
 
     // Three starts' hosts read, then the snapshot's: the one it prepared on.
     expect({ read, host: recorded.map(({ snapshot }) => snapshot.host?.model) }).toEqual({ read: 4, host: [17] });
   });
 
-  test('prepared for a pinned job fails rather than be taken off its pin, where a deployment\'s own falls back', async () => {
+  test('prepared for a pinned job fails rather than be taken off its pin, where an unpinned one is taken where it starts', async () => {
     const start = Date.now();
     let now = start;
     const failed: string[] = [];
@@ -994,8 +995,8 @@ describe('an environment\'s snapshot', () => {
 
     try {
       // Every start on 25/1, the clock past the pin's window after the first.
-      const recorded = await preparedWith(onHost(() => 1), undefined, { cpu: pinned, failed, tick: () => { setSystemTime(now); now += 5 * MINUTE; } });
-      const fallen = await preparedWith(onHost(() => 1), 'AuthenticAMD/25/17', { tick: () => { setSystemTime(now); now += 5 * MINUTE; } });
+      const recorded = await preparedWith(onHost(() => 1), { cpu: pinned, failed, tick: () => { setSystemTime(now); now += 5 * MINUTE; } });
+      const fallen = await preparedWith(onHost(() => 1), { tick: () => { setSystemTime(now); now += 5 * MINUTE; } });
 
       expect({ pinned: recorded.length, failed: failed.length === 1 && failed[0]?.includes('AuthenticAMD/25/17'), fallen: fallen.map(({ snapshot }) => snapshot.host?.model) })
         .toEqual({ pinned: 0, failed: true, fallen: [1] });
