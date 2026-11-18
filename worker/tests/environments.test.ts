@@ -68,7 +68,7 @@ describe('a deployment\'s hourly look at its environments', () => {
     const environments = new ArmadaEnvironments(stored.ctx, world({
       KEEP_ENVIRONMENTS: '0', REGISTRY_CREDENTIALS: credentials,
       FLEET: namespace(() => ({ open: async () => open })),
-      JOB: namespace(() => ({ environment: async () => 'a' })),
+      JOB: namespace(() => ({ protects: async () => false, environment: async () => 'a' })),
     }));
 
     await stored.ctx.storage.put('env:a', { state: 'ready', generation: generation('a'), lastUsed: Date.now() - 5 * HOUR });
@@ -319,7 +319,7 @@ describe('a deployment that keeps one environment', () => {
           return [];
         },
       })),
-      JOB: namespace(() => ({ environment: async () => '' })),
+      JOB: namespace(() => ({ protects: async () => false, environment: async () => '' })),
     }));
 
     await stored.ctx.storage.put('env:b', { state: 'ready', generation: generation('b'), lastUsed: Date.now() - 4 * HOUR });
@@ -345,7 +345,7 @@ describe('a snapshot no environment records any more', () => {
     const environments = new ArmadaEnvironments(stored.ctx, world({
       KEEP_ENVIRONMENTS: '5', REGISTRY_CREDENTIALS: 'user:secret',
       FLEET: namespace(() => ({ open: async () => [...open] })),
-      JOB: namespace(() => ({ environment: async () => 'k' })),
+      JOB: namespace(() => ({ protects: async () => false, environment: async () => 'k' })),
     }));
 
     return { stored, fake, environments };

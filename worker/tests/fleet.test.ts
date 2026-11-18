@@ -48,6 +48,31 @@ describe('the fleet', () => {
     expect({ asked: waited.asked, freed, after }).toEqual({ asked: [null, null], freed: [null, 'held', 'held'], after: 'held' });
   });
 
+  // Dew, 2026-11-18: a 40-minute task, queued again on its job's newest container, was recalled five times in a row.
+  test('recalls no hold whose vessel says it runs a preempted task, by priority or share, until it says it no longer does', async () => {
+    const fleet = fleetOf(8);
+
+    for (const holder of ['low/v1', 'low/v2']) await fleet.acquire(holder, 4, { deadlineAt });
+
+    await fleet.beat('low/v2', Date.now(), true);
+    await fleet.acquire('train/v1', 4, { deadlineAt, priority: 5 });
+    const byPriority = [await fleet.renews('low/v1'), await fleet.renews('low/v2')];
+
+    await fleet.beat('low/v2', Date.now(), false);
+    await fleet.acquire('train/v2', 4, { deadlineAt, priority: 5 });
+    const released = await fleet.renews('low/v2');
+    const shared = fleetOf(16);
+    const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4'];
+
+    for (const holder of burst) await shared.acquire(holder, 4, { deadlineAt });
+
+    await shared.beat('burst/v4', Date.now(), true);
+    await shared.acquire('other/v1', 4, { deadlineAt });
+    const byShare = await Promise.all(burst.map(async (holder) => await shared.renews(holder)));
+
+    expect({ byPriority, released, byShare }).toEqual({ byPriority: [false, true], released: false, byShare: [true, true, false, true] });
+  });
+
   // #60: a train's suite waited a median of 530 s for containers that developers' suites held between their tasks.
   test('grants a job of higher priority before older waiters, and recalls the newest holds of lower ones until it fits', async () => {
     const fleet = fleetOf(8);
@@ -291,6 +316,25 @@ describe('a fleet that lends what the account leaves idle', () => {
     expect({ lent, taken: await borrowing(lender('', stored), ['j/v3']) }).toEqual({ lent: [[null], [null]], taken: [null] });
   });
 
+  test('recalls no loan whose vessel says it runs a preempted task once others fill the account, and recalls it once it no longer does', async () => {
+    const others = account();
+    const fleet = lender('token');
+
+    await borrowing(fleet, ['j/v1', 'j/v2', 'j/v3']);
+    await fleet.alarm();
+    const lent = await borrowing(fleet, ['j/v3', 'j/v4']);
+
+    await fleet.beat('j/v4', Date.now(), true);
+    others.containers = 22;
+    await fleet.alarm();
+    const squeezed = [await fleet.renews('j/v4'), await fleet.renews('j/v3')];
+
+    await fleet.beat('j/v4', Date.now(), false);
+    await fleet.alarm();
+
+    expect({ lent, squeezed, released: await fleet.renews('j/v4') }).toEqual({ lent: ['borrowed', 'borrowed'], squeezed: [true, false], released: false });
+  });
+
   test('recalls its loans while a holder that may not borrow waits for room under its cap, and lends none meanwhile', async () => {
     account();
     const fleet = lender('token');
@@ -375,7 +419,7 @@ describe('a vessel stopped while the fleet answers', () => {
         renews: fleet.renews.bind(fleet),
         beat: fleet.beat.bind(fleet),
       })),
-      JOB: namespace(() => ({ moved: async () => true })),
+      JOB: namespace(() => ({ protects: async () => false, moved: async () => true })),
     });
 
     const vessel = new ArmadaVessel(stored.ctx, env);
@@ -404,7 +448,7 @@ describe('a vessel its job no longer wants', () => {
 
     await fleet.acquire('x/v1', 4, { deadlineAt });
     const stored = state();
-    const vessel = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ moved: async () => wanted })) }));
+    const vessel = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ protects: async () => false, moved: async () => wanted })) }));
 
     await vessel.begin({ jobId: 'j', name: 'v1', snapshot: 's', instance: 'standard-4', vcpus: 4, workdir: '/w', commit: null, tmpfs: [], files: {}, bundle: null, output: false, timeout: 60 });
     // Refused, it waits in line; then its job ends, and the stop it sent is lost.
@@ -423,7 +467,7 @@ describe('a vessel of a job of higher priority (#60)', () => {
 
     await fleet.acquire('low/v1', 4, { deadlineAt });
     const stored = state();
-    const vessel = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ moved: async () => true })) }));
+    const vessel = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ protects: async () => false, moved: async () => true })) }));
 
     await vessel.begin({ jobId: 'train', name: 'v1', snapshot: 's', instance: 'standard-4', vcpus: 4, workdir: '/w', commit: null, tmpfs: [], files: {}, bundle: null, output: false, timeout: 60, priority: 5 });
     await vessel.alarm();
@@ -438,7 +482,7 @@ describe('a vessel of a job of higher priority (#60)', () => {
     const recalled = Date.now();
     // The lower job's container, a task launched on it and still running.
     const stored = state(container((argv) => ({ exitCode: 0, stdout: argv[3] === 'wait' ? '' : '' })));
-    const low = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ preempted: async (_name: string, gone: boolean) => { preempted.push(gone); }, still: async () => true })) }));
+    const low = new ArmadaVessel(stored.ctx, world({ FLEET: namespace(() => fleet), JOB: namespace(() => ({ protects: async () => false, preempted: async (_name: string, gone: boolean) => { preempted.push(gone); }, still: async () => true })) }));
 
     await fleet.acquire('low/v1', 4, { deadlineAt });
     await stored.ctx.storage.put({ spec: { jobId: 'low', name: 'v1', snapshot: 's', instance: 'standard-4', vcpus: 4, workdir: '/w', commit: null, tmpfs: [], files: {}, bundle: null, output: false, timeout: null, deadlineAt },

@@ -13,7 +13,7 @@ const SHA = 'a'.repeat(40);
  *  repository of `history`, packed under `packer` with `shallow` as its boundary. */
 function deployment(history: 'full' | 'commit', objects = new Map<string, string>()) {
   const stored = bucket(objects);
-  const env = world({ ARTIFACTS: stored, ARMADA_TOKEN: TOKEN, JOB: namespace(() => ({ create: async () => undefined })) });
+  const env = world({ ARTIFACTS: stored, ARMADA_TOKEN: TOKEN, JOB: namespace(() => ({ protects: async () => false, create: async () => undefined })) });
   const call = async (method: string, path: string, body?: string) => (await worker.fetch(new Request(`https://armada.test${path}`, { method, body, headers: { authorization: `Bearer ${TOKEN}`, 'armada-protocol': String(PROTOCOL) } }), env)).status;
 
   const job = async ({ packer, shallow }: { readonly packer?: number; readonly shallow?: string[] } = {}) => await call('POST', '/jobs', JSON.stringify(v.parse(JobSpecSchema, {

@@ -133,7 +133,7 @@ describe('a job\'s env', () => {
 
     for (const [end, conclude] of Object.entries(endings)) {
       const stored = state(container(() => new Error('Network connection lost.')));
-      const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => ({ vesselFailed: async () => undefined })) }));
+      const vessel = new ArmadaVessel(stored.ctx, world({ JOB: namespace(() => ({ protects: async () => false, vesselFailed: async () => undefined })) }));
 
       await stored.ctx.storage.put({ spec: { jobId: 'j1', name: 'v1', vcpus: 4 }, state: 'working', 'slot:0': { claim, startedAt: 0 } });
       await conclude(vessel);

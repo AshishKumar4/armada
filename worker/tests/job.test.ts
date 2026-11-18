@@ -78,6 +78,27 @@ describe('a job whose containers the fleet takes for a job of a higher priority'
     expect({ begun: begun.length, landed: [landed?.outcome.kind, landed?.outcome.exitCode, landed?.outcome.attempt], vessels: (await open.status())?.vessels?.filter((each) => each.state === 'failed').length })
       .toEqual({ begun: 11, landed: ['exited', 0, 11], vessels: 0 });
   });
+
+  // Dew, 2026-11-18: a 40-minute task, queued again on its job's newest container each time, was recalled five times in a row.
+  test('says a vessel protects its container while it runs a task a recall preempted before, and no other', async () => {
+    const { job: open } = await job({ recipe: {}, items: [{ item: 'a', argv: ['true'] }, { item: 'b', argv: ['true'] }], run: { kind: 'command' }, pool: 2 });
+
+    for (const vessel of ['v1', 'v2']) {
+      const claim = await open.claim(vessel);
+
+      if (claim === null || 'waitMs' in claim) throw new Error(`${vessel} got no task`);
+    }
+
+    const before = [await open.protects('v1'), await open.protects('v2')];
+
+    await open.preempted('v1', true);
+    const again = await open.claim('v3');
+
+    if (again === null || 'waitMs' in again) throw new Error('v3 got no task');
+
+    expect({ before, task: again.index, after: [await open.protects('v3'), await open.protects('v2')] })
+      .toEqual({ before: [false, false], task: 0, after: [true, false] });
+  });
 });
 
 describe('a job of size large (#64)', () => {

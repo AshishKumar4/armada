@@ -32,7 +32,7 @@ test('a vessel the platform refuses for the account room waits in the fleet line
 
   const vessel = new ArmadaVessel(stored.ctx, world({
     FLEET: namespace(() => fleet),
-    JOB: namespace(() => ({ moved: async () => true })),
+    JOB: namespace(() => ({ protects: async () => false, moved: async () => true })),
   }));
 
   await vessel.begin({

@@ -43,7 +43,7 @@ describe('a task\'s files', () => {
     const id = '20261011120000-0123abcd';
     const artifacts = bucket();
     // The runs are the bucket's: the job is never asked.
-    const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts, JOB: namespace(() => ({})) });
+    const env = world({ ARMADA_TOKEN: TOKEN, VERSION: { id: 'v', tag: '', timestamp: '' }, ARTIFACTS: artifacts, JOB: namespace(() => ({ protects: async () => false,})) });
     const log = { httpMetadata: { contentType: 'text/plain; charset=utf-8' } };
 
     await artifacts.put(runKey(id, 0, { vessel: 'v2', attempt: 1 }, 'log'), 'rank one', { ...log, customMetadata: { rank: '1' } });

@@ -550,7 +550,12 @@ export class ArmadaVessel extends DurableObject<Env> {
    *  loop the job has nothing fitting for ends, and the next task started opens another to ask again. */
   private async work(spec: SlotSpec): Promise<boolean> {
     this.watch(this.container());
-    const endsBy = await this.env.FLEET.getByName(SINGLE).beat(this.holder(spec));
+    // A container running a task a recall preempted before is protected (`ArmadaJob.protects`): the fleet recalls
+    // nothing of it, and one it recalled already, before it heard, ends no such run at the grace: the task is preempted
+    // at most once, and the fleet holds this container past its cap until its runs end, taking no new task meanwhile.
+    const protects = await this.env.JOB.getByName(spec.jobId).protects(spec.name);
+    const recalledBy = await this.env.FLEET.getByName(SINGLE).beat(this.holder(spec), Date.now(), protects);
+    const endsBy = protects ? null : recalledBy;
     // A slice that would run past its container's recall's grace ends at it, and the next one ends its tasks; the one past
     // it runs only to land what has ended.
     const until = endsBy === null || Date.now() >= endsBy ? Date.now() + SLICE_MS : Math.min(Date.now() + SLICE_MS, endsBy);
@@ -598,7 +603,9 @@ export class ArmadaVessel extends DurableObject<Env> {
     if (failed !== undefined) throw failed.reason;
     const ended = settled.flatMap((each) => each.status === 'fulfilled' ? [each.value] : []);
 
-    if (ended.includes('preempted')) return await this.preempt(spec);
+    // Read again before the container goes: a run here may have become one of a preempted task since the slice began
+    // (its other copy's container recalled meanwhile), which no recall ends; the next slice tells the fleet.
+    if (ended.includes('preempted')) return await this.env.JOB.getByName(spec.jobId).protects(spec.name) ? true : await this.preempt(spec);
 
     if (ended.every((each) => each === 'retired')) return await this.retire(spec);
 

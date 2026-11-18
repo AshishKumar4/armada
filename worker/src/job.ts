@@ -276,7 +276,7 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('CREATE TABLE IF NOT EXISTS standby (vessel TEXT PRIMARY KEY, until INTEGER NOT NULL)');
     const tasks = this.sql.exec<{ name: string }>('PRAGMA table_info(tasks)').toArray().map((column) => column.name);
 
-    for (const column of ['dup', 'slot', 'dup_slot']) {
+    for (const column of ['dup', 'slot', 'dup_slot', 'preempted']) {
       if (!tasks.includes(column)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${column} INTEGER`);
     }
 
@@ -1423,6 +1423,15 @@ export class ArmadaJob extends DurableObject<Env> {
     return ran;
   }
 
+  /** Whether vessel `name` runs a task a recall preempted before (`preempted`): its run, a copy, or a gang's rank. The
+   *  vessel reads it each slice and tells the fleet (`ArmadaFleet.beat`), which then recalls nothing of its container,
+   *  and it ends no such run at a recall's grace (Dew, 2026-11-18: a 40-minute task was preempted five times in a row). */
+  async protects(name: string): Promise<boolean> {
+    // Read from the vessel's live runs (`Runs`, keyed by vessel), not the tasks' owners: a gang's rank 0, or a primary
+    // whose green waits for its copy, owns its task after its own run ended.
+    return this.sql.exec('SELECT 1 AS n FROM runs r JOIN tasks t ON t.idx = r.idx WHERE r.vessel = ? AND t.preempted = 1 LIMIT 1', name).toArray().length > 0;
+  }
+
   /** Vessel `name` ended the tasks it ran past its recall's grace, the fleet taking its container back for a job of a
    *  higher priority or for room (`ArmadaFleet.beat`, #63, #66). Each goes on elsewhere at no cost to its retries or
    *  INFRA_ATTEMPTS, as the fleet took it, not its task. No replacement is spent: the job's next vessels wait their
@@ -1435,6 +1444,10 @@ export class ArmadaJob extends DurableObject<Env> {
     // Said again, by an object restarted on the way, it changes nothing.
     if (this.sql.exec(`UPDATE vessels SET state = 'done', beat = ? WHERE name = ? AND state IN ${ALIVE} RETURNING name`, Date.now(), name).toArray().length === 0) return;
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
+    // Each task a run of it here was is preempted now, a copy's and a gang rank's included: every vessel running it from
+    // now on protects its container against every recall (`protects`), so it is preempted at most once.
+    this.sql.exec(`UPDATE tasks SET preempted = 1 WHERE state IN ('forming', 'running', 'landing')
+      AND (vessel = ? OR dup = ? OR idx IN (SELECT idx FROM members WHERE vessel = ?))`, name, name, name);
     await this.abandon(name, (index, infra) => { this.lost(index, infra, { vessel: name, error: '', stormed: true }); });
     await this.grow();
     await this.settle();

@@ -160,12 +160,12 @@ interface Recallable {
 }
 
 /** The fleet's loans, the newest first: it recalls them when it holds more than it may. */
-const LOANS: Recallable = { picked: { where: 'borrowed = 1', bindings: [] }, order: 'granted DESC, holder' };
+const LOANS: Recallable = { picked: { where: 'borrowed = 1 AND protects = 0', bindings: [] }, order: 'granted DESC, holder' };
 
 /** The holds a holder of job `job` and `priority` that waits has recalled: other jobs' below it, the lowest first, then
  *  the newest. */
 const belowOf = (priority: number, job: string): Recallable => ({
-  picked: { where: 'job != ? AND recallable = 1 AND priority < ?', bindings: [job, priority] }, order: 'priority, granted DESC, holder',
+  picked: { where: 'job != ? AND recallable = 1 AND protects = 0 AND priority < ?', bindings: [job, priority] }, order: 'priority, granted DESC, holder',
 });
 
 /** How long a drain holds unless it is asked again: longer than a deploy's install, the Worker upload and its
@@ -192,6 +192,12 @@ export class ArmadaFleet extends ArmadaSingle {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS holds (holder TEXT PRIMARY KEY, job TEXT NOT NULL, vcpus REAL NOT NULL, memory REAL NOT NULL, reserve REAL NOT NULL,
       reserve_memory REAL NOT NULL, until INTEGER NOT NULL, granted INTEGER NOT NULL, borrowed INTEGER NOT NULL, priority INTEGER NOT NULL, recalled INTEGER,
       recallable INTEGER NOT NULL, renewed INTEGER NOT NULL)`);
+
+    // Whether its container runs a task a recall preempted before (`beat`): no recall frees it while it does. An earlier
+    // Worker's table gets the column.
+    if (!this.sql.exec<{ name: string }>('PRAGMA table_info(holds)').toArray().some((column) => column.name === 'protects')) {
+      this.sql.exec('ALTER TABLE holds ADD COLUMN protects INTEGER NOT NULL DEFAULT 0');
+    }
 
     // An earlier Worker's line, which kept no ask's job or memory, goes: its holders take places again as they next ask.
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(waiting)').toArray().some((column) => column.name === 'job')) this.sql.exec('DROP TABLE IF EXISTS waiting');
@@ -252,8 +258,9 @@ export class ArmadaFleet extends ArmadaSingle {
     const borrowed = !within(charge, cap);
 
     this.sql.exec('DELETE FROM waiting WHERE holder = ?', holder);
-    this.sql.exec('INSERT OR REPLACE INTO holds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)', holder, job, vcpus, memory, reserve, reserveMemory, Math.max(now, deadlineAt) + LEASE_MS,
-      granted, Number(borrowed), priority, Number(recallable), Number(renewed));
+    this.sql.exec(`INSERT OR REPLACE INTO holds (holder, job, vcpus, memory, reserve, reserve_memory, until, granted, borrowed, priority, recalled, recallable, renewed, protects)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0)`, holder, job, vcpus, memory, reserve, reserveMemory, Math.max(now, deadlineAt) + LEASE_MS,
+    granted, Number(borrowed), priority, Number(recallable), Number(renewed));
 
     return borrowed ? 'borrowed' : 'held';
   }
@@ -266,7 +273,8 @@ export class ArmadaFleet extends ArmadaSingle {
   async room(job: string, vcpus: number, priority = 0, now = Date.now()): Promise<number> {
     const limit = await this.limit(now);
 
-    const kept = this.charge(now, { where: 'job != ? AND recalled IS NULL AND (priority >= ? OR recallable = 0)', bindings: [job, priority] },
+    // A protected hold the fleet recalled before its vessel said so stays, its runs ended by no recall: kept.
+    const kept = this.charge(now, { where: 'job != ? AND ((recalled IS NULL AND (priority >= ? OR recallable = 0)) OR protects = 1)', bindings: [job, priority] },
       { where: 'job != ? AND priority >= ?', bindings: [job, priority] });
 
     // What the job holds, and its reserve, which it keeps from the others while it holds any: its gang's next ranks
@@ -476,7 +484,7 @@ export class ArmadaFleet extends ArmadaSingle {
       // The furthest past first; the first with a hold small enough to leave it at its share or above.
       for (const each of past) {
         // Its newest hold that leaves it at its share or above, picked where the rows are, as `dominant` weighs it.
-        next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE job = ? AND until > ? AND recalled IS NULL AND recallable = 1 AND reserve <= vcpus
+        next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE job = ? AND until > ? AND recalled IS NULL AND recallable = 1 AND protects = 0 AND reserve <= vcpus
             AND MAX(vcpus * ?, memory * ?) <= ? ORDER BY granted DESC, holder LIMIT 1`, each.job, now, perVcpu, perMemory, each.past + SHARE_EPSILON).toArray()[0]?.holder;
 
         if (next !== undefined) break;
@@ -490,10 +498,15 @@ export class ArmadaFleet extends ArmadaSingle {
   /** `holder` still runs, as its vessel says each slice of its work: the time its container ends the tasks it runs by,
    *  RECALL_GRACE_MS after the fleet recalled it, or null while it runs on (#63, #66). A hold of a job with no deadline
    *  lasts LEASE_MS past `now` at least, so a hold whose release was lost ends as a deadline's does. */
-  async beat(holder: string, now = Date.now()): Promise<number | null> {
+  async beat(holder: string, now = Date.now(), protects = false): Promise<number | null> {
     const held = this.sql.exec<{ recalled: number | null; renewed: number }>('SELECT recalled, renewed FROM holds WHERE holder = ?', holder).toArray()[0];
 
     if (held === undefined) return null;
+    // Whether it runs a task a recall preempted before, as its vessel reads its job each slice (Dew, 2026-11-18: a
+    // 40-minute calibration row, queued again on its job's newest container each time, was recalled five times in a
+    // row, as every recall takes the newest hold first): while it does, no recall frees it, by priority, share or loan,
+    // so such a task is preempted at most once. Said each slice, so a restart or a lost word heals at the next.
+    this.sql.exec('UPDATE holds SET protects = ? WHERE holder = ?', Number(protects), holder);
 
     if (held.renewed === 1) this.sql.exec('UPDATE holds SET until = MAX(until, ?) WHERE holder = ?', now + LEASE_MS, holder);
 

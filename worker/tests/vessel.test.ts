@@ -68,13 +68,15 @@ interface Run {
   readonly inputs?: VesselSpec['inputs'];
   readonly held?: readonly string[];
   readonly reading?: (key: string) => Promise<void>;
+  /** Whether its job says it runs a task a recall preempted before (`ArmadaJob.protects`). */
+  readonly protects?: boolean;
 }
 
 /** A task through a vessel whose waits the platform loses `lost` times before the task's exit is read. */
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, pack, gang, startAllowed = true, marker, tasks = 1,
   fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
-  inputs, held = [], reading,
+  inputs, held = [], reading, protects = false,
 }: Run = {}) {
   const completed: Outcome[] = [];
   // The exit code each answer was weighed by against another copy's (`ArmadaJob.accept`).
@@ -143,6 +145,7 @@ async function run(lost: number, {
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
     preempted: async (_name: string, gone: boolean) => { preempted.push(gone); },
+    protects: async () => protects,
     vesselFailed: async (_name: string, error: string, how?: { readonly misplaced?: Host }) => {
       failed.push(error);
       misplaced.push(how?.misplaced);
@@ -243,6 +246,24 @@ describe('a task of a job with no limits', () => {
 });
 
 describe('a vessel\'s place in its fleet', () => {
+  // Dew, 2026-11-18: a 40-minute task, queued again on its job's newest container each time, was recalled five times.
+  test('runs a task a recall preempted before to its end past its container\'s recall, and tells the fleet it protects it', async () => {
+    const protecting: boolean[] = [];
+
+    const fleet = {
+      acquire: async () => 'held', release: async () => undefined, renews: async () => false,
+      beat: async (_holder: string, _now?: number, protects?: boolean) => {
+        protecting.push(protects === true);
+
+        return Date.now() - 1;
+      },
+    };
+
+    const out = await run(0, { launched: 60_000, pending: 1_000, protects: true, fleet });
+
+    expect({ preempted: out.preempted, protecting: protecting.every(Boolean) && protecting.length > 0 }).toEqual({ preempted: [], protecting: true });
+  });
+
   // #63, #66: a recalled container ran its task on, however long, and the job of a higher priority waited for it.
   test('ends a task still running past its recall\'s grace, its job told the fleet took it; one that ends within it lands', async () => {
     const recalled = (endsBy: number) => ({ acquire: async () => 'held', release: async () => undefined, renews: async () => false, beat: async () => endsBy });
@@ -443,7 +464,7 @@ describe('a vessel restarted while it finishes a task', () => {
     });
 
     const job = {
-      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true, protects: async () => false,
       stopped: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
       accept: async (_name: string, index: number) => {
         accepted.push(index);
@@ -516,7 +537,7 @@ describe('a vessel restarted while it stops a task its job no longer wants', () 
     }));
 
     const job = {
-      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false,
+      booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => false, protects: async () => false,
       retired: async () => undefined, accept: async () => true, complete: async () => undefined,
       vesselFailed: async (_name: string, error: string) => { throw new Error(error); },
       stopped: async (_name: string, index: number) => {
@@ -605,7 +626,7 @@ describe('a task that names secrets', () => {
       booted: async () => undefined,
       moved: async () => true,
       claim: once({ index: 0, attempt: 1, argv: ['true'], env: { API_KEY: 'sk-launched' }, secrets: ['API_KEY'], duplicate: false }).next,
-      still: async () => true,
+      still: async () => true, protects: async () => false,
       accept: async () => true,
       complete: async () => undefined,
       retired: async () => undefined,
@@ -650,7 +671,7 @@ async function joined(claims: (Claim | { readonly waitMs: number } | null)[]) {
   }));
 
   const job = {
-    booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true,
+    booted: async () => undefined, moved: async () => true, claim: async () => claims.shift() ?? null, started: async () => true, still: async () => true, protects: async () => false,
     accept: async () => true, complete: async () => undefined, retired: async () => undefined, vesselFailed: async () => undefined,
   };
 
@@ -728,7 +749,7 @@ describe('a gang rank', () => {
         booted: async () => undefined, moved: async () => true, retired: async () => undefined, vesselFailed: async () => undefined,
         claim: once({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false, gang }).next,
         started: async () => true,
-        still: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
+        still: async () => false, protects: async () => false, stopped: async () => { stops += 1; }, accept: async () => accepted,
         complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
       };
 
@@ -824,7 +845,7 @@ describe('a vessel\'s boot', () => {
       const vessel = new ArmadaVessel(stored.ctx, world({
         // The fleet has no room at the first ask, and has 10 s later.
         FLEET: namespace(() => ({ acquire: async () => (asked += 1) > 1 ? 'held' : null, release: async () => undefined, renews: async () => true, beat: async () => null })),
-        JOB: namespace(() => ({
+        JOB: namespace(() => ({ protects: async () => false,
           moved: async (_name: string, to: string) => {
             moved.push(to);
 
@@ -856,7 +877,7 @@ describe('a vessel\'s boot', () => {
 
       const vessel = new ArmadaVessel(stored.ctx, world({
         FLEET: namespace(() => ({ acquire: async () => null, release: async () => undefined, renews: async () => true, beat: async () => null })),
-        JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined })),
+        JOB: namespace(() => ({ protects: async () => false, moved: async () => true, claim: async () => null, retired: async () => undefined })),
       }));
 
       const asked: number[] = [];
@@ -887,7 +908,7 @@ describe('a vessel\'s boot', () => {
 
     const vessel = new ArmadaVessel(stored.ctx, world({
       FLEET: namespace(() => ({ acquire: async () => { throw new Error('Durable Object is overloaded. Requests queued for too long.'); }, release: async () => undefined, renews: async () => true, beat: async () => null })),
-      JOB: namespace(() => ({ moved: async () => true, claim: async () => null, retired: async () => undefined, vesselFailed: async (_name: string, error: string) => { failed.push(error); } })),
+      JOB: namespace(() => ({ protects: async () => false, moved: async () => true, claim: async () => null, retired: async () => undefined, vesselFailed: async (_name: string, error: string) => { failed.push(error); } })),
     }));
 
     await vessel.begin(spec);
@@ -922,7 +943,7 @@ describe('a vessel\'s boot', () => {
     const vessel = new ArmadaVessel(stored.ctx, world({
       // The platform's refusal gives the hold back as the fleet's own crowding does (`ArmadaFleet.crowded`).
       FLEET: namespace(() => ({ acquire: async () => 'held', release, crowded: release, renews: async () => true, beat: async () => null })),
-      JOB: namespace(() => ({
+      JOB: namespace(() => ({ protects: async () => false,
         moved: async (_name: string, to: string) => {
           moved.push(to);
 
@@ -985,7 +1006,7 @@ describe('a vessel\'s boot', () => {
     const stored = state(container((argv) => ({ exitCode: 0, stdout: (argv[2] ?? '').includes('echo ready') ? 'ready\n' : '' })));
 
     const vessel = new ArmadaVessel(stored.ctx, world({
-      JOB: namespace(() => ({ booted: async (_name: string, _bootMs: number, boot: Boot) => { booted.push(boot); }, claim: async () => null, retired: async () => undefined })),
+      JOB: namespace(() => ({ protects: async () => false, booted: async (_name: string, _bootMs: number, boot: Boot) => { booted.push(boot); }, claim: async () => null, retired: async () => undefined })),
     }));
 
     // Granted, its first start killed as it came up, and then the object restarted before the second answered.

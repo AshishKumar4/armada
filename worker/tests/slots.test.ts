@@ -74,7 +74,7 @@ async function run({ claims = [], tasks = 0, ends = {}, put, spec: over, still =
 
       return { index: given++, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false };
     },
-    still: async (_name: string, index: number) => still(index),
+    still: async (_name: string, index: number) => still(index), protects: async () => false,
     stopped: async () => undefined,
     accept: async () => true,
     complete: async (_name: string, outcome: Outcome) => {
@@ -151,7 +151,7 @@ describe('a slotted vessel', () => {
     const job = {
       booted: async () => undefined, moved: async () => true,
       claim: async () => ({ index: 0, attempt: 1, argv: ['true'], env: {}, secrets: [], duplicate: false }),
-      still: async () => true, stopped: async () => undefined, accept: async () => true, complete: async () => undefined, retired: async () => undefined,
+      still: async () => true, protects: async () => false, stopped: async () => undefined, accept: async () => true, complete: async () => undefined, retired: async () => undefined,
       vesselFailed: async () => { failed += 1; },
     };
 
