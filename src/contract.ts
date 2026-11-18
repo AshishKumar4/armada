@@ -158,8 +158,8 @@ function called(out: string, files: ReadonlyMap<string, string>, roots: readonly
       kept.add(`${relative(out, file)}\n${text}`);
 
       // A type the compiler wrote by its module inline (`import('../x').T`), as an inferred one is.
-      for (const [, module = '', member = ''] of text.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)\.([A-Za-z_$][\w$]*)/gu)) {
-        if (module.startsWith('.')) for (const [at, declared] of declaring(targetOf(file, module), member)) reach(at, declared);
+      for (const [, from = '', member = ''] of text.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)\.([A-Za-z_$][\w$]*)/gu)) {
+        if (from.startsWith('.')) for (const [at, declared] of declaring(targetOf(file, from), member)) reach(at, declared);
       }
 
       for (const [word = ''] of text.matchAll(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?/gu)) {
