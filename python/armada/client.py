@@ -209,7 +209,7 @@ class Armada:
     def resolve(self, recipe: Mapping[str, object], cpu: object = None) -> dict[str, str]:
         """The environment key and pack base of `recipe` for a job pinned to `cpu` (as a job spec's `cpu` takes it),
         whose environment is its pin's own; None for an unpinned job's."""
-        asked = {"recipe": recipe} if cpu is None else {"recipe": recipe, "cpu": cpu}
+        asked: dict[str, object] = {"recipe": recipe} if cpu is None else {"recipe": recipe, "cpu": cpu}
         answer = Fields(self.post("/environments/resolve", asked), "POST /environments/resolve")
         return {"key": answer.text("key"), "base": answer.text("base")}
 

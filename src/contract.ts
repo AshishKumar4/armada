@@ -30,8 +30,10 @@ export function contractOf(root: string): string {
       '--emitDeclarationOnly', '--removeComments', '--rootDir', root, '--outDir', out]);
 
     if (emitted.exitCode !== 0) throw new Error(`the Worker's declarations did not compile:\n${emitted.stdout.toString()}${emitted.stderr.toString()}`);
+
     const files = new Map(readdirSync(out, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.d.ts'))
       .map((file) => [join(out, file), readFileSync(join(out, file), 'utf8')]));
+
     const hash = createHash('sha256');
 
     for (const declaration of called(out, files, bound(root))) hash.update(`${declaration}\n`);
