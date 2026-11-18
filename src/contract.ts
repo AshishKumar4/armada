@@ -162,9 +162,11 @@ function sourceModule(file: string): SourceModule {
 }
 
 /** JavaScript's punctuators of more than one character, longest first: each read whole (maximal munch), so `a++ + b`
- *  and `a + ++b` stay apart. */
-const PUNCTUATORS = ['>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=',
-  '%=', '&=', '|=', '^=', '**', '<<', '>>'];
+ *  and `a + ++b` stay apart. None starting with `>`, which closes a generic as well (`Record<string, Map<K, V>>`): a
+ *  `>` is read alone, so a type's closers read the same however spaced, and no valid program writes `>>` or `>=` as
+ *  two tokens. */
+const PUNCTUATORS = ['...', '===', '!==', '**=', '<<=', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=',
+  '^=', '**', '<<'];
 
 /** `source`'s tokens without comments or whitespace, each literal (a string, a template's every part, a regex) whole as
  *  written, and whether each opens a statement: at bracket depth 0, first on its line, and a word a statement opens
