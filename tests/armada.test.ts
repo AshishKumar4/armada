@@ -368,8 +368,21 @@ describe('a deploy', () => {
       writeFileSync(environments, readFileSync(join(root, 'worker', 'src', 'environments.ts'), 'utf8'));
       writeFileSync(vessel, `${readFileSync(vessel, 'utf8')}\nexport interface VesselSpec {\n  readonly why?: string;\n}\n`);
 
-      expect({ inner: inner === before, outer: outer === before, exported, taken, merged: contract() === before })
-        .toEqual({ inner: true, outer: false, exported: [true, true, true, true], taken: false, merged: false });
+      const merged = contract() === before;
+
+      // A type a call names by its module inline (`import('...').T`, as the compiler writes an inferred one).
+      const protocol = join(copy, 'src', 'protocol.ts');
+      const hub = join(copy, 'worker', 'src', 'hub.ts');
+
+      writeFileSync(vessel, readFileSync(join(root, 'worker', 'src', 'vessel.ts'), 'utf8'));
+      writeFileSync(protocol, `${readFileSync(protocol, 'utf8')}\nexport interface Probe {\n  readonly a: string;\n}\n`);
+      writeFileSync(hub, readFileSync(hub, 'utf8').replace('export class ArmadaHub extends DurableObject<Env> {', 'export class ArmadaHub extends DurableObject<Env> {\n  async probe(given: import(\'../../src/protocol\').Probe): Promise<string> {\n    return await Promise.resolve(given.a);\n  }\n'));
+      const inline = contract();
+
+      writeFileSync(protocol, readFileSync(protocol, 'utf8').replace('  readonly a: string;\n}', '  readonly a: string;\n  readonly b: string;\n}'));
+
+      expect({ inner: inner === before, outer: outer === before, exported, taken, merged, inline: contract() === inline })
+        .toEqual({ inner: true, outer: false, exported: [true, true, true, true], taken: false, merged: false, inline: false });
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }

@@ -67,6 +67,11 @@ interface Module {
   readonly starred: readonly string[];
 }
 
+/** The emitted declaration file relative `module` names from `file`. */
+function targetOf(file: string, module: string): string {
+  return join(dirname(file), module.replace(/\.(?:js|ts)$/u, '')) + '.d.ts';
+}
+
 /** `files` (path to emitted `.d.ts` text), each read as a `Module`. A relative import or re-export of another form
  *  (a default import) is refused, never dropped: a name it brings in would leave the fingerprint. */
 function modulesOf(files: ReadonlyMap<string, string>): ReadonlyMap<string, Module> {
@@ -75,7 +80,7 @@ function modulesOf(files: ReadonlyMap<string, string>): ReadonlyMap<string, Modu
     const imported = new Map<string, { from: string; name: string }>();
     const namespaces = new Map<string, string>();
     const starred: string[] = [];
-    const target = (module: string) => join(dirname(file), module.replace(/\.(?:js|ts)$/u, '')) + '.d.ts';
+    const target = (module: string) => targetOf(file, module);
 
     // A top-level statement starts at the margin; its body and continuation lines are indented, or close it.
     for (const chunk of text.split(/\n(?=[^\s}\])])/u)) {
@@ -151,6 +156,11 @@ function called(out: string, files: ReadonlyMap<string, string>, roots: readonly
       const text = /^(?:export )?(?:declare )?(?:abstract )?class /u.test(chunk) ? publicOf(chunk) : chunk;
 
       kept.add(`${relative(out, file)}\n${text}`);
+
+      // A type the compiler wrote by its module inline (`import('../x').T`), as an inferred one is.
+      for (const [, module = '', member = ''] of text.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)\.([A-Za-z_$][\w$]*)/gu)) {
+        if (module.startsWith('.')) for (const [at, declared] of declaring(targetOf(file, module), member)) reach(at, declared);
+      }
 
       for (const [word = ''] of text.matchAll(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?/gu)) {
         const [head = '', member] = word.split('.');
