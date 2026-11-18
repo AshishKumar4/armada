@@ -180,6 +180,7 @@ describe('a drained version', () => {
       FLEET: namespace(() => ({ admitJob: async () => { throw new Error('Durable Object is overloaded. Requests queued for too long.'); } })),
     });
     const request = new Request('https://armada.test/jobs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'armada-protocol': String(PROTOCOL) }, body: JSON.stringify(spec) });
+
     const answer = await worker.fetch(request, env);
 
     expect([answer.status, answer.headers.get('armada-unmade')]).toEqual([503, '1']);
