@@ -360,8 +360,16 @@ describe('a deploy', () => {
 
       writeFileSync(environments, readFileSync(environments, 'utf8').replace('type Inputs = Pick<Preparation, \'recipe\' | \'sha\' | \'packer\' | \'shallow\' | \'cpu\'>;', 'type Inputs = Pick<Preparation, \'recipe\' | \'sha\' | \'packer\' | \'shallow\' | \'cpu\'> & { readonly why?: string };'));
 
-      expect({ inner: inner === before, outer: outer === before, exported, taken: contract() === before })
-        .toEqual({ inner: true, outer: false, exported: [true, true, true, true], taken: false });
+      const taken = contract() === before;
+
+      // A second declaration of a type a call takes, merged into the first (the review: only the first was kept).
+      const vessel = join(copy, 'worker', 'src', 'vessel.ts');
+
+      writeFileSync(environments, readFileSync(join(root, 'worker', 'src', 'environments.ts'), 'utf8'));
+      writeFileSync(vessel, `${readFileSync(vessel, 'utf8')}\nexport interface VesselSpec {\n  readonly why?: string;\n}\n`);
+
+      expect({ inner: inner === before, outer: outer === before, exported, taken, merged: contract() === before })
+        .toEqual({ inner: true, outer: false, exported: [true, true, true, true], taken: false, merged: false });
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }

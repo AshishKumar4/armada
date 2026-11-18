@@ -53,83 +53,116 @@ function bound(root: string): readonly string[] {
 const DECLARED = /^(?:export )?(?:declare )?(?:abstract )?(?:class|interface|type|const|function|enum|let|var|namespace) +([\w$]+)/u;
 
 /** An emitted import or re-export: its names (`a`, `b as c`, `type d`) and the module it names. */
-const IMPORTED = /^(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s+from\s+'([^']+)';/gmu;
+const IMPORTED = /^(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s+from\s+'([^']+)';$/u;
 
-/** One emitted declaration file: what it declares by name, and the module and name each name it imports stands for. */
+/** An emitted namespace import (`import * as P`), or a re-export of all a module exports (`export *`). */
+const WHOLE = /^(?:import\s+(?:type\s+)?\*\s+as\s+([\w$]+)|export\s+(?:type\s+)?\*)\s+from\s+'([^']+)';$/u;
+
+/** One emitted declaration file: what it declares by name; the module and name each name it imports stands for; the
+ *  module each namespace it imports stands for; the modules whose exports it exports whole. */
 interface Module {
   readonly declared: ReadonlyMap<string, readonly string[]>;
   readonly imported: ReadonlyMap<string, { readonly from: string; readonly name: string }>;
+  readonly namespaces: ReadonlyMap<string, string>;
+  readonly starred: readonly string[];
 }
 
-/** `files` (path to emitted `.d.ts` text), each read as a `Module`. */
+/** `files` (path to emitted `.d.ts` text), each read as a `Module`. A relative import or re-export of another form
+ *  (a default import) is refused, never dropped: a name it brings in would leave the fingerprint. */
 function modulesOf(files: ReadonlyMap<string, string>): ReadonlyMap<string, Module> {
   return new Map([...files].map(([file, text]) => {
     const declared = new Map<string, string[]>();
+    const imported = new Map<string, { from: string; name: string }>();
+    const namespaces = new Map<string, string>();
+    const starred: string[] = [];
+    const target = (module: string) => join(dirname(file), module.replace(/\.(?:js|ts)$/u, '')) + '.d.ts';
 
     // A top-level statement starts at the margin; its body and continuation lines are indented, or close it.
     for (const chunk of text.split(/\n(?=[^\s}\])])/u)) {
       const name = DECLARED.exec(chunk)?.[1];
 
-      if (name !== undefined) declared.set(name, [...declared.get(name) ?? [], chunk]);
-    }
+      if (name !== undefined) {
+        declared.set(name, [...declared.get(name) ?? [], chunk]);
 
-    const imported = new Map<string, { from: string; name: string }>();
+        continue;
+      }
 
-    for (const [, names = '', module = ''] of text.matchAll(IMPORTED)) {
-      if (!module.startsWith('.')) continue;
-      const from = join(dirname(file), module.replace(/\.(?:js|ts)$/u, '')) + '.d.ts';
+      const statement = chunk.replace(/\s+/gu, ' ').trim();
 
-      for (const part of names.split(',').map((each) => each.trim().replace(/^type\s+/u, '')).filter((each) => each !== '')) {
-        const [name = '', local = name] = part.split(/\s+as\s+/u);
+      if (!/^(?:import|export)\b.* from '\./u.test(statement)) continue;
 
-        imported.set(local, { from, name });
+      const named = IMPORTED.exec(statement);
+      const whole = WHOLE.exec(statement);
+
+      if (named !== null) {
+        for (const part of (named[1] ?? '').split(',').map((each) => each.trim().replace(/^type\s+/u, '')).filter((each) => each !== '')) {
+          const [name = '', local = name] = part.split(/\s+as\s+/u);
+
+          imported.set(local, { from: target(named[2] ?? ''), name });
+        }
+      } else if (whole?.[1] !== undefined) {
+        namespaces.set(whole[1], target(whole[2] ?? ''));
+      } else if (whole !== null) {
+        starred.push(target(whole[2] ?? ''));
+      } else {
+        throw new Error(`${file}: an import of a form the Worker's contract does not follow: ${statement}`);
       }
     }
 
-    return [file, { declared, imported }];
+    return [file, { declared, imported, namespaces, starred }];
   }));
 }
 
-/** The declarations the public methods of the classes `roots` name, each with its file (under `out`), sorted: each class's public
- *  members and the classes it extends, then every declaration a kept text names, resolved in its own module (a local
- *  declaration, else the one its import stands for, through re-exports), transitively. A class reached keeps its
- *  public members alone; its constructor, private and protected members are no call's, and the platform's type
- *  arguments of what it extends (`DurableObject<Env>`) are its deployment's, no call's. */
+/** The declarations the public methods of the classes `roots` name, each with its file (under `out`), sorted: each
+ *  class's public members and the classes it extends, then every declaration a kept text names, resolved in its own
+ *  module (a local declaration, else what its import, namespace import or whole re-export stands for), transitively;
+ *  every declaration of a name, as an interface's may be several. A class reached keeps its public members alone;
+ *  its constructor, private and protected members are no call's, and the platform's type arguments of what it
+ *  extends (`DurableObject<Env>`) are its deployment's, no call's. */
 function called(out: string, files: ReadonlyMap<string, string>, roots: readonly string[]): readonly string[] {
   const modules = modulesOf(files);
   const kept = new Set<string>();
   const seen = new Set<string>();
 
-  // The declarations `name` stands for in `file`: its own, else what its import names, followed to where declared.
-  const resolved = (file: string, name: string, hops = 0): readonly (readonly [string, string])[] => {
+  // Where `name` is declared, seen from `file`: its own module, else where its import or a whole re-export leads.
+  const declaring = (file: string, name: string, hops = 0): readonly (readonly [string, string])[] => {
     const module = modules.get(file);
-    const own = module?.declared.get(name);
 
-    if (own !== undefined) return own.map((chunk) => [file, chunk] as const);
-    const imported = module?.imported.get(name);
+    if (module === undefined || hops > 16) return [];
 
-    return imported === undefined || hops > 8 ? [] : resolved(imported.from, imported.name, hops + 1);
+    if (module.declared.has(name)) return [[file, name]];
+
+    const imported = module.imported.get(name);
+
+    if (imported !== undefined) return declaring(imported.from, imported.name, hops + 1);
+
+    return module.starred.flatMap((from) => declaring(from, name, hops + 1));
   };
 
-  const reach = (file: string, chunk: string): void => {
-    const name = DECLARED.exec(chunk)?.[1] ?? '';
-
+  // Every declaration of `name` in `file`, its text kept, then every name it says followed.
+  const reach = (file: string, name: string): void => {
     if (seen.has(`${file}\n${name}`)) return;
 
     seen.add(`${file}\n${name}`);
 
-    const text = /^(?:export )?(?:declare )?(?:abstract )?class /u.test(chunk) ? publicOf(chunk) : chunk;
+    const module = modules.get(file);
 
-    kept.add(`${relative(out, file)}\n${text}`);
+    for (const chunk of module?.declared.get(name) ?? []) {
+      const text = /^(?:export )?(?:declare )?(?:abstract )?class /u.test(chunk) ? publicOf(chunk) : chunk;
 
-    for (const word of text.matchAll(/[A-Za-z_$][\w$]*/gu)) {
-      if (word[0] !== name) for (const [at, found] of resolved(file, word[0])) reach(at, found);
+      kept.add(`${relative(out, file)}\n${text}`);
+
+      for (const [word = ''] of text.matchAll(/[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?/gu)) {
+        const [head = '', member] = word.split('.');
+        const namespace = module?.namespaces.get(head);
+        const found = namespace !== undefined && member !== undefined ? declaring(namespace, member) : declaring(file, head);
+
+        for (const [at, declared] of found) if (!(at === file && declared === name)) reach(at, declared);
+      }
     }
   };
 
-  for (const [file, module] of modules) {
-    for (const root of roots) for (const chunk of module.declared.get(root) ?? []) reach(file, chunk);
-  }
+  for (const [file, module] of modules) for (const root of roots) if (module.declared.has(root)) reach(file, root);
 
   return [...kept].toSorted();
 }
