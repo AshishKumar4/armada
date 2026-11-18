@@ -149,7 +149,8 @@ describe('a fleet of many holds', () => {
       const stored = state();
       const fleet = new ArmadaFleet(stored.ctx, world({ FLEET_VCPUS: String(4 * holds) }));
 
-      for (let at = 1; at <= holds; at++) await fleet.acquire(`a/v${String(at)}`, 4, { deadlineAt, renewed: true });
+      // Names of one width: the refusal below recalls a's newest hold to b's share (`toShares`), and its name is carried.
+      for (let at = 1; at <= holds; at++) await fleet.acquire(`a/v${String(at).padStart(4, '0')}`, 4, { deadlineAt, renewed: true });
       const costs: number[] = [];
       let before = stored.carried();
 
@@ -159,13 +160,13 @@ describe('a fleet of many holds', () => {
       };
 
       // A beat, a renewal, a refusal while the fleet is full, a release, and the grant it makes room for.
-      await fleet.beat('a/v1');
+      await fleet.beat('a/v0001');
       cost();
-      await fleet.renews('a/v1');
+      await fleet.renews('a/v0001');
       cost();
       await fleet.acquire('b/v1', 4, { deadlineAt });
       cost();
-      await fleet.release('a/v2');
+      await fleet.release('a/v0002');
       cost();
       await fleet.acquire('b/v1', 4, { deadlineAt });
       cost();

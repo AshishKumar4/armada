@@ -161,6 +161,11 @@ function sourceModule(file: string): SourceModule {
   return { declared, imported };
 }
 
+/** JavaScript's punctuators of more than one character, longest first: each read whole (maximal munch), so `a++ + b`
+ *  and `a + ++b` stay apart. */
+const PUNCTUATORS = ['>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=',
+  '%=', '&=', '|=', '^=', '**', '<<', '>>'];
+
 /** `source`'s tokens without comments or whitespace, each literal (a string, a template's every part, a regex) whole as
  *  written, and whether each opens a statement: at bracket depth 0, first on its line, and a word a statement opens
  *  with. A `/` is a regex where a value cannot end before it (an operator, an opening bracket, a keyword). */
@@ -171,6 +176,8 @@ function* tokensOf(source: string): Generator<{ readonly token: string; readonly
   let previous = '';
   // Each template whose `${` is open: the depth its expression closes back at.
   const templates: number[] = [];
+  // Each open parenthesis: whether a control statement's condition (`if (`), after whose `)` a `/` opens a regex.
+  const parens: boolean[] = [];
   const word = /[A-Za-z_$][\w$]*/uy;
   const number = /(?:0[xXbBoO][\da-fA-F_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?)n?/uy;
   const valueEnds = (token: string): boolean => /^[\w$)\]}'"`]/u.test(token.at(-1) ?? '') && !['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await', 'else', 'do'].includes(token);
@@ -239,10 +246,20 @@ function* tokensOf(source: string): Generator<{ readonly token: string; readonly
     } else {
       word.lastIndex = at;
       number.lastIndex = at;
-      token = word.exec(source)?.[0] ?? number.exec(source)?.[0] ?? char;
+      token = word.exec(source)?.[0] ?? number.exec(source)?.[0] ?? PUNCTUATORS.find((each) => source.startsWith(each, at)) ?? char;
 
       if ('([{'.includes(token)) depth += 1;
       else if (')]}'.includes(token)) depth -= 1;
+
+      if (token === '(') parens.push(['if', 'while', 'for', 'with'].includes(previous));
+      else if (token === ')' && parens.pop() === true) {
+        yield { token, opens: false };
+        lineStart = false;
+        // As a statement may start here, a `/` next opens a regex: `previous` as an operator's would leave it.
+        previous = ';';
+        at += 1;
+        continue;
+      }
     }
 
     const opens = lineStart && depth === 0 && (OPENING.has(token) || ['export', 'declare', 'abstract', 'async', 'import'].includes(token));

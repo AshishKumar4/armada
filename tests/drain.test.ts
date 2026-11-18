@@ -257,7 +257,11 @@ describe('a deploy whose clients derive differently', () => {
         string: changed(write(base.replace("'//not a comment'", "'//not  a comment'"))),
         regex: changed(write(base.replace('/[/]x/gu', '/[/]y/gu'))),
         imported: changed(write(base, { keys: 'export function keyPart(a: number): number {\n  return a * 3;\n}\n' })),
-      }).toEqual({ comment: true, formatting: true, worker: true, unshared: true, body: true, reached: true, template: true, string: true, regex: true, imported: true });
+        // Operators read whole, and a regex after a control statement's condition read as one.
+        operator: write(base.replace('keyPart(a) + SALT', 'keyPart(a) + ++SALT')) !== write(base.replace('keyPart(a) + SALT', 'keyPart(a)++ + SALT')),
+        conditioned: write(base.replace('  return `${String(', "  if (SALT) /a + b/u.test('x');\n  return `${String("))
+          !== write(base.replace('  return `${String(', "  if (SALT) /a+b/u.test('x');\n  return `${String(")),
+      }).toEqual({ comment: true, formatting: true, worker: true, unshared: true, body: true, reached: true, template: true, string: true, regex: true, imported: true, operator: true, conditioned: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
