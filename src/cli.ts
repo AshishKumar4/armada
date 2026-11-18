@@ -471,9 +471,15 @@ async function deploy(name: string, { vcpus, memoryGiB, keep }: { readonly vcpus
     }
   }
 
+  const deployed = known === null ? null : new Armada(known);
+  // Asked before anything changes, the account's registry credentials among it: a version whose clients derive what the
+  // deployed Worker's do another way is refused with the deployment as it was.
+  const health = deployed === null ? null : await healthOf(name, deployed);
+  const refused = deployed === null ? null : clientRefusal(health, derivedOf(ROOT));
+
+  if (refused !== null) throw new Error(`armada deploy: ${refused}`);
   // Minted before anything changes, so a login that cannot mint them fails the deploy with the deployment as it was.
   const registry = await mintRegistry(account);
-  const deployed = known === null ? null : new Armada(known);
   let drained = false;
 
   const admit = async () => {
@@ -500,11 +506,6 @@ async function deploy(name: string, { vcpus, memoryGiB, keep }: { readonly vcpus
     // object resumes from storage (measured: six deploys in two minutes over 200 one-minute tasks cut none and refused
     // no job). Objects keep running the deployed code for minutes after, so a version whose interface differs drains,
     // and takes its first job once they run its own (`ArmadaFleet.admitJob`).
-    const health = deployed === null ? null : await healthOf(name, deployed);
-
-    const refused = deployed === null ? null : clientRefusal(health, derivedOf(ROOT));
-
-    if (refused !== null) throw new Error(`armada deploy: ${refused}`);
     const reasons = deployed === null ? [] : drainReasons(health, forceDrain, contractOf(ROOT));
 
     if (deployed !== null && reasons.length > 0) await drain(deployed, { name, reasons, boundMin: drainBound, held: (held) => { drained = held; } });

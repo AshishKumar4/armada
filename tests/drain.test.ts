@@ -208,31 +208,54 @@ describe('a deploy whose clients derive differently', () => {
     }).toEqual({ changed: true, same: null, raised: null, unsaid: null, none: null });
   });
 
-  test('derives a new fingerprint from a shared derivation\'s body, and none from a comment, formatting or the Worker alone', () => {
+  test('derives a new fingerprint from a shared derivation\'s body, its literals and what it imports, and none from a comment, formatting or the Worker alone', () => {
     const root = mkdtempSync(join(tmpdir(), 'armada-derived-'));
 
     try {
-      const write = (protocol: string, worker = 'export const x = 1;\n') => {
+      const write = (protocol: string, { worker = 'export const x = 1;\n', keys = 'export function keyPart(a: number): number {\n  return a * 2;\n}\n' } = {}) => {
         mkdirSync(join(root, 'src'), { recursive: true });
         mkdirSync(join(root, 'worker', 'src'), { recursive: true });
         writeFileSync(join(root, 'src', 'protocol.ts'), protocol);
-        writeFileSync(join(root, 'src', 'sdk.ts'), "import { keyOf } from './protocol';\nexport const k = keyOf;\n");
-        writeFileSync(join(root, 'worker', 'src', 'worker.ts'), `import { keyOf, helper } from '../../src/protocol';\n${worker}`);
+        writeFileSync(join(root, 'src', 'keys.ts'), keys);
+        writeFileSync(join(root, 'src', 'sdk.ts'), "import { keyOf, labelOf, type Shape } from './protocol';\nexport const k = [keyOf, labelOf];\n");
+        writeFileSync(join(root, 'worker', 'src', 'worker.ts'), `import {\n  keyOf,\n  labelOf,\n  helper,\n} from '../../src/protocol';\n${worker}`);
 
         return derivedOf(root);
       };
-      const base = 'const SALT = 1;\n\n/** The key. */\nexport function keyOf(a: number): number {\n  return a + SALT;\n}\n\nexport function helper(): number {\n  return 2;\n}\n';
+      const base = [
+        "import { keyPart } from './keys';",
+        'const SALT = 1;',
+        '',
+        '/** The key. */',
+        'export function keyOf(a: number): string {',
+        '  return `${String(keyPart(a) + SALT)}-',
+        'tail/*a*/`;',
+        '}',
+        '',
+        "export const labelOf = (name: string): string => name.replace(/[/]x/gu, '//not a comment');",
+        '',
+        'export function helper(): number {',
+        '  return 2;',
+        '}',
+        '',
+      ].join('\n');
       const first = write(base);
+      const changed = (text: string) => text !== first;
 
       expect({
-        comment: write(base.replace('return a + SALT;', '// why\n  return a + SALT; // and how')),
-        formatting: write(base.replace('return a + SALT;', 'return   a +\n    SALT;')),
-        worker: write(base, 'export const x = 2;\n'),
+        comment: write(base.replace('const SALT = 1;', '// why\nconst SALT = 1; /* and how */')) === first,
+        formatting: write(base.replace('return `${String(keyPart(a) + SALT)}', 'return   `${String(keyPart(a)+SALT)}')) === first,
+        worker: write(base, { worker: 'export const x = 2;\n' }) === first,
         // A function the client does not import, though the Worker does: no derivation they share.
-        unshared: write(base.replace('return 2;', 'return 3;')),
-        body: write(base.replace('return a + SALT;', 'return a * SALT;')),
-        reached: write(base.replace('const SALT = 1;', 'const SALT = 2;')),
-      }).toEqual({ comment: first, formatting: first, worker: first, unshared: first, body: expect.not.stringMatching(first), reached: expect.not.stringMatching(first) });
+        unshared: write(base.replace('return 2;', 'return 3;')) === first,
+        body: changed(write(base.replace('keyPart(a) + SALT', 'keyPart(a) - SALT'))),
+        reached: changed(write(base.replace('const SALT = 1;', 'const SALT = 2;'))),
+        // An unindented line of a template literal, a comment's look within one, a string and a regex: each as written.
+        template: changed(write(base.replace('tail/*a*/', 'tail/*b*/'))),
+        string: changed(write(base.replace("'//not a comment'", "'//not  a comment'"))),
+        regex: changed(write(base.replace('/[/]x/gu', '/[/]y/gu'))),
+        imported: changed(write(base, { keys: 'export function keyPart(a: number): number {\n  return a * 3;\n}\n' })),
+      }).toEqual({ comment: true, formatting: true, worker: true, unshared: true, body: true, reached: true, template: true, string: true, regex: true, imported: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

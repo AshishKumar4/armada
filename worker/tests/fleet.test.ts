@@ -482,7 +482,7 @@ describe('a job past its fair share while another waits', () => {
     });
   });
 
-  test('frees a large container's room for a large ask, not a small one's', async () => {
+  test("frees a large container's room for a large ask, not a small one's", async () => {
     const fleet = fleetOf(16);
     const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4', 'burst/v5', 'burst/v6', 'burst/v7', 'burst/v8'];
 
@@ -509,7 +509,25 @@ describe('a job past its fair share while another waits', () => {
     });
   });
 
-  test('recalls nothing for a waiter whose job is past its own share, a gang's rank, a preparation or a job above its priority', async () => {
+  test('recalls two jobs past their shares, the furthest first, down to their shares and no further, until the waiter fits', async () => {
+    const fleet = fleetOf(24);
+    const a = ['a/v1', 'a/v2', 'a/v3', 'a/v4', 'a/v5', 'a/v6', 'a/v7'];
+    const b = ['b/v1', 'b/v2', 'b/v3', 'b/v4', 'b/v5'];
+
+    // a holds 14 and b 10 of 24; c's 8-vCPU ask: shares of 8 each, a 6 past its share and b 2.
+    for (const holder of a) await fleet.acquire(holder, 2, { deadlineAt });
+    for (const holder of b) await fleet.acquire(holder, 2, { deadlineAt });
+    await fleet.acquire('c/v1', 8, { deadlineAt });
+    const kept = await renewing(fleet, [...a, ...b]);
+
+    // 8 vCPUs freed, a's newest first as it is furthest past: each job left at its share of 8, neither below it.
+    expect({
+      a: a.filter((holder) => kept[holder]).length * 2, b: b.filter((holder) => kept[holder]).length * 2,
+      newest: kept['a/v7'], oldest: [kept['a/v1'], kept['b/v1']],
+    }).toEqual({ a: 8, b: 8, newest: false, oldest: [true, true] });
+  });
+
+  test('recalls nothing of a gang\'s rank, a preparation or a job above the waiter\'s priority', async () => {
     const fleet = fleetOf(16);
 
     await fleet.acquire('gang/v1', 4, { reserve: 8, deadlineAt });

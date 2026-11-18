@@ -44,49 +44,58 @@ export function contractOf(root: string): string {
   }
 }
 
-/** The fingerprint of what a client and the Worker each derive and must agree on, as src/protocol.ts derives it: every
- *  function protocol.ts exports that both the Worker (worker/src/) and the client (src/, beside protocol.ts) import,
- *  with every declaration of protocol.ts its source names, and those name in turn, as source text with comments and
- *  whitespace taken out, so a change to how one is computed changes it and formatting alone does not. The contract
- *  (`contractOf`) reads declared types alone, never a body: 2026-11-18's deploy re-keyed a pinned job's environment
- *  (`environmentKey`) behind the same types, and every job of the pinned client was refused until it moved. `armada
- *  deploy` refuses a version whose fingerprint differs from the deployed one's unless its wire's floor is raised
- *  past it (`clientRefusal`), so a pinned client is refused at its first request with an update, never mid-job. */
+/** The fingerprint of what a client and the Worker each derive and must agree on: every value src/protocol.ts exports
+ *  that both the Worker (worker/src/) and the client (src/, beside protocol.ts) import, with every declaration its
+ *  source names, and those name in turn, followed through relative imports into their own modules, as their tokens:
+ *  no comment and no whitespace, so formatting alone changes nothing, and every string, regex and template literal as
+ *  written, so any change to how one is computed does. The contract (`contractOf`) reads declared types alone, never a
+ *  body: 2026-11-18's deploy re-keyed a pinned job's environment (`environmentKey`) behind the same types, and every
+ *  job of the pinned client was refused until it moved. `armada deploy` refuses a version whose fingerprint differs
+ *  from the deployed one's unless its wire's floor is raised past it (`clientRefusal`), so a pinned client is refused
+ *  at its first request with an update, never mid-job. It errs toward a change: a refactor of a shared derivation asks
+ *  the floor's raise too. */
 export function derivedOf(root: string): string {
-  const source = readFileSync(join(root, 'src', 'protocol.ts'), 'utf8');
-  const declared = new Map<string, string[]>();
+  const protocol = join(root, 'src', 'protocol.ts');
+  const sources = (directory: string): string[] => readdirSync(directory, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.ts') && !file.endsWith('.d.ts'))
+    .map((file) => join(directory, file));
+  const importing = (files: readonly string[]): Set<string> => new Set(files.flatMap((file) => [...sourceModule(file).imported]
+    .filter(([, imported]) => imported.from === protocol).map(([, imported]) => imported.name)));
+  const worker = importing(sources(join(root, 'worker', 'src')));
+  const client = importing(sources(join(root, 'src')).filter((file) => file !== protocol));
+  const modules = new Map<string, SourceModule>();
+  const moduleOf = (file: string): SourceModule => {
+    const read = modules.get(file) ?? sourceModule(file);
 
-  for (const chunk of source.split(/\n(?=[^\s}\])])/u)) {
-    const name = SOURCE_DECLARED.exec(chunk)?.[1];
+    modules.set(file, read);
 
-    if (name !== undefined) declared.set(name, [...declared.get(name) ?? [], chunk]);
-  }
-
-  const importers = (directory: string, module: RegExp, skip?: string): Set<string> => new Set(readdirSync(join(root, directory)).filter((file) => file.endsWith('.ts') && file !== skip)
-    .flatMap((file) => [...readFileSync(join(root, directory, file), 'utf8').matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*'${module.source}'`, 'gu'))])
-    .flatMap((match) => (match[1] ?? '').split(',').map((part) => part.trim().split(/\s+as\s+/u)[0] ?? '').filter((part) => part !== '' && !part.startsWith('type '))));
-  const worker = importers(join('worker', 'src'), /\.\.\/\.\.\/src\/protocol/u);
-  const client = importers('src', /\.\/protocol/u, 'protocol.ts');
-  const roots = [...worker].filter((name) => client.has(name) && (declared.get(name) ?? []).some((chunk) => /^(?:export )?(?:async )?function /u.test(chunk)));
-
+    return read;
+  };
   const kept = new Set<string>();
   const seen = new Set<string>();
 
-  const reach = (name: string): void => {
-    if (seen.has(name)) return;
+  // `name` as module `file` declares it, or where its relative import leads; a name no relative module declares (a
+  // global, a package's, a local variable) leads nowhere.
+  const reach = (file: string, name: string): void => {
+    if (seen.has(`${file}\0${name}`)) return;
 
-    seen.add(name);
+    seen.add(`${file}\0${name}`);
+    const module = moduleOf(file);
+    const imported = module.imported.get(name);
 
-    for (const chunk of declared.get(name) ?? []) {
-      const text = uncommented(chunk);
+    if (imported !== undefined) {
+      reach(imported.from, imported.name);
 
-      kept.add(text);
+      return;
+    }
 
-      for (const word of text.matchAll(/[A-Za-z_$][\w$]*/gu)) if (word[0] !== name) reach(word[0]);
+    for (const tokens of module.declared.get(name) ?? []) {
+      kept.add(`${relative(root, file)}\0${tokens.join(' ')}`);
+
+      for (const token of tokens) if (/^[A-Za-z_$][\w$]*$/u.test(token) && token !== name) reach(file, token);
     }
   };
 
-  for (const root of roots) reach(root);
+  for (const name of [...worker].filter((each) => client.has(each)).toSorted()) reach(protocol, name);
   const hash = createHash('sha256');
 
   for (const text of [...kept].toSorted()) hash.update(`${text}\n`);
@@ -94,23 +103,150 @@ export function derivedOf(root: string): string {
   return hash.digest('hex');
 }
 
-/** A top-level declaration's name in TypeScript source. */
-const SOURCE_DECLARED = /^(?:export )?(?:declare )?(?:abstract )?(?:async )?(?:class|interface|type|const|function|enum|let|var|namespace) +([\w$]+)/u;
+/** A TypeScript source file's top-level declarations, each name's every declaration as its tokens (`tokensOf`), and
+ *  the names its relative imports bring in, each with the file and name it stands for. */
+interface SourceModule {
+  readonly declared: ReadonlyMap<string, readonly (readonly string[])[]>;
+  readonly imported: ReadonlyMap<string, { readonly from: string; readonly name: string }>;
+}
 
-/** `text` without its comments (a line's from `//`, a block's) and with its whitespace one space: a comment or
- *  formatting alone derives nothing. A `//` within a string is kept, as a line comment starts only past code that is
- *  no string's: the quote count before it is even. */
-function uncommented(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//gu, ' ')
-    .split('\n').map((line) => {
-      for (let at = line.indexOf('//'); at !== -1; at = line.indexOf('//', at + 2)) {
-        const before = line.slice(0, at);
+/** The words that open a top-level declaration, after any of `export`, `declare`, `abstract`, `async`, `default`. */
+const OPENING = new Set(['class', 'interface', 'type', 'const', 'function', 'enum', 'let', 'var', 'namespace']);
 
-        if (((before.match(/'/gu) ?? []).length % 2) === 0 && ((before.match(/`/gu) ?? []).length % 2) === 0 && ((before.match(/"/gu) ?? []).length % 2) === 0) return before;
+/** `file` read as a `SourceModule`: its tokens split into statements where a token at bracket depth 0 opens a line and
+ *  starts a declaration, an import or an export. A type-only import brings in no value and is no derivation's. */
+function sourceModule(file: string): SourceModule {
+  const declared = new Map<string, string[][]>();
+  const imported = new Map<string, { from: string; name: string }>();
+  const statements: string[][] = [];
+
+  for (const { token, opens } of tokensOf(readFileSync(file, 'utf8'))) {
+    if (opens || statements.length === 0) statements.push([]);
+    statements.at(-1)?.push(token);
+  }
+
+  for (const tokens of statements) {
+    if (tokens[0] === 'import' && tokens[1] === '{') {
+      const close = tokens.indexOf('}');
+      const from = tokens[close + 2] ?? '';
+
+      if (tokens[close + 1] !== 'from' || !/^['"]\./u.test(from)) continue;
+      const target = join(dirname(file), from.slice(1, -1).replace(/\.(?:js|ts)$/u, '')) + '.ts';
+      const names = tokens.slice(2, close).join(' ').split(',').map((part) => part.trim()).filter((part) => part !== '' && !part.startsWith('type '));
+
+      for (const part of names) {
+        const [name = '', local = name] = part.split(/\s+as\s+/u);
+
+        imported.set(local, { from: target, name });
       }
 
-      return line;
-    }).join('\n').replace(/\s+/gu, ' ').trim();
+      continue;
+    }
+
+    let at = 0;
+
+    while (['export', 'declare', 'abstract', 'async', 'default'].includes(tokens[at] ?? '')) at += 1;
+
+    if (!OPENING.has(tokens[at] ?? '')) continue;
+    const name = tokens[at + 1] ?? '';
+
+    declared.set(name, [...declared.get(name) ?? [], tokens]);
+  }
+
+  return { declared, imported };
+}
+
+/** `source`'s tokens without comments or whitespace, each literal (a string, a template's every part, a regex) whole as
+ *  written, and whether each opens a statement: at bracket depth 0, first on its line, and a word a statement opens
+ *  with. A `/` is a regex where a value cannot end before it (an operator, an opening bracket, a keyword). */
+function* tokensOf(source: string): Generator<{ readonly token: string; readonly opens: boolean }> {
+  let at = 0;
+  let depth = 0;
+  let lineStart = true;
+  let previous = '';
+  // Each template whose `${` is open: the depth its expression closes back at.
+  const templates: number[] = [];
+  const word = /[A-Za-z_$][\w$]*/uy;
+  const number = /(?:0[xXbBoO][\da-fA-F_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?)n?/uy;
+  const valueEnds = (token: string): boolean => /^[\w$)\]}'"`]/u.test(token.at(-1) ?? '') && !['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'throw', 'instanceof', 'yield', 'await', 'else', 'do'].includes(token);
+
+  // A template from `start` (its backtick, or the `}` that closes an expression in it) to its end or next `${`.
+  const template = (start: number): string => {
+    let end = start + 1;
+
+    while (end < source.length && source[end] !== '`' && !(source[end] === '$' && source[end + 1] === '{')) end += source[end] === '\\' ? 2 : 1;
+
+    return source.slice(start, end < source.length && source[end] === '`' ? end + 1 : end + 2);
+  };
+
+  while (at < source.length) {
+    const char = source[at] ?? '';
+
+    if (char === '\n') {
+      lineStart = true;
+      at += 1;
+      continue;
+    }
+
+    if (/\s/u.test(char)) {
+      at += 1;
+      continue;
+    }
+
+    if (source.startsWith('//', at)) {
+      at = source.indexOf('\n', at) === -1 ? source.length : source.indexOf('\n', at);
+      continue;
+    }
+
+    if (source.startsWith('/*', at)) {
+      at = source.indexOf('*/', at + 2) === -1 ? source.length : source.indexOf('*/', at + 2) + 2;
+      continue;
+    }
+
+    let token: string;
+
+    if (char === '`' || (char === '}' && templates.at(-1) === depth)) {
+      if (char === '}') templates.pop();
+      token = template(at);
+
+      if (token.endsWith('${')) {
+        templates.push(depth);
+      }
+    } else if (char === '\'' || char === '"') {
+      let end = at + 1;
+
+      while (end < source.length && source[end] !== char && source[end] !== '\n') end += source[end] === '\\' ? 2 : 1;
+      token = source.slice(at, end + 1);
+    } else if (char === '/' && !valueEnds(previous)) {
+      let end = at + 1;
+      let inClass = false;
+
+      while (end < source.length && (inClass || source[end] !== '/') && source[end] !== '\n') {
+        if (source[end] === '[') inClass = true;
+        else if (source[end] === ']') inClass = false;
+        end += source[end] === '\\' ? 2 : 1;
+      }
+
+      end += 1;
+
+      while (/[a-z]/u.test(source[end] ?? '')) end += 1;
+      token = source.slice(at, end);
+    } else {
+      word.lastIndex = at;
+      number.lastIndex = at;
+      token = word.exec(source)?.[0] ?? number.exec(source)?.[0] ?? char;
+
+      if ('([{'.includes(token)) depth += 1;
+      else if (')]}'.includes(token)) depth -= 1;
+    }
+
+    const opens = lineStart && depth === 0 && (OPENING.has(token) || ['export', 'declare', 'abstract', 'async', 'import'].includes(token));
+
+    yield { token, opens };
+    lineStart = false;
+    previous = token;
+    at += token.length;
+  }
 }
 
 /** The Durable Object classes `root`'s Worker config binds. */
