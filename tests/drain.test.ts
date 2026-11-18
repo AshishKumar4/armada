@@ -222,6 +222,7 @@ describe('a deploy whose clients derive differently', () => {
 
         return derivedOf(root);
       };
+
       const base = [
         "import { keyPart } from './keys';",
         'const SALT = 1;',
@@ -239,6 +240,7 @@ describe('a deploy whose clients derive differently', () => {
         '}',
         '',
       ].join('\n');
+
       const first = write(base);
       const changed = (text: string) => text !== first;
 

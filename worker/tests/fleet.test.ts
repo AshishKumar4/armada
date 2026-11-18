@@ -500,6 +500,7 @@ describe('a job past its fair share while another waits', () => {
 
     // a holds 16 and b 8 of 24; c's 4-vCPU ask makes three jobs of demand 16, 8 and 4: shares 10, 8 and 4 after c's.
     for (const holder of a) await fleet.acquire(holder, 4, { deadlineAt });
+
     for (const holder of b) await fleet.acquire(holder, 4, { deadlineAt });
     const asked = await fleet.acquire('c/v1', 4, { deadlineAt });
 
@@ -516,6 +517,7 @@ describe('a job past its fair share while another waits', () => {
 
     // a holds 14 and b 10 of 24; c's 8-vCPU ask: shares of 8 each, a 6 past its share and b 2.
     for (const holder of a) await fleet.acquire(holder, 2, { deadlineAt });
+
     for (const holder of b) await fleet.acquire(holder, 2, { deadlineAt });
     await fleet.acquire('c/v1', 8, { deadlineAt });
     const kept = await renewing(fleet, [...a, ...b]);

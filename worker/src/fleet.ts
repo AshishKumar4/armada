@@ -241,6 +241,7 @@ export class ArmadaFleet extends ArmadaSingle {
       await this.want(borrows, holder, now);
       // Holds below its priority, lowest and newest first, until it and those ahead of it fit; as `want` left them.
       this.recall({ limit, ...belowOf(priority, job), asks: throughOf(holder, priority, place), now });
+
       // Then, its job within its share, holds of its priority or below past their jobs' shares; not for a gang's rank.
       if (reserve <= vcpus) this.toShares({ cap, limit, job, priority, asks: throughOf(holder, priority, place), now });
 
@@ -431,16 +432,17 @@ export class ArmadaFleet extends ArmadaSingle {
   private fairShares(cap: Room, now: number): Map<string, { readonly share: number; readonly demand: number }> {
     const rows = this.sql.exec<{ job: string; vcpus: number; memory: number }>(`SELECT job, SUM(vcpus) AS vcpus, SUM(memory) AS memory FROM (
         SELECT job, vcpus, memory FROM holds WHERE until > ? AND recalled IS NULL UNION ALL SELECT job, vcpus, memory FROM waiting) GROUP BY job`, now).toArray();
+
     const demands = rows.map(({ job, vcpus, memory }) => ({ job, demand: dominant({ vcpus, memory }, cap) })).toSorted((left, right) => left.demand - right.demand);
     const shares = new Map<string, { share: number; demand: number }>();
     let left = 1;
 
-    demands.forEach(({ job, demand }, index) => {
+    for (const [index, { job, demand }] of demands.entries()) {
       const share = Math.min(demand, left / (demands.length - index));
 
       shares.set(job, { share, demand });
       left -= share;
-    });
+    }
 
     return shares;
   }
@@ -455,21 +457,27 @@ export class ArmadaFleet extends ArmadaSingle {
    *  stay; a waiting gang's rank recalls nothing (`acquire`), as what it needs is its whole reserve at once. */
   private toShares({ cap, limit, job, priority, asks, now }: { readonly cap: Room; readonly limit: Room; readonly job: string; readonly priority: number; readonly asks: Where; readonly now: number }): void {
     const shares = this.fairShares(cap, now);
-    const own = shares.get(job);
+    // `dominant`'s weights, for the rows' own reading.
+    const perVcpu = cap.vcpus > 0 ? 1 / cap.vcpus : 0;
+    const perMemory = Number.isFinite(cap.memory) && cap.memory > 0 ? 1 / cap.memory : 0;
+    const its = shares.get(job);
 
-    if (own === undefined || own.demand > own.share) return;
+    if (its === undefined || its.demand > its.share) return;
 
     while (!within(this.charge(now, UNRECALLED, asks), limit)) {
       const held = this.sql.exec<{ job: string; vcpus: number; memory: number }>(
         'SELECT job, SUM(vcpus) AS vcpus, SUM(memory) AS memory FROM holds WHERE until > ? AND recalled IS NULL AND job != ? AND priority <= ? GROUP BY job', now, job, priority).toArray();
+
       const past = held.map((each) => ({ job: each.job, past: dominant(each, cap) - (shares.get(each.job)?.share ?? 0) })).filter((each) => each.past > 0)
         .toSorted((left, right) => right.past - left.past);
+
       let next: string | undefined;
 
       // The furthest past first; the first with a hold small enough to leave it at its share or above.
       for (const each of past) {
-        next = this.sql.exec<{ holder: string; vcpus: number; memory: number }>(`SELECT holder, vcpus, memory FROM holds WHERE job = ? AND until > ? AND recalled IS NULL AND recallable = 1
-            AND reserve <= vcpus ORDER BY granted DESC, holder`, each.job, now).toArray().find((hold) => dominant(hold, cap) <= each.past + SHARE_EPSILON)?.holder;
+        // Its newest hold that leaves it at its share or above, picked where the rows are, as `dominant` weighs it.
+        next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE job = ? AND until > ? AND recalled IS NULL AND recallable = 1 AND reserve <= vcpus
+            AND MAX(vcpus * ?, memory * ?) <= ? ORDER BY granted DESC, holder LIMIT 1`, each.job, now, perVcpu, perMemory, each.past + SHARE_EPSILON).toArray()[0]?.holder;
 
         if (next !== undefined) break;
       }

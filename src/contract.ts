@@ -56,13 +56,17 @@ export function contractOf(root: string): string {
  *  the floor's raise too. */
 export function derivedOf(root: string): string {
   const protocol = join(root, 'src', 'protocol.ts');
+
   const sources = (directory: string): string[] => readdirSync(directory, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.ts') && !file.endsWith('.d.ts'))
     .map((file) => join(directory, file));
+
   const importing = (files: readonly string[]): Set<string> => new Set(files.flatMap((file) => [...sourceModule(file).imported]
     .filter(([, imported]) => imported.from === protocol).map(([, imported]) => imported.name)));
+
   const worker = importing(sources(join(root, 'worker', 'src')));
   const client = importing(sources(join(root, 'src')).filter((file) => file !== protocol));
   const modules = new Map<string, SourceModule>();
+
   const moduleOf = (file: string): SourceModule => {
     const read = modules.get(file) ?? sourceModule(file);
 
@@ -70,6 +74,7 @@ export function derivedOf(root: string): string {
 
     return read;
   };
+
   const kept = new Set<string>();
   const seen = new Set<string>();
 
