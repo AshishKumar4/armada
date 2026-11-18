@@ -458,3 +458,80 @@ describe('a vessel of a job of higher priority (#60)', () => {
     }
   });
 });
+
+// Dew, 2026-11-18: one run's five maps held 2,300 of 2,900 vCPUs, and every other job's larger containers waited.
+describe('a job past its fair share while another waits', () => {
+  /** Which of `holders` the fleet still lets take a task. */
+  const renewing = async (fleet: ArmadaFleet, holders: string[]) =>
+    Object.fromEntries(await Promise.all(holders.map(async (holder) => [holder, await fleet.renews(holder)] as const)));
+
+  test('holds the whole cap while nobody waits, and gives back its newest holds down to its share once one does', async () => {
+    const fleet = fleetOf(16);
+    const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4'];
+
+    const granted = [];
+
+    for (const holder of burst) granted.push(await fleet.acquire(holder, 4, { deadlineAt }));
+
+    // A 4-vCPU container of another job: the cap is full, and the burst's share of two jobs' demand is 12.
+    const asked = await fleet.acquire('other/v1', 4, { deadlineAt });
+
+    expect({ granted, asked, renewing: await renewing(fleet, burst) }).toEqual({
+      granted: ['held', 'held', 'held', 'held'], asked: null,
+      renewing: { 'burst/v1': true, 'burst/v2': true, 'burst/v3': true, 'burst/v4': false },
+    });
+  });
+
+  test('frees a large container's room for a large ask, not a small one's', async () => {
+    const fleet = fleetOf(16);
+    const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4', 'burst/v5', 'burst/v6', 'burst/v7', 'burst/v8'];
+
+    for (const holder of burst) await fleet.acquire(holder, 2, { deadlineAt });
+    await fleet.acquire('large/v1', 8, { deadlineAt });
+
+    // The large ask's share is 8: the burst's four newest 2-vCPU holds go, and its four oldest stay.
+    expect(await renewing(fleet, burst)).toEqual(Object.fromEntries(burst.map((holder, index) => [holder, index < 4])));
+  });
+
+  test('recalls the job furthest past its share first, and neither job below its share, until the waiter fits', async () => {
+    const fleet = fleetOf(24);
+    const a = ['a/v1', 'a/v2', 'a/v3', 'a/v4'];
+    const b = ['b/v1', 'b/v2'];
+
+    // a holds 16 and b 8 of 24; c's 4-vCPU ask makes three jobs of demand 16, 8 and 4: shares 10, 8 and 4 after c's.
+    for (const holder of a) await fleet.acquire(holder, 4, { deadlineAt });
+    for (const holder of b) await fleet.acquire(holder, 4, { deadlineAt });
+    const asked = await fleet.acquire('c/v1', 4, { deadlineAt });
+
+    // a is 6 past its share and b none: one of a's holds frees c's room, and b keeps both of its.
+    expect({ asked, renewing: await renewing(fleet, [...a, ...b]), again: await fleet.acquire('c/v1', 4, { deadlineAt }) }).toEqual({
+      asked: null, renewing: { 'a/v1': true, 'a/v2': true, 'a/v3': true, 'a/v4': false, 'b/v1': true, 'b/v2': true }, again: null,
+    });
+  });
+
+  test('recalls nothing for a waiter whose job is past its own share, a gang's rank, a preparation or a job above its priority', async () => {
+    const fleet = fleetOf(16);
+
+    await fleet.acquire('gang/v1', 4, { reserve: 8, deadlineAt });
+    await fleet.acquire('gang/v2', 4, { reserve: 8, deadlineAt });
+    await fleet.acquire('prep/v1', 4, { deadlineAt, recallable: false });
+    await fleet.acquire('high/v1', 4, { deadlineAt, priority: 5 });
+    // A waiter of priority 0 within its share, against a gang, a preparation and a higher job: nothing it may recall.
+    const asked = await fleet.acquire('low/v1', 4, { deadlineAt });
+
+    expect({ asked, renewing: await renewing(fleet, ['gang/v1', 'gang/v2', 'prep/v1', 'high/v1']) }).toEqual({
+      asked: null, renewing: { 'gang/v1': true, 'gang/v2': true, 'prep/v1': true, 'high/v1': true },
+    });
+  });
+
+  test('recalls nothing for a waiter whose own job is past its share', async () => {
+    const fleet = fleetOf(16);
+
+    for (const holder of ['burst/v1', 'burst/v2', 'burst/v3']) await fleet.acquire(holder, 4, { deadlineAt });
+    await fleet.acquire('small/v1', 4, { deadlineAt });
+    // The burst, at 12 of a share of 12, asks a fourth: no recall of small's container, within its share of 4.
+    const asked = await fleet.acquire('burst/v4', 4, { deadlineAt });
+
+    expect({ asked, small: await fleet.renews('small/v1') }).toEqual({ asked: null, small: true });
+  });
+});

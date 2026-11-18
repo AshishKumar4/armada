@@ -13,7 +13,9 @@
  * (`readAccount`) under the token `armada deploy` gives it, while it lends. Every hold asks before each new task
  * (`renews`), and one recalled starts no new task and ends what it runs within RECALL_GRACE_MS (`beat`): the fleet
  * recalls its newest loans once the account fills, its read goes stale, or a holder that may not borrow (a preparation,
- * a gang's rank) waits for room under the cap; and the newest holds below a waiting holder's priority (`acquire`).
+ * a gang's rank) waits for room under the cap; the newest holds below a waiting holder's priority (`acquire`); and, for
+ * a holder whose job is within its fair share, the newest holds of jobs past theirs (`toShares`): while nobody waits,
+ * a job takes all the cap the others leave, and once one does, no job keeps more than its share of it.
  *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
@@ -232,6 +234,8 @@ export class ArmadaFleet extends ArmadaSingle {
       await this.want(borrows, holder, now);
       // Holds below its priority, lowest and newest first, until it and those ahead of it fit; as `want` left them.
       this.recall({ limit, ...belowOf(priority, job), asks: throughOf(holder, priority, place), now });
+      // Then, its job within its share, holds of its priority or below past their jobs' shares.
+      this.toShares({ limit, job, priority, asks: throughOf(holder, priority, place), now });
 
       return null;
     }
@@ -406,6 +410,52 @@ export class ArmadaFleet extends ArmadaSingle {
     while (!within(this.charge(now, UNRECALLED, asks), limit)) {
       const next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE until > ? AND recalled IS NULL AND (${picked.where}) ORDER BY ${order} LIMIT 1`,
         now, ...picked.bindings).toArray()[0];
+
+      if (next === undefined) return;
+      this.sql.exec('UPDATE holds SET recalled = ? WHERE holder = ?', now, next.holder);
+    }
+  }
+
+  /** Each job's fair share of `limit`'s vCPUs, `now`: the cap filled level over the jobs with demand, what each holds
+   *  unrecalled and what its holders ask in line, a job demanding less than the level taking only its demand and
+   *  leaving the rest to the others (max-min). A job's asks in line are about one container (`room`), so a job that
+   *  wants more than it holds demands more by them. In vCPUs: a size's memory follows its vCPUs (`roomOf`). */
+  private shares(limit: Room, now: number): Map<string, number> {
+    const demands = this.sql.exec<{ job: string; vcpus: number }>(`SELECT job, SUM(vcpus) AS vcpus FROM (
+        SELECT job, vcpus FROM holds WHERE until > ? AND recalled IS NULL UNION ALL SELECT job, vcpus FROM waiting) GROUP BY job ORDER BY vcpus`, now).toArray();
+    const shares = new Map<string, number>();
+    let left = limit.vcpus;
+
+    demands.forEach(({ job, vcpus }, index) => {
+      const share = Math.min(vcpus, left / (demands.length - index));
+
+      shares.set(job, share);
+      left -= share;
+    });
+
+    return shares;
+  }
+
+  /** For a holder of job `job` and `priority` that waits, while its job holds and asks within its share (`shares`):
+   *  recalls, `now`, holds of other jobs of its priority or below that hold past their shares, the job furthest past
+   *  its share first and its newest hold first, never taking a job below its share, until it and the asks `asks` picks
+   *  fit `limit`. A burst job that filled the cap while nobody waited then gives back what it holds past its share
+   *  (Dew, 2026-11-18: five maps of one run held 2,300 of 2,900 vCPUs and every other job's larger containers waited
+   *  for their end). A hold no recall frees (`recallable` 0) and a gang's rank (its job's reserve past its own vCPUs,
+   *  whose recall would break the gang) stay; a job's holds are summed as `charge` sums them, with its reserve. */
+  private toShares({ limit, job, priority, asks, now }: { readonly limit: Room; readonly job: string; readonly priority: number; readonly asks: Where; readonly now: number }): void {
+    const shares = this.shares(limit, now);
+    const wanted = this.sql.exec<{ vcpus: number }>(`SELECT COALESCE(SUM(vcpus), 0) AS vcpus FROM (
+        SELECT vcpus FROM holds WHERE job = ? AND until > ? AND recalled IS NULL UNION ALL SELECT vcpus FROM waiting WHERE job = ?)`, job, now, job).one().vcpus;
+
+    if (wanted > (shares.get(job) ?? 0)) return;
+
+    while (!within(this.charge(now, UNRECALLED, asks), limit)) {
+      const held = this.sql.exec<{ job: string; vcpus: number }>(
+        'SELECT job, SUM(vcpus) AS vcpus FROM holds WHERE until > ? AND recalled IS NULL AND job != ? AND priority <= ? GROUP BY job', now, job, priority).toArray();
+      const past = held.map((each) => ({ ...each, past: each.vcpus - (shares.get(each.job) ?? 0) })).filter((each) => each.past > 0).sort((left, right) => right.past - left.past);
+      const next = past.map((each) => this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE job = ? AND until > ? AND recalled IS NULL AND recallable = 1 AND reserve <= vcpus
+          AND vcpus <= ? ORDER BY granted DESC, holder LIMIT 1`, each.job, now, each.past).toArray()[0]).find((found) => found !== undefined);
 
       if (next === undefined) return;
       this.sql.exec('UPDATE holds SET recalled = ? WHERE holder = ?', now, next.holder);
