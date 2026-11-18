@@ -131,7 +131,8 @@ async function failureOf(response: Response): Promise<string> {
  *  redeployed, a drain admitting no job or its objects still on the earlier code, having made nothing of the request;
  *  null for any other answer. */
 async function redeploying(response: Response): Promise<string | null> {
-  if (response.status !== 503) return null;
+  // A refusal for load that made nothing (UNMADE_HEADER) is no deploy's: its client asks again within its read's budget.
+  if (response.status !== 503 || response.headers.get(UNMADE_HEADER) === '1') return null;
   const said = v.safeParse(v.object({ error: v.string() }), jsonOf(await response.clone().text()));
 
   return said.success ? said.output.error : null;

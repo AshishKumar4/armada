@@ -2518,6 +2518,14 @@ describe('a read through an outage', () => {
       });
       expect(await armada.post('/jobs', {})).toEqual({ id: 'made' });
       expect(asked).toBe(3);
+      // Refused so past READ_OUTAGE_MS, the write ends with the refusal, said once, never as a deploy's.
+      clock = 0;
+      said.length = 0;
+      refusing = Infinity;
+      await expect(armada.post('/jobs', {})).rejects.toThrow('the fleet took no new job, loaded');
+      expect(clock).toBeGreaterThanOrEqual(READ_OUTAGE_MS);
+      expect(said.filter((line) => line.includes('nothing made'))).toHaveLength(1);
+      expect(said.some((line) => line.includes('until the deploy is done'))).toBe(false);
       asked = 0;
       globalThis.fetch = fakeFetch(() => {
         asked += 1;
