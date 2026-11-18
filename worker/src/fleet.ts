@@ -184,6 +184,8 @@ export class ArmadaFleet extends ArmadaSingle {
       reserve_memory REAL NOT NULL, until INTEGER NOT NULL, granted INTEGER NOT NULL, borrowed INTEGER NOT NULL, priority INTEGER NOT NULL, recalled INTEGER,
       recallable INTEGER NOT NULL, renewed INTEGER NOT NULL)`);
 
+    // The live loans, which each task's claim looks for (`renews`), found without reading every hold.
+    this.sql.exec('CREATE INDEX IF NOT EXISTS holds_loans ON holds (borrowed, recalled, until)');
     // An earlier Worker's line, which kept no ask's job or memory, goes: its holders take places again as they next ask.
     if (!this.sql.exec<{ name: string }>('PRAGMA table_info(waiting)').toArray().some((column) => column.name === 'job')) this.sql.exec('DROP TABLE IF EXISTS waiting');
     // Each holder the fleet had no room for: its job, what it asks, its job's priority, its place in line from its first
@@ -274,7 +276,13 @@ export class ArmadaFleet extends ArmadaSingle {
   async renews(holder: string): Promise<boolean> {
     const now = Date.now();
 
-    this.recall({ limit: await this.limit(now), ...LOANS, now });
+    // Loans are recalled where the fleet holds any (the limit they were lent under may have lapsed since): a recall
+    // reads what every hold keeps, which every task's claim asking it read whatever the fleet lent, and with none lent
+    // it recalls nothing (Dew, 2026-11-18: 299,403 asks of the fleet in 85 minutes, its p99 1.8 s, and job admissions
+    // refused for its queue).
+    if (this.sql.exec('SELECT 1 AS n FROM holds WHERE borrowed = 1 AND recalled IS NULL AND until > ? LIMIT 1', now).toArray().length > 0) {
+      this.recall({ limit: await this.limit(now), ...LOANS, now });
+    }
 
     return this.sql.exec('SELECT 1 AS n FROM holds WHERE holder = ? AND until > ? AND recalled IS NULL', holder, now).toArray().length > 0;
   }
