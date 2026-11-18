@@ -17,6 +17,10 @@ export const OLDEST_CLIENT = 3;
 
 export const PROTOCOL_HEADER = 'armada-protocol';
 
+/** On a refusal the Worker answers before it made anything of a request (its admission refused for load), so the
+ *  client asks again, a write too: the one refusal a write may be asked again on, as no other says what it made. */
+export const UNMADE_HEADER = 'armada-unmade';
+
 /** The host of the deployment `armada dashboard --serve` passes a page's requests to, on each answer it passes back. */
 export const DEPLOYMENT_HEADER = 'armada-deployment';
 

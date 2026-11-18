@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, type JobBrief, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, type JobBrief, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, UNMADE_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -596,8 +596,21 @@ async function route(request: Request, env: Env): Promise<Response> {
     const created = jobId();
 
     // Admitted and counted open in one step of the fleet's, so a drain that counts no open job has admitted none that
-    // is still being made; a job refused or failed on the way gives its place back.
-    if (!(await fleet.admitJob(env.VERSION.id, env.ARMADA_CONTRACT, created))) {
+    // is still being made; a job refused or failed on the way gives its place back. A fleet too loaded to take the
+    // admission (the runtime's "Durable Object is overloaded": it never took the call) made nothing, which the answer
+    // says (UNMADE_HEADER), so its client asks again (Dew, 2026-11-18: five of a reach's fifty maps failed POST /jobs
+    // so, and their tasks had no outcome).
+    let admitted: boolean;
+
+    try {
+      admitted = await fleet.admitJob(env.VERSION.id, env.ARMADA_CONTRACT, created);
+    } catch (cause) {
+      if (!said({ cause }).includes('Durable Object is overloaded')) throw cause;
+
+      return Response.json({ error: `the fleet took no new job, loaded: ${said({ cause })}` }, { status: 503, headers: { [UNMADE_HEADER]: '1' } });
+    }
+
+    if (!admitted) {
       return Response.json({ error: 'armada is being redeployed and takes no new job until that is done; run again in a few minutes' }, { status: 503 });
     }
 

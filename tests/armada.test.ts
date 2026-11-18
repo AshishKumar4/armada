@@ -2499,8 +2499,8 @@ describe('a read through an outage', () => {
       asked = 0;
       await expect(armada.post('/jobs', {})).rejects.toThrow('certificate has expired');
       expect(asked).toBe(1);
-      // A write the runtime refused unmade, its object overloaded, is asked again until it is taken; one the Worker
-      // failed otherwise, once.
+      // A write the Worker says it made nothing of (UNMADE_HEADER) is asked again until it is taken; one the Worker
+      // failed otherwise, its runtime's overload among them, once.
       clock = 0;
       down = 0;
       asked = 0;
@@ -2511,7 +2511,7 @@ describe('a read through an outage', () => {
         if (refusing > 0) {
           refusing -= 1;
 
-          return new Response('Durable Object is overloaded. Requests queued for too long.', { status: 500 });
+          return Response.json({ error: 'the fleet took no new job, loaded' }, { status: 503, headers: { 'armada-unmade': '1' } });
         }
 
         return Response.json({ id: 'made' });
@@ -2522,9 +2522,9 @@ describe('a read through an outage', () => {
       globalThis.fetch = fakeFetch(() => {
         asked += 1;
 
-        return new Response('an exception', { status: 500 });
+        return new Response('Durable Object is overloaded. Requests queued for too long.', { status: 500 });
       });
-      await expect(armada.post('/jobs', {})).rejects.toThrow('an exception');
+      await expect(armada.post('/jobs', {})).rejects.toThrow('Durable Object is overloaded');
       expect(asked).toBe(1);
     } finally {
       globalThis.fetch = original;

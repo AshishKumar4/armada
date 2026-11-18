@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { CONFIG_FILE, deploymentNamed } from './config';
-import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
+import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, UNMADE_HEADER, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -197,10 +197,6 @@ export class RequestError extends Error {
   }
 }
 
-/** The runtime's refusal of a request to a Durable Object whose queue was too long: the object never took it, so it made
- *  nothing (Cloudflare's "Durable Object is overloaded. Requests queued for too long."). */
-const OVERLOADED = /Durable Object is overloaded/u;
-
 export class Armada {
   /** `answerMs`: how long one ask of a read waits for its whole answer (READ_ANSWER_MS). */
   constructor(readonly connection: Connection, readonly answerMs = READ_ANSWER_MS) {}
@@ -212,10 +208,11 @@ export class Armada {
   /** A request to the runner. A read (GET, HEAD) that meets a gateway's 502, 503 or 504, the Worker's own 500, or a
    *  connection that fails (dropped, refused, its TLS refused), is asked again for READ_OUTAGE_MS, a second apart more
    *  each time up to READ_PAUSE_MS, the failure said once with its cause: the Worker answers it again unchanged, and a
-   *  `run` that polls for hours should not end on a network's blip. A write is asked once, but where the runtime refused
-   *  it unmade, a Durable Object it reached overloaded (OVERLOADED: its requests queued too long, so the object never
-   *  took this one), which is asked again as a read is (Dew, 2026-11-18: five of a reach's 50 maps failed their
-   *  POST /jobs so, and 133 tasks had no outcome). A Durable Object the runtime
+   *  `run` that polls for hours should not end on a network's blip. A write is asked once, but where the Worker says it
+   *  made nothing of it (UNMADE_HEADER: its admission refused for load), which is asked again as a read is, its pause
+   *  drawn at random up to the read's, so writes refused together do not come back together (Dew, 2026-11-18: five of
+   *  a reach's fifty maps failed their POST /jobs on an overloaded fleet, and their tasks had no outcome). A 500 says
+   *  nothing of what a write made, so no write is asked again on one. A Durable Object the runtime
    *  restarted throws once under a read ("Worker threw exception"), and the next read is answered. Any request the
    *  Worker refuses while it is redeployed (`redeploying`), which made nothing of it, is asked again until the deploy is
    *  done, a second apart more each time up to REDEPLOY_WAIT_MS, said once: a job submitted during a deploy's drain
@@ -289,9 +286,8 @@ export class Armada {
         continue;
       }
 
-      if (sent.status === 500 && !read && OVERLOADED.test(await sent.clone().text())
-        && again(`answered 500, ${OVERLOADED.source}`, true)) {
-        await pause(Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
+      if (!read && sent.headers.get(UNMADE_HEADER) === '1' && again(`answered ${String(sent.status)}, nothing made`, true)) {
+        await pause(Math.random() * Math.min(attempt * 1000, READ_PAUSE_MS), init.signal);
         continue;
       }
 

@@ -175,6 +175,16 @@ describe('a drained version', () => {
     expect(await submitted(env)).toBe('503 armada is being redeployed and its objects still run the earlier code; run again in a few minutes (The RPC receiver does not implement the method "admitJob".)');
   });
 
+  test('refuses a job its fleet, too loaded to take the admission, never made, and says it made nothing', async () => {
+    const { env } = deployment(undefined, 'b', {
+      FLEET: namespace(() => ({ admitJob: async () => { throw new Error('Durable Object is overloaded. Requests queued for too long.'); } })),
+    });
+    const request = new Request('https://armada.test/jobs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'armada-protocol': String(PROTOCOL) }, body: JSON.stringify(spec) });
+    const answer = await worker.fetch(request, env);
+
+    expect([answer.status, answer.headers.get('armada-unmade')]).toEqual([503, '1']);
+  });
+
   test('admits no job whose objects answered their interface only after it drained', async () => {
     const asked = Promise.withResolvers<void>();
     const answered = Promise.withResolvers<void>();
