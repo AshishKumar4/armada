@@ -18,7 +18,7 @@
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
 /** The fingerprint of the Worker in `root`'s `worker/`, which its own `tsconfig.json` compiles. */
 export function contractOf(root: string): string {
@@ -30,10 +30,11 @@ export function contractOf(root: string): string {
       '--emitDeclarationOnly', '--removeComments', '--rootDir', root, '--outDir', out]);
 
     if (emitted.exitCode !== 0) throw new Error(`the Worker's declarations did not compile:\n${emitted.stdout.toString()}${emitted.stderr.toString()}`);
-    const files = readdirSync(out, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.d.ts'));
+    const files = new Map(readdirSync(out, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.d.ts'))
+      .map((file) => [join(out, file), readFileSync(join(out, file), 'utf8')]));
     const hash = createHash('sha256');
 
-    for (const declaration of called(files.map((file) => readFileSync(join(out, file), 'utf8')), bound(root))) hash.update(`${declaration}\n`);
+    for (const declaration of called(out, files, bound(root))) hash.update(`${declaration}\n`);
 
     return hash.digest('hex');
   } finally {
@@ -49,41 +50,84 @@ function bound(root: string): readonly string[] {
 /** A top-level declaration's name in an emitted declaration file. */
 const DECLARED = /^(?:export )?(?:declare )?(?:abstract )?(?:class|interface|type|const|function|enum|let|var|namespace) +([\w$]+)/u;
 
-/** The declarations of `files` (emitted `.d.ts` texts) the public methods of the classes `roots` name, sorted: each
- *  class's public members and the classes it extends, then every declaration a kept text names, transitively. A class
- *  reached keeps its public members alone; its constructor, private and protected members are no call's. */
-function called(files: readonly string[], roots: readonly string[]): readonly string[] {
-  const declared = new Map<string, string[]>();
+/** An emitted import or re-export: its names (`a`, `b as c`, `type d`) and the module it names. */
+const IMPORTED = /^(?:import|export)\s+(?:type\s+)?\{([^}]*)\}\s+from\s+'([^']+)';/gmu;
 
-  for (const text of files) {
+/** One emitted declaration file: what it declares by name, and the module and name each name it imports stands for. */
+interface Module {
+  readonly declared: ReadonlyMap<string, readonly string[]>;
+  readonly imported: ReadonlyMap<string, { readonly from: string; readonly name: string }>;
+}
+
+/** `files` (path to emitted `.d.ts` text), each read as a `Module`. */
+function modulesOf(files: ReadonlyMap<string, string>): ReadonlyMap<string, Module> {
+  return new Map([...files].map(([file, text]) => {
+    const declared = new Map<string, string[]>();
+
     // A top-level statement starts at the margin; its body and continuation lines are indented, or close it.
-    const chunks = text.split(/\n(?=[^\s}\])])/u);
-
-    for (const chunk of chunks) {
+    for (const chunk of text.split(/\n(?=[^\s}\])])/u)) {
       const name = DECLARED.exec(chunk)?.[1];
 
       if (name !== undefined) declared.set(name, [...declared.get(name) ?? [], chunk]);
     }
-  }
 
+    const imported = new Map<string, { from: string; name: string }>();
+
+    for (const [, names = '', module = ''] of text.matchAll(IMPORTED)) {
+      if (!module.startsWith('.')) continue;
+      const from = join(dirname(file), module.replace(/\.(?:js|ts)$/u, '')) + '.d.ts';
+
+      for (const part of names.split(',').map((each) => each.trim().replace(/^type\s+/u, '')).filter((each) => each !== '')) {
+        const [name = '', local = name] = part.split(/\s+as\s+/u);
+
+        imported.set(local, { from, name });
+      }
+    }
+
+    return [file, { declared, imported }];
+  }));
+}
+
+/** The declarations the public methods of the classes `roots` name, each with its file (under `out`), sorted: each class's public
+ *  members and the classes it extends, then every declaration a kept text names, resolved in its own module (a local
+ *  declaration, else the one its import stands for, through re-exports), transitively. A class reached keeps its
+ *  public members alone; its constructor, private and protected members are no call's, and the platform's type
+ *  arguments of what it extends (`DurableObject<Env>`) are its deployment's, no call's. */
+function called(out: string, files: ReadonlyMap<string, string>, roots: readonly string[]): readonly string[] {
+  const modules = modulesOf(files);
   const kept = new Set<string>();
   const seen = new Set<string>();
 
-  const reach = (name: string): void => {
-    if (seen.has(name)) return;
+  // The declarations `name` stands for in `file`: its own, else what its import names, followed to where declared.
+  const resolved = (file: string, name: string, hops = 0): readonly (readonly [string, string])[] => {
+    const module = modules.get(file);
+    const own = module?.declared.get(name);
 
-    seen.add(name);
+    if (own !== undefined) return own.map((chunk) => [file, chunk] as const);
+    const imported = module?.imported.get(name);
 
-    for (const chunk of declared.get(name) ?? []) {
-      const text = /^(?:export )?(?:declare )?(?:abstract )?class /u.test(chunk) ? publicOf(chunk) : chunk;
+    return imported === undefined || hops > 8 ? [] : resolved(imported.from, imported.name, hops + 1);
+  };
 
-      kept.add(text);
+  const reach = (file: string, chunk: string): void => {
+    const name = DECLARED.exec(chunk)?.[1] ?? '';
 
-      for (const word of text.matchAll(/[A-Za-z_$][\w$]*/gu)) if (word[0] !== name) reach(word[0]);
+    if (seen.has(`${file}\n${name}`)) return;
+
+    seen.add(`${file}\n${name}`);
+
+    const text = /^(?:export )?(?:declare )?(?:abstract )?class /u.test(chunk) ? publicOf(chunk) : chunk;
+
+    kept.add(`${relative(out, file)}\n${text}`);
+
+    for (const word of text.matchAll(/[A-Za-z_$][\w$]*/gu)) {
+      if (word[0] !== name) for (const [at, found] of resolved(file, word[0])) reach(at, found);
     }
   };
 
-  for (const root of roots) reach(root);
+  for (const [file, module] of modules) {
+    for (const root of roots) for (const chunk of module.declared.get(root) ?? []) reach(file, chunk);
+  }
 
   return [...kept].toSorted();
 }
