@@ -808,7 +808,7 @@ export async function environmentKey(recipe: Recipe, cpu?: readonly Cpu[]): Prom
   // platform may start a snapshot's containers only where it was taken, so one environment serves only the jobs its
   // snapshot's host serves (the armada audit, 2026-11-18: two pins sharing one key's generation each displaced the
   // other's, and a job packed against one was refused by the next). An unpinned job's is keyed as it always was.
-  const pin = cpu === undefined ? [] : [cpu.map(cpuLabel).toSorted().join(',')];
+  const pin = cpu === undefined ? [] : [cpu.map((one) => cpuLabel([one])).toSorted().join(',')];
   const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[shared].instance, repo, ...pin];
 
   return await sha256(JSON.stringify(inputs));

@@ -68,14 +68,17 @@ function called(files: readonly string[], roots: readonly string[]): readonly st
 
   const kept = new Set<string>();
   const seen = new Set<string>();
+
   const reach = (name: string): void => {
     if (seen.has(name)) return;
+
     seen.add(name);
 
     for (const chunk of declared.get(name) ?? []) {
       const text = /^(?:export )?(?:declare )?(?:abstract )?class /u.test(chunk) ? publicOf(chunk) : chunk;
 
       kept.add(text);
+
       for (const word of text.matchAll(/[A-Za-z_$][\w$]*/gu)) if (word[0] !== name) reach(word[0]);
     }
   };

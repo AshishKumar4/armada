@@ -10,7 +10,7 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import type * as v from 'valibot';
-import { boundaryOf, cpuLabel, cpusOf, failureTail, hasCpu, hostLabel, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type Cpu, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
+import { boundaryOf, cpuLabel, failureTail, hasCpu, hostLabel, KEPT_ENVIRONMENTS, SIZES, workdirOf, type Commit, type Cpu, type EnvironmentEntrySchema, type GenerationSchema, type Recipe, type Size } from '../../src/protocol';
 import { deleteSnapshotWith } from '../../src/registry';
 import { AccountFull, AS_USER, CPU_INFO, EXEC_MS, hostOf, Misplaced, instanceOf, LAUNCH_PHASE, must, type Exec, phaseDir, pipeIn, receive, run, runnerLayer, SLICE_MS, startAndAnswer, STATE, USER_HOME, WAIT_SECONDS, waitOn } from './container';
 import { ArmadaSingle, packKey, said, SINGLE, type Env } from './env';
@@ -693,7 +693,7 @@ export class ArmadaPreparer extends DurableObject<Env> {
 
     // A pinned job's preparation fails rather than snapshot off its CPUs, which no container of it could start from:
     // its jobs end, and a later one prepares it again (Dew, 2026-11-17: re-prepared off its pin, it would loop).
-    throw new Error(`no container started on a host of ${cpuLabel(preparation.cpu)} in ${String(PREPARE_PIN_MS / 60_000)} min, the last on ${hostLabel(host)}`);
+    throw new Error(`no container started on a host of ${cpuLabel(required)} in ${String(PREPARE_PIN_MS / 60_000)} min, the last on ${hostLabel(host)}`);
   }
 
   /** The account's snapshot storage is full: the registry frees what this deployment can (`makeRoom`), and the snapshot

@@ -333,6 +333,7 @@ describe('a deploy', () => {
       const outer = contract();
 
       writeFileSync(fleet, original);
+
       // Exports no call names, each of 2026-11-17's groups that drained by one alone (the armada audit of 2026-11-18): a
       // client's HTTP header (T), a webhook driver's constant (A), a deployment's setting (E), a client's helper (I).
       const edits: readonly (readonly [string, string, string])[] = [
@@ -341,6 +342,7 @@ describe('a deploy', () => {
         ['worker/src/env.ts', 'export interface Env {', 'export interface Env {\n  readonly PREPARE_CPU?: string;'],
         ['src/protocol.ts', 'export function drainReasons(', 'export function drainFor(force: boolean): string[] {\n  return force ? [\'asked\'] : [];\n}\nexport function drainReasons('],
       ];
+
       const exported = edits.map(([file, from, to]) => {
         const path = join(copy, file);
         const was = readFileSync(path, 'utf8');
@@ -352,6 +354,7 @@ describe('a deploy', () => {
 
         return found === before;
       });
+
       // A type a call takes: what a preparation begins from (Q's preparer input).
       const environments = join(copy, 'worker', 'src', 'environments.ts');
 

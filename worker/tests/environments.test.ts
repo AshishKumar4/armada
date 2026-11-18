@@ -497,6 +497,7 @@ describe('a preparation under way', () => {
     const recipe = v.parse(RecipeSchema, {});
     const one = [{ vendor: 'AuthenticAMD', family: 25, model: 17 }];
     const other = [{ vendor: 'AuthenticAMD', family: 25, model: 1 }];
+
     const keys = [await environmentKey(recipe), await environmentKey(recipe, one), await environmentKey(recipe, [...one]), await environmentKey(recipe, other),
       await environmentKey(recipe, [...other, ...one]), await environmentKey(recipe, [...one, ...other])];
 
