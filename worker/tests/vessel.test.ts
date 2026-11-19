@@ -45,6 +45,10 @@ interface Run {
   readonly usage?: { readonly exitCode: number; readonly stdout: string } | Error;
   readonly out?: string;
   readonly stopping?: string;
+  /** Whether its task's process is gone with no exit when first waited on, and when the platform said it stops the
+   *  container from then on. */
+  readonly gone?: boolean;
+  readonly stoppingAfter?: string;
   readonly launched?: number;
   readonly packed?: boolean;
   /** What packing its artifacts gives, where it does not pack them. */
@@ -76,7 +80,7 @@ interface Run {
 async function run(lost: number, {
   argv: words = ['true'], env = {}, usage = { exitCode: 0, stdout: '' }, out, stopping = '', launched, packed = false, pack, gang, startAllowed = true, marker, tasks = 1,
   fleet = { acquire: async () => 'held', release: async () => undefined, renews: async () => true, beat: async () => null }, cpu, cpuinfo = '', pending = 0, timeout = spec.timeout, deadlineAt,
-  inputs, held = [], reading, protects = false,
+  inputs, held = [], reading, protects = false, gone = false, stoppingAfter = '',
 }: Run = {}) {
   const completed: Outcome[] = [];
   // The exit code each answer was weighed by against another copy's (`ArmadaJob.accept`).
@@ -87,8 +91,10 @@ async function run(lost: number, {
   const envs: (Readonly<Record<string, string>> | undefined)[] = [];
   const piped = new Map<string, string>();
   const started: { name: string; index: number; attempt: number; afterLaunch: boolean; stored: boolean }[] = [];
-  // Each word that the fleet took the vessel's container for a job of a higher priority: whether it was gone.
+  // Each word that the fleet took the vessel's container for a job of a higher priority: whether it was gone, and
+  // whether a recall took it (not the platform's stop).
   const preempted: boolean[] = [];
+  const recalls: boolean[] = [];
   const task = once({ index: 0, attempt: 1, argv: [...words], env: { ...env }, secrets: [], duplicate: false, gang }, tasks);
   let retired = false;
   let waits = 0;
@@ -99,7 +105,7 @@ async function run(lost: number, {
 
     if (argv[2] === usageOf(TASK_GROUP)) return usage;
 
-    if (argv[2] === STOPPED) return { exitCode: 0, stdout: stopping };
+    if (argv[2] === STOPPED) return { exitCode: 0, stdout: waits > 0 && stoppingAfter !== '' ? stoppingAfter : stopping };
 
     if (argv[2] === CPU_INFO) return { exitCode: 0, stdout: cpuinfo };
 
@@ -122,7 +128,9 @@ async function run(lost: number, {
 
     if (waits <= lost) return new Error('Network connection lost.');
 
-    return { exitCode: 0, stdout: waits <= lost + pending ? '' : '0\n' };
+    if (waits <= lost + pending) return { exitCode: 0, stdout: '' };
+
+    return { exitCode: 0, stdout: gone ? 'gone\n' : '0\n' };
   }, (argv, body) => { if (argv[3] === 'pipe-in') piped.set(argv[4] ?? '', body); }));
 
   const job = {
@@ -144,7 +152,10 @@ async function run(lost: number, {
     },
     complete: async (_name: string, outcome: Outcome) => { completed.push(outcome); },
     retired: async () => { retired = true; },
-    preempted: async (_name: string, gone: boolean) => { preempted.push(gone); },
+    preempted: async (_name: string, ended: boolean, recalled = true) => {
+      preempted.push(ended);
+      recalls.push(recalled);
+    },
     protects: async () => protects,
     vesselFailed: async (_name: string, error: string, how?: { readonly misplaced?: Host }) => {
       failed.push(error);
@@ -178,7 +189,7 @@ async function run(lost: number, {
 
   for (let alarm = 0; alarm < 4; alarm += 1) await vessel.alarm();
 
-  return { exits: completed.map((outcome) => outcome.exitCode), accepts, failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, preempted, stored: artifacts.objects, execs, envs, piped, started };
+  return { exits: completed.map((outcome) => outcome.exitCode), accepts, failed, misplaced, completed, claimed: task.given.done, claims: task.given.claims, retired, preempted, recalls, stored: artifacts.objects, execs, envs, piped, started };
 }
 
 /** The first CPU of a host's /proc/cpuinfo, `flags` its flags. */
@@ -418,6 +429,15 @@ describe('a container the platform is stopping', () => {
   test('takes no task: its vessel fails before claiming one, so the job replaces it', async () => {
     expect(await run(0, { stopping: '2026-10-07T18:21:00Z\n' }))
       .toMatchObject({ exits: [], claimed: false, failed: ['the platform asked the container to stop at 2026-10-07T18:21:00Z'] });
+  });
+
+  // Dew, 2026-11-19: a container the platform asked to stop 50 s into its one task read as an exit of -1, a train's red.
+  test('ends a task whose process it took as lost at no cost, never as an exit, and none marked preempted', async () => {
+    const stopped = await run(0, { gone: true, stoppingAfter: '2026-11-19T01:07:08Z\n' });
+    const failed = await run(0, { gone: true });
+
+    expect({ stopped: [stopped.exits, stopped.preempted, stopped.recalls], failed: [failed.exits, failed.preempted] })
+      .toEqual({ stopped: [[], [true], [false]], failed: [[-1], []] });
   });
 });
 
