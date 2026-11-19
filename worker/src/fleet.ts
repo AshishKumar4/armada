@@ -13,9 +13,7 @@
  * (`readAccount`) under the token `armada deploy` gives it, while it lends. Every hold asks before each new task
  * (`renews`), and one recalled starts no new task and ends what it runs within RECALL_GRACE_MS (`beat`): the fleet
  * recalls its newest loans once the account fills, its read goes stale, or a holder that may not borrow (a preparation,
- * a gang's rank) waits for room under the cap; the newest holds below a waiting holder's priority (`acquire`); and, for
- * a holder whose job is within its fair share, the newest holds of jobs past theirs (`toShares`): while nobody waits,
- * a job takes all the cap the others leave, and once one does, no job keeps more than its share of it.
+ * a gang's rank) waits for room under the cap; and the newest holds below a waiting holder's priority (`acquire`).
  *
  * It also keeps the jobs not yet done, and whether new ones are admitted: `armada deploy` drains the deployed version
  * (it admits no new job, and the open ones finish) before it replaces it. The drain names the version it drains, so
@@ -86,13 +84,6 @@ interface Crowded {
   readonly room: Room;
   readonly until: number;
 }
-
-/** A share's slack for floating point: a hold of exactly a job's excess, as 4 of 24 vCPUs past a share of a half of
- *  16 of 24, frees it, which the fractions' rounding would otherwise refuse. */
-const SHARE_EPSILON = 1e-9;
-
-/** What `room` takes of `cap`, as a fraction of it, in the resource of which it takes the larger part. */
-const dominant = (room: Room, cap: Room): number => Math.max(cap.vcpus > 0 ? room.vcpus / cap.vcpus : 0, Number.isFinite(cap.memory) && cap.memory > 0 ? room.memory / cap.memory : 0);
 
 /** A grant: within the fleet's cap, or lent past it. */
 export type Grant = 'held' | 'borrowed';
@@ -247,9 +238,6 @@ export class ArmadaFleet extends ArmadaSingle {
       await this.want(borrows, holder, now);
       // Holds below its priority, lowest and newest first, until it and those ahead of it fit; as `want` left them.
       this.recall({ limit, ...belowOf(priority, job), asks: throughOf(holder, priority, place), now });
-
-      // Then, its job within its share, holds of its priority or below past their jobs' shares; not for a gang's rank.
-      if (reserve <= vcpus) this.toShares({ cap, limit, job, priority, asks: throughOf(holder, priority, place), now });
 
       return null;
     }
@@ -432,69 +420,6 @@ export class ArmadaFleet extends ArmadaSingle {
     }
   }
 
-  /** Each job's fair share of `cap`, `now`, as a fraction of it in its dominant resource (vCPUs or memory, whichever
-   *  of its holds and asks takes the larger part of the cap's): the cap filled level over the jobs with demand, what
-   *  each holds unrecalled and what its holders ask in line, a job demanding less than the level taking only its demand
-   *  and leaving the rest to the others (max-min). A job's asks in line are about one container (`room`), so a job that
-   *  wants more than it holds demands more by them. Each job's demand, in that fraction, beside its share. */
-  private fairShares(cap: Room, now: number): Map<string, { readonly share: number; readonly demand: number }> {
-    const rows = this.sql.exec<{ job: string; vcpus: number; memory: number }>(`SELECT job, SUM(vcpus) AS vcpus, SUM(memory) AS memory FROM (
-        SELECT job, vcpus, memory FROM holds WHERE until > ? AND recalled IS NULL UNION ALL SELECT job, vcpus, memory FROM waiting) GROUP BY job`, now).toArray();
-
-    const demands = rows.map(({ job, vcpus, memory }) => ({ job, demand: dominant({ vcpus, memory }, cap) })).toSorted((left, right) => left.demand - right.demand);
-    const shares = new Map<string, { share: number; demand: number }>();
-    let left = 1;
-
-    for (const [index, { job, demand }] of demands.entries()) {
-      const share = Math.min(demand, left / (demands.length - index));
-
-      shares.set(job, { share, demand });
-      left -= share;
-    }
-
-    return shares;
-  }
-
-  /** For a holder of job `job` and `priority` that waits, while its job holds and asks within its share
-   *  (`fairShares`, of the fleet's own cap, never what it lends past it): recalls, `now`, holds of other jobs of its
-   *  priority or below that hold past their shares, the job furthest past its share first and its newest hold first,
-   *  never taking a job below its share, until it and the asks `asks` picks fit `limit`. A burst job that filled the
-   *  cap while nobody waited then gives back what it holds past its share (Dew, 2026-11-18: five maps of one run held
-   *  2,300 of 2,900 vCPUs and every other job's larger containers waited for their end). A hold no recall frees
-   *  (`recallable` 0) and a gang's rank (its job's reserve past its own vCPUs, whose recall would break the gang)
-   *  stay; a waiting gang's rank recalls nothing (`acquire`), as what it needs is its whole reserve at once. */
-  private toShares({ cap, limit, job, priority, asks, now }: { readonly cap: Room; readonly limit: Room; readonly job: string; readonly priority: number; readonly asks: Where; readonly now: number }): void {
-    const shares = this.fairShares(cap, now);
-    // `dominant`'s weights, for the rows' own reading.
-    const perVcpu = cap.vcpus > 0 ? 1 / cap.vcpus : 0;
-    const perMemory = Number.isFinite(cap.memory) && cap.memory > 0 ? 1 / cap.memory : 0;
-    const its = shares.get(job);
-
-    if (its === undefined || its.demand > its.share) return;
-
-    while (!within(this.charge(now, UNRECALLED, asks), limit)) {
-      const held = this.sql.exec<{ job: string; vcpus: number; memory: number }>(
-        'SELECT job, SUM(vcpus) AS vcpus, SUM(memory) AS memory FROM holds WHERE until > ? AND recalled IS NULL AND job != ? AND priority <= ? GROUP BY job', now, job, priority).toArray();
-
-      const past = held.map((each) => ({ job: each.job, past: dominant(each, cap) - (shares.get(each.job)?.share ?? 0) })).filter((each) => each.past > 0)
-        .toSorted((left, right) => right.past - left.past);
-
-      let next: string | undefined;
-
-      // The furthest past first; the first with a hold small enough to leave it at its share or above.
-      for (const each of past) {
-        // Its newest hold that leaves it at its share or above, picked where the rows are, as `dominant` weighs it.
-        next = this.sql.exec<{ holder: string }>(`SELECT holder FROM holds WHERE job = ? AND until > ? AND recalled IS NULL AND recallable = 1 AND protects = 0 AND reserve <= vcpus
-            AND MAX(vcpus * ?, memory * ?) <= ? ORDER BY granted DESC, holder LIMIT 1`, each.job, now, perVcpu, perMemory, each.past + SHARE_EPSILON).toArray()[0]?.holder;
-
-        if (next !== undefined) break;
-      }
-
-      if (next === undefined) return;
-      this.sql.exec('UPDATE holds SET recalled = ? WHERE holder = ?', now, next);
-    }
-  }
-
   /** `holder` still runs, as its vessel says each slice of its work: the time its container ends the tasks it runs by,
    *  RECALL_GRACE_MS after the fleet recalled it, or null while it runs on (#63, #66). A hold of a job with no deadline
    *  lasts LEASE_MS past `now` at least, so a hold whose release was lost ends as a deadline's does. */
@@ -504,7 +429,7 @@ export class ArmadaFleet extends ArmadaSingle {
     if (held === undefined) return null;
     // Whether it runs a task a recall preempted before, as its vessel reads its job each slice (Dew, 2026-11-18: a
     // 40-minute calibration row, queued again on its job's newest container each time, was recalled five times in a
-    // row, as every recall takes the newest hold first): while it does, no recall frees it, by priority, share or loan,
+    // row, as every recall takes the newest hold first): while it does, no recall frees it, by priority or loan,
     // so such a task is preempted at most once. Said each slice, so a restart or a lost word heals at the next.
     this.sql.exec('UPDATE holds SET protects = ? WHERE holder = ?', Number(protects), holder);
 

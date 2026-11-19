@@ -49,7 +49,7 @@ describe('the fleet', () => {
   });
 
   // Dew, 2026-11-18: a 40-minute task, queued again on its job's newest container, was recalled five times in a row.
-  test('recalls no hold whose vessel says it runs a preempted task, by priority or share, until it says it no longer does', async () => {
+  test('recalls no hold whose vessel says it runs a preempted task, by priority, until it says it no longer does', async () => {
     const fleet = fleetOf(8);
 
     for (const holder of ['low/v1', 'low/v2']) await fleet.acquire(holder, 4, { deadlineAt });
@@ -60,17 +60,8 @@ describe('the fleet', () => {
 
     await fleet.beat('low/v2', Date.now(), false);
     await fleet.acquire('train/v2', 4, { deadlineAt, priority: 5 });
-    const released = await fleet.renews('low/v2');
-    const shared = fleetOf(16);
-    const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4'];
 
-    for (const holder of burst) await shared.acquire(holder, 4, { deadlineAt });
-
-    await shared.beat('burst/v4', Date.now(), true);
-    await shared.acquire('other/v1', 4, { deadlineAt });
-    const byShare = await Promise.all(burst.map(async (holder) => await shared.renews(holder)));
-
-    expect({ byPriority, released, byShare }).toEqual({ byPriority: [false, true], released: false, byShare: [true, true, false, true] });
+    expect({ byPriority, released: await fleet.renews('low/v2') }).toEqual({ byPriority: [false, true], released: false });
   });
 
   // #60: a train's suite waited a median of 530 s for containers that developers' suites held between their tasks.
@@ -174,8 +165,7 @@ describe('a fleet of many holds', () => {
       const stored = state();
       const fleet = new ArmadaFleet(stored.ctx, world({ FLEET_VCPUS: String(4 * holds) }));
 
-      // Names of one width: the refusal below recalls a's newest hold to b's share (`toShares`), and its name is carried.
-      for (let at = 1; at <= holds; at++) await fleet.acquire(`a/v${String(at).padStart(4, '0')}`, 4, { deadlineAt, renewed: true });
+      for (let at = 1; at <= holds; at++) await fleet.acquire(`a/v${String(at)}`, 4, { deadlineAt, renewed: true });
       const costs: number[] = [];
       let before = stored.carried();
 
@@ -185,13 +175,13 @@ describe('a fleet of many holds', () => {
       };
 
       // A beat, a renewal, a refusal while the fleet is full, a release, and the grant it makes room for.
-      await fleet.beat('a/v0001');
+      await fleet.beat('a/v1');
       cost();
-      await fleet.renews('a/v0001');
+      await fleet.renews('a/v1');
       cost();
       await fleet.acquire('b/v1', 4, { deadlineAt });
       cost();
-      await fleet.release('a/v0002');
+      await fleet.release('a/v2');
       cost();
       await fleet.acquire('b/v1', 4, { deadlineAt });
       cost();
@@ -505,98 +495,4 @@ describe('a vessel of a job of higher priority (#60)', () => {
 });
 
 // Dew, 2026-11-18: one run's five maps held 2,300 of 2,900 vCPUs, and every other job's larger containers waited.
-describe('a job past its fair share while another waits', () => {
-  /** Which of `holders` the fleet still lets take a task. */
-  const renewing = async (fleet: ArmadaFleet, holders: string[]) =>
-    Object.fromEntries(await Promise.all(holders.map(async (holder) => [holder, await fleet.renews(holder)] as const)));
 
-  test('holds the whole cap while nobody waits, and gives back its newest holds down to its share once one does', async () => {
-    const fleet = fleetOf(16);
-    const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4'];
-
-    const granted = [];
-
-    for (const holder of burst) granted.push(await fleet.acquire(holder, 4, { deadlineAt }));
-
-    // A 4-vCPU container of another job: the cap is full, and the burst's share of two jobs' demand is 12.
-    const asked = await fleet.acquire('other/v1', 4, { deadlineAt });
-
-    expect({ granted, asked, renewing: await renewing(fleet, burst) }).toEqual({
-      granted: ['held', 'held', 'held', 'held'], asked: null,
-      renewing: { 'burst/v1': true, 'burst/v2': true, 'burst/v3': true, 'burst/v4': false },
-    });
-  });
-
-  test("frees a large container's room for a large ask, not a small one's", async () => {
-    const fleet = fleetOf(16);
-    const burst = ['burst/v1', 'burst/v2', 'burst/v3', 'burst/v4', 'burst/v5', 'burst/v6', 'burst/v7', 'burst/v8'];
-
-    for (const holder of burst) await fleet.acquire(holder, 2, { deadlineAt });
-    await fleet.acquire('large/v1', 8, { deadlineAt });
-
-    // The large ask's share is 8: the burst's four newest 2-vCPU holds go, and its four oldest stay.
-    expect(await renewing(fleet, burst)).toEqual(Object.fromEntries(burst.map((holder, index) => [holder, index < 4])));
-  });
-
-  test('recalls the job furthest past its share first, and neither job below its share, until the waiter fits', async () => {
-    const fleet = fleetOf(24);
-    const a = ['a/v1', 'a/v2', 'a/v3', 'a/v4'];
-    const b = ['b/v1', 'b/v2'];
-
-    // a holds 16 and b 8 of 24; c's 4-vCPU ask makes three jobs of demand 16, 8 and 4: shares 10, 8 and 4 after c's.
-    for (const holder of a) await fleet.acquire(holder, 4, { deadlineAt });
-
-    for (const holder of b) await fleet.acquire(holder, 4, { deadlineAt });
-    const asked = await fleet.acquire('c/v1', 4, { deadlineAt });
-
-    // a is 6 past its share and b none: one of a's holds frees c's room, and b keeps both of its.
-    expect({ asked, renewing: await renewing(fleet, [...a, ...b]), again: await fleet.acquire('c/v1', 4, { deadlineAt }) }).toEqual({
-      asked: null, renewing: { 'a/v1': true, 'a/v2': true, 'a/v3': true, 'a/v4': false, 'b/v1': true, 'b/v2': true }, again: null,
-    });
-  });
-
-  test('recalls two jobs past their shares, the furthest first, down to their shares and no further, until the waiter fits', async () => {
-    const fleet = fleetOf(24);
-    const a = ['a/v1', 'a/v2', 'a/v3', 'a/v4', 'a/v5', 'a/v6', 'a/v7'];
-    const b = ['b/v1', 'b/v2', 'b/v3', 'b/v4', 'b/v5'];
-
-    // a holds 14 and b 10 of 24; c's 8-vCPU ask: shares of 8 each, a 6 past its share and b 2.
-    for (const holder of a) await fleet.acquire(holder, 2, { deadlineAt });
-
-    for (const holder of b) await fleet.acquire(holder, 2, { deadlineAt });
-    await fleet.acquire('c/v1', 8, { deadlineAt });
-    const kept = await renewing(fleet, [...a, ...b]);
-
-    // 8 vCPUs freed, a's newest first as it is furthest past: each job left at its share of 8, neither below it.
-    expect({
-      a: a.filter((holder) => kept[holder]).length * 2, b: b.filter((holder) => kept[holder]).length * 2,
-      newest: kept['a/v7'], oldest: [kept['a/v1'], kept['b/v1']],
-    }).toEqual({ a: 8, b: 8, newest: false, oldest: [true, true] });
-  });
-
-  test('recalls nothing of a gang\'s rank, a preparation or a job above the waiter\'s priority', async () => {
-    const fleet = fleetOf(16);
-
-    await fleet.acquire('gang/v1', 4, { reserve: 8, deadlineAt });
-    await fleet.acquire('gang/v2', 4, { reserve: 8, deadlineAt });
-    await fleet.acquire('prep/v1', 4, { deadlineAt, recallable: false });
-    await fleet.acquire('high/v1', 4, { deadlineAt, priority: 5 });
-    // A waiter of priority 0 within its share, against a gang, a preparation and a higher job: nothing it may recall.
-    const asked = await fleet.acquire('low/v1', 4, { deadlineAt });
-
-    expect({ asked, renewing: await renewing(fleet, ['gang/v1', 'gang/v2', 'prep/v1', 'high/v1']) }).toEqual({
-      asked: null, renewing: { 'gang/v1': true, 'gang/v2': true, 'prep/v1': true, 'high/v1': true },
-    });
-  });
-
-  test('recalls nothing for a waiter whose own job is past its share', async () => {
-    const fleet = fleetOf(16);
-
-    for (const holder of ['burst/v1', 'burst/v2', 'burst/v3']) await fleet.acquire(holder, 4, { deadlineAt });
-    await fleet.acquire('small/v1', 4, { deadlineAt });
-    // The burst, at 12 of a share of 12, asks a fourth: no recall of small's container, within its share of 4.
-    const asked = await fleet.acquire('burst/v4', 4, { deadlineAt });
-
-    expect({ asked, small: await fleet.renews('small/v1') }).toEqual({ asked: null, small: true });
-  });
-});

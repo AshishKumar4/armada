@@ -129,7 +129,7 @@ export interface Current {
 }
 
 /** How one slot's loop ended its slice: the slice ran out, the job had no task for it, or how long to wait for one. */
-type SlotEnd = 'reslice' | 'retired' | 'preempted' | 'stopped' | number;
+type SlotEnd = 'reslice' | 'retired' | 'preempted' | number;
 
 /** A slice of a vessel's slot loops: when it ends, the flag the first failed loop sets, and what a loop calls when it
  *  started a task (a packing vessel then opens one more slot to ask). */
@@ -518,13 +518,7 @@ export class ArmadaVessel extends DurableObject<Env> {
       if (waited.value.exitCode !== 0) throw new Error(`the wait exited ${String(waited.value.exitCode)}: ${failureTail(waited.value.stdout, waited.value.stderr)}`);
       const exit = waited.value.stdout.trim();
 
-      // Its process gone with no exit recorded, in a container the platform asked to stop: the platform ended it, not
-      // its task, which goes on elsewhere at no cost (`stopped`). Gone otherwise: it failed, though what it would have
-      // exited is unknown.
-      if (exit === 'gone' && (await must(container, 'the stop check', ['/bin/sh', '-c', STOPPED], { ms: EXEC_MS })).stdout.trim() !== '') {
-        return 'stopped';
-      }
-
+      // Its process gone with no exit recorded: it failed, though what it would have exited is unknown.
       if (exit !== '') {
         await this.finish(spec, slot, current, { exitCode: exit === 'gone' ? -1 : Number(exit) });
         continue;
@@ -605,13 +599,9 @@ export class ArmadaVessel extends DurableObject<Env> {
 
     while (settled.length < loops.length) settled = await Promise.allSettled(loops);
     const failed = settled.find((each) => each.status === 'rejected');
-    const ended = settled.flatMap((each) => each.status === 'fulfilled' ? [each.value] : []);
-
-    // A container the platform is stopping ends whatever it runs, a sibling slot's failure as it stops among it: its
-    // tasks go on elsewhere at no cost, none marked preempted (no recall took them).
-    if (ended.includes('stopped')) return await this.preempt(spec, false);
 
     if (failed !== undefined) throw failed.reason;
+    const ended = settled.flatMap((each) => each.status === 'fulfilled' ? [each.value] : []);
 
     // Read again before the container goes: a run here may have become one of a preempted task since the slice began
     // (its other copy's container recalled meanwhile), which no recall ends; the next slice tells the fleet.
@@ -887,10 +877,10 @@ export class ArmadaVessel extends DurableObject<Env> {
 
   /** The fleet took its container back for a job of a higher priority, or for room, from tasks that ran past the grace
    *  (`ArmadaFleet.beat`): the container ends with them, and its job queues them again (`ArmadaJob.preempted`). */
-  private async preempt(spec: VesselSpec, recalled = true): Promise<false> {
+  private async preempt(spec: VesselSpec): Promise<false> {
     const gone = await this.end('done', spec);
 
-    await this.env.JOB.getByName(spec.jobId).preempted(spec.name, gone, recalled);
+    await this.env.JOB.getByName(spec.jobId).preempted(spec.name, gone);
 
     return false;
   }

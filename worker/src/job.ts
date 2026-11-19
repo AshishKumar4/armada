@@ -1435,11 +1435,8 @@ export class ArmadaJob extends DurableObject<Env> {
   /** Vessel `name` ended the tasks it ran past its recall's grace, the fleet taking its container back for a job of a
    *  higher priority or for room (`ArmadaFleet.beat`, #63, #66). Each goes on elsewhere at no cost to its retries or
    *  INFRA_ATTEMPTS, as the fleet took it, not its task. No replacement is spent: the job's next vessels wait their
-   *  turn in the fleet's line. Its runs end once its container is `gone`. Where the platform stopped its container
-   *  (`recalled` false: Dew, 2026-11-19, a container the platform asked to stop 50 s into its one task, which read as
-   *  an exit of -1 and blocked a train as a red), its tasks go on elsewhere at no cost alike, and are not marked
-   *  preempted: no recall took them. */
-  async preempted(name: string, gone = false, recalled = true): Promise<void> {
+   *  turn in the fleet's line. Its runs end once its container is `gone`. */
+  async preempted(name: string, gone = false): Promise<void> {
     if ((await this.spec()) === undefined) return;
 
     if (gone) this.runs.gone(name);
@@ -1449,12 +1446,8 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('DELETE FROM standby WHERE vessel = ?', name);
     // Each task a run of it here was is preempted now, a copy's and a gang rank's included: every vessel running it from
     // now on protects its container against every recall (`protects`), so it is preempted at most once.
-
-    if (recalled) {
-      this.sql.exec(`UPDATE tasks SET preempted = 1 WHERE state IN ('forming', 'running', 'landing')
-        AND (vessel = ? OR dup = ? OR idx IN (SELECT idx FROM members WHERE vessel = ?))`, name, name, name);
-    }
-
+    this.sql.exec(`UPDATE tasks SET preempted = 1 WHERE state IN ('forming', 'running', 'landing')
+      AND (vessel = ? OR dup = ? OR idx IN (SELECT idx FROM members WHERE vessel = ?))`, name, name, name);
     await this.abandon(name, (index, infra) => { this.lost(index, infra, { vessel: name, error: '', stormed: true }); });
     await this.grow();
     await this.settle();
