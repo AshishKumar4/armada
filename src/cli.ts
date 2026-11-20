@@ -432,7 +432,7 @@ async function deployedFleet(name: string, deployed: Armada): Promise<{ readonly
   try {
     return v.parse(v.object({ cap: v.number(), peakShare: v.optional(v.number(), 1) }), await (await deployed.call('/fleet')).json());
   } catch (cause) {
-    throw new Error(`${name} did not state its fleet cap (${errorOf({ cause }).message}): name it, --vcpus=N`, { cause });
+    throw new Error(`${name} did not state its fleet cap and peak share (${errorOf({ cause }).message}): name them, --vcpus=N --peak-share=N`, { cause });
   }
 }
 
@@ -461,7 +461,18 @@ async function deploy(name: string, asked: { readonly vcpus: number | undefined;
 
   // Its fleet's cap and its packing's peak share, each the one asked or the deployed Worker's own (`fleetCap`), read
   // before anything changes: a redeploy keeps both.
-  const stated = known === null || (vcpus !== undefined && asked.peakShare !== undefined) ? null : await deployedFleet(name, new Armada(known));
+  // A cap named needs no read of it: a Worker that cannot be read at this wire (an older one, drained across wires) keeps
+  // the peak share it states, else 1, as before there was one.
+  let stated: Awaited<ReturnType<typeof deployedFleet>> | null = null;
+
+  if (known !== null && (vcpus === undefined || asked.peakShare === undefined)) {
+    try {
+      stated = await deployedFleet(name, new Armada(known));
+    } catch (cause) {
+      if (vcpus === undefined) throw cause;
+    }
+  }
+
   const cap = fleetCap(name, vcpus, vcpus !== undefined ? null : stated?.cap ?? null);
   const peakShare = asked.peakShare ?? stated?.peakShare ?? 1;
   // Checked before anything changes, as the registry's credentials are minted; its memory caps the fleet's in the
