@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as v from 'valibot';
-import { environmentKey, JobSpecSchema, PROTOCOL, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
+import { environmentKey, JobSpecSchema, lineageKey, PROTOCOL, RecipeSchema, type Json, type Outcome } from '../../src/protocol';
 import { ArmadaEstimates, itemKey, MIN_SAMPLES, type Usage } from '../src/estimates';
 import { ArmadaJob, type Claim } from '../src/job';
 import worker from '../src/worker';
@@ -9,13 +9,16 @@ import { namespace, READY, runOf, state, world } from './harness';
 const GIB = 2 ** 30;
 
 /** Half a core and 2 GiB: four fit a medium container's 4 vCPUs and 85% of its 10 GiB. */
-const SMALL: Usage = { cores: 0.5, memory: 2 * GIB, disk: 1e6 };
+const SMALL: Usage = { cores: 0.5, sustained: 0.5, memory: 2 * GIB, disk: 1e6 };
 
 /** Each item's command: one class, `sim work`, whatever the item. */
 const argvOf = (item: Json) => ['sim', 'work', JSON.stringify(item)];
 
 /** The class every task of these jobs is: `sim work` on a medium recipe's environment. */
 const CLASS = `command ${JSON.stringify(['sim', 'work'])} ${await environmentKey(v.parse(RecipeSchema, { size: 'medium' }))}`;
+
+/** The same command's class on every environment of the recipe's lineage (`lineageKey`). */
+const LINEAGE = `command ${JSON.stringify(['sim', 'work'])} lineage ${await lineageKey(v.parse(RecipeSchema, { size: 'medium' }))}`;
 
 /** The classes' stores, as a job reaches them, and each class's real object. */
 interface Stores {
@@ -210,7 +213,7 @@ describe('an efficient job', () => {
 
   // #47: packed by records of runs beside others, Dew's next job ran up to six tasks a container, each 1.15 to 1.72x slower.
   test('keeps a run beside others out of its item\'s cores, its measured ones kept, and keeps its memory', async () => {
-    const made = await learned({ cores: 1.5, memory: GIB, disk: 1e6 });
+    const made = await learned({ cores: 1.5, sustained: 1.5, memory: GIB, disk: 1e6 });
     const first = await packing(['a', 'b'], made);
     const packed = await slotsOf(first.job, 'v1', 3);
 
@@ -281,17 +284,40 @@ describe('an efficient job', () => {
       .toEqual({ besideB: null, begun: ['v1', 'v2'], landed: [[0, 0, 'exit 1'], [1, 0, null]], alone: [true, false] });
   });
 
-  test('runs a task whose item has no cores of its own whole, though its class is measured, and records its busiest window', async () => {
+  // Dew's CI re-cuts its plan, and an item new to its class ran whole each time though its class was measured.
+  test('packs a task whose item has no record at its class\'s estimate; one whose own run alone kept a pool busy runs whole', async () => {
     const made = await learned(SMALL);
     const first = await packing(['x', 'y'], made);
-    const handed = await slotsOf(first.job, 'v1', 2);
+    const packed = await slotsOf(first.job, 'v1', 3);
+    const pool = await packing(['p', 'q'], made);
 
-    // Alone, a pool of four processes: 0.5 cores over its wall, four in its busiest window.
-    await land(first.job, 'v1', ran(0, 'v1', 0, { cpuSeconds: 5, peakCores: 4 }));
-    await first.job.alarm();
-    const key = await itemKey({ item: 'x', argv: argvOf('x') });
+    // Alone, a pool of four processes: three cores over its wall, four in its busiest window (Dew row 6003).
+    await slotsOf(pool.job, 'v1', 1);
+    await land(pool.job, 'v1', ran(0, 'v1', 0, { cpuSeconds: 30, peakCores: 4 }));
+    await pool.job.alarm();
+    const key = await itemKey({ item: 'p', argv: argvOf('p') });
+    const next = await packing(['p', 'q'], made);
 
-    expect({ handed, cores: (await made.store(CLASS)?.read([key]))?.items[key]?.cores }).toEqual({ handed: [0, null], cores: 4 });
+    expect({ packed, item: (await made.store(CLASS)?.read([key]))?.items[key], next: [await slotsOf(next.job, 'v1', 2), next.begun] })
+      .toEqual({ packed: [0, 1, null], item: { cores: 4, sustained: 3, memory: 2 * GIB, disk: 1e6, alone: false }, next: [[0, null], ['v1', 'v2']] });
+  });
+
+  // A dependency's bump makes a new environment, whose class has measured nothing: every task ran whole (Dew's train
+  // 1089: 3,576 tasks, one a container).
+  test('packs a new environment\'s tasks from its lineage\'s records and estimate, and records each run in both', async () => {
+    const made = stores();
+    const own = await Promise.all(MEASURED.map(async (item, at) => ({ ...SMALL, run: `own/${String(at)}/1/v1`, item: await itemKey({ item, argv: argvOf(item) }), beside: false })));
+
+    await made.store(LINEAGE)?.record([...Array.from({ length: MIN_SAMPLES }, (_, at) => ({ ...SMALL, run: `earlier/${String(at)}/1/v1`, item: `earlier-${String(at)}`, beside: false })), ...own]);
+    const { job, begun } = await packing(['a', 'b', 'c', 'd'], made);
+    const packed = await slotsOf(job, 'v1', 5);
+
+    await land(job, 'v1', ran(0, 'v1', 0));
+    await job.alarm();
+    const key = await itemKey({ item: 'a', argv: argvOf('a') });
+
+    expect({ begun, packed, recorded: [(await made.store(CLASS)?.read([key]))?.items[key]?.memory, (await made.store(LINEAGE)?.read([key]))?.items[key]?.memory] })
+      .toEqual({ begun: ['v1'], packed: [0, 1, 2, 3, null], recorded: [2 * GIB, 2 * GIB] });
   });
 
   test.each([0, 137])('retries a packed task whose child was OOM-killed even when its wrapper exits %i', async (exitCode) => {
@@ -465,7 +491,7 @@ describe('an efficient job', () => {
     expect({ spent, after: begun }).toEqual({ spent: Array.from({ length: 10 }, (_, index) => `v${String(index + 1)}`), after: spent });
   });
   test('keeps the newest estimate of a class, though an older answer arrives after it', async () => {
-    const big: Usage = { cores: 1, memory: 6 * GIB, disk: 1e6 };
+    const big: Usage = { cores: 1, sustained: 1, memory: 6 * GIB, disk: 1e6 };
     const answered = Promise.withResolvers<void>();
     const released = Promise.withResolvers<void>();
 

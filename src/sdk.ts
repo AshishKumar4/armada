@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { CONFIG_FILE, deploymentNamed } from './config';
-import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, UNMADE_HEADER, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
+import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, IDEMPOTENCY_HEADER, UNMADE_HEADER, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -198,6 +198,35 @@ export class RequestError extends Error {
   }
 }
 
+/** `answer`'s body, whole, each wait for its next bytes bounded by `idleMs`: past it, `bounded` aborts with why. */
+async function bodyOf(answer: Response, idleMs: number, bounded: AbortController): Promise<Uint8Array> {
+  const reader = answer.body?.getReader();
+
+  if (reader === undefined) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+
+  for (;;) {
+    // Past it, the ask is aborted and its reader cancelled, which ends a read waiting on it.
+    const idle = setTimeout(() => {
+      bounded.abort(new Error(`no bytes in ${String(Math.round(idleMs / 1000))} s`));
+      void reader.cancel(bounded.signal.reason).catch(() => undefined);
+    }, idleMs);
+
+    try {
+      const { done, value } = await reader.read();
+
+      if (bounded.signal.aborted) throw bounded.signal.reason;
+
+      if (done) break;
+      chunks.push(value);
+    } finally {
+      clearTimeout(idle);
+    }
+  }
+
+  return Bun.concatArrayBuffers(chunks, Infinity, true);
+}
+
 export class Armada {
   /** `answerMs`: how long one ask of a read waits for its whole answer (READ_ANSWER_MS). */
   constructor(readonly connection: Connection, readonly answerMs = READ_ANSWER_MS) {}
@@ -232,6 +261,10 @@ export class Armada {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const read = method === 'GET' || method === 'HEAD';
+    // A write its key makes idempotent (IDEMPOTENCY_HEADER) is asked again as a read is, its own ask unbounded: its body
+    // goes up as fast as the network takes it (row 8848: a pack's part, and POST /jobs, each failed a whole CI run on
+    // one dropped connection).
+    const repeatable = read || headers.has(IDEMPOTENCY_HEADER);
     // When the outage began: when the ask that first failed was sent, its own wait counted (a redeploy's wait before it,
     // `deployed`, is no outage). Every later ask and pause ends within the budget it leaves (the armada audit,
     // 2026-11-18: a pause could pass the budget's end, and a full ask start after it).
@@ -242,7 +275,7 @@ export class Armada {
     // Whether a read that failed, or a write the runtime refused unmade, is asked again, the first failure said with its
     // cause.
     const again = (cause: string, unmade = false): boolean => {
-      if ((!read && !unmade) || init.signal?.aborted === true) return false;
+      if ((!repeatable && !unmade) || init.signal?.aborted === true) return false;
 
       if (began === null) {
         began = asking;
@@ -270,7 +303,12 @@ export class Armada {
         try {
           const answer = await fetch(this.connection.url.replace(/\/$/u, '') + path, { ...init, headers, signal });
 
-          return whole ? new Response(await answer.bytes(), { status: answer.status, headers: answer.headers }) : answer;
+          if (!whole) return answer;
+          // Its body bounded by its silence, not its length: a large artifact's bytes still coming are no lost answer
+          // (row 8848: one past `answerMs` failed its CI run whole).
+          clearTimeout(timer);
+
+          return new Response(await bodyOf(answer, bound, bounded), { status: answer.status, headers: answer.headers });
         } catch (cause) {
           throw bounded.signal.aborted && init.signal?.aborted !== true ? bounded.signal.reason : cause;
         } finally {
@@ -309,8 +347,8 @@ export class Armada {
   }
 
   /** `body` as JSON, and the answer's JSON. */
-  async post(path: string, body: JsonBody): Promise<Json> {
-    return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json());
+  async post(path: string, body: JsonBody, headers: Record<string, string> = {}): Promise<Json> {
+    return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })).json());
   }
 
   /** The deployment's health; `signal` ends the ask, and every retry of it, once aborted. */
@@ -436,7 +474,10 @@ export class Armada {
 
     try {
       for (let start = 0, partNumber = 1; start < body.size; start += PACK_PART, partNumber += 1) {
-        const stored = await (await this.call(`${uploading}&part=${String(partNumber)}`, { method: 'PUT', body: body.slice(start, start + PACK_PART) })).json();
+        // A part put again is the same part, whole: its key makes it idempotent.
+        const stored = await (await this.call(`${uploading}&part=${String(partNumber)}`, {
+          method: 'PUT', body: body.slice(start, start + PACK_PART), headers: { [IDEMPOTENCY_HEADER]: `part ${String(partNumber)}` },
+        })).json();
 
         parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
       }
@@ -479,7 +520,9 @@ export class Armada {
 
     if (refused !== null) throw new Error(refused);
 
-    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', { ...spec, recipe: ownPacker(spec.recipe) })).id;
+    // One key for every ask of this job: a POST /jobs asked again after a dropped connection gets the job its first ask
+    // made, never a second (`ArmadaFleet.admitKeyed`).
+    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', { ...spec, recipe: ownPacker(spec.recipe) }, { [IDEMPOTENCY_HEADER]: crypto.randomUUID() })).id;
   }
 
   async add(id: string, items: readonly Task[]): Promise<void> {
@@ -564,7 +607,7 @@ export class Armada {
   }
 
   /** A read's whole answer, its bytes, or null where the Worker says it is absent: each ask bounded from its sending
-   *  to its last byte (`asked`). */
+   *  to its first byte, and then by each wait for its next (`asked`). */
   async whole(path: string): Promise<Uint8Array | null> {
     const answer = await this.asked(path, {}, PROTOCOL, true);
 

@@ -7,7 +7,12 @@
   "compatibility_date": "2026-09-30",
   "workers_dev": true,
   "preview_urls": false,
-  "observability": { "enabled": true },
+  // Workers Observability off, its logs and traces each named off too (the owner, 2026-11-20: its charges): a setting a
+  // sub-object leaves out would otherwise follow its own default.
+  "observability": {
+    "enabled": false, "logs": { "enabled": false, "persist": false, "invocation_logs": false }, "traces": { "enabled": false, "persist": false },
+    "issues": { "enabled": false }
+  },
   // Both on the `durable_object` policy: no image, instance type or cap here. Each start names what it starts from
   // (a recipe's base image, or an environment snapshot) and its instance; running instances count against the
   // account's limits, and ArmadaFleet keeps this deployment's jobs under its FLEET_VCPUS.

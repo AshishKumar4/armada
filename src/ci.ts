@@ -862,7 +862,7 @@ async function runGraded(armada: Armada, target: string, { deadline, by, pool: b
       const reported = parsed?.success === true ? parsed.output.rows : ungradable;
 
       if (reported !== null && reported.length > 0) wrote.add(index);
-      const rows = reported === null ? null : underExit(reported, result.meta, nameOf(index), plan.include[index]?.rows);
+      const rows = reported === null ? null : underExit(reported, result.meta, nameOf(index), plan.include[index]?.rows, config.task.redExit);
 
       verdicts.set(index, rows);
 

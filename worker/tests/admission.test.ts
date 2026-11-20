@@ -187,6 +187,15 @@ describe('a drained version', () => {
     expect([answer.status, answer.headers.get('armada-unmade')]).toEqual([503, '1']);
   });
 
+  // Row 8848: POST /jobs reset on its way back failed a CI run whole; asked again, it must not make a second job.
+  test('makes one job of a POST /jobs asked again under one idempotency key, and another key makes another', async () => {
+    const { armada, fleet } = deployment();
+    const asked = async (key: string) => v.parse(v.object({ id: v.string() }), await armada.post('/jobs', spec, { 'armada-idempotency': key })).id;
+    const first = await asked('k1');
+
+    expect({ again: await asked('k1'), other: (await asked('k2')) === first, open: await fleet.jobs() }).toEqual({ again: first, other: false, open: 2 });
+  });
+
   test('admits no job whose objects answered their interface only after it drained', async () => {
     const asked = Promise.withResolvers<void>();
     const answered = Promise.withResolvers<void>();

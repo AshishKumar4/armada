@@ -4,14 +4,16 @@
  * used, delivered to their classes' stores (`estimates.ts`). It keeps its own tables in the job's storage and reads the
  * job's `tasks` and `members`; the job hands out each run it chooses, as it does any other.
  *
- * A task's estimate is its own item's record where its item ran before, its memory else its class's, read live from
- * the class's last answer; a task whose item has no cores of its own (none of its runs ran alone, so none measured
- * them), one not looked up yet, one that runs alone, a gang's rank and a task with a copy running each take a
- * container whole: its first run alone measures it, as a class's cores say nothing of an item that starts four
- * processes (Dew row 6003: packed at its class's estimate, a four-rank pool got one core and aborted).
+ * A task's estimate is its own item's record where its item ran before, else its class's, read live from the class's
+ * last answer; where its environment's class or item has none yet, its lineage's (`lineageKey`), so an environment
+ * bumped packs from its first task. A container holds what fits two budgets of cores: their sustained cores within its
+ * vCPUs and their busiest windows within `PEAK_SHARE` times them (`roomOf`). One not looked up yet, one with no
+ * estimate at all, one that runs alone, one whose own runs alone kept a process pool busy (`POOL_CORES`: Dew row 6003,
+ * a four-rank pool packed at its class's estimate got one core and aborted), a gang's rank and a task with a copy
+ * running each take a container whole. A packed run that fails runs again alone (`packedFailure`).
  */
 import type { Outcome, Size } from '../../src/protocol';
-import { roomOf, type ArmadaEstimates, type Estimate, type Sample, type Usage } from './estimates';
+import { roomOf, type ArmadaEstimates, type Estimate, type Reading, type Sample, type Usage } from './estimates';
 
 /** How a run beside other tasks ended when the kernel killed it for memory. */
 export const KILLED_FOR_MEMORY = 'killed for memory';
@@ -26,12 +28,21 @@ export const costOf = (item: string): string => `CASE WHEN json_type(${item}, '$
 /** The class stores a job asks at once. */
 const STORE_CALLS = 32;
 
+/** The sustained cores an item's own runs alone held at which it takes a container whole: a process pool's, which
+ *  packed beside others would get a share of one core (Dew row 6003). */
+export const POOL_CORES = 2.5;
+
+/** An estimate's dimension: the item's own, else its class's, else its lineage's. */
+const own = (column: string): string => `COALESCE(p.${column}, c.${column}, l.${column})`;
+
 /** Each task with what it is expected to use and the containers it takes whole, as an SQL row source over the job's
- *  tasks. */
+ *  tasks. Its cores and sustained cores are one run's or one class's together, never one of each. */
 const ESTIMATED = `SELECT t.idx, t.state, t.weight, t.not_before, t.vessel, t.dup,
-    COALESCE(p.cores, c.cores) AS cores, COALESCE(p.memory, c.memory) AS memory, COALESCE(p.disk, c.disk) AS disk, ${ranksOf('t.item')} AS ranks, ${costOf('t.item')} AS cost,
-    (p.idx IS NULL OR p.looked = 0 OR p.alone = 1 OR COALESCE(p.memory, c.memory) IS NULL OR p.cores IS NULL OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
-  FROM tasks t LEFT JOIN placed p ON p.idx = t.idx LEFT JOIN classes c ON c.class = p.class`;
+    ${own('cores')} AS cores, CASE WHEN p.cores IS NOT NULL THEN COALESCE(p.sustained, p.cores) WHEN c.cores IS NOT NULL THEN c.sustained ELSE l.sustained END AS sustained,
+    ${own('memory')} AS memory, ${own('disk')} AS disk, ${ranksOf('t.item')} AS ranks, ${costOf('t.item')} AS cost,
+    (p.idx IS NULL OR p.looked < 2 OR p.alone = 1 OR ${own('memory')} IS NULL OR ${own('cores')} IS NULL OR COALESCE(p.sustained, 0) >= ${String(POOL_CORES)}
+      OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
+  FROM tasks t LEFT JOIN placed p ON p.idx = t.idx LEFT JOIN classes c ON c.class = p.class LEFT JOIN classes l ON l.class = p.lineage`;
 
 /** The task states whose runs hold a container. */
 const HELD = `('running', 'landing')`;
@@ -47,20 +58,24 @@ export interface Load extends Usage {
   readonly joined: boolean;
 }
 
-/** One task of a job, for its placement: its index, its class and its item's key (`estimates.ts`). */
+/** One task of a job, for its placement: its index, its class, its lineage's class and its item's key
+ *  (`estimates.ts`). */
 export interface Placed {
   readonly index: number;
   readonly class: string;
+  readonly lineage: string;
   readonly item: string;
 }
 
 /** `usage` and `more` together. */
-const plus = (usage: Usage, more: Usage): Usage => ({ cores: usage.cores + more.cores, memory: usage.memory + more.memory, disk: usage.disk + more.disk });
+const plus = (usage: Usage, more: Usage): Usage => ({
+  cores: usage.cores + more.cores, sustained: usage.sustained + more.sustained, memory: usage.memory + more.memory, disk: usage.disk + more.disk,
+});
 
 /** Whether `usage` stays within `room` in every dimension. */
-const within = (usage: Usage, room: Usage): boolean => usage.cores <= room.cores && usage.memory <= room.memory && usage.disk <= room.disk;
+const within = (usage: Usage, room: Usage): boolean => usage.cores <= room.cores && usage.sustained <= room.sustained && usage.memory <= room.memory && usage.disk <= room.disk;
 
-const NONE: Usage = { cores: 0, memory: 0, disk: 0 };
+const NONE: Usage = { cores: 0, sustained: 0, memory: 0, disk: 0 };
 
 /** What a job asks of each class's store (`ask`), and does with its answer (`take`); `doing` names it in the log. */
 interface Asking<Rows, Answer> {
@@ -89,13 +104,26 @@ async function eachClass<Rows, Answer>(stores: DurableObjectNamespace<ArmadaEsti
 
 export class Placement {
   constructor(private readonly sql: SqlStorage) {
+    // `looked`: 0 not looked up, 1 its class's answer taken, 2 its lineage's too (`look`).
     sql.exec(`CREATE TABLE IF NOT EXISTS placed (idx INTEGER PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, looked INTEGER NOT NULL DEFAULT 0,
-      cores REAL, memory REAL, disk REAL, alone INTEGER NOT NULL DEFAULT 0, failure TEXT)`);
-    sql.exec('CREATE TABLE IF NOT EXISTS classes (class TEXT PRIMARY KEY, cores REAL, memory REAL, disk REAL, revision INTEGER NOT NULL)');
+      cores REAL, memory REAL, disk REAL, alone INTEGER NOT NULL DEFAULT 0, failure TEXT, lineage TEXT, sustained REAL)`);
+    sql.exec('CREATE TABLE IF NOT EXISTS classes (class TEXT PRIMARY KEY, cores REAL, memory REAL, disk REAL, revision INTEGER NOT NULL, sustained REAL)');
     sql.exec(`CREATE TABLE IF NOT EXISTS outbox (run TEXT PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, cores REAL NOT NULL, memory REAL NOT NULL, disk REAL NOT NULL,
-      beside INTEGER NOT NULL DEFAULT 0)`);
+      beside INTEGER NOT NULL DEFAULT 0, sustained REAL)`);
+    // An earlier Worker's tables: a job it made takes up where it was, its tasks with no lineage looked up as it left them.
+    const columns = (table: string): string[] => sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map((column) => column.name);
 
-    if (!sql.exec<{ name: string }>('PRAGMA table_info(outbox)').toArray().some((column) => column.name === 'beside')) sql.exec('ALTER TABLE outbox ADD COLUMN beside INTEGER NOT NULL DEFAULT 0');
+    if (!columns('outbox').includes('beside')) sql.exec('ALTER TABLE outbox ADD COLUMN beside INTEGER NOT NULL DEFAULT 0');
+
+    if (!columns('outbox').includes('sustained')) sql.exec('ALTER TABLE outbox ADD COLUMN sustained REAL');
+
+    if (!columns('classes').includes('sustained')) sql.exec('ALTER TABLE classes ADD COLUMN sustained REAL');
+
+    if (!columns('placed').includes('lineage')) {
+      sql.exec('ALTER TABLE placed ADD COLUMN lineage TEXT');
+      sql.exec('ALTER TABLE placed ADD COLUMN sustained REAL');
+      sql.exec('UPDATE placed SET looked = 2 WHERE looked = 1');
+    }
     sql.exec('CREATE TABLE IF NOT EXISTS isolate (class TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (class, item))');
     // Each run handed out beside others, and whether it got a copy since (`copied`).
     sql.exec('CREATE TABLE IF NOT EXISTS beside (vessel TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, copied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (vessel, idx, attempt))');
@@ -103,45 +131,67 @@ export class Placement {
     if (!sql.exec<{ name: string }>('PRAGMA table_info(beside)').toArray().some((column) => column.name === 'copied')) sql.exec('ALTER TABLE beside ADD COLUMN copied INTEGER NOT NULL DEFAULT 0');
   }
 
-  /** New tasks, each with its class and item, to be looked up. */
+  /** New tasks, each with its class, its lineage's and its item, to be looked up. */
   add(tasks: readonly Placed[]): void {
-    for (const task of tasks) this.sql.exec('INSERT OR IGNORE INTO placed (idx, class, item) VALUES (?, ?, ?)', task.index, task.class, task.item);
+    for (const task of tasks) this.sql.exec('INSERT OR IGNORE INTO placed (idx, class, lineage, item) VALUES (?, ?, ?, ?)', task.index, task.class, task.lineage, task.item);
   }
 
-  /** Each task not looked up yet, given its item's record, and its class's estimate: a lookup applies only to a task
-   *  still not looked up, so it never undoes what happened to the task meanwhile, such as its running alone. A class whose
-   *  store does not answer is looked up at the next call; its tasks take containers whole meanwhile. */
+  /** Each task not looked up yet, given its item's record and its class's estimate; then its lineage's, where its own
+   *  class held no record of its item. A lookup applies only to a task still at that step, so it never undoes what
+   *  happened to the task meanwhile, such as its running alone. A class whose store does not answer is looked up at the
+   *  next call; its tasks take containers whole meanwhile. */
   async look(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
     const unlooked = this.sql.exec<{ idx: number; class: string; item: string }>('SELECT idx, class, item FROM placed WHERE looked = 0').toArray();
 
     await eachClass(stores, Map.groupBy(unlooked, (row) => row.class), {
       doing: 'looking',
       ask: async (store, rows) => await store.read([...new Set(rows.map((row) => row.item))]),
-      take: (cls, rows, { estimate, items }) => {
-        this.estimated(cls, estimate);
-
-        for (const row of rows) {
-          const own = items[row.item];
-
-          this.sql.exec('UPDATE placed SET looked = 1, cores = ?, memory = ?, disk = ?, alone = MAX(alone, ?) WHERE idx = ? AND looked = 0',
-            own?.cores ?? null, own?.memory ?? null, own?.disk ?? null, own?.alone === true ? 1 : 0, row.idx);
-        }
-      },
+      take: (cls, rows, reading) => { this.taken(cls, rows, reading, 0); },
     });
+    // Its own class's record of its item stands; one it lacks is its lineage's, an item that ran under an environment
+    // of the lineage before.
+    const lineal = this.sql.exec<{ idx: number; lineage: string; item: string }>('SELECT idx, lineage, item FROM placed WHERE looked = 1').toArray();
+
+    await eachClass(stores, Map.groupBy(lineal, (row) => row.lineage), {
+      doing: 'looking',
+      ask: async (store, rows) => await store.read([...new Set(rows.map((row) => row.item))]),
+      take: (cls, rows, reading) => { this.taken(cls, rows, reading, 1); },
+    });
+  }
+
+  /** `cls`'s answer (`reading`) taken for `rows`, each still at step `step`: its estimate, and each item's record where
+   *  the task has none yet, its cores, sustained cores, memory and disk one run's; the task one step further. */
+  private taken(cls: string, rows: readonly { idx: number; item: string }[], { estimate, items }: Reading, step: number): void {
+    this.estimated(cls, estimate);
+
+    for (const row of rows) {
+      const kept = items[row.item];
+      const fresh = kept !== undefined && kept.cores !== null;
+
+      this.sql.exec(`UPDATE placed SET looked = ?, alone = MAX(alone, ?),
+          cores = CASE WHEN cores IS NULL AND ? THEN ? ELSE cores END, sustained = CASE WHEN cores IS NULL AND ? THEN ? ELSE sustained END,
+          memory = COALESCE(memory, ?), disk = COALESCE(disk, ?)
+        WHERE idx = ? AND looked = ?`,
+      step + 1, kept?.alone === true ? 1 : 0, fresh ? 1 : 0, kept?.cores ?? null, fresh ? 1 : 0, kept?.sustained ?? null,
+      kept?.memory ?? null, kept?.disk ?? null, row.idx, step);
+    }
+
+    // A task with no lineage (made by an earlier Worker) is looked up whole at its class's answer.
+    if (step === 0) this.sql.exec('UPDATE placed SET looked = 2 WHERE looked = 1 AND lineage IS NULL');
   }
 
   /** What vessel `name` runs now: its tasks and the copies it runs, and the gang ranks it holds, each of which takes it
    *  whole. */
   loadOf(name: string): Load {
-    const held = this.sql.exec<{ runs: number; cores: number | null; memory: number | null; disk: number | null; whole: number | null }>(
-      `SELECT COUNT(*) AS runs, SUM(cores) AS cores, SUM(memory) AS memory, SUM(disk) AS disk, MAX(whole) AS whole
+    const held = this.sql.exec<{ runs: number; cores: number | null; sustained: number | null; memory: number | null; disk: number | null; whole: number | null }>(
+      `SELECT COUNT(*) AS runs, SUM(cores) AS cores, SUM(sustained) AS sustained, SUM(memory) AS memory, SUM(disk) AS disk, MAX(whole) AS whole
         FROM (${ESTIMATED}) WHERE state IN ${HELD} AND (vessel = ? OR dup = ?)`, name, name,
     ).one();
 
     const ranks = this.sql.exec<{ state: string }>(`SELECT state FROM members WHERE vessel = ? AND state IN ${RANKED}`, name).toArray();
 
     return {
-      runs: held.runs + ranks.length, cores: held.cores ?? 0, memory: held.memory ?? 0, disk: held.disk ?? 0,
+      runs: held.runs + ranks.length, cores: held.cores ?? 0, sustained: held.sustained ?? 0, memory: held.memory ?? 0, disk: held.disk ?? 0,
       whole: held.whole === 1 || ranks.length > 0, joined: ranks.some((rank) => rank.state === 'joined' || rank.state === 'ready'),
     };
   }
@@ -154,8 +204,9 @@ export class Placement {
     const left = roomOf(size);
 
     return this.sql.exec<{ idx: number }>(
-      `SELECT idx FROM (${ESTIMATED}) WHERE state = 'queued' AND not_before <= ? AND whole = 0 AND cores <= ? AND memory <= ? AND disk <= ?
-        AND (? IS NULL OR cost <= ?) ORDER BY weight DESC, idx LIMIT 1`, now, left.cores - load.cores, left.memory - load.memory, left.disk - load.disk, afford, afford,
+      `SELECT idx FROM (${ESTIMATED}) WHERE state = 'queued' AND not_before <= ? AND whole = 0 AND cores <= ? AND sustained <= ? AND memory <= ? AND disk <= ?
+        AND (? IS NULL OR cost <= ?) ORDER BY weight DESC, idx LIMIT 1`, now, left.cores - load.cores, left.sustained - load.sustained, left.memory - load.memory,
+      left.disk - load.disk, afford, afford,
     ).toArray()[0]?.idx ?? null;
   }
 
@@ -168,15 +219,16 @@ export class Placement {
     const room = roomOf(size);
     const among = only === null ? null : JSON.stringify(only);
 
-    const open = this.sql.exec<{ cores: number | null; memory: number | null; disk: number | null; ranks: number; whole: number }>(
-      `SELECT cores, memory, disk, ranks, whole FROM (${ESTIMATED}) WHERE state IN ('queued', 'forming', 'running', 'landing')
+    const open = this.sql.exec<{ cores: number | null; sustained: number | null; memory: number | null; disk: number | null; ranks: number; whole: number }>(
+      `SELECT cores, sustained, memory, disk, ranks, whole FROM (${ESTIMATED}) WHERE state IN ('queued', 'forming', 'running', 'landing')
         AND (? IS NULL OR idx IN (SELECT value FROM json_each(?))) ORDER BY state IN ${HELD} DESC, weight DESC, idx LIMIT ?`, among, among, pool,
     ).toArray();
 
     const whole = open.filter((task) => task.whole === 1).reduce((sum, task) => sum + task.ranks, 0);
     const bins: Usage[] = [];
 
-    for (const task of open.filter((each) => each.whole === 0).map((each) => ({ cores: each.cores ?? 0, memory: each.memory ?? 0, disk: each.disk ?? 0 })).toSorted((left, right) => right.memory - left.memory)) {
+    for (const task of open.filter((each) => each.whole === 0).map((each) => ({ cores: each.cores ?? 0, sustained: each.sustained ?? 0, memory: each.memory ?? 0, disk: each.disk ?? 0 }))
+      .toSorted((left, right) => right.memory - left.memory)) {
       const bin = bins.findIndex((held) => within(plus(held, task), room));
 
       if (bin === -1) bins.push(task);
@@ -249,29 +301,36 @@ export class Placement {
     return task.failure;
   }
 
-  /** What `run`, vessel `name`'s run of task `index`, used, to deliver to its class (its cores its busiest window's,
-   *  `peakCores`, where the container read it): only a run measured whole, its disk included, which a run in a slot of
-   *  its own is. It ran beside others when it was marked so (`beside`), or when its
-   *  job runs a fixed number of `slots` in each container. */
+  /** What `run`, vessel `name`'s run of task `index`, used, to deliver to its class and its lineage's (its cores its
+   *  busiest window's, `peakCores`, where the container read it, and its sustained cores, its CPU seconds over its wall
+   *  seconds): only a run measured whole, its disk included, which a run in a slot of its own is. It ran beside others
+   *  when it was marked so (`beside`), or when its job runs a fixed number of `slots` in each container. */
   learn(run: string, name: string, { index, attempt, cpuSeconds, peakCores, peakMemory, diskBytes, seconds }: Outcome, slots: number): void {
     if (cpuSeconds === undefined || peakMemory === undefined || diskBytes === undefined || seconds <= 0) return;
     const marked = this.sql.exec('SELECT 1 AS n FROM beside WHERE vessel = ? AND idx = ? AND attempt = ?', name, index, attempt).toArray().length > 0;
+    const sustained = cpuSeconds / seconds;
 
-    this.sql.exec('INSERT OR IGNORE INTO outbox (run, class, item, cores, memory, disk, beside) SELECT ?, class, item, ?, ?, ?, ? FROM placed WHERE idx = ?',
-      run, peakCores ?? cpuSeconds / seconds, peakMemory, diskBytes, marked || slots > 1 ? 1 : 0, index);
+    const used = [Math.max(peakCores ?? sustained, sustained), sustained, peakMemory, diskBytes, marked || slots > 1 ? 1 : 0] as const;
+
+    // One sample to each class it counts in, its class's and its lineage's, the run told apart by where it goes.
+    for (const [column, suffix] of [['class', ''], ['lineage', ' lineage']] as const) {
+      this.sql.exec(`INSERT OR IGNORE INTO outbox (run, class, item, cores, sustained, memory, disk, beside)
+        SELECT ?, ${column}, item, ?, ?, ?, ?, ? FROM placed WHERE idx = ? AND ${column} IS NOT NULL`, run + suffix, ...used, index);
+    }
   }
 
   /** Delivers to each class's store what the job has for it and has not delivered, and takes its answer as the class's
    *  estimate. A delivery is idempotent (`ArmadaEstimates.record`), so what two sends at once both carry counts once; one
    *  a store does not take stays for the next send. */
   async flush(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
-    const samples = this.sql.exec<{ run: string; class: string; item: string; cores: number; memory: number; disk: number; beside: number }>('SELECT run, class, item, cores, memory, disk, beside FROM outbox').toArray();
+    const samples = this.sql.exec<{ run: string; class: string; item: string; cores: number; sustained: number | null; memory: number; disk: number; beside: number }>(
+      'SELECT run, class, item, cores, sustained, memory, disk, beside FROM outbox').toArray();
     const isolated = this.sql.exec<{ class: string; item: string }>('SELECT class, item FROM isolate').toArray();
     const samplesOf = Map.groupBy(samples, (row) => row.class);
     const aloneOf = Map.groupBy(isolated, (row) => row.class);
 
     const classes = new Map([...new Set([...samplesOf.keys(), ...aloneOf.keys()])].map((cls) => [cls, {
-      samples: (samplesOf.get(cls) ?? []).map(({ run, item, cores, memory, disk, beside }): Sample => ({ run, item, cores, memory, disk, beside: beside === 1 })),
+      samples: (samplesOf.get(cls) ?? []).map(({ run, item, cores, sustained, memory, disk, beside }): Sample => ({ run, item, cores, sustained: sustained ?? cores, memory, disk, beside: beside === 1 })),
       alone: (aloneOf.get(cls) ?? []).map((row) => row.item),
     }]));
 
@@ -295,8 +354,9 @@ export class Placement {
 
   /** `cls`'s estimate, as its store answered, unless the job holds a newer one already: answers can arrive out of order. */
   private estimated(cls: string, { usage, revision }: Estimate): void {
-    this.sql.exec(`INSERT INTO classes (class, cores, memory, disk, revision) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT (class) DO UPDATE SET cores = excluded.cores, memory = excluded.memory, disk = excluded.disk, revision = excluded.revision WHERE excluded.revision >= classes.revision`,
-    cls, usage?.cores ?? null, usage?.memory ?? null, usage?.disk ?? null, revision);
+    this.sql.exec(`INSERT INTO classes (class, cores, sustained, memory, disk, revision) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (class) DO UPDATE SET cores = excluded.cores, sustained = excluded.sustained, memory = excluded.memory, disk = excluded.disk, revision = excluded.revision
+      WHERE excluded.revision >= classes.revision`,
+    cls, usage?.cores ?? null, usage?.sustained ?? null, usage?.memory ?? null, usage?.disk ?? null, revision);
   }
 }

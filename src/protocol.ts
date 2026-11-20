@@ -21,6 +21,11 @@ export const PROTOCOL_HEADER = 'armada-protocol';
  *  client asks again, a write too: the one refusal a write may be asked again on, as no other says what it made. */
 export const UNMADE_HEADER = 'armada-unmade';
 
+/** A write's key that makes it idempotent: the client asks a write carrying it again on a dropped connection or a 5xx,
+ *  as it does a read, and the Worker makes once what one key asks (a pack's part, put again whole; a job, made once,
+ *  its id answered again: `ArmadaFleet.admitKeyed`). */
+export const IDEMPOTENCY_HEADER = 'armada-idempotency';
+
 /** The host of the deployment `armada dashboard --serve` passes a page's requests to, on each answer it passes back. */
 export const DEPLOYMENT_HEADER = 'armada-deployment';
 
@@ -810,9 +815,22 @@ export async function cacheKey(bundle: string, task: string, environment: string
 
 /** One environment per driver and recipe: base, scripts, size and, for a repository, its key files. */
 export async function environmentKey(recipe: Recipe, cpu?: readonly Cpu[]): Promise<string> {
+  return await sha256(JSON.stringify([DRIVER, ...recipeInputs(recipe, cpu, (entry) => `${entry.path} ${entry.id}`)]));
+}
+
+/** The key of a recipe's lineage: its environment's (`environmentKey`) with each manifest file by its path alone, and
+ *  no driver, so a change to a file's content (a dependency's lock bumped) or to the runner keeps it. What a lineage's
+ *  tasks used stands for an environment of it that has measured none yet (`estimates.ts`); its base, scripts, size,
+ *  project and CPU pin keep it apart from any environment whose tasks run otherwise. */
+export async function lineageKey(recipe: Recipe, cpu?: readonly Cpu[]): Promise<string> {
+  return await sha256(JSON.stringify(['lineage', ...recipeInputs(recipe, cpu, (entry) => entry.path)]));
+}
+
+/** What keys a recipe's environment, each manifest entry as `named` says it, in path order. */
+function recipeInputs(recipe: Recipe, cpu: readonly Cpu[] | undefined, named: (entry: Manifest[number]) => string): unknown[] {
   const repo = recipe.repo === undefined ? null : {
     ...recipe.repo,
-    manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map((entry) => `${entry.path} ${entry.id}`),
+    manifest: [...recipe.repo.manifest].sort((left, right) => left.path.localeCompare(right.path)).map(named),
   };
 
   // A snapshot starts at any size of its disk (one prepared on medium started on large, small and micro, 2026-10-28), so
@@ -824,9 +842,8 @@ export async function environmentKey(recipe: Recipe, cpu?: readonly Cpu[]): Prom
   // snapshot's host serves (the armada audit, 2026-11-18: two pins sharing one key's generation each displaced the
   // other's, and a job packed against one was refused by the next). An unpinned job's is keyed as it always was.
   const pin = cpu === undefined ? [] : [cpu.map((one) => cpuLabel([one])).toSorted().join(',')];
-  const inputs = [DRIVER, recipe.base, recipe.setup, recipe.install, SIZES[shared].instance, repo, ...pin];
 
-  return await sha256(JSON.stringify(inputs));
+  return [recipe.base, recipe.setup, recipe.install, SIZES[shared].instance, repo, ...pin];
 }
 
 /** Where a job's commands run: the checkout, or the user's work directory. */

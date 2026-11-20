@@ -105,14 +105,16 @@ export const MEMORY_KILL = 'memory';
 
 /** A verdict file's rows under its task's exit: a task that exited nonzero failed, so every row it reported green is
  *  red with that exit; a row it already reported red keeps its own. A red row that kept no output shows the task's.
+ *  A task that exits `redExit` (its config's `task.redExit`) having reported a red row says only that: each row stands
+ *  as reported, so a packed run's red reruns it alone (`packedFailure`) and its green siblings stay green.
  *  A task that exited nonzero having reported no row, cut off at its timeout or killed before it wrote one, is red in
  *  every row its plan entry names (`expected`), or in a row of its own under its name when the entry names none.
  *  A task its kernel killed a process of for want of memory has that kill as a red row of its own beside its rows: a
  *  test the kill took may have reported none, and a red row of another's must not hide why it is missing. It names
  *  the rows its plan entry names (`rows`), where it names any, so a reader knows whose tests the kill took (Dew,
  *  2026-11-17: a reader found no file in the row's task name and could not read the verdict). */
-export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
-  const graded = gradedUnderExit(rows, exit, task, expected);
+export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows'], redExit?: number): VerdictRow[] {
+  const graded = gradedUnderExit(rows, exit, task, expected, redExit);
 
   if (exit.oomKilled !== true) return graded;
   const peak = exit.peakMemory === undefined ? '' : `, its peak ${(exit.peakMemory / 2 ** 30).toFixed(2)} GiB`;
@@ -127,7 +129,13 @@ export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: str
   return [...graded, { ...killed, rows: expected.map((want) => expectedOf(want).name) }];
 }
 
-function gradedUnderExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
+function gradedUnderExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows'], redExit?: number): VerdictRow[] {
+  // The exit a task's config names for "a row I reported is red" (`task.redExit`): its rows stand as reported, each its
+  // own. Only where a row is red and no kill for memory came: that exit with every row green, or a kill, is a failure.
+  if (redExit !== undefined && exit.exitCode === redExit && exit.oomKilled !== true && rows.some((row) => row.exitCode !== 0)) {
+    return rows.map((row) => row.exitCode !== 0 && row.output === '' ? { ...row, output: exit.tail } : row);
+  }
+
   if (rows.length === 0 && exit.exitCode !== 0) {
     const output = `the task exited ${String(exit.exitCode)} and reported no row\n${exit.tail}`;
     const names = expected === undefined || expected.length === 0 ? [task] : expected.map((want) => expectedOf(want).name);

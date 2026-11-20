@@ -69,6 +69,9 @@ const ConfigSchema = v.object({
     /** The matrix key that names a task; `name`, else the first string-valued key, by default. */
     name: v.optional(v.string()),
     verdict: v.optional(v.boolean(), true),
+    /** The exit its command makes when a row it reported is red, and no other failure came: the rows then stand as
+     *  reported, where any other nonzero exit fails every green one (`underExit`). */
+    redExit: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(255))),
     ...v.pick(JobSpecSchema, ['slots', 'mode', 'cpu', 'speculative', 'hedge', 'timeout', 'secrets']).entries,
   }),
 });

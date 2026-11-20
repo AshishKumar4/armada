@@ -12,6 +12,7 @@ import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, tasksMemoryOf, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
 import { Armada, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
+import { IDEMPOTENCY_HEADER } from '../src/protocol';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
@@ -174,6 +175,20 @@ describe('grading a CI run', () => {
     ]);
     expect(grade([{ name: 'a', entry: {}, rows: exited, artifacts: null }]).reds.map(rowName)).toEqual(['one', 'two', 'three']);
     expect(underExit([row('one')], { exitCode: 0, tail: '' }, 'a')).toEqual([row('one')]);
+  });
+
+  test('a task that exits its red exit having reported a red row keeps each row as reported; any other way it fails them', () => {
+    const rows = [row('one'), row('two', 1), { ...row('three', 1), output: '' }];
+    const red = underExit(rows, { exitCode: 3, tail: 'a test failed' }, 'a', undefined, 3);
+
+    expect(red.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
+      ['one', 0, 'one said this'], ['two', 1, 'two said this'], ['three', 1, 'a test failed'],
+    ]);
+    // Its red exit with every row green, another exit, or a kill for memory: every green row fails, as without one.
+    expect(underExit([row('one')], { exitCode: 3, tail: 'no red' }, 'a', undefined, 3).map((each) => each.exitCode)).toEqual([3]);
+    expect(underExit(rows, { exitCode: 4, tail: 'crashed' }, 'a', undefined, 3).map((each) => each.exitCode)).toEqual([4, 1, 1]);
+    expect(underExit(rows, { exitCode: 3, tail: 'Killed', oomKilled: true }, 'a', undefined, 3).map((each) => [rowName(each), each.exitCode]))
+      .toEqual([['one', 3], ['two', 1], ['three', 1], ['a: killed for memory', 137]]);
   });
 
   test('a task its kernel killed a process of for want of memory has the kill as a red row of its own, its green rows green', () => {
@@ -2573,6 +2588,86 @@ describe('a read through an outage', () => {
       console.error = error;
     }
   });
+});
+
+describe('an idempotent write and a long answer', () => {
+  // Row 8848: one dropped connection under a pack's part or POST /jobs, and one artifact past a minute, each failed a
+  // whole CI run ungraded.
+  test('a write its key makes idempotent is asked again through a dropped connection and a 5xx, its key the same each time', async () => {
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const error = console.error;
+    const keys: (string | null)[] = [];
+    let failing = 3;
+
+    Bun.sleep = async () => undefined;
+
+    console.error = () => undefined;
+
+    globalThis.fetch = fakeFetch((request) => {
+      keys.push(request.headers.get(IDEMPOTENCY_HEADER));
+      failing -= 1;
+
+      if (failing === 2) throw new Error('ECONNRESET');
+
+      if (failing >= 0) return new Response('Network connection lost', { status: failing === 1 ? 500 : 502 });
+
+      return Response.json({ id: 'made' });
+    });
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
+
+      expect(await armada.post('/jobs', {}, { [IDEMPOTENCY_HEADER]: 'k1' })).toEqual({ id: 'made' });
+      expect(keys).toEqual(['k1', 'k1', 'k1', 'k1']);
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+      console.error = error;
+    }
+  });
+
+  test('a whole answer slower than its bound in all is read to its end while its bytes keep coming, and fails once they stop', async () => {
+    const original = globalThis.fetch;
+    const sleep = Bun.sleep;
+    const now = Date.now;
+    const error = console.error;
+    let stalls = false;
+    let clock = 0;
+
+    console.error = () => undefined;
+
+    // Each pause moves the clock on by what it waits, so the stalled read's outage is measured in waits, not in asks.
+    Bun.sleep = async (ms: number | Date) => { clock += ms instanceof Date ? 0 : ms; };
+
+    Date.now = () => clock;
+
+    // Five chunks 40 ms apart: 200 ms in all against a 100 ms bound; or a first chunk, then nothing.
+    globalThis.fetch = fakeFetch(() => new Response(new ReadableStream({
+      async start(controller) {
+        for (let chunk = 0; chunk < (stalls ? 1 : 5); chunk += 1) {
+          await new Promise((resolve) => { setTimeout(resolve, 40); });
+          controller.enqueue(new Uint8Array([chunk]));
+        }
+
+        if (stalls) await new Promise((resolve) => { setTimeout(resolve, 10_000); });
+        controller.close();
+      },
+    })));
+
+    try {
+      const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' }, 100);
+
+      expect([...(await armada.whole('/jobs/j/tasks/0/artifacts')) ?? []]).toEqual([0, 1, 2, 3, 4]);
+      stalls = true;
+      await expect(armada.whole('/jobs/j/tasks/0/artifacts')).rejects.toBeInstanceOf(Unreachable);
+    } finally {
+      globalThis.fetch = original;
+      Bun.sleep = sleep;
+      Date.now = now;
+      console.error = error;
+    }
+  }, 30_000);
 });
 
 describe('the webhook command', () => {

@@ -5,12 +5,12 @@ import { state, world } from './harness';
 const GIB = 2 ** 30;
 
 /** Run `run` of `item`: one core, 1 GiB and a byte of disk, alone, unless `usage` says otherwise. */
-const sampled = (run: string, item: string, usage: Partial<Sample> = {}): Sample => ({ run, item, cores: 1, memory: GIB, disk: 1, beside: false, ...usage });
+const sampled = (run: string, item: string, usage: Partial<Sample> = {}): Sample => ({ run, item, cores: 1, sustained: 1, memory: GIB, disk: 1, beside: false, ...usage });
 
 describe('a class\'s estimates', () => {
   test('count each run once, however often and however late it is delivered, and estimate from enough of the newest', async () => {
     const store = new ArmadaEstimates(state().ctx, world({}));
-    const run = (at: number, memory: number) => ({ run: `j/${String(at)}/1/v1`, item: `i${String(at)}`, cores: at / 10, memory, disk: at * 1000, beside: false });
+    const run = (at: number, memory: number) => ({ run: `j/${String(at)}/1/v1`, item: `i${String(at)}`, cores: at / 10, sustained: at / 20, memory, disk: at * 1000, beside: false });
     const few = Array.from({ length: MIN_SAMPLES - 1 }, (_, at) => run(at, GIB));
 
     const below = await store.record(few);
@@ -20,9 +20,10 @@ describe('a class\'s estimates', () => {
     // The first runs again, after far more runs than an estimate reads.
     const late = await store.record(few);
 
-    // The newest 200 of 308 are runs 200 to 399: cores 20 to 39.9, whose 90th percentile by rank is 38; 3 GiB each.
+    // The newest 200 of 308 are runs 200 to 399: cores 20 to 39.9, whose 90th percentile by rank is 38 (sustained, half
+    // of each, 19); 3 GiB each.
     expect({ below: below.usage, again: again.map((each) => each.revision === below.revision && each.usage === null), enough: enough.usage, late: late.revision === enough.revision && late.revision > below.revision })
-      .toEqual({ below: null, again: Array.from({ length: 30 }, () => true), enough: { cores: 38, memory: 3 * GIB, disk: 399_000 }, late: true });
+      .toEqual({ below: null, again: Array.from({ length: 30 }, () => true), enough: { cores: 38, sustained: 19, memory: 3 * GIB, disk: 399_000 }, late: true });
   });
 
   test('estimate once enough runs are in, however many deliveries came again before them', async () => {
@@ -33,19 +34,20 @@ describe('a class\'s estimates', () => {
 
     for (let again = 0; again < 30; again += 1) await store.record(runs.slice(0, -1));
 
-    expect((await store.record(runs.slice(-1))).usage).toEqual({ cores: 1, memory: GIB, disk: 1 });
+    expect((await store.record(runs.slice(-1))).usage).toEqual({ cores: 1, sustained: 1, memory: GIB, disk: 1 });
   });
 
   test('keep each item\'s most memory and disk and the cores of its latest run alone, and alone once found to run alone', async () => {
     const store = new ArmadaEstimates(state().ctx, world({}));
 
-    await store.record([{ run: 'j/0/1/v1', item: 'a', cores: 1, memory: 2 * GIB, disk: 100, beside: false }, { run: 'j/1/1/v1', item: 'b', cores: 0.5, memory: GIB, disk: 50, beside: false }]);
-    await store.record([{ run: 'j/0/2/v1', item: 'a', cores: 2, memory: GIB, disk: 300, beside: false }, { run: 'j/2/1/v1', item: 'c', cores: 0.4, memory: GIB, disk: 1, beside: true }], ['b']);
-    // Beside others it got a quarter of a core, and reached 3 GiB.
-    await store.record([{ run: 'j/0/3/v1', item: 'a', cores: 0.25, memory: 3 * GIB, disk: 10, beside: true }]);
+    await store.record([sampled('j/0/1/v1', 'a', { cores: 1, sustained: 0.5, memory: 2 * GIB, disk: 100 }), sampled('j/1/1/v1', 'b', { cores: 0.5, sustained: 0.5, disk: 50 })]);
+    await store.record([sampled('j/0/2/v1', 'a', { cores: 2, sustained: 1.5, disk: 300 }), sampled('j/2/1/v1', 'c', { cores: 0.4, sustained: 0.4, beside: true })], ['b']);
+    // Beside others it got a quarter of a core, and reached 3 GiB: its cores, both of one run alone, stand.
+    await store.record([sampled('j/0/3/v1', 'a', { cores: 0.25, sustained: 0.2, memory: 3 * GIB, disk: 10, beside: true })]);
 
     expect((await store.read(['a', 'b', 'c', 'unknown'])).items).toEqual({
-      a: { cores: 2, memory: 3 * GIB, disk: 300, alone: false }, b: { cores: 0.5, memory: GIB, disk: 50, alone: true }, c: { cores: null, memory: GIB, disk: 1, alone: false },
+      a: { cores: 2, sustained: 1.5, memory: 3 * GIB, disk: 300, alone: false }, b: { cores: 0.5, sustained: 0.5, memory: GIB, disk: 50, alone: true },
+      c: { cores: null, sustained: null, memory: GIB, disk: 1, alone: false },
     });
   });
 
@@ -64,7 +66,7 @@ describe('a class\'s estimates', () => {
     const after = await store.record(Array.from({ length: 20 }, (_, at) => sampled(`k/${String(at)}/1/v1`, 'a', { cores: 0.5, beside: true })));
 
     expect({ before, after: after.usage, item: (await store.read(['a'])).items['a'] })
-      .toEqual({ before: { cores: 2, memory: GIB, disk: 1 }, after: { cores: 2, memory: GIB, disk: 1 }, item: { cores: 2, memory: GIB, disk: 1, alone: false } });
+      .toEqual({ before: { cores: 2, sustained: 2, memory: GIB, disk: 1 }, after: { cores: 2, sustained: 2, memory: GIB, disk: 1 }, item: { cores: 2, sustained: 2, memory: GIB, disk: 1, alone: false } });
   });
   test('reads every item it is asked for, however many, as the platform bounds a statement', async () => {
     const store = new ArmadaEstimates(state().ctx, world({}));

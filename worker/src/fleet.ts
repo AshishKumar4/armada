@@ -168,6 +168,10 @@ export interface Drained {
   readonly until: number;
 }
 
+/** How long a job admitted under a client's idempotency key answers an ask of the key again with its id
+ *  (`admitKeyed`): longer than any client's retries of one ask. */
+const KEYED_MS = 60 * 60_000;
+
 export class ArmadaFleet extends ArmadaSingle {
   private readonly sql = this.ctx.storage.sql;
 
@@ -480,6 +484,29 @@ export class ArmadaFleet extends ArmadaSingle {
     await this.ctx.storage.put(`job:${job}`, Date.now());
 
     return true;
+  }
+
+  /** `admitJob` under a client's idempotency `key` (IDEMPOTENCY_HEADER): the job an earlier ask of the key admitted,
+   *  within KEYED_MS, else `job`, admitted now and kept under the key, in one step, so two asks of one key at once
+   *  admit one job; null where none may be admitted. */
+  async admitKeyed(version: string, contract: string | undefined, job: string, key: string): Promise<string | null> {
+    const kept = await this.ctx.storage.get<{ job: string; at: number }>(`key:${key}`);
+
+    if (kept !== undefined && Date.now() - kept.at < KEYED_MS) return kept.job;
+
+    if (!(await this.admitJob(version, contract, job))) return null;
+    await this.ctx.storage.put(`key:${key}`, { job, at: Date.now() });
+    // Keys past their time are dropped as new ones come: a client asks again within minutes.
+    const stale = [...(await this.ctx.storage.list<{ at: number }>({ prefix: 'key:' })).entries()].filter(([, held]) => Date.now() - held.at >= KEYED_MS).map(([name]) => name);
+
+    if (stale.length > 0) await this.ctx.storage.delete(stale.slice(0, 128));
+
+    return job;
+  }
+
+  /** The job admitted under `key` was not made: an ask of the key again makes it anew. */
+  async unkeyed(key: string): Promise<void> {
+    await this.ctx.storage.delete(`key:${key}`);
   }
 
   /** Whether this fleet and each other deployment-wide object run `contract`. One whose code is too old to say runs an

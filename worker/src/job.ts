@@ -25,7 +25,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as v from 'valibot';
 import {
-  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, failureTail, gangOf, GANG_START_SECONDS, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, tasksMemoryOf, weightOf, workdirOf,
+  ANSWER_PATH, ARTIFACTS_PATH, BootSchema, INPUTS_DIR, BUNDLE_PATH, cpuLabel, JobSpecSchema, PY_BUNDLE_PATH, environmentKey, lineageKey, failureTail, gangOf, GANG_START_SECONDS, hostLabel, JOB_LEASE_SECONDS, JOB_RENEWAL_SECONDS, MAX_TASKS, OUT_PATH, OutcomeSchema, refusal, SIZES, TaskSchema, tasksMemoryOf, weightOf, workdirOf,
   type Boot, type Cpu, type Host, type JobSpec, type JobStatus, type Outcome, type Size, type Task, type TaskStatus, type VesselRow,
 } from '../../src/protocol';
 import { answer, keep, type CacheScope } from './cache';
@@ -300,7 +300,7 @@ export class ArmadaJob extends DurableObject<Env> {
     const { items, env, open, ...kept } = spec;
     const key = await environmentKey(spec.recipe, spec.cpu);
 
-    await this.insert(items, kept, key);
+    await this.insert(items, kept, key, await lineageKey(spec.recipe, spec.cpu));
     await this.ctx.storage.put({ id, spec: kept satisfies Kept, env, open, origin, recorded: true, phase: 'preparing' satisfies Phase, key, createdAt: Date.now(), problems: [], replaced: 0, inputs });
     // Counted open before it can run, so its conclusion, which counts it closed, comes after.
     await this.env.FLEET.getByName(SINGLE).opened(id);
@@ -322,13 +322,14 @@ export class ArmadaJob extends DurableObject<Env> {
     this.sql.exec('INSERT INTO events (outcome, at) VALUES (?, ?)', JSON.stringify(outcome), Date.now());
   }
 
-  /** The new tasks, each with its class and item key on environment `key`; their indexes. */
-  private async insert(items: readonly Task[], spec: Pick<Kept, 'run'>, key: string): Promise<number[]> {
+  /** The new tasks, each with its class and item key on environment `key`, and its class on the environment's
+   *  `lineage` (`lineageKey`); their indexes. */
+  private async insert(items: readonly Task[], spec: Pick<Kept, 'run'>, key: string, lineage: string): Promise<number[]> {
     const keys = await Promise.all(items.map(async (task) => await itemKey(task)));
     const first = this.count('1 = 1');
 
     for (const [at, task] of items.entries()) this.sql.exec('INSERT INTO tasks (idx, item, weight, state) VALUES (?, ?, ?, ?)', first + at, JSON.stringify(task), weightOf(task.item), 'queued');
-    this.placement.add(items.map((task, at) => ({ index: first + at, class: classOf(spec, task, key), item: keys[at] ?? '' })));
+    this.placement.add(items.map((task, at) => ({ index: first + at, class: classOf(spec, task, key), lineage: classOf(spec, task, `lineage ${lineage}`), item: keys[at] ?? '' })));
 
     return items.map((_, at) => first + at);
   }
@@ -343,7 +344,7 @@ export class ArmadaJob extends DurableObject<Env> {
       ?? (this.count('1 = 1') + items.length > MAX_TASKS ? `a job takes at most ${String(MAX_TASKS)} items` : null);
 
     if (refused !== null) return refused;
-    const added = await this.insert(items, spec, (await this.ctx.storage.get<string>('key')) ?? '');
+    const added = await this.insert(items, spec, (await this.ctx.storage.get<string>('key')) ?? '', await lineageKey(spec.recipe, spec.cpu));
 
     await this.answerFromCache(spec, added);
     await this.look(spec);
