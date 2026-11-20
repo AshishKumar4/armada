@@ -5,7 +5,7 @@
  */
 import * as v from 'valibot';
 import {
-  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, type JobBrief, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, IDEMPOTENCY_HEADER, UNMADE_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
+  briefOf, CpusSchema, deadlineRefusal, Digest, DRIVER, environmentKey, type Health, INPUT, type JobBrief, jsonOf, JOB_ID, JobSpecSchema, MAX_INPUT_RUNS, ModeSchema, OLDEST_CLIENT, PackBase, Packer, Project, PROTOCOL, PROTOCOL_HEADER, UNMADE_HEADER, PushSchema, RecipeSchema, refusal, SECRET_BYTES, SecretName, Sha,
   HookConfigSchema, hex, TaskSchema, RecordedSchema, type HookConfig, type Json, type TaskRun,
 } from '../../src/protocol';
 import { bundleKey, equal, hmac, logRun, packKey, runKey, said, SINGLE, statusToken, taskKey, type Env } from './env';
@@ -599,16 +599,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     // admission (the runtime's "Durable Object is overloaded": it never took the call) made nothing, which the answer
     // says (UNMADE_HEADER), so its client asks again (Dew, 2026-11-18: five of a reach's fifty maps failed POST /jobs
     // so, and their tasks had no outcome).
-    // A client's idempotency key (IDEMPOTENCY_HEADER): an ask of it again, after a connection its answer was lost on,
-    // gets the job the first made, never a second (row 8848).
-    const key = request.headers.get(IDEMPOTENCY_HEADER);
     let admitted: boolean;
 
     try {
-      const made = key === null ? null : await fleet.admitKeyed(env.VERSION.id, env.ARMADA_CONTRACT, created, key);
-
-      if (made !== null && made !== created) return Response.json({ id: made });
-      admitted = key === null ? await fleet.admitJob(env.VERSION.id, env.ARMADA_CONTRACT, created) : made !== null;
+      admitted = await fleet.admitJob(env.VERSION.id, env.ARMADA_CONTRACT, created);
     } catch (cause) {
       if (!said({ cause }).includes('Durable Object is overloaded')) throw cause;
 
@@ -621,11 +615,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 
     const answer = await closedOnFailure(fleet, created, async () => await createJob(request, env, created));
 
-    if (!answer.ok) {
-      await fleet.closed(created);
-
-      if (key !== null) await fleet.unkeyed(key);
-    }
+    if (!answer.ok) await fleet.closed(created);
 
     return answer;
   }

@@ -11,8 +11,7 @@ import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, tasksMemoryOf, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
-import { Armada, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
-import { IDEMPOTENCY_HEADER } from '../src/protocol';
+import { Armada, IDEMPOTENCY_HEADER, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
@@ -2591,8 +2590,8 @@ describe('a read through an outage', () => {
 });
 
 describe('an idempotent write and a long answer', () => {
-  // Row 8848: one dropped connection under a pack's part or POST /jobs, and one artifact past a minute, each failed a
-  // whole CI run ungraded.
+  // Row 8848: one dropped connection under a pack's part, and one artifact past a minute, each failed a whole CI run
+  // ungraded.
   test('a write its key makes idempotent is asked again through a dropped connection and a 5xx, its key the same each time', async () => {
     const original = globalThis.fetch;
     const sleep = Bun.sleep;

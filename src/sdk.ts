@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import * as v from 'valibot';
 import { CONFIG_FILE, deploymentNamed } from './config';
-import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, IDEMPOTENCY_HEADER, UNMADE_HEADER, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
+import { type Cpu, deadlineRefusal, errorOf, EventsSchema, HealthSchema, hostLabel, JobStatusSchema, jsonOf, JsonSchema, median, PACKER, PROTOCOL, PROTOCOL_HEADER, RecipeSchema, UNMADE_HEADER, TaskRunsSchema, TaskStatusSchema, type Boot, type Commit, type Health, type JobSpecSchema, type JobStatus, type Json, type JsonBody, type Recipe, type Task, type TaskRun, type TaskStatus } from './protocol';
 
 export const CONFIG_DIR = join(homedir(), '.config', 'armada');
 
@@ -198,6 +198,11 @@ export class RequestError extends Error {
   }
 }
 
+/** A write's key that makes it idempotent, the client's own: a write carrying it is asked again on a dropped
+ *  connection or a 5xx, as a read is (`asked`). Only for a write that made the same again is the same: a pack's part,
+ *  put again whole (row 8848: one dropped connection under a part failed a CI run). */
+export const IDEMPOTENCY_HEADER = 'armada-idempotency';
+
 /** `answer`'s body, whole, each wait for its next bytes bounded by `idleMs`: past it, `bounded` aborts with why. */
 async function bodyOf(answer: Response, idleMs: number, bounded: AbortController): Promise<Uint8Array> {
   const reader = answer.body?.getReader();
@@ -324,13 +329,14 @@ export class Armada {
         continue;
       }
 
-      if ([500, 502, 503, 504].includes(sent.status) && again(`answered ${String(sent.status)}`)) {
-        await pause(Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
+      // A refusal that made nothing first: its pause drawn at random, so writes refused together do not come back together.
+      if (!read && sent.headers.get(UNMADE_HEADER) === '1' && again(`answered ${String(sent.status)}, nothing made`, true)) {
+        await pause(Math.random() * Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
         continue;
       }
 
-      if (!read && sent.headers.get(UNMADE_HEADER) === '1' && again(`answered ${String(sent.status)}, nothing made`, true)) {
-        await pause(Math.random() * Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
+      if ([500, 502, 503, 504].includes(sent.status) && again(`answered ${String(sent.status)}`)) {
+        await pause(Math.min(attempt * 1000, READ_PAUSE_MS, remaining()), init.signal);
         continue;
       }
 
@@ -471,10 +477,11 @@ export class Armada {
 
     try {
       for (let start = 0, partNumber = 1; start < body.size; start += PACK_PART, partNumber += 1) {
-        // A part put again is the same part, whole: its key makes it idempotent.
-        const stored = await (await this.call(`${uploading}&part=${String(partNumber)}`, {
+        // A part put again is the same part, whole: its key makes it idempotent, and its answer is read within its ask,
+        // so one lost after its headers is asked again too.
+        const stored = await (await this.asked(`${uploading}&part=${String(partNumber)}`, {
           method: 'PUT', body: body.slice(start, start + PACK_PART), headers: { [IDEMPOTENCY_HEADER]: `part ${String(partNumber)}` },
-        })).json();
+        }, PROTOCOL, true)).json();
 
         parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
       }
@@ -517,9 +524,7 @@ export class Armada {
 
     if (refused !== null) throw new Error(refused);
 
-    // One key for every ask of this job: a POST /jobs asked again after a dropped connection gets the job its first ask
-    // made, never a second (`ArmadaFleet.admitKeyed`).
-    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', { ...spec, recipe: ownPacker(spec.recipe) }, { [IDEMPOTENCY_HEADER]: crypto.randomUUID() })).id;
+    return v.parse(v.object({ id: v.string() }), await this.post('/jobs', { ...spec, recipe: ownPacker(spec.recipe) })).id;
   }
 
   async add(id: string, items: readonly Task[]): Promise<void> {

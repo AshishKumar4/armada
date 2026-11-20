@@ -38,7 +38,8 @@ const own = (column: string): string => `COALESCE(p.${column}, c.${column}, l.${
 /** Each task with what it is expected to use and the containers it takes whole, as an SQL row source over the job's
  *  tasks. Its cores and sustained cores are one run's or one class's together, never one of each. */
 const ESTIMATED = `SELECT t.idx, t.state, t.weight, t.not_before, t.vessel, t.dup,
-    ${own('cores')} AS cores, CASE WHEN p.cores IS NOT NULL THEN COALESCE(p.sustained, p.cores) WHEN c.cores IS NOT NULL THEN c.sustained ELSE l.sustained END AS sustained,
+    ${own('cores')} AS cores, CASE WHEN p.cores IS NOT NULL THEN COALESCE(p.sustained, p.cores) WHEN c.cores IS NOT NULL THEN COALESCE(c.sustained, c.cores)
+      ELSE COALESCE(l.sustained, l.cores) END AS sustained,
     ${own('memory')} AS memory, ${own('disk')} AS disk, ${ranksOf('t.item')} AS ranks, ${costOf('t.item')} AS cost,
     (p.idx IS NULL OR p.looked < 2 OR p.alone = 1 OR ${own('memory')} IS NULL OR ${own('cores')} IS NULL OR COALESCE(p.sustained, 0) >= ${String(POOL_CORES)}
       OR ${ranksOf('t.item')} > 1 OR t.dup IS NOT NULL) AS whole
@@ -174,11 +175,12 @@ export class Placement {
       const kept = items[row.item];
       const fresh = kept !== undefined && kept.cores !== null;
 
+      // An item its own class answered whole needs no lineage's: it is looked up.
       this.sql.exec(`UPDATE placed SET looked = ?, alone = MAX(alone, ?),
           cores = CASE WHEN cores IS NULL AND ? THEN ? ELSE cores END, sustained = CASE WHEN cores IS NULL AND ? THEN ? ELSE sustained END,
           memory = COALESCE(memory, ?), disk = COALESCE(disk, ?)
         WHERE idx = ? AND looked = ?`,
-      step + 1, kept?.alone === true ? 1 : 0, fresh ? 1 : 0, kept?.cores ?? null, fresh ? 1 : 0, kept?.sustained ?? null,
+      fresh ? 2 : step + 1, kept?.alone === true ? 1 : 0, fresh ? 1 : 0, kept?.cores ?? null, fresh ? 1 : 0, kept?.sustained ?? null,
       kept?.memory ?? null, kept?.disk ?? null, row.idx, step);
     }
 
