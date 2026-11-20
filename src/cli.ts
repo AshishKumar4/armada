@@ -16,7 +16,7 @@ import { deploymentConfig, fleetCap } from './deploy';
 import { deleteImageWith, deleteSnapshotWith, registryCredentials } from './registry';
 import { destroyDeployment, destroyName, DestroyStateSchema } from './destroy';
 import { findProject, push } from './push';
-import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots } from './sdk';
+import { Armada, CONFIG_DIR, connect, connectionFile, ConnectionSchema, describeBoots, RequestError } from './sdk';
 import { boundsOf, RetentionSchema, type Retention } from './runs';
 import { retentionOf, runsCommand } from './runs-command';
 import { BaseSchema, clientRefusal, cpusOf, deadlineRefusal, describeUsage, errorOf, hex, HookConfigSchema, jsonOf, JsonSchema, KEPT_ENVIRONMENTS, ModeSchema, drainReasons, Project, SizeSchema, usageOf, WebhooksSchema, type Cpu, type Health, type Push } from './protocol';
@@ -461,15 +461,19 @@ async function deploy(name: string, asked: { readonly vcpus: number | undefined;
 
   // Its fleet's cap and its packing's peak share, each the one asked or the deployed Worker's own (`fleetCap`), read
   // before anything changes: a redeploy keeps both.
-  // A cap named needs no read of it: a Worker that cannot be read at this wire (an older one, drained across wires) keeps
-  // the peak share it states, else 1, as before there was one.
+  // A cap named needs no read of it: a Worker of an older wire (drained across wires), which has no peak share, gets
+  // the one named, else 1.
   let stated: Awaited<ReturnType<typeof deployedFleet>> | null = null;
 
   if (known !== null && (vcpus === undefined || asked.peakShare === undefined)) {
     try {
       stated = await deployedFleet(name, new Armada(known));
     } catch (cause) {
-      if (vcpus === undefined) throw cause;
+      // Only a Worker of an older wire, which has no peak share, is passed by: any other failure to read it stops the
+      // deploy, so a share it holds is never written over unread.
+      const older = cause instanceof Error && cause.cause instanceof RequestError && cause.cause.status === 426;
+
+      if (vcpus === undefined || !older) throw cause;
     }
   }
 
