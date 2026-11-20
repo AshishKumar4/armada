@@ -198,11 +198,6 @@ export class RequestError extends Error {
   }
 }
 
-/** A stalled body's cancel that failed, said: its read then ends on the abort, the stream erroring. */
-function saidUncancelled(cause: Error): void {
-  console.error(`a stalled answer's body would not cancel: ${cause.message}`);
-}
-
 /** `answer`'s body, whole, each wait for its next bytes bounded by `idleMs`: past it, `bounded` aborts with why. */
 async function bodyOf(answer: Response, idleMs: number, bounded: AbortController): Promise<Uint8Array> {
   const reader = answer.body?.getReader();
@@ -211,11 +206,8 @@ async function bodyOf(answer: Response, idleMs: number, bounded: AbortController
   const chunks: Uint8Array[] = [];
 
   for (;;) {
-    // Past it, the ask is aborted and its reader cancelled, which ends a read waiting on it.
-    const idle = setTimeout(() => {
-      bounded.abort(new Error(`no bytes in ${String(Math.round(idleMs / 1000))} s`));
-      reader.cancel(bounded.signal.reason).catch(saidUncancelled);
-    }, idleMs);
+    // Past it, the ask is aborted, which errors its body's stream and so ends a read waiting on it.
+    const idle = setTimeout(() => { bounded.abort(new Error(`no bytes in ${String(Math.round(idleMs / 1000))} s`)); }, idleMs);
 
     try {
       const { done, value } = await reader.read();

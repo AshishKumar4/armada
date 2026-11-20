@@ -2642,16 +2642,18 @@ describe('an idempotent write and a long answer', () => {
 
     Date.now = () => clock;
 
-    // Five chunks 40 ms apart: 200 ms in all against a 100 ms bound; or a first chunk, then nothing.
-    globalThis.fetch = fakeFetch(() => new Response(new ReadableStream({
+    // Five chunks 40 ms apart: 200 ms in all against a 100 ms bound; or a first chunk, then nothing, its stream erred
+    // by the ask's abort as a fetch's is.
+    globalThis.fetch = fakeFetch((request) => new Response(new ReadableStream({
       async start(controller) {
+        request.signal.addEventListener('abort', () => { controller.error(request.signal.reason); });
+
         for (let chunk = 0; chunk < (stalls ? 1 : 5); chunk += 1) {
           await new Promise((resolve) => { setTimeout(resolve, 40); });
           controller.enqueue(new Uint8Array([chunk]));
         }
 
-        if (stalls) await new Promise((resolve) => { setTimeout(resolve, 10_000); });
-        controller.close();
+        if (!stalls) controller.close();
       },
     })));
 
