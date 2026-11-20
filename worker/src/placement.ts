@@ -124,6 +124,7 @@ export class Placement {
       sql.exec('ALTER TABLE placed ADD COLUMN sustained REAL');
       sql.exec('UPDATE placed SET looked = 2 WHERE looked = 1');
     }
+
     sql.exec('CREATE TABLE IF NOT EXISTS isolate (class TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (class, item))');
     // Each run handed out beside others, and whether it got a copy since (`copied`).
     sql.exec('CREATE TABLE IF NOT EXISTS beside (vessel TEXT NOT NULL, idx INTEGER NOT NULL, attempt INTEGER NOT NULL, copied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (vessel, idx, attempt))');
@@ -142,11 +143,14 @@ export class Placement {
    *  next call; its tasks take containers whole meanwhile. */
   async look(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
     const unlooked = this.sql.exec<{ idx: number; class: string; item: string }>('SELECT idx, class, item FROM placed WHERE looked = 0').toArray();
+    const ask = async (store: DurableObjectStub<ArmadaEstimates>, rows: readonly { item: string }[]): Promise<Reading> => await store.read([...new Set(rows.map((row) => row.item))]);
 
     await eachClass(stores, Map.groupBy(unlooked, (row) => row.class), {
       doing: 'looking',
-      ask: async (store, rows) => await store.read([...new Set(rows.map((row) => row.item))]),
-      take: (cls, rows, reading) => { this.taken(cls, rows, reading, 0); },
+      ask,
+      take: (cls, rows, reading) => {
+        this.taken(cls, rows, reading, 0);
+      },
     });
     // Its own class's record of its item stands; one it lacks is its lineage's, an item that ran under an environment
     // of the lineage before.
@@ -154,8 +158,10 @@ export class Placement {
 
     await eachClass(stores, Map.groupBy(lineal, (row) => row.lineage), {
       doing: 'looking',
-      ask: async (store, rows) => await store.read([...new Set(rows.map((row) => row.item))]),
-      take: (cls, rows, reading) => { this.taken(cls, rows, reading, 1); },
+      ask,
+      take: (cls, rows, reading) => {
+        this.taken(cls, rows, reading, 1);
+      },
     });
   }
 
@@ -325,6 +331,7 @@ export class Placement {
   async flush(stores: DurableObjectNamespace<ArmadaEstimates>): Promise<void> {
     const samples = this.sql.exec<{ run: string; class: string; item: string; cores: number; sustained: number | null; memory: number; disk: number; beside: number }>(
       'SELECT run, class, item, cores, sustained, memory, disk, beside FROM outbox').toArray();
+
     const isolated = this.sql.exec<{ class: string; item: string }>('SELECT class, item FROM isolate').toArray();
     const samplesOf = Map.groupBy(samples, (row) => row.class);
     const aloneOf = Map.groupBy(isolated, (row) => row.class);

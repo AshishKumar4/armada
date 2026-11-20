@@ -179,15 +179,15 @@ describe('grading a CI run', () => {
 
   test('a task that exits its red exit having reported a red row keeps each row as reported; any other way it fails them', () => {
     const rows = [row('one'), row('two', 1), { ...row('three', 1), output: '' }];
-    const red = underExit(rows, { exitCode: 3, tail: 'a test failed' }, 'a', undefined, 3);
+    const red = underExit(rows, { exitCode: 3, tail: 'a test failed', redExit: 3 }, 'a');
 
     expect(red.map((each) => [rowName(each), each.exitCode, each.output])).toEqual([
       ['one', 0, 'one said this'], ['two', 1, 'two said this'], ['three', 1, 'a test failed'],
     ]);
     // Its red exit with every row green, another exit, or a kill for memory: every green row fails, as without one.
-    expect(underExit([row('one')], { exitCode: 3, tail: 'no red' }, 'a', undefined, 3).map((each) => each.exitCode)).toEqual([3]);
-    expect(underExit(rows, { exitCode: 4, tail: 'crashed' }, 'a', undefined, 3).map((each) => each.exitCode)).toEqual([4, 1, 1]);
-    expect(underExit(rows, { exitCode: 3, tail: 'Killed', oomKilled: true }, 'a', undefined, 3).map((each) => [rowName(each), each.exitCode]))
+    expect(underExit([row('one')], { exitCode: 3, tail: 'no red', redExit: 3 }, 'a').map((each) => each.exitCode)).toEqual([3]);
+    expect(underExit(rows, { exitCode: 4, tail: 'crashed', redExit: 3 }, 'a').map((each) => each.exitCode)).toEqual([4, 1, 1]);
+    expect(underExit(rows, { exitCode: 3, tail: 'Killed', oomKilled: true, redExit: 3 }, 'a').map((each) => [rowName(each), each.exitCode]))
       .toEqual([['one', 3], ['two', 1], ['three', 1], ['a: killed for memory', 137]]);
   });
 

@@ -98,6 +98,8 @@ export interface TaskExit {
   /** The kernel killed a process of the task's for want of memory (`Outcome.oomKilled`), its cgroup's peak then. */
   readonly oomKilled?: boolean;
   readonly peakMemory?: number;
+  /** The exit its config names for "a row it reported is red" (`task.redExit`), where it names one. */
+  readonly redExit?: number;
 }
 
 /** A verdict row's `kind` for its task's kill for memory (`underExit`): its own red, which no plan entry names. */
@@ -113,8 +115,8 @@ export const MEMORY_KILL = 'memory';
  *  test the kill took may have reported none, and a red row of another's must not hide why it is missing. It names
  *  the rows its plan entry names (`rows`), where it names any, so a reader knows whose tests the kill took (Dew,
  *  2026-11-17: a reader found no file in the row's task name and could not read the verdict). */
-export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows'], redExit?: number): VerdictRow[] {
-  const graded = gradedUnderExit(rows, exit, task, expected, redExit);
+export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
+  const graded = gradedUnderExit(rows, exit, task, expected);
 
   if (exit.oomKilled !== true) return graded;
   const peak = exit.peakMemory === undefined ? '' : `, its peak ${(exit.peakMemory / 2 ** 30).toFixed(2)} GiB`;
@@ -129,10 +131,10 @@ export function underExit(rows: readonly VerdictRow[], exit: TaskExit, task: str
   return [...graded, { ...killed, rows: expected.map((want) => expectedOf(want).name) }];
 }
 
-function gradedUnderExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows'], redExit?: number): VerdictRow[] {
+function gradedUnderExit(rows: readonly VerdictRow[], exit: TaskExit, task: string, expected?: PlanEntry['rows']): VerdictRow[] {
   // The exit a task's config names for "a row I reported is red" (`task.redExit`): its rows stand as reported, each its
   // own. Only where a row is red and no kill for memory came: that exit with every row green, or a kill, is a failure.
-  if (redExit !== undefined && exit.exitCode === redExit && exit.oomKilled !== true && rows.some((row) => row.exitCode !== 0)) {
+  if (exit.redExit !== undefined && exit.exitCode === exit.redExit && exit.oomKilled !== true && rows.some((row) => row.exitCode !== 0)) {
     return rows.map((row) => row.exitCode !== 0 && row.output === '' ? { ...row, output: exit.tail } : row);
   }
 
