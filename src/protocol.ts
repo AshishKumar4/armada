@@ -835,7 +835,8 @@ const LINEAGE_ID = '0'.repeat(40);
 /** The key of a recipe's lineage: its environment's (`environmentKey`) with every manifest file's content set aside, so
  *  a change to one (a dependency's lock bumped) keeps it. What a lineage's tasks used stands for an environment of it
  *  that has measured none yet (`estimates.ts`); its base, scripts, size, project and CPU pin keep it apart from any
- *  environment whose tasks run otherwise. The Worker's alone: no client derives it. */
+ *  environment whose tasks run otherwise, and the driver too: a driver's bump rebuilds every environment, and their
+ *  lineages begin again with it. The Worker's alone: no client derives it. */
 export async function lineageKey(recipe: Recipe, cpu?: readonly Cpu[]): Promise<string> {
   const repo = recipe.repo === undefined ? undefined : { ...recipe.repo, manifest: recipe.repo.manifest.map((entry) => ({ ...entry, id: LINEAGE_ID })) };
 

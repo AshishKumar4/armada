@@ -104,7 +104,8 @@ async function eachClass<Rows, Answer>(stores: DurableObjectNamespace<ArmadaEsti
 }
 
 export class Placement {
-  constructor(private readonly sql: SqlStorage) {
+  /** Over `sql`, the job's storage; `peakShare`, its deployment's (`peakShareOf`). */
+  constructor(private readonly sql: SqlStorage, private readonly peakShare = 1) {
     // `looked`: 0 not looked up, 1 its class's answer taken, 2 its lineage's too (`look`).
     sql.exec(`CREATE TABLE IF NOT EXISTS placed (idx INTEGER PRIMARY KEY, class TEXT NOT NULL, item TEXT NOT NULL, looked INTEGER NOT NULL DEFAULT 0,
       cores REAL, memory REAL, disk REAL, alone INTEGER NOT NULL DEFAULT 0, failure TEXT, lineage TEXT, sustained REAL)`);
@@ -209,7 +210,7 @@ export class Placement {
    *  Choosing changes nothing: the job hands the run out, then marks who it runs beside (`beside`). */
   fit(load: Load, size: Size, now: number, afford: number | null): number | null {
     if (load.whole) return null;
-    const left = roomOf(size);
+    const left = roomOf(size, this.peakShare);
 
     return this.sql.exec<{ idx: number }>(
       `SELECT idx FROM (${ESTIMATED}) WHERE state = 'queued' AND not_before <= ? AND whole = 0 AND cores <= ? AND sustained <= ? AND memory <= ? AND disk <= ?
@@ -224,7 +225,7 @@ export class Placement {
    *  which cannot start on fewer. The same `within` decides it as decides a claim (`fit`). `only` names the open tasks
    *  a budget runs at once (`ArmadaJob.admitted`), null for every one. */
   containers(size: Size, { pool, hedged, only }: { readonly pool: number; readonly hedged: number; readonly only: readonly number[] | null }): number {
-    const room = roomOf(size);
+    const room = roomOf(size, this.peakShare);
     const among = only === null ? null : JSON.stringify(only);
 
     const open = this.sql.exec<{ cores: number | null; sustained: number | null; memory: number | null; disk: number | null; ranks: number; whole: number }>(

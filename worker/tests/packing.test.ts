@@ -79,9 +79,12 @@ function reached(estimates: Stores) {
   return { env, begun };
 }
 
-/** A job of `items` on a ready medium environment, its classes' stores `estimates`: the job, and the vessels it began. */
-async function packing(items: readonly Json[], estimates: Stores, more: Partial<v.InferInput<typeof JobSpecSchema>> = {}) {
-  const { env, begun } = reached(estimates);
+/** A job of `items` on a ready medium environment, its classes' stores `estimates`, on a deployment of `peakShare`
+ *  (PEAK_SHARE, none by default): the job, and the vessels it began. */
+async function packing(items: readonly Json[], estimates: Stores, more: Partial<v.InferInput<typeof JobSpecSchema>> = {}, peakShare?: string) {
+  const reach = reached(estimates);
+  const { begun } = reach;
+  const env = peakShare === undefined ? reach.env : { ...reach.env, PEAK_SHARE: peakShare };
   const stored = state();
   const created = new ArmadaJob(stored.ctx, env);
 
@@ -300,6 +303,16 @@ describe('an efficient job', () => {
 
     expect({ packed, item: (await made.store(CLASS)?.read([key]))?.items[key], next: [await slotsOf(next.job, 'v1', 2), next.begun] })
       .toEqual({ packed: [0, 1, null], item: { cores: 4, sustained: 3, memory: 2 * GIB, disk: 1e6, alone: false }, next: [[0, null], ['v1', 'v2']] });
+  });
+
+  test('packs tasks whose busiest windows overrun its vCPUs together only where its deployment shares their peaks', async () => {
+    // Three cores in its busiest window, one over its wall: two pass four vCPUs at their peaks, never sustained.
+    const made = await learned({ cores: 3, sustained: 1, memory: GIB, disk: 1e6 });
+    const plain = await packing(['a', 'b'], made);
+    const shared = await packing(['a', 'b'], made, {}, '2');
+
+    expect({ plain: [plain.begun, await slotsOf(plain.job, 'v1', 2)], shared: [shared.begun, await slotsOf(shared.job, 'v1', 3)] })
+      .toEqual({ plain: [['v1', 'v2'], [0, null]], shared: [['v1'], [0, 1, null]] });
   });
 
   // A dependency's bump makes a new environment, whose class has measured nothing: every task ran whole (Dew's train

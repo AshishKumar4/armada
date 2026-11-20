@@ -15,6 +15,7 @@ import type { ArmadaFleet } from './fleet';
 import { fleetRefusal, VESSEL_NAME, type ArmadaJob } from './job';
 import type { Input } from './vessel';
 import { opening } from './relay';
+import { peakShareOf } from './estimates';
 
 export { ArmadaJob } from './job';
 
@@ -546,7 +547,7 @@ const shares: Handler = async (request, env) => {
   const statuses = await Promise.all(open.map(async (id) => await env.JOB.getByName(id).status()));
   const work = statuses.reduce((sum, status) => ({ running: sum.running + (status?.tasks.running ?? 0), queued: sum.queued + (status?.tasks.queued ?? 0) }), { running: 0, queued: 0 });
 
-  return Response.json({ ...held, tasks: work });
+  return Response.json({ ...held, tasks: work, peakShare: peakShareOf(env) });
 };
 
 const ROUTES: ReadonlyMap<string, Handler> = new Map([

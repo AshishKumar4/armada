@@ -51,6 +51,9 @@ export interface Env {
   /** How many of the most recently used environments keep their snapshots beyond those open jobs use
    *  (`armada deploy --keep`, 3 by default). */
   readonly KEEP_ENVIRONMENTS?: string;
+  /** How many times its vCPUs a container's packed tasks' busiest windows may add to (`roomOf`): `armada deploy
+   *  --peak-share`, kept across deploys; 1, none past its vCPUs, where absent. */
+  readonly PEAK_SHARE?: string;
   /** `user:password` for the account's registry, which deletes the snapshots past those kept; `armada deploy` mints
    *  it. */
   readonly REGISTRY_CREDENTIALS?: string;

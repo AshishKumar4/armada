@@ -198,10 +198,13 @@ export class RequestError extends Error {
   }
 }
 
-/** A write's key that makes it idempotent, the client's own: a write carrying it is asked again on a dropped
- *  connection or a 5xx, as a read is (`asked`). Only for a write that made the same again is the same: a pack's part,
- *  put again whole (row 8848: one dropped connection under a part failed a CI run). */
-export const IDEMPOTENCY_HEADER = 'armada-idempotency';
+/** How `asked` asks: in the wire's version `protocol`; its answer read `whole` within each ask; `replayed`, a write whose
+ *  ask again makes the same again (a pack's part, put again whole), asked again as a read is. */
+interface Asking {
+  readonly protocol: number;
+  readonly whole: boolean;
+  readonly replayed?: boolean;
+}
 
 /** `answer`'s body, whole, each wait for its next bytes bounded by `idleMs`: past it, `bounded` aborts with why. */
 async function bodyOf(answer: Response, idleMs: number, bounded: AbortController): Promise<Uint8Array> {
@@ -251,7 +254,7 @@ export class Armada {
    *  starts after it, never fails on it (Main, 2026-11-06: a drain refused every lane's run). The deploy bounds that
    *  wait: its drain lasts while its open jobs finish, each within its deadline, and lapses if the deploy dies. */
   async call(path: string, init: RequestInit = {}, protocol = PROTOCOL): Promise<Response> {
-    return await this.asked(path, init, protocol, false);
+    return await this.asked(path, init, { protocol, whole: false });
   }
 
   /** `call`'s request, its answer read whole within each ask where `whole` (its bytes held in the Response it gives):
@@ -259,14 +262,14 @@ export class Armada {
    *  failed read asked again within the read's one outage budget; a redeploy's refusals waited outside every ask's
    *  bound (review: a bound around the redeploy wait cut it short, and a body's bound around the read restarted its
    *  outage budget). */
-  private async asked(path: string, init: RequestInit, protocol: number, whole: boolean): Promise<Response> {
+  private async asked(path: string, init: RequestInit, { protocol, whole, replayed = false }: Asking): Promise<Response> {
     const headers = new Headers(init.headers);
     const method = init.method ?? 'GET';
     const read = method === 'GET' || method === 'HEAD';
-    // A write its key makes idempotent (IDEMPOTENCY_HEADER) is asked again as a read is, its own ask unbounded: its body
-    // goes up as fast as the network takes it (row 8848: a pack's part, and POST /jobs, each failed a whole CI run on
-    // one dropped connection).
-    const repeatable = read || headers.has(IDEMPOTENCY_HEADER);
+    // A write made the same however often it is made (`replayed`) is asked again as a read is, its own ask unbounded:
+    // its body goes up as fast as the network takes it (row 8848: a pack's part failed a whole CI run on one dropped
+    // connection).
+    const repeatable = read || replayed;
     // When the outage began: when the ask that first failed was sent, its own wait counted (a redeploy's wait before it,
     // `deployed`, is no outage). Every later ask and pause ends within the budget it leaves (the armada audit,
     // 2026-11-18: a pause could pass the budget's end, and a full ask start after it).
@@ -350,8 +353,8 @@ export class Armada {
   }
 
   /** `body` as JSON, and the answer's JSON. */
-  async post(path: string, body: JsonBody, headers: Record<string, string> = {}): Promise<Json> {
-    return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })).json());
+  async post(path: string, body: JsonBody): Promise<Json> {
+    return v.parse(JsonSchema, await (await this.call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json());
   }
 
   /** The deployment's health; `signal` ends the ask, and every retry of it, once aborted. */
@@ -477,11 +480,10 @@ export class Armada {
 
     try {
       for (let start = 0, partNumber = 1; start < body.size; start += PACK_PART, partNumber += 1) {
-        // A part put again is the same part, whole: its key makes it idempotent, and its answer is read within its ask,
-        // so one lost after its headers is asked again too.
-        const stored = await (await this.asked(`${uploading}&part=${String(partNumber)}`, {
-          method: 'PUT', body: body.slice(start, start + PACK_PART), headers: { [IDEMPOTENCY_HEADER]: `part ${String(partNumber)}` },
-        }, PROTOCOL, true)).json();
+        // A part put again is the same part, whole: asked again as a read is, its answer read within its ask, so one
+        // lost after its headers is asked again too.
+        const stored = await (await this.asked(`${uploading}&part=${String(partNumber)}`, { method: 'PUT', body: body.slice(start, start + PACK_PART) },
+          { protocol: PROTOCOL, whole: true, replayed: true })).json();
 
         parts.push(v.parse(v.object({ partNumber: v.number(), etag: v.string() }), stored));
       }
@@ -611,7 +613,7 @@ export class Armada {
   /** A read's whole answer, its bytes, or null where the Worker says it is absent: each ask bounded from its sending
    *  to its first byte, and then by each wait for its next (`asked`). */
   async whole(path: string): Promise<Uint8Array | null> {
-    const answer = await this.asked(path, {}, PROTOCOL, true);
+    const answer = await this.asked(path, {}, { protocol: PROTOCOL, whole: true });
 
     return answer.status === 404 ? null : await answer.bytes();
   }

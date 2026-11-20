@@ -11,7 +11,7 @@ import { parseConfig } from '../src/config';
 import { deploymentConfig, fleetCap } from '../src/deploy';
 import { grade, rowName, taskName, underExit, type TaskAnswer } from '../src/grade';
 import { DRIVER, environmentKey, HostSchema, JsonSchema, PACKER, PROTOCOL, errorOf, fill, fitSize, itemValues, tasksMemoryOf, JobSpecSchema, MAX_ARGUMENT_BYTES, MAX_INPUT_JOBS, MAX_INPUT_RUNS, medians, mustDrain, RecipeSchema, recordSamples, refusal, servedFloor, usageOf, weightOf, type Health, type Host, type Json, type Outcome, type Recipe } from '../src/protocol';
-import { Armada, IDEMPOTENCY_HEADER, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
+import { Armada, PACK_PART, READ_OUTAGE_MS, Unreachable } from '../src/sdk';
 import { fakeFetch, git, scratchEnv } from './fakes';
 
 describe('a task\'s command', () => {
@@ -409,12 +409,12 @@ describe('a deployment\'s wrangler config', () => {
     const template = readFileSync(join(import.meta.dir, '..', 'worker', 'wrangler.jsonc'), 'utf8');
     // The same template laid out otherwise: no comments, its keys in another order, one line.
     const reordered = JSON.stringify(Object.fromEntries(Object.entries(v.parse(v.record(v.string(), JsonSchema), Bun.JSONC.parse(template))).reverse()));
-    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/home/o\'brien/"armada"\\worker.ts', dashboard: '/tmp/dash', bucket: 'armada-x-artifacts', vcpus: 64, sha: 'b'.repeat(40), contract: 'c'.repeat(64), derived: 'd'.repeat(64) };
+    const deployment = { name: 'armada-x', account: 'a'.repeat(32), main: '/home/o\'brien/"armada"\\worker.ts', dashboard: '/tmp/dash', bucket: 'armada-x-artifacts', vcpus: 64, peakShare: 2, sha: 'b'.repeat(40), contract: 'c'.repeat(64), derived: 'd'.repeat(64) };
     const read = (text: string) => v.parse(v.looseObject({ name: v.string(), account_id: v.string(), main: v.string(), assets: v.looseObject({ directory: v.string() }), vars: v.record(v.string(), v.string()), r2_buckets: v.array(v.looseObject({ bucket_name: v.string() })), durable_objects: JsonSchema }), JSON.parse(deploymentConfig(text, deployment)));
     const [laid, other] = [read(template), read(reordered)];
 
     expect({ same: laid, name: laid.name, account: laid.account_id, main: laid.main, assets: laid.assets.directory, vars: laid.vars, buckets: laid.r2_buckets.map((each) => each.bucket_name), schema: '$schema' in laid })
-      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_DERIVED: 'd'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
+      .toEqual({ same: other, name: 'armada-x', account: 'a'.repeat(32), main: deployment.main, assets: '/tmp/dash', vars: { FLEET_VCPUS: '64', PEAK_SHARE: '2', ARMADA_SHA: 'b'.repeat(40), ARMADA_CONTRACT: 'c'.repeat(64), ARMADA_DERIVED: 'd'.repeat(64), ARMADA_NAME: 'armada-x', ARMADA_ACCOUNT: 'a'.repeat(32) }, buckets: ['armada-x-artifacts'], schema: false });
   });
 });
 
@@ -2592,33 +2592,53 @@ describe('a read through an outage', () => {
 describe('an idempotent write and a long answer', () => {
   // Row 8848: one dropped connection under a pack's part, and one artifact past a minute, each failed a whole CI run
   // ungraded.
-  test('a write its key makes idempotent is asked again through a dropped connection and a 5xx, its key the same each time', async () => {
+  test('a pack\'s part is put again through a dropped connection and a 5xx, its answer read within its ask; a job is asked once', async () => {
     const original = globalThis.fetch;
     const sleep = Bun.sleep;
     const error = console.error;
-    const keys: (string | null)[] = [];
-    let failing = 3;
+    const parts: string[] = [];
+    let failing = 4;
+    let jobs = 0;
 
     Bun.sleep = async () => undefined;
 
     console.error = () => undefined;
 
-    globalThis.fetch = fakeFetch((request) => {
-      keys.push(request.headers.get(IDEMPOTENCY_HEADER));
+    globalThis.fetch = fakeFetch(async (request) => {
+      const url = new URL(request.url);
+
+      if (request.method === 'HEAD') return new Response(null, { status: 404 });
+
+      if (url.pathname === '/jobs') {
+        jobs += 1;
+        throw new Error('ECONNRESET');
+      }
+
+      if (url.searchParams.has('uploads')) return Response.json({ upload: 'u1' });
+
+      if (!url.searchParams.has('part')) return Response.json({ stored: 'key' });
+      parts.push(url.searchParams.get('part') ?? '');
+      await request.arrayBuffer();
       failing -= 1;
 
-      if (failing === 2) throw new Error('ECONNRESET');
+      if (failing === 3) throw new Error('ECONNRESET');
 
-      if (failing >= 0) return new Response('Network connection lost', { status: failing === 1 ? 500 : 502 });
+      if (failing === 2) return new Response('Network connection lost', { status: 500 });
 
-      return Response.json({ id: 'made' });
+      // Its headers answered, its body cut off.
+      if (failing === 1) return new Response(new ReadableStream({ start(controller) { controller.error(new Error('ECONNRESET')); } }), { status: 200 });
+
+      return Response.json({ partNumber: Number(url.searchParams.get('part')), etag: 'e' });
     });
 
     try {
       const armada = new Armada({ url: 'https://armada.test', token: 't', account: 'a' });
 
-      expect(await armada.post('/jobs', {}, { [IDEMPOTENCY_HEADER]: 'k1' })).toEqual({ id: 'made' });
-      expect(keys).toEqual(['k1', 'k1', 'k1', 'k1']);
+      expect(await uploadPack(armada, 'app', { sha: 'd'.repeat(40), base: 'root' }, async (file) => { await Bun.write(file, new Uint8Array(PACK_PART + 1)); })).toBe(PACK_PART + 1);
+      expect(parts).toEqual(['1', '1', '1', '1', '2']);
+      // A job's POST, which no Worker makes once of two asks, is asked once.
+      await expect(armada.post('/jobs', {})).rejects.toThrow('ECONNRESET');
+      expect(jobs).toBe(1);
     } finally {
       globalThis.fetch = original;
       Bun.sleep = sleep;

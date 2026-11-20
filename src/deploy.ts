@@ -20,6 +20,8 @@ export interface Deployment {
   readonly dashboard: string;
   readonly bucket: string;
   readonly vcpus: number;
+  /** How many times its vCPUs a container's packed tasks' busiest windows may add to (PEAK_SHARE, `--peak-share`). */
+  readonly peakShare: number;
   /** The fleet's memory cap in MiB (FLEET_MEMORY_MIB): absent where the deploy could not read the account. */
   readonly memoryMib?: number | undefined;
   readonly sha: string;
@@ -31,12 +33,12 @@ export interface Deployment {
 
 /** `template`, a wrangler.jsonc, as `deployment`'s config, JSON. Its `$schema` is a path relative to the template, so
  *  it is left out. */
-export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, memoryMib, sha, contract, derived }: Deployment): string {
+export function deploymentConfig(template: string, { name, account, main, dashboard, bucket, vcpus, peakShare, memoryMib, sha, contract, derived }: Deployment): string {
   const { $schema: _schema, ...parsed } = v.parse(v.looseObject({ ...TemplateSchema.entries, $schema: v.optional(v.string()) }), Bun.JSONC.parse(template));
 
   // Its name and account also name its own container apps among the account's (`readAccount`); FLEET_MEMORY_MIB the
   // fleet's memory, where the deploy read the account's.
-  const vars = new Map(Object.entries({ ...parsed.vars, FLEET_VCPUS: String(vcpus), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_DERIVED: derived, ARMADA_NAME: name, ARMADA_ACCOUNT: account }));
+  const vars = new Map(Object.entries({ ...parsed.vars, FLEET_VCPUS: String(vcpus), PEAK_SHARE: String(peakShare), ARMADA_SHA: sha, ARMADA_CONTRACT: contract, ARMADA_DERIVED: derived, ARMADA_NAME: name, ARMADA_ACCOUNT: account }));
 
   if (memoryMib !== undefined) vars.set('FLEET_MEMORY_MIB', String(memoryMib));
 

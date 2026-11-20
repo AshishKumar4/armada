@@ -91,17 +91,22 @@ export async function itemKey(task: Task): Promise<string> {
   return await sha256(canonical(stated === null ? { item: task.item, argv: task.argv === undefined ? null : [...task.argv] } : { key: stated }));
 }
 
-/** How many times its vCPUs a container's tasks' busiest windows may add to: each one's busiest window is brief (a
- *  pytest's import, a compile), and they seldom coincide, while their sustained cores, which do, stay within its
- *  vCPUs. */
-export const PEAK_SHARE = 2;
+/** How many times its vCPUs a container's tasks' busiest windows may add to, its deployment's (PEAK_SHARE, `armada
+ *  deploy --peak-share`): 1, as before, unless the deployment opts in to more. Past 1, tasks whose busiest windows
+ *  coincide share the vCPUs for that while, each slower, so one near its timeout may pass it and run again alone; a
+ *  deployment whose tasks' timeouts stand far past their runs (Dew's) packs denser for it. */
+export function peakShareOf(env: Pick<Env, 'PEAK_SHARE'>): number {
+  const share = Number(env.PEAK_SHARE ?? '1');
+
+  return Number.isFinite(share) && share >= 1 ? share : 1;
+}
 
 /** What a container's tasks may be estimated to use together: of sustained cores, every vCPU, since estimates are at
- *  their 90th percentile; of their busiest windows' cores, `PEAK_SHARE` times as many; of memory and disk, a margin
+ *  their 90th percentile; of their busiest windows' cores, `peakShare` times as many; of memory and disk, a margin
  *  under what it holds, since a task's use varies from its class's. */
-export function roomOf(size: Size): Usage {
+export function roomOf(size: Size, peakShare: number): Usage {
   return {
-    cores: SIZES[size].vcpus * PEAK_SHARE, sustained: SIZES[size].vcpus, memory: tasksMemoryOf(size) * 0.85, disk: SIZES[size].diskGB * 1e9 * 0.8,
+    cores: SIZES[size].vcpus * peakShare, sustained: SIZES[size].vcpus, memory: tasksMemoryOf(size) * 0.85, disk: SIZES[size].diskGB * 1e9 * 0.8,
   };
 }
 

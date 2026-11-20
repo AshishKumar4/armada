@@ -31,7 +31,7 @@ import {
 import { answer, keep, type CacheScope } from './cache';
 import { gangToken, runKey, said, SINGLE, statusToken, type Env } from './env';
 import { commandEnv, type Generation } from './environments';
-import { classOf, itemKey } from './estimates';
+import { classOf, itemKey, peakShareOf } from './estimates';
 import { costOf, Placement, ranksOf, type Load } from './placement';
 import { instanceOf } from './container';
 import { Runs, type RunEnd } from './runs';
@@ -245,7 +245,7 @@ export class ArmadaJob extends DurableObject<Env> {
   private readonly runs = new Runs(this.ctx.storage.sql);
 
   /** How its tasks are packed into its containers, in efficient mode (`placement.ts`). */
-  private readonly placement = new Placement(this.ctx.storage.sql);
+  private readonly placement = new Placement(this.ctx.storage.sql, peakShareOf(this.env));
 
   /** The tasks whose cache read this object is making now (`answerFromCache`). */
   private readonly looking = new Set<number>();
